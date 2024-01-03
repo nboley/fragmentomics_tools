@@ -13,19 +13,36 @@ import pandas
 import sparse
 from scipy.sparse import coo_matrix
 
-from fbio.fragment import Fragment
-from fbio.fragments_h5 import FragmentsH5
-from fbio.region import Region
-from fbio.util.numpy_utils import add_at_intervals_inplace
-from ravel.bio.frag.fragment_matrix import RegionFragmentMatrix, FragmentMatrix
-from ravel.bio.frag.fragment_matrix_math import reverse_sum_pool
-from ravel.constants import DEFAULT_DATA_MANIFEST_PATH, DEFAULT_MAX_SCALING_FACTOR
-from ravel.constants import (
-    DEFAULT_MAX_FRAG_LEN,
-    DEFAULT_MIN_MAPQ,
-    DEFAULT_VPLOT_SUMPOOL_BY,
-)
-from ravel.data_manifest import load_data_manifest
+from fragments_h5 import FragmentsH5
+
+
+from region import Region
+from fragment_matrix import RegionFragmentMatrix, FragmentMatrix
+from fragment_matrix_math import reverse_sum_pool
+
+
+@numba.njit
+def add_at_intervals_inplace(arr, starts, stops, amount):
+    """
+    Optimized method to increment arr by amount over intervals specified by starts and stops
+
+    .. warning:: out of bounds starts/stops will result in unexpected behavior
+
+    >>> arr = numpy.zeros(10)
+    >>> add_at_intervals_inplace(arr, [0, 3], [1, 4], 1)
+    >>> arr
+    array([1., 0., 0., 1., 0., 0., 0., 0., 0., 0.])
+    """
+    for start, stop in zip(starts, stops):
+        for i in range(start, stop):
+            arr[i] += amount
+
+
+DEFAULT_VPLOT_SUMPOOL_BY = 16
+# preserve power of two, when including the 0 frag.  This constant is primarily for ML models
+DEFAULT_MAX_FRAG_LEN = 511
+DEFAULT_MIN_MAPQ = 0
+
 
 logger = logging.getLogger(__name__)
 
@@ -1128,36 +1145,6 @@ class RegionFragmentArray(FragmentArray):
     def fragment_matrix(self) -> RegionFragmentMatrix:
         # remove fragments whose midpoints are out of bounds
         return RegionFragmentMatrix(self.arr, region=self.region)
-
-    @classmethod
-    def from_fragments(
-        cls, fragments, region: Region, max_frag_len=DEFAULT_MAX_FRAG_LEN, min_mapq: int = DEFAULT_MIN_MAPQ,
-    ):
-        """
-        Creates a FragmentArray from a list of fragments.
-
-        :param fragments: an iterable of fragments
-        :param region: a Region
-        :param max_frag_len: maximum fragment length
-        :return: a FragmentArray
-        >>> from fbio.fragment import Fragment
-        >>> rfa = RegionFragmentArray.from_fragments([Fragment('chr1', 80, 110), Fragment('chr1', 110, 150)],
-        ...                                     Region('chr1', 100, 200))
-        >>> rfa
-        RegionFragmentArray(n_frags=2, region=chr1:100-200, length=100, starts_0=[-20, 10], stops_0=[10, 50], weights=[1.0, 1.0], first_covered_base_weights=[1.0, 1.0], last_covered_base_weights=[1.0, 1.0], cell_barcodes=[b'', b''], num_cpgs=[0, 0], num_meth_cpgs=[0, 0], max_frag_len=511)
-        >>> rfa.n_frags
-        2
-        """
-        starts_0, stops_0 = [], []
-        for frag in fragments:
-            assert frag.chrom == region.chrom, f"Fragments must come from the same chromosome as the Region"
-            if frag.length <= max_frag_len and frag.mapq_gte(min_mapq):
-                starts_0.append(frag.start - region.start)
-                stops_0.append(frag.stop - region.start)
-
-        return cls(
-            starts_0=starts_0, stops_0=stops_0, max_frag_len=max_frag_len, region=region, validate_data=True
-        )
 
     @property
     def chrom(self):
