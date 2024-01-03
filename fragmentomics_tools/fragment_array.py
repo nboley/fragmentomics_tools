@@ -38,12 +38,6 @@ def add_at_intervals_inplace(arr, starts, stops, amount):
             arr[i] += amount
 
 
-DEFAULT_VPLOT_SUMPOOL_BY = 16
-# preserve power of two, when including the 0 frag.  This constant is primarily for ML models
-DEFAULT_MAX_FRAG_LEN = 511
-DEFAULT_MIN_MAPQ = 0
-
-
 logger = logging.getLogger(__name__)
 
 
