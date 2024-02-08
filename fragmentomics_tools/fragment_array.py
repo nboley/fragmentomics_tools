@@ -13,12 +13,18 @@ import pandas
 import sparse
 from scipy.sparse import coo_matrix
 
+import numba
+
 from fragments_h5 import FragmentsH5
 
 
-from region import Region
-from fragment_matrix import RegionFragmentMatrix, FragmentMatrix
-from fragment_matrix_math import reverse_sum_pool
+from fragmentomics_tools.constants import DEFAULT_VPLOT_SUMPOOL_BY, DEFAULT_MIN_MAPQ, DEFAULT_MAX_FRAG_LEN
+from fragmentomics_tools.region import Region
+from fragmentomics_tools.fragment_matrix import RegionFragmentMatrix, FragmentMatrix
+from fragmentomics_tools.fragment_matrix_math import reverse_sum_pool
+
+DEFAULT_MIN_SCALING_FACTOR: float = 1e-6
+DEFAULT_MAX_SCALING_FACTOR: float = 10.0
 
 
 @numba.njit
@@ -322,7 +328,7 @@ class FragmentArray:
                 ("m", numpy.uint32),
             ],
         )
-        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "b", "c", "m"))
+        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "c", "m"))
         return self.mask(srt_idx)
 
     def __eq__(self, other: "FragmentArray"):
@@ -352,7 +358,6 @@ class FragmentArray:
             and numpy.allclose(self.weights, other.weights)
             and numpy.allclose(self.first_covered_base_weights, other.first_covered_base_weights)
             and numpy.allclose(self.last_covered_base_weights, other.last_covered_base_weights)
-            and numpy.all(self.cell_barcodes == other.cell_barcodes)
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -389,7 +394,7 @@ class FragmentArray:
         >>> fa.n_frags
         3
         >>> fa.downsampled(2, random_state=1)
-        FragmentArray(n_frags=2, length=5, starts_0=[-1, 3], stops_0=[3, 5], weights=[1.0, 1.0], first_covered_base_weights=[1.0, 1.0], last_covered_base_weights=[1.0, 1.0], cell_barcodes=[b'', b''], num_cpgs=[0, 0], num_meth_cpgs=[0, 0], max_frag_len=10)
+        FragmentArray(n_frags=2, length=5, starts_0=[-1, 3], stops_0=[3, 5], weights=[1.0, 1.0], first_covered_base_weights=[1.0, 1.0], last_covered_base_weights=[1.0, 1.0], num_cpgs=[0, 0], num_meth_cpgs=[0, 0], max_frag_len=10)
         >>> fa.downsampled(4, random_state=1)
         Traceback (most recent call last):
         ...
@@ -453,7 +458,6 @@ class FragmentArray:
             fragment_strands=fragment_strands,
             first_covered_base_weights=self.last_covered_base_weights[::-1],
             last_covered_base_weights=self.first_covered_base_weights[::-1],
-            cell_barcodes=self.cell_barcodes[::-1],
             num_cpgs=self.num_cpgs[::-1],
             num_meth_cpgs=self.num_meth_cpgs[::-1],
             validate_data=False,
@@ -654,7 +658,6 @@ class FragmentArray:
             first_covered_base_weights=self.first_covered_base_weights[mask],
             last_covered_base_weights=self.last_covered_base_weights[mask],
             fragment_strands=fragment_strands,
-            cell_barcodes=self.cell_barcodes[mask],
             num_cpgs=self.num_cpgs[mask],
             num_meth_cpgs=self.num_meth_cpgs[mask],
             validate_data=validate_data,
@@ -998,7 +1001,6 @@ class RegionFragmentArray(FragmentArray):
         weights: Union[numpy.ndarray, List] = None,
         first_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
-        cell_barcodes: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
         num_meth_cpgs: Union[numpy.ndarray, List, None] = None,
     ):
@@ -1013,7 +1015,6 @@ class RegionFragmentArray(FragmentArray):
             region=region,
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
-            cell_barcodes=cell_barcodes,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
         )
@@ -1196,7 +1197,6 @@ class RegionFragmentArray(FragmentArray):
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
-        cell_barcodes = numpy.concatenate([self.cell_barcodes, other.cell_barcodes])
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         if region is None:
@@ -1207,7 +1207,6 @@ class RegionFragmentArray(FragmentArray):
                 weights=weights,
                 first_covered_base_weights=first_covered_base_weights,
                 last_covered_base_weights=last_covered_base_weights,
-                cell_barcodes=cell_barcodes,
                 num_cpgs=num_cpgs,
                 num_meth_cpgs=num_meth_cpgs,
                 max_frag_len=max_frag_len,
@@ -1220,7 +1219,6 @@ class RegionFragmentArray(FragmentArray):
             weights=weights,
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
-            cell_barcodes=cell_barcodes,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
             region=region,
@@ -1253,7 +1251,6 @@ class RegionFragmentArray(FragmentArray):
             and numpy.allclose(self.weights, other.weights)
             and numpy.allclose(self.first_covered_base_weights, other.first_covered_base_weights)
             and numpy.allclose(self.last_covered_base_weights, other.last_covered_base_weights)
-            and numpy.all(self.cell_barcodes == other.cell_barcodes)
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -1310,7 +1307,6 @@ class RegionFragmentArray(FragmentArray):
             max_frag_len=max_frag_len,
             return_mapqs=(min_mapq > 0),  # only get mapqs if we need them to filter
             return_strand=include_fragment_strand,
-            return_cell_barcode=fragments_h5.has_cell_barcodes,
             return_methyl=return_methyl,
         )
 
@@ -1521,7 +1517,6 @@ def merge_fragment_arrays(ars):
     weights = numpy.concatenate([ar.weights for ar in ars])
     first_covered_base_weights = numpy.concatenate([ar.first_covered_base_weights for ar in ars])
     last_covered_base_weights = numpy.concatenate([ar.last_covered_base_weights for ar in ars])
-    cell_barcodes = numpy.concatenate([ar.cell_barcodes for ar in ars])
     num_cpgs = numpy.concatenate([ar.num_cpgs for ar in ars])
     num_meth_cpgs = numpy.concatenate([ar.num_meth_cpgs for ar in ars])
     regions = list(set(getattr(ar, "region", None) for ar in ars))
@@ -1535,7 +1530,6 @@ def merge_fragment_arrays(ars):
             last_covered_base_weights=last_covered_base_weights,
             max_frag_len=ars[0].max_frag_len,
             region=region,
-            cell_barcodes=cell_barcodes,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
         )
@@ -1548,7 +1542,6 @@ def merge_fragment_arrays(ars):
             last_covered_base_weights=last_covered_base_weights,
             max_frag_len=ars[0].max_frag_len,
             length=ars[0].length,
-            cell_barcodes=cell_barcodes,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
         )

@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Dict
 
 
-from constants import get_data_path
+from fragmentomics_tools.constants import get_data_path
 
 
 REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]

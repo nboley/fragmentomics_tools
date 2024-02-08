@@ -7,13 +7,16 @@ from typing import List, Optional, Sequence, Union
 import numpy
 
 import pysam
-from fbio.constants import DEFAULT_REFERENCE
-from fbio.contig import CONTIG_LENGTHS, CONTIGS, STANDARD_CHROMS, REFERENCE_FASTA_DATA_MANIFEST_KEY
-from fbio.liftover import RegionLiftOver
+
+from fragmentomics_tools.util.dataclass import DataClassMixin
+from fragmentomics_tools.constants import DEFAULT_REFERENCE
+from fragmentomics_tools.util.liftover import RegionLiftOver
+from fragmentomics_tools.contig import CONTIG_LENGTHS, CONTIGS, STANDARD_CHROMS, REFERENCE_FASTA_DATA_MANIFEST_KEY
+"""
 from fbio.util.dataclass_utils import DataClassMixin
 from fbio.util.misc_utils import cmp
 from pyDNAbinding.sequence import one_hot_encode_sequences
-
+"""
 
 class OutOfBoundsError(ValueError):
     pass
