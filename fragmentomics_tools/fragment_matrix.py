@@ -83,10 +83,6 @@ class FragmentMatrix:
         """
         return self.dense_array
 
-    def get_density(self, pseudo_count=0):
-        arr = self.dense_array + pseudo_count
-        return arr / arr.sum()
-
     def get_fragment_length_density(self, pseudo_count=0):
         arr = self.dense_array.sum(1) + pseudo_count
         return (arr / arr.sum()).flatten()
@@ -118,12 +114,6 @@ class FragmentMatrix:
 
     def smooth_by_sum_pool(self, sum_pool_by, preserve_sum: bool = False):
         return self.sum_pooled(sum_pool_by).reverse_sum_pooled(sum_pool_by, preserve_sum=preserve_sum)
-
-    def to_density(self) -> numpy.ndarray:
-        if self.n_fragments:
-            return self.dense_array / self.n_fragments
-        else:
-            return self.dense_array
 
 
 @dataclass

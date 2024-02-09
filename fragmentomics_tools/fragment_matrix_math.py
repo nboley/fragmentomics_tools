@@ -1,6 +1,7 @@
 from typing import Union
 
 import numpy
+import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 from sklearn.utils._random import sample_without_replacement
 
