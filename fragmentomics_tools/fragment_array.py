@@ -1256,6 +1256,67 @@ class RegionFragmentArray(FragmentArray):
         )
 
     @classmethod
+    def from_frag_bed(
+        cls,
+        in_frag_bed: str,
+        region: Region,
+        min_mapq: int = DEFAULT_MIN_MAPQ,
+        max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
+    ) -> "RegionFragmentArray":
+        """Read an indexed frag bed.
+
+        """
+        # chr1    1079316 1079500 40,60,163,83,45M,45M
+        # contig  start   stop    mapq1,mapq2,samflag1,samflag2,cigar1,cigar2
+        import pysam
+        import io
+
+        with pysam.TabixFile(in_frag_bed) as tabixfile:
+            s = io.StringIO("\n".join(
+                (s.replace(',', '\t') for s in tabixfile.fetch(region.chrom, region.start, region.stop))
+            ))
+
+        colnames = ['contig', 'start', 'stop', 'mapq1', 'mapq2', 'sam1', 'sam2', 'cigar1', 'cigar2', 'drop']
+        df = pandas.read_table(s, names=colnames, usecols=colnames[:-1])
+
+        # filter fragments that are too long or that don't have a high enough mapq score
+        df = df.query("stop - start <= @max_frag_len and mapq1 >= @min_mapq and mapq2 >= @min_mapq")
+
+        # make sam1 the first read in the pair
+        first_in_pair_sam_flag = np.zeros(df.shape[0], dtype=int) - 1
+        second_in_pair_sam_flag = np.zeros(df.shape[0], dtype=int) - 1
+
+        first_in_pair_mask = (df.sam1&64 > 0)
+        first_in_pair_sam_flag[first_in_pair_mask] = df.sam1[first_in_pair_mask]
+        second_in_pair_sam_flag[~first_in_pair_mask] = df.sam1[~first_in_pair_mask]
+
+        second_in_pair_mask = (df.sam2&64 > 0)
+        first_in_pair_sam_flag[second_in_pair_mask] = df.sam2[second_in_pair_mask]
+        second_in_pair_sam_flag[~second_in_pair_mask] = df.sam2[~second_in_pair_mask]
+
+        df['sam1'] = first_in_pair_sam_flag
+        df['sam2'] = second_in_pair_sam_flag
+
+        df['strand'] = np.empty((df.shape[0],), dtype='U1')
+        plus_strand_mask = ((first_in_pair_sam_flag&16 == 0)  & (second_in_pair_sam_flag&16 > 0))
+        df['strand'][plus_strand_mask] = '+'
+        minus_strand_mask = ((first_in_pair_sam_flag&16 > 0)  & (second_in_pair_sam_flag&16 == 0))
+        df['strand'][minus_strand_mask] = '-'
+
+
+        return cls(
+            starts_0=(df.start - region.start),
+            stops_0=(df.stop - region.start),
+            region=region,
+            max_frag_len=max_frag_len,
+            validate_data=True,
+            fragment_strands=df.strand,
+            num_cpgs=None,
+            num_meth_cpgs=None,
+        )
+
+
+    @classmethod
     def from_fragments_h5(
         cls,
         in_fragments_h5: Union[str, FragmentsH5],
