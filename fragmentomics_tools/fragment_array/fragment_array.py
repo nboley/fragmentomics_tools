@@ -463,10 +463,11 @@ class FragmentArray:
         frag_len_acceptance_prbs = numpy.asarray(frag_len_acceptance_prbs)
         assert 0 <= frag_len_acceptance_prbs.max() <= 1, frag_len_acceptance_prbs.max()
         assert (
-            frag_len_acceptance_prbs.shape[0] == self.max_frag_len + 1
+            frag_len_acceptance_prbs.shape[0] == self.max_frag_len
         ), f"Frag len acceptance prbs shape: {frag_len_acceptance_prbs.shape} -- Max Frag Len: {self.max_frag_len}"
 
-        prbs = frag_len_acceptance_prbs[self.fragment_lengths]
+        # subtract 1 to account for the fact that valid fragment lengths start at 1, but the array is zero indexed
+        prbs = frag_len_acceptance_prbs[self.fragment_lengths-1]
         mask = numpy.random.rand(len(prbs)) < prbs
 
         return self.mask(mask)
@@ -1168,6 +1169,11 @@ class RegionFragmentArray(FragmentArray):
         new_region = self.region.resize(new_size)
         self = super()._resize(new_size)
         return self._replace(region=new_region)
+
+    @wraps(FragmentArray.shift_and_zero_pad)
+    def shift_and_zero_pad(self, shift_amt):
+        shifted_region = self.region.shift(shift_amt)
+        return super().shift_and_zero_pad(shift_amt)._replace(region=shifted_region, validate_data=False)
 
     def _shift_boundaries(self, /, left=0, right=0):
         """Modify the length of self.region without changin fragments.
