@@ -55,6 +55,24 @@ def _switch_plus_with_minus_and_minus_with_plus(fragment_strands):
     return fragment_strands
 
 
+def _concat_fragment_strands(fs1, fs2):
+    if fs1 is None and fs2 is None:
+        return None
+    elif (len(fs1) == 0) and (fs2 is None):
+        return None
+    elif (fs1 is None) and (len(fs2) == 0):
+        return None
+    elif fs1 is None or fs2 is None:
+        raise ValueError("Can not add two fragment arrays where one has fragment strands and the other does not.")
+    else:
+        return numpy.concatenate([fs1, fs2])
+
+
+def _fragment_strands_are_equal(fs1, fs2):
+    if (fs1 is None or len(fs1) == 0) and (fs2 is None or len(fs2) == 0):
+        return True
+    return numpy.all(fs1 == fs2)
+
 logger = logging.getLogger(__name__)
 
 already_warned_diff_region_add = False
@@ -315,9 +333,7 @@ class FragmentArray:
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
-        fragment_strands = numpy.concatenate(
-            [self.fragment_strands, other.fragment_strands]
-        )
+        fragment_strands = _concat_fragment_strands(self.fragment_strands, other.fragment_strands)
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         assert (
@@ -355,7 +371,7 @@ class FragmentArray:
                 ("m", numpy.uint32),
             ],
         )
-        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "b", "c", "m"))
+        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "c", "m"))
         return self.mask(srt_idx)
 
     def __eq__(self, other: "FragmentArray"):
@@ -379,6 +395,7 @@ class FragmentArray:
             return False
         self.sort_in_place()
         other.sort_in_place()
+
         return (
             numpy.all(self.starts_0 == other.starts_0)
             and numpy.all(self.stops_0 == other.stops_0)
@@ -389,7 +406,7 @@ class FragmentArray:
             and numpy.allclose(
                 self.last_covered_base_weights, other.last_covered_base_weights
             )
-            and numpy.all(self.fragment_strands == other.fragment_strands)
+            and _fragment_strands_are_equal(self.fragment_strands, other.fragment_strands)
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -490,7 +507,7 @@ class FragmentArray:
         """
         new_length = self.length - left + right
         assert new_length >= 0
-        return self.replace(length=new_length)
+        return self._replace(length=new_length)
 
     def resize_offset(self, new_size: int, region=None) -> int:
         """Return the integer offset for fragment starts/ends when asking for
@@ -515,7 +532,7 @@ class FragmentArray:
         #  Try (5-2)//2 != (2-5)//2 while int((5-2)/2) == int((2-5)/2) == -1
         # Truncated integer conversion is different from //
         starts_0, stops_0, mask = self.new_starts_stops_mask_for_resize(new_size)
-        return self.replace(
+        return self._replace(
             starts_0=starts_0, stops_0=stops_0, validate_data=False
         ).mask(mask, validate_data=False)
 
@@ -1143,21 +1160,21 @@ class RegionFragmentArray(FragmentArray):
         return (
             super()
             .reverse_strand()
-            .replace(region=self.region.flip_strand(), validate_data=False)
+            ._replace(region=self.region.flip_strand(), validate_data=False)
         )
 
     @wraps(FragmentArray.resize)
     def resize(self, new_size: int):
         new_region = self.region.resize(new_size)
         self = super()._resize(new_size)
-        return self.replace(region=new_region)
+        return self._replace(region=new_region)
 
     def _shift_boundaries(self, /, left=0, right=0):
         """Modify the length of self.region without changin fragments.
 
         This is a utility function so that FragmentArray and RegionFragmentArray can share code.
         """
-        return self.replace(region=self.region.left_shift(left).right_shift(right))
+        return self._replace(region=self.region.left_shift(left).right_shift(right))
 
     def resize_offset(self, new_size: int) -> int:
         """Return the offset for fragment starts/ends when asking for a resize of this region"""
@@ -1322,9 +1339,9 @@ class RegionFragmentArray(FragmentArray):
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
-        fragment_strands = numpy.concatenate(
-            [self.fragment_strands, other.fragment_strands]
-        )
+
+        fragment_strands = _concat_fragment_strands(self.fragment_strands, other.fragment_strands)
+
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         if region is None:
@@ -1385,10 +1402,7 @@ class RegionFragmentArray(FragmentArray):
             and numpy.allclose(
                 self.last_covered_base_weights, other.last_covered_base_weights
             )
-            and (
-                (self.fragment_strands is None and other.fragmnet_strands is None)
-                or (numpy.all(self.fragment_strands == other.fragment_strands))
-            )
+            and _fragment_strands_are_equal(self.fragment_strands, other.fragment_strands)
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
