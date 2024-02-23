@@ -66,7 +66,7 @@ def test_fragment_array_against_fragment_matrix(small_h5_path, min_mapq, max_fra
         FragmentsH5(small_h5_path, "r"), region=region, min_mapq=min_mapq, max_frag_len=max_frag_len)
     frag_mat = frag_array.fragment_matrix
 
-    numpy.testing.assert_equal(frag_array.to_fragment_matrix().dense_array, frag_mat.dense_array)
+    numpy.testing.assert_equal(frag_array.fragment_matrix.dense_array, frag_mat.dense_array)
 
 
 def test_fragment_array_assertions():
@@ -533,3 +533,4 @@ def test_from_fragments_h5(small_h5_path):
     region = Region("chr6", 99118615, 99121634).resize(2048)
     rfa = RegionFragmentArray.from_fragments_h5(small_h5_path, region, include_fragment_strand=True)
     assert rfa.n_frags == 9
+

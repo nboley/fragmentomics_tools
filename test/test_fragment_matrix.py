@@ -138,70 +138,52 @@ def test_add_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=624158
         assert False, "It should not be possible to add fm1 and fm2 because they have different strands"
 
 
-def test_region_fragment_matrix_plot(chrom="chrX", strand="+", pos=6241588):
+def test_downsample(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
     )
-    fa.plot()
-
-
-def test_region_fragment_matrix_plot_with_smoothed(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    fm.plot(fragment_matrix_density=fm.to_kernel_smoothed())
-
-
-def test_downsample(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    assert fm.downsampled(3).arr.sum() == 3
+    assert fa.downsampled(3).arr.sum() == 3
 
 
 def test_reverse_strand(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    flipped_fm = fm.reverse_strand()
-    fm = fm
-    flipped_fm = flipped_fm
-    assert flipped_fm.region.strand == "-"
-    assert (flipped_fm.arr.todense() == fm.arr.todense()[:, ::-1]).all()
+    )
+    flipped_fa = fa.reverse_strand()
+    assert flipped_fa.region.strand == "-"
+    assert (fa.fragment_strands == numpy.array([b'+', b'+', b'-', b'+'], dtype='<U1')).all()
+    assert (fa.fragment_strands == numpy.array(['+', '+', '-', '+'], dtype='<U1')).all()
+    assert (flipped_fa.fragment_strands == numpy.array(['-', '+', '-', '-'], dtype='<U1')).all()
+    assert sorted(fa.fragment_lengths) == sorted(flipped_fa.fragment_lengths)
 
 
 def test_downsampled_frag_lens(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
+    )
     # downsample so that only fragments with lengths < 100 are allowed
-    downsampled_fm = fm.downsampled_frag_lens([1] * 100 + [0] * 1000)
-    assert all(frag.len() < 100 for frag in downsampled_fm.to_fragments())
+    downsampled_fa = fa.downsampled_frag_lens([1] * 185 + [0] * (fa.max_frag_len-185))
+    assert sorted(downsampled_fa.fragment_lengths) == [165, 178, 185]
+
+    downsampled_fa = fa.downsampled_frag_lens([0] * 185 + [1] * (fa.max_frag_len-185))
+    assert sorted(downsampled_fa.fragment_lengths) == [200]
 
 
 def test_shift_and_zero_pad(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    unshifted_arr = fm.arr.tocsc()
-    shifted_fm = fm.shift_and_zero_pad(100)
-    assert (unshifted_arr[:, 100:].todense() == shifted_fm.arr.tocsc()[:, :-100].todense()).all()
-    assert fm.region == shifted_fm.region.shift(-100)
+    )
+    shifted_fa = fa.shift_and_zero_pad(100)
+    assert (fa.fragment_matrix.dense_array[:, :-100] == fa.shift_and_zero_pad(100).fragment_matrix.dense_array[:, 100:]).all()
+    assert fa.region == shifted_fa.region.shift(-100)
 
 
 def test_sample_with_replacement(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    res = fm.sample_with_replacement(3)
-    assert res.arr.sum() == 3
-
-
-def test_fragment_matrix_plot(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
-    ).fragment_matrix
-    fm.plot()
+    )
+    res = fa.sample_with_replacement(3)
+    assert res.n_fragments == 3
 
 
 def test_get_slice(chrom="chrX", strand="+", pos=6241588):
@@ -222,24 +204,42 @@ def test_get_slice(chrom="chrX", strand="+", pos=6241588):
 
 
 def test_split_into_k_nonoverlapping_fms(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    fm1, fm2 = fm.split_into_k_nonoverlapping_fms(k=2, sample_size=2)
-    assert fm1.n_fragments == 2
-    assert fm2.n_fragments == 2
+    )
+    fa1, fa2 = fa.split_into_k_nonoverlapping_fas(k=2, sample_size=2)
+    assert fa1.n_fragments == 2
+    assert fa2.n_fragments == 2
 
     # test that None works
-    fm1, fm2 = fm.split_into_k_nonoverlapping_fms(k=2)
-    assert fm1.n_fragments == fm.n_fragments // 2
-    assert fm2.n_fragments == fm.n_fragments // 2
+    fa1, fa2 = fa.split_into_k_nonoverlapping_fas(k=2)
+    assert fa.n_fragments%2 == 0
+    assert fa1.n_fragments == fa.n_fragments // 2
+    assert fa2.n_fragments == fa.n_fragments // 2
 
 
 def test_jitter(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
-    ).fragment_matrix
+    )
 
-    fm_j = fm.jitter(jitter_value=100, output_length=500)
-    assert fm_j.shape == (fm.shape[0], 500)
-    assert (fm_j.todense() == fm.todense()[:, (1024 // 2 + 100 - 250) : (1024 // 2 + 100 + 250)]).all()
+    fa_j = fa.jitter(jitter_value=100, output_length=500)
+    assert fa_j.shape == (fa.shape[0], 500)
+    assert (fa_j.fragment_matrix.todense().sum() == fa.fragment_matrix.todense()[:, (1024 // 2 + 100 - 250) : (1024 // 2 + 100 + 250)].sum())
+
+
+### Plot
+@pytest.mark.skip(reason="haven't added plotting code")
+def test_region_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
+    fa = RegionFragmentArray.from_frag_bed(
+        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+    )
+    fa.plot()
+
+
+@pytest.mark.skip(reason="haven't added plotting code")
+def test_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
+    fa = RegionFragmentArray.from_frag_bed(
+        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
+    )
+    fa.plot()

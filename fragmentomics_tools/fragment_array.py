@@ -44,6 +44,17 @@ def add_at_intervals_inplace(arr, starts, stops, amount):
             arr[i] += amount
 
 
+def _switch_plus_with_minus_and_minus_with_plus(fragment_strands):
+    # plus_mask = ((fragment_strands == '+') | (fragment_strands == b'+'))
+    # minus_mask = ((fragment_strands == '-') | (fragment_strands == b'-'))
+    plus_mask = (fragment_strands == '+')
+    minus_mask = (fragment_strands == '-')
+    fragment_strands = fragment_strands.copy()
+    fragment_strands[plus_mask] = '-'
+    fragment_strands[minus_mask] = '+'
+    return fragment_strands
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -403,7 +414,7 @@ class FragmentArray:
         if n is None:
             return self._replace(validate_data=False)
 
-        keep_idxs = numpy.random.sample(self.n_frags, n, replace=False)
+        keep_idxs = numpy.random.choice(self.n_frags, n, replace=False)
         return self.mask(keep_idxs, validate_data=False)
 
     def oversampled(self, n=None):
@@ -434,6 +445,21 @@ class FragmentArray:
         # TODO -- Add test
         return self.mask(np.random.choice(self.n_frags, n))
 
+    def downsampled_frag_lens(self, frag_len_acceptance_prbs):
+        """Downsample self where the acceptance probability for a fragment is taken from frag_len_acceptance_prbs.
+
+        """
+        frag_len_acceptance_prbs = numpy.asarray(frag_len_acceptance_prbs)
+        assert 0 <= frag_len_acceptance_prbs.max() <= 1, frag_len_acceptance_prbs.max()
+        assert frag_len_acceptance_prbs.shape[0] == self.max_frag_len, \
+            f"Frag len acceptance prbs shape: {frag_len_acceptance_prbs.shape[0]} -- Max Frag Len: {self.max_frag_len}"
+
+        # subtract 1 to account for the fact that fragment lengths starts at 1
+        prbs = frag_len_acceptance_prbs[self.fragment_lengths - 1]
+        mask = (numpy.random.rand(len(prbs)) < prbs)
+
+        return self.mask(mask)
+
     def shift_and_zero_pad(self, shift_amt):
         starts_0 = self.starts_0 + shift_amt
         stops_0 = self.stops_0 + shift_amt
@@ -450,6 +476,12 @@ class FragmentArray:
         starts_0 = self.length - self.stops_0
         stops_0 = self.length - self.starts_0
         fragment_strands = None if self.fragment_strands is None else self.fragment_strands[::-1]
+
+        fragment_strands = (
+            None
+            if self.fragment_strands is None
+            else _switch_plus_with_minus_and_minus_with_plus(self.fragment_strands)[::-1]
+        )
 
         return self._replace(
             starts_0=starts_0[::-1],
@@ -666,12 +698,12 @@ class FragmentArray:
     def mask(self, mask, validate_data=True):
         return self._subset_or_mask(mask, validate_data=validate_data)
 
-    def subset(self, indices):
+    def subset(self, indices, validate_data=True):
         """Return a subset of self for the fragmnets in indices.
 
         Indices can be repeated, and we only return a single fragment per cell in arr (even if 'data' is greater)
         """
-        self._subset_or_mask(indices, validate_data=indices)
+        return self._subset_or_mask(indices, validate_data=validate_data)
 
     def subset_by_fragment_strand(self, strand):
         """Return two fragment arrays each containing the fragments on either strand.
@@ -1246,12 +1278,12 @@ class RegionFragmentArray(FragmentArray):
         df['sam1'] = first_in_pair_sam_flag
         df['sam2'] = second_in_pair_sam_flag
 
-        df['strand'] = np.empty((df.shape[0],), dtype='U1')
+        strand = np.empty((df.shape[0],), dtype='U1')
         plus_strand_mask = ((first_in_pair_sam_flag&16 == 0)  & (second_in_pair_sam_flag&16 > 0))
-        df['strand'][plus_strand_mask] = '+'
+        strand[plus_strand_mask] = '+'
         minus_strand_mask = ((first_in_pair_sam_flag&16 > 0)  & (second_in_pair_sam_flag&16 == 0))
-        df['strand'][minus_strand_mask] = '-'
-
+        strand[minus_strand_mask] = '-'
+        df['strand'] = strand
 
         return cls(
             starts_0=(df.start - region.start),
@@ -1532,8 +1564,8 @@ def merge_fragment_arrays(ars):
     regions = list(set(getattr(ar, "region", None) for ar in ars))
 
     kwargs = dict(
-        starts=starts,
-        stops=stops,
+        starts_0=starts,
+        stops_0=stops,
         weights=weights,
         first_covered_base_weights=first_covered_base_weights,
         last_covered_base_weights=last_covered_base_weights,
@@ -1547,4 +1579,4 @@ def merge_fragment_arrays(ars):
         return RegionFragmentArray(**kwargs)
     else:
         kwargs['length'] = ars[0].length
-        return FragmentArray(kwargs)
+        return FragmentArray(**kwargs)
