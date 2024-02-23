@@ -3,7 +3,9 @@ import os
 # from contig import CONTIG_LENGTHS, CONTIGS, STANDARD_CHROMS, REFERENCE_FASTA_DATA_MANIFEST_KEY
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # /home/user/src/fragmentomics_tools/
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)  # /home/user/src/fragmentomics_tools/
 DATA_DIR = os.path.join(BASE_DIR, "data")  # /home/user/src/fragmentomics_tools/data
 
 

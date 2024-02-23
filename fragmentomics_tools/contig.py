@@ -86,15 +86,22 @@ def infer_reference_genome_from_fname(fname, expected=None, spec=None):
             )
         return inferred
     else:
-        raise ReferenceInferenceError(f"Can not infer reference for '{fname}'.\nMultiple matches found")
+        raise ReferenceInferenceError(
+            f"Can not infer reference for '{fname}'.\nMultiple matches found"
+        )
 
 
 def infer_reference_genome_from_fnames(fnames, expected=None, spec=None):
     """Infer the reference genome from a group of filenames, raising an error if they're not all the same."""
-    refs = {x: infer_reference_genome_from_fname(x, expected=expected, spec=spec) for x in fnames}
+    refs = {
+        x: infer_reference_genome_from_fname(x, expected=expected, spec=spec)
+        for x in fnames
+    }
     ref = next(iter(refs.values()))
     if not all(ref == x for x in refs.values()):
-        raise ValueError("Input files have different input references.\n'{}'".format(refs))
+        raise ValueError(
+            "Input files have different input references.\n'{}'".format(refs)
+        )
     return ref
 
 
@@ -270,7 +277,9 @@ def get_flattened_genome_offsets(assembly):
         elif i == 1:
             # offset should be chr1 length
             assert chrom == "chr2"
-            flattened_chrom_offsets[chrom] = CONTIG_LENGTHS[assembly][STANDARD_CHROMS[i - 1]]
+            flattened_chrom_offsets[chrom] = CONTIG_LENGTHS[assembly][
+                STANDARD_CHROMS[i - 1]
+            ]
         else:
             flattened_chrom_offsets[chrom] = (
                 flattened_chrom_offsets[STANDARD_CHROMS[i - 1]]
@@ -317,11 +326,16 @@ def get_chromosome_q_arm_starts(assembly: str) -> Dict[str, int]:
 
     if _CHROMOSOME_Q_ARM_STARTS_HG38 is None:
         with load_data_manifest(DEFAULT_DATA_MANIFEST_PATH) as dm:
-            fname = dm.sync_and_get("annotations/GRCh38_extras/hg38.cytobands.bed.gz").path
+            fname = dm.sync_and_get(
+                "annotations/GRCh38_extras/hg38.cytobands.bed.gz"
+            ).path
             df = BedReader.load_dataframe(fname)
             # get the first occurance of a cytoband that starts with a "q" for each chromosome
             long_arm_starts = dict(
-                df[df["name"].str.startswith("q")].groupby("chrom").first()["start"].items()
+                df[df["name"].str.startswith("q")]
+                .groupby("chrom")
+                .first()["start"]
+                .items()
             )
             _CHROMOSOME_Q_ARM_STARTS_HG38 = long_arm_starts
 

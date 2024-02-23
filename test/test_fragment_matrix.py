@@ -14,16 +14,23 @@ DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")
 def test_start_counts():
     fa = RegionFragmentArray([-1, 2, 2], [2, 3, 4], Region("chr1", 0, 5), 511)
     # fm = fa.fragment_matrix
-    numpy.testing.assert_equal(fa.first_covered_base_counts, numpy.array([0, 0, 2, 0, 0], dtype=numpy.uint32))
+    numpy.testing.assert_equal(
+        fa.first_covered_base_counts, numpy.array([0, 0, 2, 0, 0], dtype=numpy.uint32)
+    )
     # numpy.testing.assert_equal(fa.first_covered_base_counts, fm.first_covered_base_counts)
 
 
 def test_end_counts():
     fa = RegionFragmentArray(
-        starts_0=[-1, 2, 2], stops_0=[2, 4, 4], region=Region("chr1", 0, 5), max_frag_len=511
+        starts_0=[-1, 2, 2],
+        stops_0=[2, 4, 4],
+        region=Region("chr1", 0, 5),
+        max_frag_len=511,
     )
     # fm = fa.fragment_matrix
-    numpy.testing.assert_equal(fa.last_covered_base_counts, numpy.array([0, 1, 0, 2, 0], dtype=numpy.uint32))
+    numpy.testing.assert_equal(
+        fa.last_covered_base_counts, numpy.array([0, 1, 0, 2, 0], dtype=numpy.uint32)
+    )
     # numpy.testing.assert_equal(fa.last_covered_base_counts, fm.last_covered_base_counts)
 
 
@@ -61,7 +68,9 @@ def test_mapq_filtering(chrom="chrX", strand="+", pos=6241588):
 
 def test_merged_fragment_matrices_bed(chrom="chrX", strand="+", pos=6241588):
     fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     ).fragment_matrix
 
     merged_fm = merge_fragment_matrices([fm, fm])
@@ -70,10 +79,14 @@ def test_merged_fragment_matrices_bed(chrom="chrX", strand="+", pos=6241588):
 
 def test_merged_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
     fm1 = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     ).fragment_matrix
     fm2 = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 100, pos + 100, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 100, pos + 100, strand),
+        min_mapq=0,
     ).fragment_matrix
 
     try:
@@ -81,12 +94,16 @@ def test_merged_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=624
     except ValueError:
         pass
     else:
-        assert False, "It should not be possible to merge fm1 and fm2 because they have different shapes"
+        assert (
+            False
+        ), "It should not be possible to merge fm1 and fm2 because they have different shapes"
 
 
 def test_add_region_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
     fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     ).fragment_matrix
 
     merged_fm = fm + fm
@@ -96,16 +113,22 @@ def test_add_region_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
 
 def test_add_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
     fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     ).fragment_matrix
 
     merged_fm = fm + fm
     assert fm.arr.sum() * 2 == merged_fm.arr.sum()
 
 
-def test_add_fragment_matrix_to_region_fragment_matrix(chrom="chrX", strand="+", pos=6241588):
+def test_add_fragment_matrix_to_region_fragment_matrix(
+    chrom="chrX", strand="+", pos=6241588
+):
     fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     ).fragment_matrix
 
     # make sure that we get a type error if we try to add a region fragment matrix to
@@ -120,10 +143,14 @@ def test_add_fragment_matrix_to_region_fragment_matrix(chrom="chrX", strand="+",
 
 def test_add_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
     fm1 = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 100, pos + 100, strand="+"), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 100, pos + 100, strand="+"),
+        min_mapq=0,
     ).fragment_matrix
     fm2 = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 100, pos + 100, strand="-"), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 100, pos + 100, strand="-"),
+        min_mapq=0,
     ).fragment_matrix
 
     try:
@@ -131,52 +158,71 @@ def test_add_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=624158
     except ValueError:
         pass
     else:
-        assert False, "It should not be possible to add fm1 and fm2 because they have different strands"
+        assert (
+            False
+        ), "It should not be possible to add fm1 and fm2 because they have different strands"
 
 
 def test_downsample(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     assert fa.downsampled(3).arr.sum() == 3
 
 
 def test_reverse_strand(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     flipped_fa = fa.reverse_strand()
     assert flipped_fa.region.strand == "-"
-    assert (fa.fragment_strands == numpy.array([b'+', b'+', b'-', b'+'], dtype='<U1')).all()
-    assert (fa.fragment_strands == numpy.array(['+', '+', '-', '+'], dtype='<U1')).all()
-    assert (flipped_fa.fragment_strands == numpy.array(['-', '+', '-', '-'], dtype='<U1')).all()
+    assert (
+        fa.fragment_strands == numpy.array([b"+", b"+", b"-", b"+"], dtype="<U1")
+    ).all()
+    assert (fa.fragment_strands == numpy.array(["+", "+", "-", "+"], dtype="<U1")).all()
+    assert (
+        flipped_fa.fragment_strands == numpy.array(["-", "+", "-", "-"], dtype="<U1")
+    ).all()
     assert sorted(fa.fragment_lengths) == sorted(flipped_fa.fragment_lengths)
 
 
 def test_downsampled_frag_lens(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     # downsample so that only fragments with lengths < 100 are allowed
-    downsampled_fa = fa.downsampled_frag_lens([1] * 185 + [0] * (fa.max_frag_len-185))
+    downsampled_fa = fa.downsampled_frag_lens([1] * 185 + [0] * (fa.max_frag_len - 185))
     assert sorted(downsampled_fa.fragment_lengths) == [165, 178, 185]
 
-    downsampled_fa = fa.downsampled_frag_lens([0] * 185 + [1] * (fa.max_frag_len-185))
+    downsampled_fa = fa.downsampled_frag_lens([0] * 185 + [1] * (fa.max_frag_len - 185))
     assert sorted(downsampled_fa.fragment_lengths) == [200]
 
 
 def test_shift_and_zero_pad(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     shifted_fa = fa.shift_and_zero_pad(100)
-    assert (fa.fragment_matrix.dense_array[:, :-100] == fa.shift_and_zero_pad(100).fragment_matrix.dense_array[:, 100:]).all()
+    assert (
+        fa.fragment_matrix.dense_array[:, :-100]
+        == fa.shift_and_zero_pad(100).fragment_matrix.dense_array[:, 100:]
+    ).all()
     assert fa.region == shifted_fa.region.shift(-100)
 
 
 def test_sample_with_replacement(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     res = fa.sample_with_replacement(3)
     assert res.n_fragments == 3
@@ -184,7 +230,9 @@ def test_sample_with_replacement(chrom="chrX", strand="+", pos=6241588):
 
 def test_get_slice(chrom="chrX", strand="+", pos=6241588):
     fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 512, pos + 512, strand),
+        min_mapq=0,
     ).fragment_matrix
     # Check that slicing works with defined bounds
     assert fm.get_slice(slice(20, 400)).region.length == 380
@@ -201,7 +249,9 @@ def test_get_slice(chrom="chrX", strand="+", pos=6241588):
 
 def test_split_into_k_nonoverlapping_fms(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     fa1, fa2 = fa.split_into_k_nonoverlapping_fas(k=2, sample_size=2)
     assert fa1.n_fragments == 2
@@ -209,26 +259,35 @@ def test_split_into_k_nonoverlapping_fms(chrom="chrX", strand="+", pos=6241588):
 
     # test that None works
     fa1, fa2 = fa.split_into_k_nonoverlapping_fas(k=2)
-    assert fa.n_fragments%2 == 0
+    assert fa.n_fragments % 2 == 0
     assert fa1.n_fragments == fa.n_fragments // 2
     assert fa2.n_fragments == fa.n_fragments // 2
 
 
 def test_jitter(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 512, pos + 512, strand),
+        min_mapq=0,
     )
 
     fa_j = fa.jitter(jitter_value=100, output_length=500)
     assert fa_j.shape == (fa.shape[0], 500)
-    assert (fa_j.fragment_matrix.todense().sum() == fa.fragment_matrix.todense()[:, (1024 // 2 + 100 - 250) : (1024 // 2 + 100 + 250)].sum())
+    assert (
+        fa_j.fragment_matrix.todense().sum()
+        == fa.fragment_matrix.todense()[
+            :, (1024 // 2 + 100 - 250) : (1024 // 2 + 100 + 250)
+        ].sum()
+    )
 
 
 ### Plot
 @pytest.mark.skip(reason="haven't added plotting code")
 def test_region_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 256, pos + 256, strand),
+        min_mapq=0,
     )
     fa.plot()
 
@@ -236,6 +295,8 @@ def test_region_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
 @pytest.mark.skip(reason="haven't added plotting code")
 def test_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 512, pos + 512, strand), min_mapq=0,
+        os.path.join(DIR, "frag.bed.gz"),
+        Region(chrom, pos - 512, pos + 512, strand),
+        min_mapq=0,
     )
     fa.plot()

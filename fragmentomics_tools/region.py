@@ -11,12 +11,19 @@ import pysam
 from fragmentomics_tools.util.dataclass import DataClassMixin
 from fragmentomics_tools.constants import DEFAULT_REFERENCE
 from fragmentomics_tools.util.liftover import RegionLiftOver
-from fragmentomics_tools.contig import CONTIG_LENGTHS, CONTIGS, STANDARD_CHROMS, REFERENCE_FASTA_DATA_MANIFEST_KEY
+from fragmentomics_tools.contig import (
+    CONTIG_LENGTHS,
+    CONTIGS,
+    STANDARD_CHROMS,
+    REFERENCE_FASTA_DATA_MANIFEST_KEY,
+)
+
 """
 from fbio.util.dataclass_utils import DataClassMixin
 from fbio.util.misc_utils import cmp
 from pyDNAbinding.sequence import one_hot_encode_sequences
 """
+
 
 class OutOfBoundsError(ValueError):
     pass
@@ -83,7 +90,9 @@ class Region(DataClassMixin):
             CACHED_READERS[(annotation_name, self.ref)] = ANNOTATIONS.get(
                 annotation_name, self.ref
             ).get_reader()
-        for record in CACHED_READERS[(annotation_name, self.ref)].fetch(self.chrom, self.start, self.stop):
+        for record in CACHED_READERS[(annotation_name, self.ref)].fetch(
+            self.chrom, self.start, self.stop
+        ):
             yield record
 
     def get_coverage_array(self, regions) -> numpy.ndarray:
@@ -113,7 +122,11 @@ class Region(DataClassMixin):
             if region.chrom != self.chrom:
                 raise ValueError(f"{region.chrom} != {self.chrom}")
 
-            arr[max(region.start - self.start, 0) : min(region.stop - self.start, self.stop)] += 1
+            arr[
+                max(region.start - self.start, 0) : min(
+                    region.stop - self.start, self.stop
+                )
+            ] += 1
         return arr
 
     def get_annotation_coverage_array(self, annotation_names) -> numpy.ndarray:
@@ -140,7 +153,9 @@ class Region(DataClassMixin):
         >>> is_repeat.mean()
         0.5
         """
-        return self.get_annotation_coverage_array(["repeat_masker", "anshul_blacklist"]).astype(bool)
+        return self.get_annotation_coverage_array(
+            ["repeat_masker", "anshul_blacklist"]
+        ).astype(bool)
 
     def intersect_with_bed(self, bed_path):
         # Prevents circular import
@@ -149,7 +164,9 @@ class Region(DataClassMixin):
         if bed_path not in CACHED_READERS:
             # Create a new reader
             CACHED_READERS[(bed_path, self.ref)] = TabixBedReader(bed_path)
-        for record in CACHED_READERS[(bed_path, self.ref)].fetch(self.chrom, self.start, self.stop):
+        for record in CACHED_READERS[(bed_path, self.ref)].fetch(
+            self.chrom, self.start, self.stop
+        ):
             yield record
 
     def get_bed_coverage_array(self, bed_path) -> numpy.ndarray:
@@ -176,14 +193,14 @@ class Region(DataClassMixin):
         tracks = []
         for annotation_name in annotation_names:
             annotation = ANNOTATIONS.get(annotation_name, self.ref)
-            tracks.append(BedTrack(annotation.local_path, region=self, name=annotation.name))
+            tracks.append(
+                BedTrack(annotation.local_path, region=self, name=annotation.name)
+            )
 
         return Tracks(tracks).plot()
 
     def convert_region(self, unique_liftoverer: RegionLiftOver):
-        """Returns a copy of converted into the new reference.
-
-        """
+        """Returns a copy of converted into the new reference."""
         if not isinstance(unique_liftoverer, RegionLiftOver):
             raise TypeError(
                 "Expecting an instance of RegionLiftOver for unique_liftoverer "
@@ -195,14 +212,23 @@ class Region(DataClassMixin):
                     self.ref, unique_liftoverer.source, unique_liftoverer.dest
                 )
             )
-        res = unique_liftoverer.uniquely_convert_region(self.chrom, self.start, self.stop)
+        res = unique_liftoverer.uniquely_convert_region(
+            self.chrom, self.start, self.stop
+        )
         # check that this region can be converted
         if res is None:
             return None
         else:
             chrom, start, stop, strand = res
 
-        return type(self)(chrom, start, stop, strand=strand, ref=unique_liftoverer.dest, data=self.data,)
+        return type(self)(
+            chrom,
+            start,
+            stop,
+            strand=strand,
+            ref=unique_liftoverer.dest,
+            data=self.data,
+        )
 
     def liftover(self, *args, **kwargs):
         """Alias for convert_region."""
@@ -213,7 +239,9 @@ class Region(DataClassMixin):
         return self.start + self.length // 2
 
     @staticmethod
-    def get_resize_start(start: int, current_size: int, new_size: int, strand: Optional[str] = None):
+    def get_resize_start(
+        start: int, current_size: int, new_size: int, strand: Optional[str] = None
+    ):
         midpoint = start + current_size // 2
         if strand == "-" and current_size % 2 == 0 and new_size % 2 == 1:
             # Resizing from even to odd. Extending 1 space further to the left (5' for negative strand)
@@ -240,11 +268,15 @@ class Region(DataClassMixin):
         if strand is not None:
             # Resizing from even to odd. Extending 1 space further to the left (5' for negative strand)
             new_start[
-                (strand == "-") & (numpy.mod(new_size, 2) == 1) & (numpy.mod(current_size, 2) == 0)
+                (strand == "-")
+                & (numpy.mod(new_size, 2) == 1)
+                & (numpy.mod(current_size, 2) == 0)
             ] -= 1
             # Resizing from odd to even.Extending 1 space further to the RIGHT (3' for negative strand)
             new_start[
-                (strand == "-") & (numpy.mod(new_size, 2) == 0) & (numpy.mod(current_size, 2) == 1)
+                (strand == "-")
+                & (numpy.mod(new_size, 2) == 0)
+                & (numpy.mod(current_size, 2) == 1)
             ] += 1
 
         return new_start
@@ -276,7 +308,10 @@ class Region(DataClassMixin):
             return self.replace()
 
         new_start = self.get_resize_start(
-            start=self.start, current_size=self.length, new_size=new_size, strand=self.strand
+            start=self.start,
+            current_size=self.length,
+            new_size=new_size,
+            strand=self.strand,
         )
 
         if new_start < 0:
@@ -293,7 +328,9 @@ class Region(DataClassMixin):
                 f"chrom length is '{CONTIG_LENGTHS[self.chrom]}')"
             )
 
-        rv = type(self)(self.chrom, new_start, new_stop, self.strand, self.ref, self.data)
+        rv = type(self)(
+            self.chrom, new_start, new_stop, self.strand, self.ref, self.data
+        )
         # assert rv.midpoint == self.midpoint, f"New mp: {self.midpoint} VS Old mp: {rv.midpoint}"
 
         return rv
@@ -315,7 +352,9 @@ class Region(DataClassMixin):
         # split spaces/tabs
         parts = re.split(r"[\s\t]+", s.strip())
         if len(parts) > 1:
-            assert len(parts) == 3, "if there is a tab is the region string, it must contain three parts"
+            assert (
+                len(parts) == 3
+            ), "if there is a tab is the region string, it must contain three parts"
             return parts[0], None, int(parts[1]), int(parts[2])
         else:
             data = s.strip().split(":")
@@ -336,7 +375,9 @@ class Region(DataClassMixin):
     @classmethod
     def from_region_str(cls, region_str, ref: str = DEFAULT_REFERENCE, data=None):
         chrom, strand, start, stop = Region.parse_region_str(region_str)
-        return cls(chrom=chrom, start=start, stop=stop, strand=strand, ref=ref, data=data)
+        return cls(
+            chrom=chrom, start=start, stop=stop, strand=strand, ref=ref, data=data
+        )
 
     def __post_init__(self):
         """
@@ -353,12 +394,16 @@ class Region(DataClassMixin):
             raise ValueError(f"{self.ref} is not in CONTIG_LENGTHS")
 
         if ":" in self.chrom or "\t" in self.chrom:
-            self.chrom, self.strand, self.start, self.stop = Region.parse_region_str(self.chrom)
+            self.chrom, self.strand, self.start, self.stop = Region.parse_region_str(
+                self.chrom
+            )
 
         if self.chrom != "NA" and self.chrom not in CONTIG_LENGTHS[self.ref]:
             raise ValueError(f"{self.chrom} not found in CONTIG_LENGTHS for {self.ref}")
 
-        assert self.data is None or "strand" not in self.data, "'strand' should now be passed into init"
+        assert (
+            self.data is None or "strand" not in self.data
+        ), "'strand' should now be passed into init"
 
         if self.start is None:
             self.start = 0
@@ -378,9 +423,13 @@ class Region(DataClassMixin):
                 f"stop ({self.stop}) is greater than {self.chrom} length ({CONTIG_LENGTHS[self.ref][self.chrom]})"
             )
         if self.start > self.stop:
-            raise ValueError(f"stop ({self.stop}) can not be less than start ({self.start})")
+            raise ValueError(
+                f"stop ({self.stop}) can not be less than start ({self.start})"
+            )
         if self.strand not in [None, "+", "-"]:
-            raise ValueError(f"strand='{self.strand}' expected to be one of: [None, '+', '-']")
+            raise ValueError(
+                f"strand='{self.strand}' expected to be one of: [None, '+', '-']"
+            )
 
     @property
     def length(self):
@@ -398,7 +447,9 @@ class Region(DataClassMixin):
         >>> x.intersects(z)
         False
         """
-        return regions_intersect(self.chrom, self.start, self.stop, other.chrom, other.start, other.stop)
+        return regions_intersect(
+            self.chrom, self.start, self.stop, other.chrom, other.start, other.stop
+        )
 
     def cmp(self, region, chrom_ordering=ChromOrdering.natural):
         """
@@ -421,7 +472,10 @@ class Region(DataClassMixin):
             if chrom_ordering == ChromOrdering.lexicographical:
                 c = cmp(self.chrom, region.chrom)
             elif chrom_ordering == ChromOrdering.natural:
-                c = cmp(CONTIGS[self.ref].index(self.chrom), CONTIGS[self.ref].index(region.chrom),)
+                c = cmp(
+                    CONTIGS[self.ref].index(self.chrom),
+                    CONTIGS[self.ref].index(region.chrom),
+                )
             else:
                 raise AssertionError("impossible")
 
@@ -487,7 +541,9 @@ class Region(DataClassMixin):
         False
         """
         assert isinstance(other, Region) or other.__class__.__name__ == "Region"
-        return all(getattr(self, f.name) == getattr(other, f.name) for f in fields(self))
+        return all(
+            getattr(self, f.name) == getattr(other, f.name) for f in fields(self)
+        )
 
     def __contains__(self, other):
         """
@@ -504,7 +560,11 @@ class Region(DataClassMixin):
         False
         """
         assert isinstance(other, Region), "invalid type comparison"
-        return (other.chrom == self.chrom) and (self.start <= other.start) and (self.stop >= other.stop)
+        return (
+            (other.chrom == self.chrom)
+            and (self.start <= other.start)
+            and (self.stop >= other.stop)
+        )
 
     def __hash__(self):
         return hash(
@@ -582,16 +642,19 @@ class Region(DataClassMixin):
         """Return True if the strand is set and it is -"""
         return self.strand_is_set() and self.strand == "-"
 
-    def get_sequence(self, reference_fasta: pysam.Fastafile, reverse_complement_sequence_if_minus_strand: bool = False) -> numpy.ndarray:
-
+    def get_sequence(
+        self,
+        reference_fasta: pysam.Fastafile,
+        reverse_complement_sequence_if_minus_strand: bool = False,
+    ) -> numpy.ndarray:
         """
         get the sequence of a region from a fasta file
         :param reverse_complement_sequence_if_minus_strand: If set to True, then flip/RC the sequence if it is on the minus strand.
         :return: a 4xlength one-hot encoded numpy array
         """
-        seq = one_hot_encode_sequences([reference_fasta.fetch(self.chrom, self.start, self.stop).encode()]).astype(
-            "int8"
-        )
+        seq = one_hot_encode_sequences(
+            [reference_fasta.fetch(self.chrom, self.start, self.stop).encode()]
+        ).astype("int8")
         one_hot = seq[0]
         if reverse_complement_sequence_if_minus_strand and self.is_minus_strand():
             return one_hot[::-1, ::-1]
@@ -602,11 +665,16 @@ class Region(DataClassMixin):
         self, output_size: int, jitter: int, strand: Optional[str] = None
     ):
         new_resize_start = self.get_resize_start(
-            start=self.start, current_size=self.length, new_size=output_size, strand=strand
+            start=self.start,
+            current_size=self.length,
+            new_size=output_size,
+            strand=strand,
         )
         new_jittered_start = new_resize_start + jitter
         new_stop = new_jittered_start + output_size
-        return type(self)(self.chrom, new_jittered_start, new_stop, strand, self.ref, self.data)
+        return type(self)(
+            self.chrom, new_jittered_start, new_stop, strand, self.ref, self.data
+        )
 
 
 def intervals_intersect(x_start, x_stop, y_start, y_stop):

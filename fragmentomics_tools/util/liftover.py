@@ -6,8 +6,12 @@ class RegionLiftOver(LiftOver):
 
     def __init__(self, source, dest, *args, **kwargs):
         valid_assemblies = {"hg16", "hg17", "hg18", "hg19", "hg38"}
-        assert source in valid_assemblies, f"invalid source: {source}, should be {valid_assemblies}"
-        assert dest in valid_assemblies, f"invalid dest: {dest}, should be {valid_assemblies}"
+        assert (
+            source in valid_assemblies
+        ), f"invalid source: {source}, should be {valid_assemblies}"
+        assert (
+            dest in valid_assemblies
+        ), f"invalid dest: {dest}, should be {valid_assemblies}"
         self.source = source
         self.dest = dest
         super().__init__(source, dest, *args, **kwargs)
@@ -21,7 +25,9 @@ class RegionLiftOver(LiftOver):
 
     def uniquely_convert_region(self, chrom, start, stop, strand=None):
         if start >= stop:
-            raise ValueError("Stop coordinate must be greater than the start coordinate.")
+            raise ValueError(
+                "Stop coordinate must be greater than the start coordinate."
+            )
         converted_start = self.uniquely_convert_coordinate(chrom, start, strand)
         if converted_start is None:
             return None

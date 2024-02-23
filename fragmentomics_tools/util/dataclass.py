@@ -17,6 +17,7 @@ from fbio.util.iter_utils import only_one
 from fbio.util.misc_utils import classproperty, isinstance_typing_union
 """
 
+
 ################# fbio.util.misc_utils ##################################
 class ClassPropertyDescriptor(object):
     """
@@ -93,7 +94,9 @@ def only_one(itrbl, error_message=None):
     try:
         a = next(itrbl)
     except StopIteration:
-        raise StopIteration(f"iterable had 0 items.{' ' if error_message else ''}{error_message}")
+        raise StopIteration(
+            f"iterable had 0 items.{' ' if error_message else ''}{error_message}"
+        )
 
     try:
         b = next(itrbl)
@@ -105,10 +108,7 @@ def only_one(itrbl, error_message=None):
         return a
 
 
-
 ##################################################################################################
-
-
 
 
 def to_ndarray(x):
@@ -139,14 +139,23 @@ class DataClassMixin:
         # convert lists to tuples.
         # FIXME this doesn't handle converting lists nested inside another dict
         for field in cls.fields:
-            if field.type in [Tuple, tuple, typing.Union[tuple, type(None)], typing.Union[type(None), tuple]]:
+            if field.type in [
+                Tuple,
+                tuple,
+                typing.Union[tuple, type(None)],
+                typing.Union[type(None), tuple],
+            ]:
                 if isinstance(d[field.name], list):
                     d[field.name] = tuple(d[field.name])
 
         return from_dict(
             cls,
             d,
-            config=Config(strict=strict, check_types=check_types, type_hooks={np.ndarray: to_ndarray},),
+            config=Config(
+                strict=strict,
+                check_types=check_types,
+                type_hooks={np.ndarray: to_ndarray},
+            ),
         )
 
     def validate_types(self):
@@ -177,7 +186,9 @@ class DataClassMixin:
     def replace(self, **changes):
         return replace(self, **changes)
 
-    def save_to_json_s3_or_local(self, out_fname, validate_reload=False, allow_overwrite=False):
+    def save_to_json_s3_or_local(
+        self, out_fname, validate_reload=False, allow_overwrite=False
+    ):
         """
         :param out_fname: path to write to
         :param validate_reload: validate that we can reload the we saved
@@ -213,7 +224,9 @@ class DataClassMixin:
                 union = field.type
                 non_nones = [t for t in union.__args__ if t not in [None, type(None)]]
                 if len(non_nones) == 0:
-                    raise TypeError(f"{field.name} does not have a valid type: {field.type}")
+                    raise TypeError(
+                        f"{field.name} does not have a valid type: {field.type}"
+                    )
                 elif len(non_nones) == 1:
                     # only one non None element in the typing.Union, add it to dtypes
                     d[field.name] = only_one(non_nones)
@@ -222,7 +235,9 @@ class DataClassMixin:
                         f"{field.name} is has more than two types {field.type}, cannot select one"
                     )
                 else:
-                    raise AssertionError("impossible, there must be two or more __args__s")
+                    raise AssertionError(
+                        "impossible, there must be two or more __args__s"
+                    )
             else:
                 if isinstance(field.type, collections.Container):
                     raise TypeError(f"Cannot return a single dtype for field: {field}")
@@ -231,7 +246,9 @@ class DataClassMixin:
         return d
 
     @classmethod
-    def from_json_s3_or_local(cls, fname, strict=True, check_types=True, force_values=None):
+    def from_json_s3_or_local(
+        cls, fname, strict=True, check_types=True, force_values=None
+    ):
         """
         :param fname: json file path
         :param strict: all keys must exist, there can be no extra keys
@@ -256,7 +273,9 @@ class DataClassMixin:
         return pandas.DataFrame.from_dict(rec.to_dict() for rec in records)
 
     @classmethod
-    def add_to_argparse(cls, parameter_group, group_name=None, underscores_to_dashes=True):
+    def add_to_argparse(
+        cls, parameter_group, group_name=None, underscores_to_dashes=True
+    ):
         required_arguments = []
         optional_arguments = []
 
@@ -268,7 +287,9 @@ class DataClassMixin:
             elif isinstance(f.type, typing._GenericAlias):
                 if f.type.__origin__ in (list, tuple, List, Tuple):
                     # accept List[type] or Tuple[type]
-                    assert len(f.type.__args__) == 1, f"{f.type} can only have a single type"
+                    assert (
+                        len(f.type.__args__) == 1
+                    ), f"{f.type} can only have a single type"
                     d = dict(type=only_one(f.type.__args__), nargs="*")
                 elif f.type.__origin__ == typing.Union:
                     # accept Union[type, None] for optional arguments
@@ -319,13 +340,17 @@ class DataClassMixin:
 
         group_name_str = f" {group_name}" if group_name is not None else ""
         if len(required_arguments):
-            required_args = parameter_group.add_argument_group(f"Required{group_name_str}")
+            required_args = parameter_group.add_argument_group(
+                f"Required{group_name_str}"
+            )
 
             for name, d in required_arguments:
                 required_args.add_argument(f"--{name}", **d)
 
         if len(optional_arguments):
-            optional_args = parameter_group.add_argument_group(f"Optional{group_name_str}")
+            optional_args = parameter_group.add_argument_group(
+                f"Optional{group_name_str}"
+            )
 
             for name, d in optional_arguments:
                 optional_args.add_argument(f"--{name}", **d)

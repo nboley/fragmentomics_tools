@@ -25,7 +25,9 @@ def test_sum_pool_by_on_sparse():
             sparse_arr = coo_matrix(dense_arr)
             # sum_pool with an dense array uses view_as_windows
             # sum_pool with an sparse array manually changes the coordinates
-            assert (sum_pool(dense_arr, sum_pool_by) == sum_pool(sparse_arr, sum_pool_by)).all()
+            assert (
+                sum_pool(dense_arr, sum_pool_by) == sum_pool(sparse_arr, sum_pool_by)
+            ).all()
 
 
 def test_sum_pool():
@@ -79,7 +81,9 @@ def test_make_ones_coo_arr():
 
 def test_make_ones_fails_for_non_integer_float():
     try:
-        make_ones_coo_arr(coo_matrix((np.array(DATA + 0.1, dtype=float), (ROW, COL)), shape=(4, 4)))
+        make_ones_coo_arr(
+            coo_matrix((np.array(DATA + 0.1, dtype=float), (ROW, COL)), shape=(4, 4))
+        )
     except ValueError:
         pass
     else:
@@ -88,7 +92,9 @@ def test_make_ones_fails_for_non_integer_float():
 
 def test_downsample_coo_matrix():
     arr = coo_matrix((DATA, (ROW, COL)), shape=(4, 4))
-    assert (arr.toarray() == array([[1, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 3]])).all()
+    assert (
+        arr.toarray() == array([[1, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 3]])
+    ).all()
 
     assert (
         downsample_coo_matrix(arr, 4, random_state=2).toarray()

@@ -8,7 +8,10 @@ import pytest
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
 from fragmentomics_tools.region import Region
 
-from fragmentomics_tools.fragment_array.fragment_array import FragmentDoesNotIntersect, InvalidCoordinates
+from fragmentomics_tools.fragment_array.fragment_array import (
+    FragmentDoesNotIntersect,
+    InvalidCoordinates,
+)
 
 from fragmentomics_tools import (
     RegionFragmentArray,
@@ -18,6 +21,7 @@ from fragmentomics_tools import (
 
 
 DATA_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")
+
 
 def test_no_fragments():
     fa = RegionFragmentArray([], [], Region("chr1", 0, 100), 100)
@@ -46,24 +50,36 @@ def small_h5_path(bam_path, fasta_file_path):
 
 regions = [
     Region("chr6", 99119615, 99119634),  # CTCF Constitutive
-    #("chr10", 127907312, 127907911),
-    #("chr10", 25933676, 25934876),
+    # ("chr10", 127907312, 127907911),
+    # ("chr10", 25933676, 25934876),
 ]
 
+
 @pytest.mark.parametrize(
-    "min_mapq, max_frag_len, region", [(0, 127, regions[0]), ] # , (20, 511, regions[1]), (60, 1023, regions[2])],
+    "min_mapq, max_frag_len, region",
+    [
+        (0, 127, regions[0]),
+    ],  # , (20, 511, regions[1]), (60, 1023, regions[2])],
 )
-def test_fragment_array_against_fragment_matrix(small_h5_path, min_mapq, max_frag_len, region):
+def test_fragment_array_against_fragment_matrix(
+    small_h5_path, min_mapq, max_frag_len, region
+):
     # make sure creating a fragment matrix from a fragment array produces is equivalent to
     # creating the fragment matrix from scratch
     assert isinstance(max_frag_len, int)
     assert isinstance(region, Region)
 
     frag_array = RegionFragmentArray.from_fragments_h5(
-        FragmentsH5(small_h5_path, "r"), region=region, min_mapq=min_mapq, max_frag_len=max_frag_len)
+        FragmentsH5(small_h5_path, "r"),
+        region=region,
+        min_mapq=min_mapq,
+        max_frag_len=max_frag_len,
+    )
     frag_mat = frag_array.fragment_matrix
 
-    numpy.testing.assert_equal(frag_array.fragment_matrix.dense_array, frag_mat.dense_array)
+    numpy.testing.assert_equal(
+        frag_array.fragment_matrix.dense_array, frag_mat.dense_array
+    )
 
 
 def test_fragment_array_assertions():
@@ -77,7 +93,9 @@ def test_fragment_array_assertions():
 
     with pytest.raises(TypeError):
         # no floating point numbers
-        RegionFragmentArray(numpy.array([0, 3.0]), numpy.array([2, 4]), Region("chr1", 0, 5), 511)
+        RegionFragmentArray(
+            numpy.array([0, 3.0]), numpy.array([2, 4]), Region("chr1", 0, 5), 511
+        )
 
     with pytest.raises(InvalidCoordinates):
         RegionFragmentArray([2], [-1], Region("chr1", 0, 5), 511)
@@ -99,7 +117,9 @@ def test_fragment_array_assertions():
     ],
 )
 def test_boundary_conditions(small_h5_path, region, expected_starts, expected_stops):
-    fa = RegionFragmentArray.from_fragments_h5(FragmentsH5(small_h5_path, "r"), region=region)
+    fa = RegionFragmentArray.from_fragments_h5(
+        FragmentsH5(small_h5_path, "r"), region=region
+    )
     fm = fa.fragment_matrix
     numpy.testing.assert_equal(fa.starts_0, expected_starts)
     numpy.testing.assert_equal(fa.stops_0, expected_stops)
@@ -125,22 +145,40 @@ def test_boundary_conditions(small_h5_path, region, expected_starts, expected_st
             max_frag_len=100,
         ),
         RegionFragmentArray(
-            starts_0=[], stops_0=[], region=Region("chr1", 0, 5, strand="+"), max_frag_len=100,
+            starts_0=[],
+            stops_0=[],
+            region=Region("chr1", 0, 5, strand="+"),
+            max_frag_len=100,
         ),
         FragmentArray(
-            starts_0=[-3, -2, 0, 1, 2, 3, 4], stops_0=[1, 2, 2, 3, 4, 5, 6], length=5, max_frag_len=100,
+            starts_0=[-3, -2, 0, 1, 2, 3, 4],
+            stops_0=[1, 2, 2, 3, 4, 5, 6],
+            length=5,
+            max_frag_len=100,
         ),
-        FragmentArray(starts_0=[], stops_0=[], length=5, max_frag_len=100,),
+        FragmentArray(
+            starts_0=[],
+            stops_0=[],
+            length=5,
+            max_frag_len=100,
+        ),
     ],
 )
 def test_sum(frag_arr):
     additive_identity_downcast = FragmentArray(
-        starts_0=[], stops_0=[], length=frag_arr.length, max_frag_len=frag_arr.max_frag_len,
+        starts_0=[],
+        stops_0=[],
+        length=frag_arr.length,
+        max_frag_len=frag_arr.max_frag_len,
     )
     summed = sum([frag_arr, frag_arr]).sort_in_place()
     merged = merge_fragment_arrays([frag_arr, frag_arr]).sort_in_place()
-    summed_downcast = sum([frag_arr, additive_identity_downcast, frag_arr]).sort_in_place()
-    merged_downcast = merge_fragment_arrays([frag_arr, additive_identity_downcast, frag_arr]).sort_in_place()
+    summed_downcast = sum(
+        [frag_arr, additive_identity_downcast, frag_arr]
+    ).sort_in_place()
+    merged_downcast = merge_fragment_arrays(
+        [frag_arr, additive_identity_downcast, frag_arr]
+    ).sort_in_place()
     added = (frag_arr + frag_arr).sort_in_place()
     assert summed == added
     assert merged == summed
@@ -154,10 +192,18 @@ def test_sum(frag_arr):
     numpy.testing.assert_equal(merged_downcast.stops_0, summed.stops_0)
     numpy.testing.assert_equal(summed_downcast.weights, summed.weights)
     numpy.testing.assert_equal(merged_downcast.weights, summed.weights)
-    numpy.testing.assert_equal(summed_downcast.first_covered_base_weights, summed.first_covered_base_weights)
-    numpy.testing.assert_equal(merged_downcast.first_covered_base_weights, summed.first_covered_base_weights)
-    numpy.testing.assert_equal(summed_downcast.last_covered_base_weights, summed.last_covered_base_weights)
-    numpy.testing.assert_equal(merged_downcast.last_covered_base_weights, summed.last_covered_base_weights)
+    numpy.testing.assert_equal(
+        summed_downcast.first_covered_base_weights, summed.first_covered_base_weights
+    )
+    numpy.testing.assert_equal(
+        merged_downcast.first_covered_base_weights, summed.first_covered_base_weights
+    )
+    numpy.testing.assert_equal(
+        summed_downcast.last_covered_base_weights, summed.last_covered_base_weights
+    )
+    numpy.testing.assert_equal(
+        merged_downcast.last_covered_base_weights, summed.last_covered_base_weights
+    )
 
 
 @pytest.mark.parametrize(
@@ -179,10 +225,16 @@ def test_sum(frag_arr):
         ),
         (  # Slice with two reads at begin/end edges
             FragmentArray(
-                starts_0=[-3, -2, 0, 1, 2, 3, 4], stops_0=[1, 2, 2, 3, 4, 5, 6], length=5, max_frag_len=100
+                starts_0=[-3, -2, 0, 1, 2, 3, 4],
+                stops_0=[1, 2, 2, 3, 4, 5, 6],
+                length=5,
+                max_frag_len=100,
             ),
             FragmentArray(
-                starts_0=[-1, 0, 1, 2, 3, 3, 4], stops_0=[1, 2, 3, 4, 5, 7, 8], length=5, max_frag_len=100,
+                starts_0=[-1, 0, 1, 2, 3, 3, 4],
+                stops_0=[1, 2, 3, 4, 5, 7, 8],
+                length=5,
+                max_frag_len=100,
             ),
         ),
         (  # Slice with no fragments is empty
@@ -222,20 +274,44 @@ def test_reverse_complement(input_fa: FragmentArray, expected_fa: FragmentArray)
     [
         (
             RegionFragmentArray(
-                starts_0=[], stops_0=[], region=Region("chr1", 1, 6, strand="+"), max_frag_len=100,
+                starts_0=[],
+                stops_0=[],
+                region=Region("chr1", 1, 6, strand="+"),
+                max_frag_len=100,
             ),
             0,
             0,
         ),
-        (FragmentArray(starts_0=[], stops_0=[], length=6, max_frag_len=100,), 0, 0),
+        (
+            FragmentArray(
+                starts_0=[],
+                stops_0=[],
+                length=6,
+                max_frag_len=100,
+            ),
+            0,
+            0,
+        ),
         (
             RegionFragmentArray(
-                starts_0=[-5, -2], stops_0=[7, 8], region=Region("chr1", 1, 6, strand="+"), max_frag_len=100,
+                starts_0=[-5, -2],
+                stops_0=[7, 8],
+                region=Region("chr1", 1, 6, strand="+"),
+                max_frag_len=100,
             ),
             0,
             2,
         ),
-        (FragmentArray(starts_0=[-5, -2], stops_0=[7, 8], length=5, max_frag_len=100,), 0, 2),
+        (
+            FragmentArray(
+                starts_0=[-5, -2],
+                stops_0=[7, 8],
+                length=5,
+                max_frag_len=100,
+            ),
+            0,
+            2,
+        ),
     ],
 )
 def test_empty_array_covered_base_counts(
@@ -314,14 +390,34 @@ def test_empty_array_covered_base_counts(
             ),
         ),
         (
-            FragmentArray(starts_0=[-2, 0, 1, 2, 3], stops_0=[2, 2, 3, 4, 5], length=5, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-2, 0, 1, 2, 3],
+                stops_0=[2, 2, 3, 4, 5],
+                length=5,
+                max_frag_len=100,
+            ),
             -2,
-            FragmentArray(starts_0=[-1, 0, 1], stops_0=[1, 2, 3], length=5, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-1, 0, 1],
+                stops_0=[1, 2, 3],
+                length=5,
+                max_frag_len=100,
+            ),
         ),
         (
-            FragmentArray(starts_0=[-2, 0, 1, 2, 3], stops_0=[2, 2, 3, 4, 5], length=5, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-2, 0, 1, 2, 3],
+                stops_0=[2, 2, 3, 4, 5],
+                length=5,
+                max_frag_len=100,
+            ),
             2,
-            FragmentArray(starts_0=[0, 2, 3, 4], stops_0=[4, 4, 5, 6], length=5, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[0, 2, 3, 4],
+                stops_0=[4, 4, 5, 6],
+                length=5,
+                max_frag_len=100,
+            ),
         ),
     ],
 )
@@ -358,9 +454,19 @@ def test_shift(input_fa: FragmentArray, shift: int, expected_fa: FragmentArray):
             ),
         ),
         (  # The full region
-            FragmentArray(starts_0=[-2, 0, 1, 2, 3], stops_0=[2, 2, 3, 4, 5], length=5, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-2, 0, 1, 2, 3],
+                stops_0=[2, 2, 3, 4, 5],
+                length=5,
+                max_frag_len=100,
+            ),
             3,
-            FragmentArray(starts_0=[-3, -1, 0, 1, 2], stops_0=[1, 1, 2, 3, 4], length=3, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-3, -1, 0, 1, 2],
+                stops_0=[1, 1, 2, 3, 4],
+                length=3,
+                max_frag_len=100,
+            ),
         ),
         (
             RegionFragmentArray(
@@ -408,9 +514,19 @@ def test_shift(input_fa: FragmentArray, shift: int, expected_fa: FragmentArray):
             ),
         ),
         (  # The full region
-            FragmentArray(starts_0=[-2, 0, 1, 2, 3], stops_0=[2, 2, 3, 4, 5], length=6, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-2, 0, 1, 2, 3],
+                stops_0=[2, 2, 3, 4, 5],
+                length=6,
+                max_frag_len=100,
+            ),
             3,
-            FragmentArray(starts_0=[-1, 0, 1], stops_0=[1, 2, 3], length=3, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-1, 0, 1],
+                stops_0=[1, 2, 3],
+                length=3,
+                max_frag_len=100,
+            ),
         ),
         (
             RegionFragmentArray(
@@ -443,9 +559,19 @@ def test_shift(input_fa: FragmentArray, shift: int, expected_fa: FragmentArray):
             ),
         ),
         (  # The full region
-            FragmentArray(starts_0=[-2, 0, 1, 2, 3], stops_0=[2, 2, 3, 4, 5], length=6, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-2, 0, 1, 2, 3],
+                stops_0=[2, 2, 3, 4, 5],
+                length=6,
+                max_frag_len=100,
+            ),
             2,
-            FragmentArray(starts_0=[-1, 0, 1], stops_0=[1, 2, 3], length=2, max_frag_len=100,),
+            FragmentArray(
+                starts_0=[-1, 0, 1],
+                stops_0=[1, 2, 3],
+                length=2,
+                max_frag_len=100,
+            ),
         ),
     ],
 )
@@ -456,7 +582,9 @@ def test_resize(input_fa: FragmentArray, new_size: int, expected_fa: FragmentArr
 
 
 def test_data_validation():
-    with pytest.raises(ValueError, match=".*The length of starts_0 must be the same as stops_0.*"):
+    with pytest.raises(
+        ValueError, match=".*The length of starts_0 must be the same as stops_0.*"
+    ):
         _ = RegionFragmentArray(
             starts_0=[-3, -2, 0, 1, 2, 3, 4, 33],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
@@ -476,7 +604,10 @@ def test_data_validation():
             region=Region("chr1", 0, 5),
             max_frag_len=100,
         )
-    with pytest.raises(ValueError, match=".*First covered base weights length should match data length.*"):
+    with pytest.raises(
+        ValueError,
+        match=".*First covered base weights length should match data length.*",
+    ):
         _ = RegionFragmentArray(
             starts_0=[-3, -2, 0, 1, 2, 3, 4],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
@@ -486,7 +617,10 @@ def test_data_validation():
             region=Region("chr1", 0, 5),
             max_frag_len=100,
         )
-    with pytest.raises(ValueError, match=".*Last covered base weights length should match data length.*"):
+    with pytest.raises(
+        ValueError,
+        match=".*Last covered base weights length should match data length.*",
+    ):
         _ = RegionFragmentArray(
             starts_0=[-3, -2, 0, 1, 2, 3, 4],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
@@ -528,6 +662,7 @@ def test_save_load_region_fragment_array(rfa: RegionFragmentArray, tmpdir):
 
 def test_from_fragments_h5(small_h5_path):
     region = Region("chr6", 99118615, 99121634).resize(2048)
-    rfa = RegionFragmentArray.from_fragments_h5(small_h5_path, region, include_fragment_strand=True)
+    rfa = RegionFragmentArray.from_fragments_h5(
+        small_h5_path, region, include_fragment_strand=True
+    )
     assert rfa.n_frags == 9
-

@@ -23,11 +23,7 @@ import pysam
 
 from ..region import Region
 
-from .fragment_matrix_math import (
-    make_ones_coo_arr,
-    reverse_sum_pool,
-    sum_pool
-)
+from .fragment_matrix_math import make_ones_coo_arr, reverse_sum_pool, sum_pool
 
 
 def _rescale_shape(shape, frag_step_size, pos_step_size):
@@ -35,8 +31,7 @@ def _rescale_shape(shape, frag_step_size, pos_step_size):
 
 
 def dense_array_into_coo_arr(arr, frag_step_size=1, pos_step_size=1):
-    """Build a smoothed fragment matrix from a dense array.
-    """
+    """Build a smoothed fragment matrix from a dense array."""
     # convert the dense array into a coo_matrix where every data entry is 1.
     # This makes conversion into the data frame of positions straightforward.
     coo_arr = make_ones_coo_arr(coo_matrix(arr))
@@ -48,7 +43,10 @@ def dense_array_into_coo_arr(arr, frag_step_size=1, pos_step_size=1):
         coo_arr = coo_matrix(
             # multiplying each row entry by the step sizes puts them onto the
             # correct scale
-            (coo_arr.data, (coo_arr.row * frag_step_size, coo_arr.col * pos_step_size),),
+            (
+                coo_arr.data,
+                (coo_arr.row * frag_step_size, coo_arr.col * pos_step_size),
+            ),
             # it is critical that we set the shape. Otherwise, the downstream code
             # will yield a smoothed array that is the wrong size.
             shape=_rescale_shape(arr.shape, frag_step_size, pos_step_size),
@@ -63,7 +61,9 @@ class FragmentMatrix:
     # the second dimension (shape[1]) is the position
     arr: coo_matrix
 
-    def __post_init__(self,):
+    def __post_init__(
+        self,
+    ):
         if isinstance(self.arr, (np.ndarray, csr_matrix)):
             self.arr = make_ones_coo_arr(coo_matrix(self.arr))
         # assert np.issubdtype(self.arr.dtype, np.integer)  # FIXME re-enable this and test get tests working
@@ -136,11 +136,17 @@ class FragmentMatrix:
         else:
             return replace(
                 self,
-                arr=coo_matrix(reverse_sum_pool(self.dense_array, sum_pool_by, preserve_sum=preserve_sum)),
+                arr=coo_matrix(
+                    reverse_sum_pool(
+                        self.dense_array, sum_pool_by, preserve_sum=preserve_sum
+                    )
+                ),
             )
 
     def smooth_by_sum_pool(self, sum_pool_by, preserve_sum: bool = False):
-        return self.sum_pooled(sum_pool_by).reverse_sum_pooled(sum_pool_by, preserve_sum=preserve_sum)
+        return self.sum_pooled(sum_pool_by).reverse_sum_pooled(
+            sum_pool_by, preserve_sum=preserve_sum
+        )
 
 
 @dataclass
@@ -163,7 +169,9 @@ class RegionFragmentMatrix(FragmentMatrix):
     @property
     def stops(self):
         # add one to the stop if length is odd, since the actual midpoint was midpoint + .5
-        return self.midpoints + self.lengths // 2 + (self.lengths % 2) + self.region.start
+        return (
+            self.midpoints + self.lengths // 2 + (self.lengths % 2) + self.region.start
+        )
 
     @property
     def chrom(self):
@@ -215,7 +223,9 @@ class RegionFragmentMatrix(FragmentMatrix):
         arr = make_ones_coo_arr(self.arr.tocsc()[:, sl].tocoo())
 
         shifted_region = replace(
-            self.region, start=self.region.start + sl.start, stop=self.region.start + sl.stop
+            self.region,
+            start=self.region.start + sl.start,
+            stop=self.region.start + sl.stop,
         )
         return replace(self, arr=arr, region=shifted_region)
 
@@ -224,12 +234,14 @@ class RegionFragmentMatrix(FragmentMatrix):
         assert isinstance(subregion, Region)
         if subregion not in self.region:
             raise ValueError(f"subregion {subregion} is not a subset of {self.region}")
-        sl = slice(subregion.start - self.region.start, subregion.stop - self.region.start)
+        sl = slice(
+            subregion.start - self.region.start, subregion.stop - self.region.start
+        )
         return self.get_slice(sl)
 
 
 def merge_fragment_matrices(
-        fragment_matrices: Iterable[Union[FragmentMatrix, RegionFragmentMatrix]]
+    fragment_matrices: Iterable[Union[FragmentMatrix, RegionFragmentMatrix]]
 ) -> Union[FragmentMatrix, RegionFragmentMatrix]:
     # FIXME: flip_minus_strand is broken. Fragment matrices are now natively flipped for minus strand
     # raise NotImplementedError("Deprecated. Use FragmentArray and merge those instead")
@@ -237,16 +249,24 @@ def merge_fragment_matrices(
     regions = set()
     arr = None
     for i, fm in enumerate(fragment_matrices):
-        if isinstance(fm, RegionFragmentMatrix) or fm.__class__.__name__ == "RegionFragmentMatrix":
+        if (
+            isinstance(fm, RegionFragmentMatrix)
+            or fm.__class__.__name__ == "RegionFragmentMatrix"
+        ):
             regions.add(fm.region)
         else:
             if not (
                 isinstance(fm, FragmentMatrix)
                 or isinstance(fm, RegionFragmentMatrix)
                 or fm.__class__.__name__
-                in {"FragmentMatrix", "RegionFragmentMatrix",}
+                in {
+                    "FragmentMatrix",
+                    "RegionFragmentMatrix",
+                }
             ):
-                raise TypeError(f"{fm}, name={fm.__class__.__name__} is not a recognized FragmentMatrix")
+                raise TypeError(
+                    f"{fm}, name={fm.__class__.__name__} is not a recognized FragmentMatrix"
+                )
             regions.add(None)
 
         if i == 0:

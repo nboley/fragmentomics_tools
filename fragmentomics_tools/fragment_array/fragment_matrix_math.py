@@ -138,7 +138,12 @@ def view_as_windows(arr_in, window_shape, step=1):
 
     # -- build rolling window view
     if not arr_in.flags.contiguous:
-        warn(RuntimeWarning("Cannot provide views on a non-contiguous input " "array without copying."))
+        warn(
+            RuntimeWarning(
+                "Cannot provide views on a non-contiguous input "
+                "array without copying."
+            )
+        )
 
     arr_in = np.ascontiguousarray(arr_in)
 
@@ -147,7 +152,9 @@ def view_as_windows(arr_in, window_shape, step=1):
 
     indexing_strides = arr_in[slices].strides
 
-    win_indices_shape = ((np.array(arr_in.shape) - np.array(window_shape)) // np.array(step)) + 1
+    win_indices_shape = (
+        (np.array(arr_in.shape) - np.array(window_shape)) // np.array(step)
+    ) + 1
 
     new_shape = tuple(list(win_indices_shape) + list(window_shape))
     strides = tuple(list(indexing_strides) + list(window_strides))
@@ -289,7 +296,9 @@ def sum_pool(
             (i,) = sum_pool_by
 
         if arr.shape[0] % i != 0:
-            raise ValueError(f"row shape: {arr.shape[0]} is not evenly divisible by {i}")
+            raise ValueError(
+                f"row shape: {arr.shape[0]} is not evenly divisible by {i}"
+            )
 
         if isinstance(arr, coo_matrix):
             raise NotImplementedError()
@@ -304,25 +313,34 @@ def sum_pool(
             i, j = sum_pool_by
 
         if arr.shape[0] % i != 0:
-            raise ValueError(f"row shape: {arr.shape[0]} is not evenly divisible by {i}")
+            raise ValueError(
+                f"row shape: {arr.shape[0]} is not evenly divisible by {i}"
+            )
         if arr.shape[1] % j != 0:
-            raise ValueError(f"row shape: {arr.shape[1]} is not evenly divisible by {j}")
+            raise ValueError(
+                f"row shape: {arr.shape[1]} is not evenly divisible by {j}"
+            )
 
         if isinstance(arr, coo_matrix):
             # This returns identical results as view_as_windows().sum(),
             # but works for a sparse array.
             return coo_matrix(
-                (arr.data, (arr.row // i, arr.col // j)), shape=(arr.shape[0] // i, arr.shape[1] // j),
+                (arr.data, (arr.row // i, arr.col // j)),
+                shape=(arr.shape[0] // i, arr.shape[1] // j),
             )
         elif isinstance(arr, numpy.ndarray):
             return view_as_windows(arr, (i, j), (i, j)).sum((2, 3))
         else:
             raise TypeError(f"{type(arr)} is an invalid type")
     else:
-        raise NotImplementedError(f"Array has an unsupported number of dimensions: {len(arr.shape)}")
+        raise NotImplementedError(
+            f"Array has an unsupported number of dimensions: {len(arr.shape)}"
+        )
 
 
-def reverse_sum_pool(arr, sum_pool_by: Union[int, tuple, None], preserve_sum: bool = False):
+def reverse_sum_pool(
+    arr, sum_pool_by: Union[int, tuple, None], preserve_sum: bool = False
+):
     """
     Upsamples by performing the inverse operation of a sum_pool()
 
@@ -358,7 +376,9 @@ def reverse_sum_pool(arr, sum_pool_by: Union[int, tuple, None], preserve_sum: bo
         # reverse sum_pool_by the same amount in in all dimensions
         sum_pool_by = (sum_pool_by,) * arr.ndim
 
-    assert arr.ndim == len(sum_pool_by), f"{sum_pool_by} should have {arr.ndim} dimensions"
+    assert arr.ndim == len(
+        sum_pool_by
+    ), f"{sum_pool_by} should have {arr.ndim} dimensions"
     unpooler = numpy.ones(sum_pool_by, dtype=arr.dtype)
     if preserve_sum:
         dims = numpy.product(unpooler.shape)
