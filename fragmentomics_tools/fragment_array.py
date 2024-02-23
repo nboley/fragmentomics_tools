@@ -763,35 +763,56 @@ class FragmentArray:
                 mask &= self.pct_meth_cpgs < pct_meth_cpgs[1]
         return self.mask(mask)
 
-    def split_into_k_nonoverlapping_fms(self, sample_size=None, k=2):
-        """Split into 'k' fragment arrays with 'sample_size' distinct fragments in each.
 
-        Returns a list of fragment arrays.
+    def vplot(self, sum_pool_by=DEFAULT_VPLOT_SUMPOOL_BY, title=None):
+        from fbio.plot.tracks import VplotTrack
+
+        return VplotTrack(
+            self.fragment_matrix.dense_array, self.plot_region, name=title, sum_pool_by=sum_pool_by,
+        ).plot(figsize=(17, 5))
+
+    @classmethod
+    def from_frag_length_midpoint_dense_array(cls, dense_array) -> "FragmentArray":
         """
-        if sample_size is None:
-            sample_size = self.n_fragments // k
-        return self.split_into_nonoverlapping_fms([sample_size] * k)
+        Converts a dense array of frag_length/midpoint to start/stop sparse array coordinates,
+        along with the length of the region and the maximumm fragment length.
 
-    def split_into_2_nonoverlapping_fms(self, sample_size=None, seed=None):
-        """Split into 2 fragment arrays with 'sample_size' distinct fragments in the first, and the
-           rest in the other fm.
+        Can be used for converting a FragmentMatrix to a FragmentArray
 
-        If sample_size is None, split into two equal sizes
-        Returns a list of fragment arrays.
+        :param dense_array: a fragment_length/midpoint dense array
+        :returns: starts, stops, vals, length, max_frag_len
+
+        .. warning::
+          The fragment_length/midpoint dense array representation loses fragments at the boundaries
+          of a region.  This occurs when a fragment overlaps the region, but the midpoint does not.
+          If you use this method, you should beware of boundary effects.
+
+        Note that the first row is frag_length == 0, which is invalid, and so does not get represted
+        in the FragmentArray
+        >>> fa = FragmentArray.from_frag_length_midpoint_dense_array([[0,0],
+        ...                                                           [0,1],
+        ...                                                           [1,2]])
+        >>> fa.n_frags
+        3
+        >>> fa.starts_0
+        array([ 1, -1,  0], dtype=int32)
+        >>> fa.stops_0
+        array([2, 1, 2], dtype=int32)
+        >>> fa.last_covered_bases_0
+        array([1, 0, 1], dtype=int32)
         """
-        if sample_size is None:
-            sample_size = self.n_fragments // 2
-        sample_size_2 = self.n_fragments - sample_size
-        return self.split_into_nonoverlapping_fms([sample_size, sample_size_2], seed=seed)
+        (starts_0, stops_0, vals, length, max_frag_len,) = frag_len_midpoint_dense_array_to_start_stops(
+            dense_array
+        )
+        return cls(starts_0, stops_0, length, max_frag_len, weights=vals)
 
-    def make_cut_site_tracks(
+    def make_tracks(
         self,
         vplot_sum_pool_by=DEFAULT_VPLOT_SUMPOOL_BY,
         vplot_label: str = None,
         vplot_cmap: str = "nipy_spectral_r",
         binding_site_data=None,
         coverage_smoothing_window=20,
-        fragment_matrix_density=dict(),
         show_coverage: bool = True,
     ) -> "Tracks":
         """
@@ -799,7 +820,7 @@ class FragmentArray:
 
         :param binding_site_data: a binding site data instance
         """
-        from fbio.plot.tracks import (
+        from fragmentomics_tools.tracks import (
             VectorTrack,
             EmptyTrack,
             VplotTrack,
@@ -814,8 +835,6 @@ class FragmentArray:
 
         region = self.plot_region
 
-        if not isinstance(fragment_matrix_density, dict):
-            fragment_matrix_density = {"density": fragment_matrix_density}
         vlines = []
         tracks = [
             VplotTrack(
@@ -827,18 +846,6 @@ class FragmentArray:
                 vlines=vlines,
             ),
         ]
-
-        # add in the vplot densities
-        for key, density in fragment_matrix_density.items():
-            tracks.append(
-                VplotDensityTrack(
-                    density,
-                    sum_pool_by=vplot_sum_pool_by,
-                    vlines=vlines,
-                    region=region,
-                    name=key,
-                )
-            )
 
         if show_coverage:
             tracks.extend(
@@ -915,63 +922,8 @@ class FragmentArray:
             ]
         return Tracks(tracks)
 
-    @functools.wraps(make_cut_site_tracks)
-    def make_footprint_tracks(
-        self, include_atac_footprint: bool = True, include_cfdna_footprint: bool = True, *args, **kwargs
-    ) -> "Tracks":
-        tracks = self.make_cut_site_tracks(*args, **kwargs)
-        if include_atac_footprint:
-            tracks.append(self.get_atac_footprint_fit_track())
-        if include_cfdna_footprint:
-            tracks.append(self.get_cfdna_footprint_fit_track())
-        return tracks
-
-    def vplot(self, sum_pool_by=DEFAULT_VPLOT_SUMPOOL_BY, title=None):
-        from fbio.plot.tracks import VplotTrack
-
-        return VplotTrack(
-            self.fragment_matrix.dense_array, self.plot_region, name=title, sum_pool_by=sum_pool_by,
-        ).plot(figsize=(17, 5))
-
-    @classmethod
-    def from_frag_length_midpoint_dense_array(cls, dense_array) -> "FragmentArray":
-        """
-        Converts a dense array of frag_length/midpoint to start/stop sparse array coordinates,
-        along with the length of the region and the maximumm fragment length.
-
-        Can be used for converting a FragmentMatrix to a FragmentArray
-
-        :param dense_array: a fragment_length/midpoint dense array
-        :returns: starts, stops, vals, length, max_frag_len
-
-        .. warning::
-          The fragment_length/midpoint dense array representation loses fragments at the boundaries
-          of a region.  This occurs when a fragment overlaps the region, but the midpoint does not.
-          If you use this method, you should beware of boundary effects.
-
-        Note that the first row is frag_length == 0, which is invalid, and so does not get represted
-        in the FragmentArray
-        >>> fa = FragmentArray.from_frag_length_midpoint_dense_array([[0,0],
-        ...                                                           [0,1],
-        ...                                                           [1,2]])
-        >>> fa.n_frags
-        3
-        >>> fa.starts_0
-        array([ 1, -1,  0], dtype=int32)
-        >>> fa.stops_0
-        array([2, 1, 2], dtype=int32)
-        >>> fa.last_covered_bases_0
-        array([1, 0, 1], dtype=int32)
-        """
-        (starts_0, stops_0, vals, length, max_frag_len,) = frag_len_midpoint_dense_array_to_start_stops(
-            dense_array
-        )
-        return cls(starts_0, stops_0, length, max_frag_len, weights=vals)
-
-    # @wraps(make_tracks) inherits the signature and docstring of make_tracks
-    @wraps(make_cut_site_tracks)
-    def plot_cut_site_tracks(self, *args, **kwargs):
-        self.make_cut_site_tracks(self, *args, **kwargs).plot()
+    def plot(self, *args, **kwargs):
+        return self.make_tracks(*args, **kwargs).plot()
 
 
 class RegionFragmentArray(FragmentArray):
@@ -1072,9 +1024,6 @@ class RegionFragmentArray(FragmentArray):
             f"num_meth_cpgs={self.frag_str(self.num_meth_cpgs)}, "
             f"max_frag_len={self.max_frag_len})"
         )
-
-    def plot(self, *args, **kwargs):
-        return self.fragment_matrix.plot(*args, **kwargs)
 
     def save(self, fname: Union[str, Path]) -> None:
         assert str(fname).endswith(".rfa.h5"), "Save name needs to end in .rfa.h5"
@@ -1581,28 +1530,21 @@ def merge_fragment_arrays(ars):
     num_cpgs = numpy.concatenate([ar.num_cpgs for ar in ars])
     num_meth_cpgs = numpy.concatenate([ar.num_meth_cpgs for ar in ars])
     regions = list(set(getattr(ar, "region", None) for ar in ars))
+
+    kwargs = dict(
+        starts=starts,
+        stops=stops,
+        weights=weights,
+        first_covered_base_weights=first_covered_base_weights,
+        last_covered_base_weights=last_covered_base_weights,
+        max_frag_len=ars[0].max_frag_len,
+        num_cpgs=num_cpgs,
+        num_meth_cpgs=num_meth_cpgs,
+    )
     if len(regions) == 1 and regions[0] is not None:
         region = regions.pop()
-        return RegionFragmentArray(
-            starts,
-            stops,
-            weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
-            max_frag_len=ars[0].max_frag_len,
-            region=region,
-            num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
-        )
+        kwargs['region'] = region
+        return RegionFragmentArray(**kwargs)
     else:
-        return FragmentArray(
-            starts,
-            stops,
-            weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
-            max_frag_len=ars[0].max_frag_len,
-            length=ars[0].length,
-            num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
-        )
+        kwargs['length'] = ars[0].length
+        return FragmentArray(kwargs)

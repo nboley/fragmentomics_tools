@@ -72,28 +72,6 @@ def test_merged_fragment_matrices_bed(chrom="chrX", strand="+", pos=6241588):
     assert fm.arr.sum() * 2 == merged_fm.arr.sum()
 
 
-def test_merged_fragment_matrices_flip_minus_strand(chrom="chrX", pos=6241588):
-    fm_fwd = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, "+"), min_mapq=0,
-    ).fragment_matrix
-    fm_rev = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, "-"), min_mapq=0,
-    ).fragment_matrix
-
-    merged_fm = merge_fragment_matrices([fm_fwd, fm_rev], flip_minus_strand=True)
-    assert numpy.all(merged_fm.dense_array == fm_fwd.dense_array + fm_rev.dense_array[:, ::-1])
-
-    fm = RegionFragmentArray.from_frag_bed(
-        os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256), min_mapq=0,
-    ).fragment_matrix
-    try:
-        merge_fragment_matrices([fm, fm], flip_minus_strand=True)
-    except AssertionError:
-        pass
-    else:
-        assert False, "Cannot flip minus strand with unstranded fragment matrices"
-
-
 def test_merged_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
     fm1 = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
@@ -132,7 +110,7 @@ def test_add_fragment_matrices(chrom="chrX", strand="+", pos=6241588):
 def test_add_fragment_matrix_to_region_fragment_matrix(chrom="chrX", strand="+", pos=6241588):
     fm = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    )
+    ).fragment_matrix
 
     # make sure that we get a type error if we try to add a region fragment matrix to
     # a fragment matrix
@@ -161,10 +139,10 @@ def test_add_incompatible_fragment_matrices(chrom="chrX", strand="+", pos=624158
 
 
 def test_region_fragment_matrix_plot(chrom="chrX", strand="+", pos=6241588):
-    fm = RegionFragmentArray.from_frag_bed(
+    fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"), Region(chrom, pos - 256, pos + 256, strand), min_mapq=0,
-    ).fragment_matrix
-    fm.plot()
+    )
+    fa.plot()
 
 
 def test_region_fragment_matrix_plot_with_smoothed(chrom="chrX", strand="+", pos=6241588):

@@ -1,7 +1,7 @@
 import copy
 import itertools as it
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, fields
 from typing import Iterable, Dict, Tuple, List, Union, Optional
 
 import matplotlib.pyplot as plt
@@ -67,6 +67,33 @@ class FragmentMatrix:
         if isinstance(self.arr, (np.ndarray, csr_matrix)):
             self.arr = make_ones_coo_arr(coo_matrix(self.arr))
         # assert np.issubdtype(self.arr.dtype, np.integer)  # FIXME re-enable this and test get tests working
+
+    def __add__(self, other):
+        # ensure that the types match. eg, we shouldn't be able to add a RegionFragmentMatrix
+        # to a normal FragmentMatrix
+        if type(other) != type(self):
+            raise TypeError(
+                f"Can only add FragmentMatrices of the same type. "
+                f"(self is '{type(self)}', other is type {type(other)}\n"
+                f"Hint: use 'merge_fragment_matrices' if you want everything to be a FragmentMatrix"
+            )
+
+        # ensure that the two fragment matrices that we're adding have the same non-array. This,
+        # for example, prevents one from adding two RegionFragmentMatrix's from different regions
+        # without first casting to a normal FragmentMatrix
+        self_attrs = [getattr(self, f.name) for f in fields(self) if f.name != "arr"]
+        other_attrs = [getattr(other, f.name) for f in fields(self) if f.name != "arr"]
+        if self_attrs != other_attrs:
+            raise ValueError(
+                f"Can only add FragmentMatrices that have the same metadata. "
+                f"(self has attributes '{self_attrs}', other has {other_attrs}\n"
+                f"Hint: use 'merge_fragment_matrices' if you want everything to be a FragmentMatrix"
+            )
+
+        return replace(self, arr=(self.arr + other.arr))
+
+    def __radd__(self, other):
+        return other + self
 
     @staticmethod
     def from_fragment_matrices(fragment_matrices):
@@ -202,18 +229,13 @@ class RegionFragmentMatrix(FragmentMatrix):
 
 
 def merge_fragment_matrices(
-    fragment_matrices: Iterable[Union[FragmentMatrix, RegionFragmentMatrix]],
-    flip_minus_strand: bool = False,
+        fragment_matrices: Iterable[Union[FragmentMatrix, RegionFragmentMatrix]]
 ) -> Union[FragmentMatrix, RegionFragmentMatrix]:
     # FIXME: flip_minus_strand is broken. Fragment matrices are now natively flipped for minus strand
     # raise NotImplementedError("Deprecated. Use FragmentArray and merge those instead")
 
     regions = set()
     arr = None
-    if flip_minus_strand:
-        assert all(
-            [fm.strand is not None for fm in fragment_matrices]
-        ), "If flipping minus strand, all fragment matrices must have a strand"
     for i, fm in enumerate(fragment_matrices):
         if isinstance(fm, RegionFragmentMatrix) or fm.__class__.__name__ == "RegionFragmentMatrix":
             regions.add(fm.region)
@@ -227,15 +249,10 @@ def merge_fragment_matrices(
                 raise TypeError(f"{fm}, name={fm.__class__.__name__} is not a recognized FragmentMatrix")
             regions.add(None)
 
-        if flip_minus_strand and fm.strand == "-":
-            _arr = fm.reverse_strand().arr
-        else:
-            _arr = fm.arr
-
         if i == 0:
-            arr = _arr
+            arr = fm.arr
         else:
-            arr += _arr
+            arr += fm.arr
 
     if arr is None:
         raise StopIteration(f"fragment_matrices was an empty iterable")
@@ -245,7 +262,7 @@ def merge_fragment_matrices(
     elif len(regions) == 1:
         return RegionFragmentMatrix(arr, regions.pop())
     else:
-        raise ValueError(f"Unsure how to process {regions}, {arr}")
+        assert False, "Unreachable"
 
 
 class TooFewReadsToDownsample(Exception):
