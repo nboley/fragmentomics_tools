@@ -6,7 +6,7 @@ import pytest
 from numpy import array
 from scipy.sparse import coo_matrix
 
-from fragmentomics_tools.fragment_matrix_math import (
+from fragmentomics_tools.fragment_array.fragment_matrix_math import (
     sum_pool,
     downsample_coo_matrix,
     make_ones_coo_arr,

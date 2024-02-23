@@ -21,9 +21,9 @@ from fragments_h5 import FragmentsH5
 import pysam
 
 
-from fragmentomics_tools.region import Region
+from ..region import Region
 
-from fragmentomics_tools.fragment_matrix_math import (
+from .fragment_matrix_math import (
     make_ones_coo_arr,
     reverse_sum_pool,
     sum_pool

@@ -8,16 +8,13 @@ import pytest
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
 from fragmentomics_tools.region import Region
 
-# from fragmentomics_tools.fragment_matrix import RegionFragmentMatrix
-from fragmentomics_tools.fragment_array import (
+from fragmentomics_tools.fragment_array.fragment_array import FragmentDoesNotIntersect, InvalidCoordinates
+
+from fragmentomics_tools import (
     RegionFragmentArray,
-    FragmentDoesNotIntersect,
-    InvalidCoordinates,
     FragmentArray,
     merge_fragment_arrays,
 )
-
-from fragmentomics_tools.fragment_matrix import RegionFragmentMatrix
 
 
 DATA_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")

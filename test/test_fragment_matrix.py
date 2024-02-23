@@ -4,13 +4,9 @@ import pytest
 
 # from fbio.formats import FragmentBigBedReader, FragmentBedReader
 
-from fragmentomics_tools.fragment_matrix import (
-    RegionFragmentMatrix,
-    Region,
-    merge_fragment_matrices,
-    # iter_fragments_from_10x_frag_tsv,
-)
-from fragmentomics_tools.fragment_array import RegionFragmentArray
+from fragmentomics_tools.region import Region
+from fragmentomics_tools.fragment_array.fragment_matrix import merge_fragment_matrices
+from fragmentomics_tools import RegionFragmentArray
 
 DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), "./data/")
 

@@ -18,10 +18,10 @@ import numba
 from fragments_h5 import FragmentsH5
 
 
-from fragmentomics_tools.constants import DEFAULT_VPLOT_SUMPOOL_BY, DEFAULT_MIN_MAPQ, DEFAULT_MAX_FRAG_LEN
-from fragmentomics_tools.region import Region
-from fragmentomics_tools.fragment_matrix import RegionFragmentMatrix, FragmentMatrix
-from fragmentomics_tools.fragment_matrix_math import reverse_sum_pool
+from ..constants import DEFAULT_VPLOT_SUMPOOL_BY, DEFAULT_MIN_MAPQ, DEFAULT_MAX_FRAG_LEN
+from ..region import Region
+from .fragment_matrix import RegionFragmentMatrix, FragmentMatrix
+from .fragment_matrix_math import reverse_sum_pool
 
 DEFAULT_MIN_SCALING_FACTOR: float = 1e-6
 DEFAULT_MAX_SCALING_FACTOR: float = 10.0
@@ -56,7 +56,6 @@ def _switch_plus_with_minus_and_minus_with_plus(fragment_strands):
 
 
 logger = logging.getLogger(__name__)
-
 
 already_warned_diff_region_add = False
 
@@ -143,7 +142,6 @@ class FragmentArray:
         :param num_cpgs: number of cpgs in the entire fragment (not just the sequenced reads)
         :param num_meth_cpgs: number of converted cpgs (e.g. from emseq)
         """
-
         # do not add validate_data yet.
         self.init_kwargs = dict(
             starts_0=starts_0,
@@ -257,7 +255,6 @@ class FragmentArray:
     def _replace(self, validate_data: bool = True, **kwargs):
         """Reinitalize self, potentially replacing input args with entries from **kwargs
 
-        For exam
         """
         assert (
             len(set(kwargs.keys()) - set(self.init_kwargs.keys())) == 0
@@ -266,13 +263,6 @@ class FragmentArray:
         for k, v in kwargs.items():
             init_kwargs[k] = v
         return type(self)(**init_kwargs, validate_data=validate_data)
-
-    def new_starts_stops_mask_for_resize(self, new_size: int):
-        start_delta = self.resize_offset(new_size)
-        starts_0 = self.starts_0 + start_delta
-        stops_0 = self.stops_0 + start_delta
-        keep_idxs = self.valid_idxs(starts_0, stops_0, new_size)
-        return starts_0, stops_0, keep_idxs
 
     def __radd__(self, other):
         # NOTE: __radd__ is only called when __add__ is not defined on both left/right.
@@ -303,6 +293,9 @@ class FragmentArray:
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
+        fragment_strands = numpy.concatenate(
+            [self.fragment_strands, other.fragment_strands]
+        )
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         assert (
@@ -315,6 +308,7 @@ class FragmentArray:
             weights=weights,
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
+            fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
             validate_data=False,
@@ -339,7 +333,7 @@ class FragmentArray:
                 ("m", numpy.uint32),
             ],
         )
-        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "c", "m"))
+        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "b", "c", "m"))
         return self.mask(srt_idx)
 
     def __eq__(self, other: "FragmentArray"):
@@ -369,6 +363,7 @@ class FragmentArray:
             and numpy.allclose(self.weights, other.weights)
             and numpy.allclose(self.first_covered_base_weights, other.first_covered_base_weights)
             and numpy.allclose(self.last_covered_base_weights, other.last_covered_base_weights)
+            and numpy.all(self.fragment_strands == other.fragment_strands)
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -395,7 +390,7 @@ class FragmentArray:
         straddling_fragments = (starts_0 < 0) & (stops_0 > length)
         return starts_or_stops_overlap_array | straddling_fragments
 
-    def downsampled(self, n=None):
+    def downsampled(self, n=None, random_state=None):
         """
         :param n: number of fragments to keep
         :param random_state: random seed
@@ -414,12 +409,27 @@ class FragmentArray:
         if n is None:
             return self._replace(validate_data=False)
 
-        keep_idxs = numpy.random.choice(self.n_frags, n, replace=False)
+	rng = np.random.default_rng(seed=random_state)
+        keep_idxs = rng.choice(self.n_frags, n, replace=False)
         return self.mask(keep_idxs, validate_data=False)
 
-    def oversampled(self, n=None):
-        """Returns all fragents in self plus some randomly chosen copied fragmnets.
+    def downsampled_frag_lens(self, frag_len_acceptance_prbs):
+        """Downsample self where the acceptance probability for a fragment is taken from frag_len_acceptance_prbs.
 
+        """
+        frag_len_acceptance_prbs = numpy.asarray(frag_len_acceptance_prbs)
+        assert 0 <= frag_len_acceptance_prbs.max() <= 1, frag_len_acceptance_prbs.max()
+        assert frag_len_acceptance_prbs.shape[0] == self.max_frag_len + 1, \
+            f"Frag len acceptance prbs shape: {frag_len_acceptance_prbs.shape} -- Max Frag Len: {self.max_frag_len}"
+
+        prbs = frag_len_acceptance_prbs[self.fragment_lengths]
+        mask = (numpy.random.rand(len(prbs)) < prbs)
+
+        return self.mask(mask)
+
+    def oversampled(self, n=None):
+        """
+        Takes fragments, returns all of them, plus some oversampled
         :param n: total number of fragments to return
         :return:
         """
@@ -435,38 +445,113 @@ class FragmentArray:
         )
         return self.mask(keep_idxs, validate_data=False)
 
-    def sampled_to_frac(self, frac):
+    def sampled_to_frac(self, frac, random_state=None):
         if frac >= 1.0:
             return self.oversampled(n=int(round(frac * self.n_frags)))
         else:
-            return self.downsampled(n=int(round(frac * self.n_frags)))
+            return self.downsampled(n=int(round(frac * self.n_frags)), random_state=random_state)
 
     def sample_with_replacement(self, n):
-        # TODO -- Add test
         return self.mask(np.random.choice(self.n_frags, n))
 
-    def downsampled_frag_lens(self, frag_len_acceptance_prbs):
-        """Downsample self where the acceptance probability for a fragment is taken from frag_len_acceptance_prbs.
+    def _shift_boundaries(self, /, left=0, right=0):
+        """Modify the length of self.region without changin fragments.
 
+        This is a utility function so that FragmentArray and RegionFragmentArray can share code.
         """
-        frag_len_acceptance_prbs = numpy.asarray(frag_len_acceptance_prbs)
-        assert 0 <= frag_len_acceptance_prbs.max() <= 1, frag_len_acceptance_prbs.max()
-        assert frag_len_acceptance_prbs.shape[0] == self.max_frag_len, \
-            f"Frag len acceptance prbs shape: {frag_len_acceptance_prbs.shape[0]} -- Max Frag Len: {self.max_frag_len}"
+        new_length = self.length - left + right
+        assert new_length >= 0
+        return self.replace(length=new_length)
 
-        # subtract 1 to account for the fact that fragment lengths starts at 1
-        prbs = frag_len_acceptance_prbs[self.fragment_lengths - 1]
-        mask = (numpy.random.rand(len(prbs)) < prbs)
+    def resize_offset(self, new_size: int, region=None) -> int:
+        """Return the integer offset for fragment starts/ends when asking for
+            a resize from self.length to new_size.
+        """
+        if region is None:
+            start_dummy = max(new_size, self.length)
+            region = Region("NA", start_dummy, start_dummy + self.length)
 
-        return self.mask(mask)
+        ori_start = region.start
+        new_start = region.resize(new_size).start
+        return ori_start - new_start
+
+    def new_starts_stops_mask_for_resize(self, new_size: int):
+        start_delta = self.resize_offset(new_size)
+        starts_0 = self.starts_0 + start_delta
+        stops_0 = self.stops_0 + start_delta
+        keep_idxs = self.valid_idxs(starts_0, stops_0, new_size)
+        return starts_0, stops_0, keep_idxs
+
+    def _resize(self, new_size: int):
+        #  Try (5-2)//2 != (2-5)//2 while int((5-2)/2) == int((2-5)/2) == -1
+        # Truncated integer conversion is different from //
+        starts_0, stops_0, mask = self.new_starts_stops_mask_for_resize(new_size)
+        return self.replace(starts_0=starts_0, stops_0=stops_0, validate_data=False) \
+                   .mask(mask, validate_data=False)
+
+    def resize(self, new_size: int):
+        return self._resize(new_size)._shift_boundaries(right=new_size-self.length)
 
     def shift_and_zero_pad(self, shift_amt):
+        """Shift all fragments by shift_amt and then remove all fragments that don't overlap self.
+
+        """
         starts_0 = self.starts_0 + shift_amt
         stops_0 = self.stops_0 + shift_amt
         keep_idxs = self.valid_idxs(starts_0, stops_0, self.length)
         # note that this won't validate because we haven't masked out invalid positions yet
         rv = self._replace(starts_0=starts_0, stops_0=stops_0, validate_data=False)
         return rv.mask(keep_idxs, validate_data=True)
+
+    def zero_pad(self, left_amt=0, right_amt=0):
+        if left_amt > 0:
+            assert left_amt >= 0
+            return self.shift_and_zero_pad(left_amt)._shift_boundaries(left=-left_amt)
+        elif right_amt > 0:
+            assert right_amt >= 0
+            return self._shift_boundaries(right=right_amt)
+        else:
+            raise ValueError("'left_amt' or 'right_amt' must be set")
+
+    def truncate(self, left_amt=0, right_amt=0):
+        """Make self smaller by left_amt and/or right_amt
+
+        """
+        assert left_amt >= 0 and right_amt >= 0
+        if left_amt > 0:
+            self = self.shift_and_zero_pad(-left_amt)._shift_boundaries(left=left_amt)
+        if right_amt > 0:
+            self = self.mask(
+                self.valid_idxs(self.starts_0, self.stops_0, self.length-right_amt)
+            )._shift_boundaries(right=-right_amt)
+
+        return self
+
+    def left_resize(self, new_length):
+        """Resize self to new_length by modifying self.start
+
+        """
+        if new_length == self.length:
+            return self
+        elif new_length < self.length:
+            return self.truncate(left_amt=self.length - new_length)
+        elif new_length > self.length:
+            return self.zero_pad(left_amt=new_length - self.length)
+        else:
+            assert False, "Unreachable"
+
+    def right_resize(self, new_length):
+        """Resize self to new_length by modifying self.stop
+
+        """
+        if new_length == self.length:
+            return self
+        elif new_length < self.length:
+            return self.truncate(right_amt=self.length - new_length)
+        elif new_length > self.length:
+            return self.zero_pad(right_amt=new_length - self.length)
+        else:
+            assert False, "Unreachable"
 
     def jitter(self, jitter_value: int, output_length: int):
         return self.shift_and_zero_pad(jitter_value).resize(output_length)
@@ -475,8 +560,6 @@ class FragmentArray:
         """Create a copy of self with the strand and fragment matrix reversed"""
         starts_0 = self.length - self.stops_0
         stops_0 = self.length - self.starts_0
-        fragment_strands = None if self.fragment_strands is None else self.fragment_strands[::-1]
-
         fragment_strands = (
             None
             if self.fragment_strands is None
@@ -495,6 +578,14 @@ class FragmentArray:
             validate_data=False,
         )
 
+    def reverse_strand_if_negative(self):
+        if self.strand == '+':
+            return self
+        elif self.strand == '-':
+            return self.reverse_strand()
+        else:
+            raise TypeError(f"Unrecognized strand '{self.strand}' (are you sure that you want to use this function?)")
+
     @property
     def dense_array(self) -> numpy.ndarray:
         """
@@ -503,20 +594,13 @@ class FragmentArray:
         """
         return self.fragment_matrix.dense_array
 
-    def resize(self, new_size: int):
-        #  Try (5-2)//2 != (2-5)//2 while int((5-2)/2) == int((2-5)/2) == -1
-        # Truncated integer conversion is different from //
-        starts_0, stops_0, mask = self.new_starts_stops_mask_for_resize(new_size)
-        return self._replace(starts_0=starts_0, stops_0=stops_0, length=new_size, validate_data=False).mask(
-            mask, validate_data=True
-        )
-
     def __str__(self):
         return (
             f"FragmentArray(n_frags={self.n_frags}, "
             f"length={self.length}, "
             f"starts_0={self.frag_str(self.starts_0)}, "
             f"stops_0={self.frag_str(self.stops_0)}, "
+            f"strand={self.frag_str(self.fragment_strands) if self.fragment_strands is not None else None}, "
             f"weights={self.frag_str(self.weights)}, "
             f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
             f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
@@ -572,17 +656,6 @@ class FragmentArray:
             mask &= self.fragment_lengths < max_frag_len
 
         return self.mask(mask)
-
-    def resize_offset(self, new_size: int) -> int:
-        """Return the integer offset for fragment starts/ends when asking for
-            a resize from self.length to new_size.
-        """
-        start_dummy = max(new_size, self.length)
-        # we take advantage of the work that's already been done in region
-        region = Region("NA", start_dummy, start_dummy + self.length)
-        ori_start = region.start
-        new_start = region.resize(new_size).start
-        return ori_start - new_start
 
     @property
     def first_covered_base_counts(self) -> numpy.ndarray:
@@ -676,7 +749,6 @@ class FragmentArray:
         """Keep fragments that satisfy mask.
 
         Mask can be either boolean array the length of self, or an array of indices
-
         """
         if self.fragment_strands is not None:
             fragment_strands = self.fragment_strands[mask]
@@ -724,6 +796,10 @@ class FragmentArray:
 
         mask = self.fragment_strands == strand
         return self.subset(mask)
+
+    def drop_duplicate_fragments(self):
+        _, indices = np.unique(np.array([self.starts_0, self.stops_0]), axis=1, return_index=True)
+        return self.subset(indices)
 
     def split_into_nonoverlapping_fas(self, sample_sizes, seed=None):
         """Split into fragment arrays with 'sample_size' distinct fragments in each.
@@ -1015,31 +1091,56 @@ class RegionFragmentArray(FragmentArray):
             init_kwargs[k] = getattr(self, k)
         self.init_kwargs = init_kwargs
 
-    @wraps(FragmentArray.shift_and_zero_pad)
-    def shift_and_zero_pad(self, shift_amt):
-        shifted_region = self.region.shift(shift_amt)
-        return super().shift_and_zero_pad(shift_amt)._replace(region=shifted_region, validate_data=False)
 
     @wraps(FragmentArray.reverse_strand)
     def reverse_strand(self):
         """Create a copy of self with the strand and fragment matrix reversed"""
-        return super().reverse_strand()._replace(region=self.region.flip_strand(), validate_data=False)
-
-    def new_starts_stops_for_start_delta(self, start_delta: int, new_size: int):
-        starts_0 = self.starts_0 + start_delta
-        stops_0 = self.stops_0 + start_delta
-        keep_idxs = self.valid_idxs(starts_0, stops_0, new_size)
-        return starts_0[keep_idxs], stops_0[keep_idxs]
+        return super().reverse_strand().replace(region=self.region.flip_strand(), validate_data=False)
 
     @wraps(FragmentArray.resize)
     def resize(self, new_size: int):
-        #  Try (5-2)//2 != (2-5)//2 while int((5-2)/2) == int((2-5)/2) == -1
-        # Truncated integer conversion is different from //
         new_region = self.region.resize(new_size)
-        starts_0, stops_0, mask = self.new_starts_stops_mask_for_resize(new_size)
-        return self._replace(starts_0=starts_0, stops_0=stops_0, region=new_region, validate_data=False).mask(
-            mask, validate_data=True
-        )
+        self = super()._resize(new_size)
+        return self.replace(region=new_region)
+
+    def _shift_boundaries(self, /, left=0, right=0):
+        """Modify the length of self.region without changin fragments.
+
+        This is a utility function so that FragmentArray and RegionFragmentArray can share code.
+        """
+        return self.replace(region=self.region.left_shift(left).right_shift(right))
+
+    def resize_offset(self, new_size: int) -> int:
+        """Return the offset for fragment starts/ends when asking for a resize of this region"""
+        return super().resize_offset(new_size, self.region)
+
+    def five_prime_resize(self, new_length):
+        """Resize self by modifying the five prime end.
+
+        """
+        # check that we have a valid region
+        _new_region = self.region.five_prime_resize(new_length)
+        assert self.strand == _new_region.strand
+        if self.strand == '+':
+            return self.left_resize(new_length)
+        elif self.strand == '-':
+            return self.right_resize(new_length)
+        else:
+            assert False, "Unreachable -- should be caught by the region resize"
+
+    def three_prime_resize(self, new_length):
+        """Resize self by modifying the three prime end.
+
+        """
+        # check that we have a valid region
+        _new_region = self.region.three_prime_resize(new_length)
+        assert self.strand == _new_region.strand
+        if self.strand == '+':
+            return self.right_resize(new_length)
+        elif self.strand == '-':
+            return self.left_resize(new_length)
+        else:
+            assert False, "Unreachable -- should be caught by the region resize"
 
     def __str__(self):
         return (
@@ -1048,10 +1149,10 @@ class RegionFragmentArray(FragmentArray):
             f"length={self.length}, "
             f"starts_0={self.frag_str(self.starts_0)}, "
             f"stops_0={self.frag_str(self.stops_0)}, "
+            f"strand={self.frag_str(self.fragment_strands) if self.fragment_strands is not None else None}, "
             f"weights={self.frag_str(self.weights)}, "
             f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
             f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
-            f"strand={self.frag_str(self.fragment_strands) if self.fragment_strands is not None else None}, "
             f"num_cpgs={self.frag_str(self.num_cpgs)}, "
             f"num_meth_cpgs={self.frag_str(self.num_meth_cpgs)}, "
             f"max_frag_len={self.max_frag_len})"
@@ -1092,12 +1193,6 @@ class RegionFragmentArray(FragmentArray):
     @property
     def midpoint_0(self) -> int:
         return self.region.midpoint - self.region.start
-
-    def resize_offset(self, new_size: int) -> int:
-        """Return the offset for fragment starts/ends when asking for a resize of this region"""
-        ori_start = self.region.start
-        new_start = self.region.resize(new_size).start
-        return ori_start - new_start
 
     @property
     def starts(self):
@@ -1178,6 +1273,9 @@ class RegionFragmentArray(FragmentArray):
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
+        fragment_strands = numpy.concatenate(
+            [self.fragment_strands, other.fragment_strands]
+        )
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         if region is None:
@@ -1188,6 +1286,7 @@ class RegionFragmentArray(FragmentArray):
                 weights=weights,
                 first_covered_base_weights=first_covered_base_weights,
                 last_covered_base_weights=last_covered_base_weights,
+                fragment_strands=fragment_strands,
                 num_cpgs=num_cpgs,
                 num_meth_cpgs=num_meth_cpgs,
                 max_frag_len=max_frag_len,
@@ -1200,6 +1299,7 @@ class RegionFragmentArray(FragmentArray):
             weights=weights,
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
+            fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
             region=region,
@@ -1232,6 +1332,11 @@ class RegionFragmentArray(FragmentArray):
             and numpy.allclose(self.weights, other.weights)
             and numpy.allclose(self.first_covered_base_weights, other.first_covered_base_weights)
             and numpy.allclose(self.last_covered_base_weights, other.last_covered_base_weights)
+            and (
+			(self.fragment_strands is None and other.fragmnet_strands is None) 
+			or 
+			(numpy.all(self.fragment_strands == other.fragment_strands))
+	    )
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -1296,7 +1401,6 @@ class RegionFragmentArray(FragmentArray):
             num_meth_cpgs=None,
         )
 
-
     @classmethod
     def from_fragments_h5(
         cls,
@@ -1323,15 +1427,17 @@ class RegionFragmentArray(FragmentArray):
         :param region: region to query
         :param min_mapq: mapq filter
         :param max_frag_len: max frag len filter
+        :param **kwargs: Any other arguments you want to pass along to the beta cutsite bias correction function, if you
+            want to try out those experimental features.
         """
         if isinstance(in_fragments_h5, str):
             fragments_h5 = FragmentsH5(in_fragments_h5, cache_pointers=False)
             do_close = True
-        elif str(type(in_fragments_h5)) == str(FragmentsH5):
+        elif (str(type(in_fragments_h5)) == str(type(FragmentsH5)) or ('FragmentsH5' in str(type(in_fragments_h5)))) :
             fragments_h5 = in_fragments_h5
             do_close = False
         else:
-            raise TypeError(f"{in_fragments_h5} must be a str or FragmentsH5")
+            raise TypeError(f"{type(in_fragments_h5)} must be a str or FragmentsH5 {str(type(FragmentsH5))}")
 
         if region.ref is not None:
             assert region.ref == "hg38", "Fragment h5s are only generated for ref 'hg38'"
@@ -1374,13 +1480,14 @@ class RegionFragmentArray(FragmentArray):
         stops_0 = (stops - region.start)[mask]
 
         if flip_data_to_match_region_strand and region.is_minus_strand():
+            ## TODO -- move this into reverse strand
             # Store into temp variables so we can swap. One depends on other.
             _starts_0 = (region.length - stops_0)[::-1]
             _stops_0 = (region.length - starts_0)[::-1]
             starts_0 = _starts_0
             stops_0 = _stops_0
             if fragment_strands is not None:
-                fragment_strands = fragment_strands[::-1]
+                fragment_strands = _switch_plus_with_minus_and_minus_with_plus(fragment_strands)
             if return_methyl:
                 num_cpgs = num_cpgs[::-1]
                 num_meth_cpgs = num_meth_cpgs[::-1]
@@ -1556,6 +1663,14 @@ def merge_fragment_arrays(ars):
 
     starts = numpy.concatenate([ar.starts_0 for ar in ars])
     stops = numpy.concatenate([ar.stops_0 for ar in ars])
+
+    if all(ar.fragment_strands is None for ar in ars):
+	fragment_strands = None        
+    elif all(ar.fragment_strands is not None for ar in ars)::
+        fragment_strands = numpy.concatenate([ar.fragment_strands for ar in ars])
+    else:
+	raise ValueError("Can not merge fragment arrays where only some have fragment strands.")
+
     weights = numpy.concatenate([ar.weights for ar in ars])
     first_covered_base_weights = numpy.concatenate([ar.first_covered_base_weights for ar in ars])
     last_covered_base_weights = numpy.concatenate([ar.last_covered_base_weights for ar in ars])
@@ -1563,20 +1678,33 @@ def merge_fragment_arrays(ars):
     num_meth_cpgs = numpy.concatenate([ar.num_meth_cpgs for ar in ars])
     regions = list(set(getattr(ar, "region", None) for ar in ars))
 
-    kwargs = dict(
-        starts_0=starts,
-        stops_0=stops,
-        weights=weights,
-        first_covered_base_weights=first_covered_base_weights,
-        last_covered_base_weights=last_covered_base_weights,
-        max_frag_len=ars[0].max_frag_len,
-        num_cpgs=num_cpgs,
-        num_meth_cpgs=num_meth_cpgs,
-    )
     if len(regions) == 1 and regions[0] is not None:
         region = regions.pop()
-        kwargs['region'] = region
-        return RegionFragmentArray(**kwargs)
+        return RegionFragmentArray(
+            starts,
+            stops,
+            fragment_strands=fragment_strands,
+            weights=weights,
+            first_covered_base_weights=first_covered_base_weights,
+            last_covered_base_weights=last_covered_base_weights,
+            max_frag_len=ars[0].max_frag_len,
+            region=region,
+            num_cpgs=num_cpgs,
+            num_meth_cpgs=num_meth_cpgs,
+        )
     else:
-        kwargs['length'] = ars[0].length
-        return FragmentArray(**kwargs)
+        return FragmentArray(
+            starts,
+            stops,
+            fragment_strands=fragment_strands,
+            weights=weights,
+            first_covered_base_weights=first_covered_base_weights,
+            last_covered_base_weights=last_covered_base_weights,
+            max_frag_len=ars[0].max_frag_len,
+            length=ars[0].length,
+            num_cpgs=num_cpgs,
+            num_meth_cpgs=num_meth_cpgs,
+        )
+
+
+
