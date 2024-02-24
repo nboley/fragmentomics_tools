@@ -23,6 +23,20 @@ from ..region import Region
 from .fragment_matrix import RegionFragmentMatrix, FragmentMatrix
 from .fragment_matrix_math import reverse_sum_pool
 
+from fragmentomics_tools.plot.tracks import (
+    VectorTrack,
+    EmptyTrack,
+    VplotTrack,
+    VplotDensityTrack,
+    MotifTrack,
+    Line,
+    VLine,
+    Tracks,
+    MidpointCoverageTrack,
+    CoverageTrack,
+)
+
+
 DEFAULT_MIN_SCALING_FACTOR: float = 1e-6
 DEFAULT_MAX_SCALING_FACTOR: float = 10.0
 
@@ -984,19 +998,6 @@ class FragmentArray:
 
         :param binding_site_data: a binding site data instance
         """
-        from fragmentomics_tools.tracks import (
-            VectorTrack,
-            EmptyTrack,
-            VplotTrack,
-            VplotDensityTrack,
-            MotifTrack,
-            Line,
-            VLine,
-            Tracks,
-            MidpointCoverageTrack,
-            CoverageTrack,
-        )
-
         region = self.plot_region
 
         vlines = []

@@ -12,7 +12,6 @@ import matplotlib.patheffects as path_effects
 import numpy
 import numpy as np
 import seaborn
-import torch
 import copy
 
 import pysam
@@ -1000,54 +999,6 @@ class CoverageTrack(GenomeTrack):
 
 
 @dataclass
-class TfConvTrack(GenomeTrack):
-    factors: List[str] = None
-    tf_conv_width: int = 17
-
-    def get_conv_scores(self):
-        assert self.factors is not None
-        assert len(self.factors) > 0
-        one_hot_seq = self.region.get_sequence(
-            reverse_complement_sequence_if_minus_strand=False
-        ).T
-        # 4 x region_length
-        with torch.no_grad():
-            tfc = TFConv1D(
-                tf_width=self.tf_conv_width,
-                tfs=set(self.factors),
-                default_jaspar=True,
-                output_both_strands=True,
-            )
-            one_hot_t = torch.tensor(one_hot_seq[None, ...], dtype=torch.float)
-            conv_scores = (
-                (tfc(one_hot_t) / tfc.max_tf_scores[:, None, None]).cpu().numpy()[0]
-            )
-            # conv_scores is n_tf x strand (2) x seq_len - conv_width
-            return conv_scores, tfc.tf_names, tfc.max_tf_scores
-
-    def _plot(self, ax):
-        self.name = f"Motif midpoint scores for {', '.join(self.factors)}"
-        ax.set_ylim(0, 100)
-        self.ylim = (0, 100)
-
-        conv_scores, tf_channel_names, tf_channel_maxs = self.get_conv_scores()
-        conv_score_len = conv_scores.shape[-1]
-        for tfi, tf in enumerate(tf_channel_names):
-            for si, strand in enumerate(["+", "-"]):
-                label = f"{tf}({strand})"
-                ax.plot(
-                    numpy.arange(
-                        self.region.start + self.tf_conv_width // 2,
-                        self.region.start + self.tf_conv_width // 2 + conv_score_len,
-                    ),
-                    100 * conv_scores[tfi, si],
-                    label=label,
-                )
-        ax.set_ylabel("% Motif Match")
-        ax.legend(loc="right", bbox_to_anchor=(1.12, 0.5), borderaxespad=0.0)
-
-
-@dataclass
 class TfRegionTrack(GenomeTrack):
     noisy_tf_threshold: int = 8
 
@@ -1520,8 +1471,6 @@ class ChromHmmTrack(GenomeTrack):
     annotate: bool = False
 
     def _materialize_data(self):
-        if isinstance(self.input, torch.Tensor):
-            self.input = self.input.numpy()
         assert isinstance(self.input, numpy.ndarray)
         num_states, num_pos = self.input.shape
         if num_pos == self.region.length:
