@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import fields, dataclass, InitVar
 from itertools import islice, groupby
 from tempfile import TemporaryDirectory
-from typing import Iterable, List, Union, Optional
+from typing import Iterable, List, Union, Optional, TextIO
 import string
 import random
 
@@ -24,6 +24,7 @@ import pyBigWig
 import pysam
 import smart_open
 from fragmentomics_tools.region import region_to_region_str, intervals_intersect_with_none, Region
+from fragmentomics_tools.fragment import Fragment
 
 from smart_open import open
 
@@ -31,6 +32,23 @@ from smart_open import open
 DEFAULT_FBIO_CACHE_DIR = os.environ.get("DEFAULT_FBIO_CACHE_DIR", "/ssd/fbio_cache")
 
 log = logging.getLogger(__name__)
+
+
+def path_exists_s3(s3_prefix):
+    """
+    True if the s3_prefix exists
+    """
+    s3_client = boto3.client(service_name="s3")
+    bucket, prefix = split_bucket_key(s3_prefix)
+    return len(s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1).get("Contents", [])) > 0
+
+
+def path_exists_s3_or_local(local_path_or_s3_uri):
+    if is_s3_uri(local_path_or_s3_uri):
+        return path_exists_s3(local_path_or_s3_uri)
+    else:
+        return os.path.exists(local_path_or_s3_uri)
+
 
 def _bash_iter(
     cmd, print_lines: Union[bool, TextIO] = False, print_cmd: Union[bool, TextIO] = False,
@@ -113,226 +131,12 @@ def _get_file_path_and_file_hash_fast(path, n_bytes=1024, url_ok=False):
     else:
         # use file size
         m.update(str(os.stat(path).st_size).encode())
-        with open(path, "rb") as fp:
+        with smart_open.open(path, "rb") as fp:
             m.update(fp.read(n_bytes))
 
         return m.hexdigest()
 
 
-@dataclass
-class Fragment:
-    __slots__ = [
-        "chrom",
-        "start",
-        "stop",
-        "mapq1",
-        "mapq2",
-        "gc",
-        "strand",
-        "cell_barcode",
-        "num_cpgs",
-        "num_meth_cpgs",
-    ]
-
-    def __init__(
-        self,
-        chrom: str,
-        start: int,
-        stop: int,
-        mapq1: Optional[int] = None,
-        mapq2: Optional[int] = None,
-        gc: Optional[float] = None,
-        strand: Optional[str] = None,
-        cell_barcode: Optional[str] = None,
-        num_cpgs: Optional[int] = None,
-        num_meth_cpgs: Optional[int] = None,
-    ):
-        assert isinstance(start, (int, numpy.int64, numpy.int32))
-        if strand in [b"+", b"-"]:
-            strand = strand.decode()
-        assert strand in [None, "+", "-"]
-        for k, v in locals().items():
-            # @py_assert2 check is to avoid a pytest error introduced by it changing state
-            if k != "self" and not k.startswith("@py_assert"):
-                setattr(self, k, v)
-
-    def mapq_gte(self, threshold):
-        """
-        >>> Fragment('chr1', 0, 1, mapq1=9).mapq_gte(10)
-        False
-        >>> Fragment('chr1', 0, 1, mapq2=10).mapq_gte(10)
-        True
-
-        None mapqs always pass
-        >>> Fragment('chr1', 0, 1).mapq_gte(90)
-        True
-        """
-        return self.mapq12_min is None or self.mapq12_min >= threshold
-
-    @property
-    def mapq12_min(self):
-        """Returns the minimum of self.mapq1 and self.mapq2 ignoring None values
-        >>> Fragment('chr1', 0, 1, mapq1=1, mapq2=0).mapq12_min
-        0
-        >>> Fragment('chr1', 0, 1, mapq1=0, mapq2=0).mapq12_min
-        0
-        >>> Fragment('chr1', 0, 1, mapq1=None, mapq2=2).mapq12_min
-        2
-        >>> Fragment('chr1', 0, 1, mapq1=1, mapq2=None).mapq12_min
-        1
-        >>> Fragment('chr1', 0, 1, mapq1=None, mapq2=None).mapq12_min is None
-        True
-        """
-
-        def none_to_inf(x):
-            return float("inf") if x is None else x
-
-        if self.mapq1 is None and self.mapq2 is None:
-            return None
-        elif self.mapq1 is None and self.mapq2 is not None:
-            return self.mapq2
-        elif self.mapq1 is not None and self.mapq2 is None:
-            return self.mapq1
-        else:
-            return min(self.mapq1, self.mapq2)
-
-    def replace(self, **kwargs):
-        d = {field_name: getattr(self, field_name) for field_name in self.field_names}
-        d.update(**kwargs)
-        return self.__class__(**d)
-
-    @classproperty
-    def field_names(cls):
-        return cls.__slots__
-
-    @classproperty
-    def field_types(cls):
-        sig = funcsigs.signature(cls.__init__)
-        return [sig.parameters[field].annotation for field in cls.field_names]
-
-    def to_line(self):
-        def none_to_empty_string(val):
-            if val is None:
-                return ""
-            else:
-                return val
-
-        mapq1 = none_to_empty_string(self.mapq1)
-        mapq2 = none_to_empty_string(self.mapq2)
-        gc = none_to_empty_string(self.gc)
-        strand = none_to_empty_string(self.strand)
-
-        # extra fields must be comma separated in the last column, otherwise bedToBigBed fails
-        return f"{self.chrom}\t{self.start}\t{self.stop}\t{mapq1},{mapq2},{gc},{strand}"
-
-    @classmethod
-    def from_line_parts(cls, parts):
-        def cast(s, type_):
-            if s in ("", None):
-                return None
-            else:
-                return type_(s)
-
-        assert len(parts) == 4
-        contig, start, stop, attrs = parts
-        attr_parts = attrs.split(",")
-
-        mapq1 = cast(attr_parts[0], int)
-        strand = None
-        # if the length of attr_parts, try to cast the last one
-        # to an int. If that works, then assume they are mapqs.
-        # Otherwise, assume that it is GC.
-        if len(attr_parts) == 1:
-            mapq2 = None
-            gc = None
-        elif len(attr_parts) == 2:
-            try:
-                cast(attr_parts[1], int)
-            except ValueError:
-                mapq2 = mapq1
-                gc = cast(attr_parts[1], float)
-            else:
-                mapq2 = cast(attr_parts[1], int)
-                gc = None
-        elif len(attr_parts) >= 3:
-            mapq2 = cast(attr_parts[1], int)
-            gc = cast(attr_parts[2], float)
-            if len(attr_parts) == 4 and attr_parts[3] in ["+", "-"]:
-                strand = attr_parts[3]
-
-        return cls(contig, int(start), int(stop), mapq1, mapq2, gc, strand)
-
-    @classmethod
-    def from_line(cls, line):
-        return cls.from_line_parts(line.rstrip("\n").split("\t"))
-
-    @property
-    def tlen(self):
-        return self.stop - self.start
-
-    @property
-    def length(self):
-        return self.tlen
-
-    @property
-    def midpoint(self):
-        return self.start + (self.stop - self.start) // 2
-
-    def __repr__(self):
-        items = ",".join(
-            "%s=%r" % (k, getattr(self, k)) for k in self.field_names if getattr(self, k) is not None
-        )
-        return f"Fragment({items})"
-
-    def __eq__(self, other):
-        return [getattr(self, k) for k in self.field_names] == [getattr(other, k) for k in self.field_names]
-
-    @staticmethod
-    def length_and_midpoint_to_start_and_stop(length, midpoint):
-        """
-        Converts length and midpoint representation to start and stop representation.  Note that there is a
-        1:1 mapping for any (length, midpoint) to (start, stop).  Midpoint is defined as the floor of the exact middle
-        of (start, stop).
-        >>> Fragment.length_and_midpoint_to_start_and_stop(10, 5)
-        (0, 10)
-        >>> Fragment.length_and_midpoint_to_start_and_stop(9, 5)
-        (1, 10)
-
-        """
-        start = midpoint - length // 2
-        # add one to the stop if length is odd, since the actual midpoint was midpoint + .5
-        stop = midpoint + length // 2 + (length % 2)
-
-        if isinstance(start, (int, numpy.int64, numpy.int32)):
-            # start/stop are scalars
-            assert start < stop, f"impossible coordinates: {start}, {stop}"
-        elif isinstance(start, numpy.ndarray):
-            # start/stop are arrays
-            assert (start < stop).all(), f"impossible coordinates: {start}, {stop}"
-        else:
-            raise TypeError(f"{start} is not a valid dtype")
-
-        return start, stop
-
-    @classmethod
-    def from_bed12_parts(cls, parts):
-        assert len(parts) == 12
-        if parts[10] != ".":
-            methyls = parts[10].split(",")
-            num_cpgs = len(methyls)
-            num_meth_cpgs = int(numpy.array([methyl == "1" for methyl in methyls]).sum())
-        else:
-            num_cpgs = 0
-            num_meth_cpgs = 0
-
-        return cls(
-            chrom=parts[0],
-            start=int(parts[1]),
-            stop=int(parts[2]),
-            strand=parts[5],
-            num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
-        )
 
 
 @dataclass
@@ -671,7 +475,7 @@ class RegionReader(abc.ABC):
     @classmethod
     def get_writer_class(cls):
         writer_class_name = cls.__name__.split(".")[-1].replace("Reader", "Writer")
-        module = importlib.import_module(f"fbio.formats")
+        module = importlib.import_module(f"fragmentomics_tools.formats")
         return getattr(module, writer_class_name)
 
     def record_from_parts(self, parts):
@@ -686,7 +490,7 @@ class BedReader(RegionReader):
 
     @staticmethod
     def infer_bed_record_class_from_file(in_file):
-        with open(in_file) as reader:
+        with smart_open.open(in_file) as reader:
             try:
                 line = next(reader).rstrip("\n")
                 return infer_bed_record_class_from_parts(line.split("\t"))
@@ -694,11 +498,11 @@ class BedReader(RegionReader):
                 return None
 
     def _init_reader(self, in_file):
-        self._reader = open(in_file)
+        self._reader = smart_open.open(in_file)
 
     @classmethod
     def load_dataframe(cls, in_file, *args, **kwargs):
-        with open(in_file) as infile:
+        with smart_open.open(in_file) as infile:
             first_line_fields = infile.readline().split()
             if first_line_fields[0].lower() in ["chromosome", "chrom", "chr", "contig"]:
                 has_header = True
@@ -850,6 +654,37 @@ class IndexedRegionReader(RegionReader):
             with writer_class(out_file, **writer_init_kwargs) as writer:
                 for rec in reader.fetch(chrom, start, stop):
                     writer.write_record(rec)
+
+
+class BedIntervalTreeReader(IndexedRegionReader, BedReader):
+    """
+    This loads all records INTO MEMORY and stores it in an interval tree for fast indexing.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.itrees = defaultdict(Intersecter)
+
+        for line in self._reader:
+            parts = line.rstrip("\n").split("\t")
+            self.itrees[parts[0]].add(int(parts[1]), int(parts[2]), parts)
+
+    def _fetch(self, chrom, start, stop) -> Iterable:
+        if start is None:
+            start = 0
+        if stop is None:
+            # largest integer that find() will accept
+            stop = 999999999
+        return self.itrees[chrom].find(start, stop)
+
+    def _fetch_all(self) -> Iterable:
+        for chrom in self.itrees.keys():
+            for parts in self._fetch(chrom, None, None):
+                yield parts
+
+    @classmethod
+    def get_writer_class(cls):
+        return BedWriter
 
 
 class BigWigReader(IndexedRegionReader):
@@ -1294,7 +1129,7 @@ class RegionWriter(abc.ABC):
         return cls.extensions[0]
 
     def _init_writer(self):
-        self._writer = smart_open(self.out_file)
+        self._writer = smart_open.open(self.out_file, 'w')
 
     def __enter__(self):
         return self
@@ -1400,7 +1235,7 @@ class BigBedWriter(BedWriter):
         with TemporaryDirectory() as temp_dir:
             temp_path = os.path.join(temp_dir, os.path.basename(self.out_file))
             shutil.move(self.out_file, temp_path)
-            with open("chrom.sizes", "w") as fp:
+            with smart_open.open("chrom.sizes", "w") as fp:
                 for chrom, length in self.header["chrom_lengths"].items():
                     fp.write(f"{chrom}\t{length}\n")
 

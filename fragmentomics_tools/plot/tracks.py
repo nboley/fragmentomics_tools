@@ -8,6 +8,8 @@ from collections import UserList, defaultdict
 from dataclasses import dataclass, field, replace
 from typing import Union, List, Tuple, Optional
 
+import scipy
+
 import matplotlib.patheffects as path_effects
 import numpy
 import numpy as np
@@ -16,18 +18,18 @@ import copy
 
 import pysam
 
-from fbio.formats import (
+from fragmentomics_tools.formats import (
     BigWigReader,
     NarrowPeakBigBedReader,
     BedIntervalTreeReader,
     TabixBedReader,
     GenePredReader,
 )
-from fragmentomics_tools.region import intervals_intersect
+from fragmentomics_tools.region import Region, intervals_intersect
+from fragmentomics_tools.formats import path_exists_s3_or_local
 
-from fbio.util import aws_utils
-from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
-from fbio.viz_sequence import plot_weights_given_ax
+#from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
+#from fbio.viz_sequence import plot_weights_given_ax
 
 from matplotlib import pyplot, colors
 from matplotlib.cm import ScalarMappable
@@ -36,13 +38,140 @@ from matplotlib.patches import Rectangle, Polygon
 from matplotlib.pyplot import axis
 from matplotlib.ticker import FuncFormatter
 
-from ravel.bio.frag.fragment_matrix_math import sum_pool, reverse_sum_pool
 from scipy.ndimage import gaussian_filter
 
-from ravel.learn.functional_genomics.model import TFConv1D
-from ravel.public_data_resources.public_chromhmm import CHROMHMM_COLORS
-from ravel.fragment_array import FragmentArray
-from ravel.util.numpy_utils import smooth1d
+from fragmentomics_tools.fragment_array.fragment_matrix_math import reverse_sum_pool, sum_pool
+
+CHROMHMM_COLORS = {
+    "blueprint": {
+        "E1": "Silver",
+        "E2": "Gainsboro",
+        "E3": "White",
+        "E4": "PaleTurquoise",
+        "E5": "Green",
+        "E6": "DarkGreen",
+        "E7": "GreenYellow",
+        "E8": "Yellow",
+        "E9": "Orange",
+        "E10": "OrangeRed",
+        "E11": "Red",
+        "E12": "IndianRed",
+    },
+    "roadmap_15": {
+        "1_TssA": "Red",
+        "2_TssAFlnk": "OrangeRed",
+        "3_TxFlnk": "LimeGreen",
+        "4_Tx": "Green",
+        "5_TxWk": "DarkGreen",
+        "6_EnhG": "GreenYellow",
+        "7_Enh": "Yellow",
+        "8_ZNF/Rpts": "MediumAquamarine",
+        "9_Het": "PaleTurquoise",
+        "10_TssBiv": "IndianRed",
+        "11_BivFlnk": "DarkSalmon",
+        "12_EnhBiv": "DarkKhaki",
+        "13_ReprPC": "Silver",
+        "14_ReprPCWk": "Gainsboro",
+        "15_Quies": "White",
+    },
+    "roadmap_18": {
+        "1_TssA": "Red",
+        "2_TssFlnk": "OrangeRed",
+        "3_TssFlnkU": "OrangeRed",
+        "4_TssFlnkD": "OrangeRed",
+        "5_Tx": "Green",
+        "6_TxWk": "DarkGreen",
+        "7_EnhG1": "GreenYellow",
+        "8_EnhG2": "GreenYellow",
+        "9_EnhA1": "Orange",
+        "10_EnhA2": "Orange",
+        "11_EnhWk": "Yellow",
+        "12_ZNF/Rpts": "MediumAquamarine",
+        "13_Het": "PaleTurquoise",
+        "14_TssBiv": "IndianRed",
+        "15_EnhBiv": "DarkKhaki",
+        "16_ReprPC": "Silver",
+        "17_ReprPCWk": "Gainsboro",
+        "18_Quies": "White",
+    },
+}
+
+
+# TODO -- move this into config
+FBIO_BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # /home/user/projects/Ravel/fbio
+FBIO_DATA_DIR = os.path.join(FBIO_BASE_DIR, "data")  # /home/user/projects/Ravel/fbio/data
+
+def obj_type_name_matches_class_name_str(obj, cls):
+    """
+    same as isinstance, but also checks for the class __name__, to handle autoreload()s of the class
+    breaking isinstance().  For example, classes decorated by @dataclass are affected by this.
+
+    This approach is very dangerous because it doesn't properly account for different scopes. Only use
+    this if you're sure that you know what you're doing.
+    >>> class Foo():
+    ...     pass
+    >>> foo = Foo()
+    >>> obj_type_name_matches_class_name_str(foo, Foo)
+    True
+
+    Lets pretend int was a class that was autoreloaded
+    >>> class Foo():
+    ...     pass
+    >>> isinstance(foo, Foo)
+    False
+    >>> obj_type_name_matches_class_name_str(foo, Foo)
+    True
+
+    You can also pass a tuple of classes
+    >>> obj_type_name_matches_class_name_str(foo, (Foo, int))
+    True
+    """
+    if not (isinstance(cls, tuple) or isinstance(cls, list)):
+        cls = tuple([cls])
+
+    return isinstance(obj, cls) or any(
+        obj.__class__.__name__ == c.__name__ and obj.__class__.__module__ == getattr(c, "__module__", None)
+        for c in cls
+    )
+
+### UTILITY FUNCTIONS ###
+def gaussian(window_len, num_std):
+    win = symmetric_arange(window_len)
+    std = window_len / num_std / 2
+    win = 1.0 / numpy.sqrt(2.0 * numpy.pi * std ** 2) * numpy.exp(-(win ** 2) / (2.0 * std ** 2))
+
+    return win
+
+
+def smooth1d(arr, window_len, filter_shape="uniform", num_std=3, mode="mirror"):
+    """
+    Does 1d smoothing
+
+    :param arr: 1d vector
+    :param window_len: smoothing window length
+    :param filter_shape: "uniform" or "gaussian" smoothing
+    :param num_std: number of standard deviations to use (in each direction) for gaussian filter in window
+      e.g., a window_len of 12 and num_std=3 will make each std of size 2
+    :param mode: convolve mode
+    :return: smoothed 1d vector
+
+    >>> smooth1d([1,2,3,4,5,6,7,8,9,10], 4)
+    array([2. , 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9. , 9. ])
+    """
+    if window_len > len(arr):
+        raise ValueError(f"window length greater than array {window_len} > {len(arr)}")
+    if window_len is None:
+        return arr
+    else:
+        if filter_shape == "uniform":
+            win = numpy.ones(window_len)
+        elif filter_shape == "gaussian":
+            win = gaussian(window_len, num_std)
+        else:
+            raise NotImplementedError(f"{filter_shape} not implemented")
+
+    win /= win.sum()
+    return scipy.ndimage.convolve(numpy.array(arr, dtype=float), win, mode=mode)
 
 
 @dataclass
@@ -151,7 +280,7 @@ class GenomeTrack:
         return self._data
 
     def __post_init__(self):
-        if isinstance(self.input, str) and not aws_utils.path_exists_s3_or_local(
+        if isinstance(self.input, str) and not _path_exists_s3_or_local(
             self.input
         ):
             raise ValueError(f"{self.input} does not exist")
@@ -727,7 +856,7 @@ class VplotDensityDiffTrack(GenomeTrack):
 @dataclass
 class VplotTrack(GenomeTrack):
     """
-    :param input: a str or a list of strs of fnames to stack, or a 2d numpy array, or a FragmentMatrix
+    :param input: a str or a list of strs of fnames to stack, or a 2d numpy array, or a FragmentArray
     """
 
     # smooth = None
@@ -790,22 +919,15 @@ class VplotTrack(GenomeTrack):
         """
         Returns a numpy array of a FM from a variety input types (strings, fragment matrix instances, arrays, ...)
 
-        :param input: a str or a list of strs of fnames to stack, or a 2d numpy array, or a FragmentMatrix
+        :param input: a str or a list of strs of fnames to stack, or a 2d numpy array, or a FragmentArray
         :return: a numpy array
         """
-        from ravel.bio.frag.fragment_matrix import (
-            RegionFragmentMatrix,
-            FragmentMatrix,
-            merge_fragment_matrices,
+        from fragmentomics_tools import (
+            RegionFragmentArray,
+            FragmentArray,
         )
-        from ravel.fragment_array import RegionFragmentArray
 
-        if isinstance(input, (FragmentMatrix)) or input.__class__.__name__ in [
-            "FragmentMatrix",
-            "RegionFragmentMatrix",
-        ]:
-            return input.dense_array.astype(float)
-        if isinstance(input, (FragmentArray)) or input.__class__.__name__ in [
+        if isinstance(input, (RegionFragmentArray, FragmentArray)) or input.__class__.__name__ in [
             "FragmentArray",
             "RegionFragmentArray",
         ]:
@@ -1375,7 +1497,6 @@ class EpilogosTrack(GenomeTrack):
         :param stop: ending coordinate
         """
         # Load categories file for coloring
-        from fbio.constants import FBIO_DATA_DIR
 
         with open(FBIO_DATA_DIR + "/misc/chrom_hmm_epilogo_colors.json", "r") as file:
             categories = json.load(file)["categories"]

@@ -6,6 +6,9 @@ import pandas as pd
 import pytest
 
 from fragments_h5.fragments_h5 import build_fragments_h5, FragmentsH5
+
+
+from fragmentomics_tools.fragment import Fragment
 from fragmentomics_tools.region import Region
 
 from fragmentomics_tools.fragment_array.fragment_array import (

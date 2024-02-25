@@ -27,7 +27,6 @@ from fragmentomics_tools.plot.tracks import (
     VectorTrack,
     EmptyTrack,
     VplotTrack,
-    VplotDensityTrack,
     MotifTrack,
     Line,
     VLine,
@@ -936,14 +935,14 @@ class FragmentArray:
         return self.mask(mask)
 
     def vplot(self, sum_pool_by=DEFAULT_VPLOT_SUMPOOL_BY, title=None):
-        from fbio.plot.tracks import VplotTrack
+        from fragmentomics_tools.plot.tracks import VplotTrack
 
         return VplotTrack(
             self.fragment_matrix.dense_array,
             self.plot_region,
             name=title,
             sum_pool_by=sum_pool_by,
-        ).plot(figsize=(17, 5))
+        ).plot()
 
     @classmethod
     def from_frag_length_midpoint_dense_array(cls, dense_array) -> "FragmentArray":
