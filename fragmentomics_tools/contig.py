@@ -13,20 +13,24 @@ from fragmentomics_tools.constants import get_data_path
 REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
 
 # mapping from reference annotation name to fasta file key
-REFERENCE_FASTA_DATA_MANIFEST_KEY = {
+REFERENCE_FASTA_PATH = {
     "hg16": "reference/GRCh34/GRCh34.primary_assembly.genome.fa.gz",
     "hg17": "reference/GRCh35/GRCh35.primary_assembly.genome.fa.gz",
     "hg18": "reference/GRCh36/GRCh36.primary_assembly.genome.fa.gz",
     "hg19": "reference/GRCh37/GRCh37.primary_assembly.genome.fa.gz",
     "hg38": "reference/GRCh38/GRCh38.p12.genome.fa.gz",
 }
-REFERENCE_CHROM_SIZES_MANIFEST_KEY = {
+REFERENCE_CHROM_SIZES_PATH = {
     "hg16": "reference/GRCh34/chrom.sizes",
     "hg17": "reference/GRCh35/chrom.sizes",
     "hg18": "reference/GRCh36/chrom.sizes",
     "hg19": "reference/GRCh37/chrom.sizes",
     "hg38": "reference/GRCh38/chrom.sizes",
 }
+
+
+def get_reference_path(ref_name):
+    return get_data_path(REFERENCE_FASTA_PATH[ref_name])
 
 
 def get_canonical_reference_name(ref_name):
@@ -318,7 +322,7 @@ def get_chromosome_q_arm_starts(assembly: str) -> Dict[str, int]:
      'chrX': 61000000,
      'chrY': 10400000}
     """
-    from fbio.formats import BedReader
+    from fragmentomics_tools.formats import BedReader
 
     global _CHROMOSOME_Q_ARM_STARTS_HG38
     if assembly != "hg38":

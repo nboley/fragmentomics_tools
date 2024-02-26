@@ -282,7 +282,6 @@ def test_jitter(chrom="chrX", strand="+", pos=6241588):
 
 
 ### Plot
-@pytest.mark.skip(reason="haven't added plotting code")
 def test_region_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"),
@@ -292,7 +291,6 @@ def test_region_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
     fa.plot()
 
 
-@pytest.mark.skip(reason="haven't added plotting code")
 def test_fragment_array_plot(chrom="chrX", strand="+", pos=6241588):
     fa = RegionFragmentArray.from_frag_bed(
         os.path.join(DIR, "frag.bed.gz"),

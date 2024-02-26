@@ -1,10 +1,12 @@
 import numpy
 import pytest
+import pysam
+
 from typing import List, Optional
 
 from fragmentomics_tools.util.liftover import RegionLiftOver
 from fragmentomics_tools.region import Region
-
+from fragmentomics_tools.contig import get_reference_path
 
 @pytest.mark.parametrize(
     "start, stop, strand, resizes, flips",
@@ -135,20 +137,21 @@ def test_convert_region_fails_chrom_length():
 
 def test_get_sequence():
     region = Region("chr11", 106022048, 106023072, ref="hg38")
-    sequence = region.get_sequence()
+    with pysam.FastaFile(get_reference_path(region.ref)) as fasta:
+        sequence = region.get_sequence(fasta)
 
-    assert sequence.shape[0] == region.length, "sequence and region must have the same length"
-    assert set(numpy.unique(sequence)) == {0, 1}, "output must be a one-hot encoding"
-    assert (sequence.sum(axis=1) == 1).all(), "Only one base must be on at each locus."
-    assert (
-        numpy.array(
-            ["acgt".index(c) for c in "cctagagatccgcttgctgcgctgttccaactgattggggcactggccgc".replace(" ", "")]
+        assert sequence.shape[0] == region.length, "sequence and region must have the same length"
+        assert set(numpy.unique(sequence)) == {0, 1}, "output must be a one-hot encoding"
+        assert (sequence.sum(axis=1) == 1).all(), "Only one base must be on at each locus."
+        assert (
+            numpy.array(
+                ["acgt".index(c) for c in "cctagagatccgcttgctgcgctgttccaactgattggggcactggccgc".replace(" ", "")]
+            )
+            == region.resize(50).get_sequence(fasta).argmax(axis=1)
+        ).all(), (
+            "computed sequence does not match the fetched sequence from UCSC Genome Browser"
+            "http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment=chr11:106022536,106022585"
         )
-        == region.resize(50).get_sequence().argmax(axis=1)
-    ).all(), (
-        "computed sequence does not match the fetched sequence from UCSC Genome Browser"
-        "http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment=chr11:106022536,106022585"
-    )
 
 
 def test_get_subregion_from_jitter_and_strand():

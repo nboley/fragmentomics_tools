@@ -1,4 +1,13 @@
-from setuptools import setup
+import numpy as np
+from Cython.Build import cythonize
+from setuptools import setup, find_packages, Extension
+
+extensions = cythonize(
+    [
+        Extension("sequence", ["fragmentomics_tools/sequence.pyx"]),
+    ],
+    compiler_directives={"language_level": "3"},
+)
 
 setup(
     name="fragmentomics_tools",
@@ -14,4 +23,6 @@ setup(
         "seaborn",
         "sparse",
     ],
+    include_dirs=[np.get_include()],
+    ext_modules=extensions,
 )

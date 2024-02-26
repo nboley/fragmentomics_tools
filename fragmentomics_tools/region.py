@@ -15,8 +15,10 @@ from fragmentomics_tools.contig import (
     CONTIG_LENGTHS,
     CONTIGS,
     STANDARD_CHROMS,
-    REFERENCE_FASTA_DATA_MANIFEST_KEY,
+    get_reference_path,
 )
+
+from sequence import one_hot_encode_sequences
 
 """
 from fbio.util.dataclass_utils import DataClassMixin

@@ -17,6 +17,8 @@ from tempfile import TemporaryDirectory
 from typing import Iterable, List, Union, Optional, TextIO
 import string
 import random
+from bx.intervals.intersection import Intersecter
+import hashlib
 
 import numpy
 import pandas
@@ -26,12 +28,70 @@ import smart_open
 from fragmentomics_tools.region import region_to_region_str, intervals_intersect_with_none, Region
 from fragmentomics_tools.fragment import Fragment
 
-from smart_open import open
 
 # TODO -- move this into config
 DEFAULT_FBIO_CACHE_DIR = os.environ.get("DEFAULT_FBIO_CACHE_DIR", "/ssd/fbio_cache")
 
 log = logging.getLogger(__name__)
+
+
+class BgzipWriter:
+    def __init__(self, stream, bgzip_path="bgzip"):
+        self.stream = stream
+        self.bgzip_path = bgzip_path
+        self.mode = stream.mode
+
+        self.cmd = [self.bgzip_path, "-c"]
+        self.opstream_proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=self.stream)
+        if self.mode == "w":
+            self._ofp = TextIOWrapper(self.opstream_proc.stdin, write_through=True)
+            self._newline = "\n"
+        elif self.mode == "wb":
+            self._ofp = self.opstream_proc.stdin
+            self._newline = b"\n"
+        else:
+            raise ValueError(f"Invalid mode '{self.mode}' (expecting 'w' or 'wb')")
+
+    def flush(self):
+        self.stream.flush()
+        self.opstream_proc.stdin.flush()
+        self.stream.flush()
+        return
+
+    def close(self):
+        self.opstream_proc.stdin.flush()
+        self.opstream_proc.stdin.close()
+        self.opstream_proc.wait()
+        if self.opstream_proc.returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode=self.opstream_proc.returncode, cmd=" ".join(self.cmd)
+            )
+        self.stream.close()
+
+    def write(self, s):
+        self._ofp.write(s)
+
+    def write_line(self, s):
+        self.write(s + self._newline)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exception_type, exception_value, traceback):
+        self.close()
+
+
+def OptionalBgzipWriter(fname, mode="wb", bgzip_path="bgzip"):
+    """Open fname for writing. If fname ends with .gz or .gzip then compress.
+
+    """
+    is_bgzip = any(fname.endswith(ext) for ext in [".gz", ".gzip", ".bgz"])
+
+    if not is_bgzip:
+        return open(fname, mode)
+    else:
+        # assume that we want to gzip the file
+        return BgzipWriter(open(fname, mode), bgzip_path=bgzip_path)
 
 
 def path_exists_s3(s3_prefix):
@@ -48,6 +108,19 @@ def path_exists_s3_or_local(local_path_or_s3_uri):
         return path_exists_s3(local_path_or_s3_uri)
     else:
         return os.path.exists(local_path_or_s3_uri)
+
+
+class VerboseCalledProcessError(subprocess.CalledProcessError):
+    def __str__(self):
+        if self.returncode and self.returncode < 0:
+            try:
+                msg = "Command '%s' died with %r." % (self.cmd, signal.Signals(-self.returncode),)
+            except ValueError:
+                msg = "Command '%s' died with unknown signal %d." % (self.cmd, -self.returncode,)
+        else:
+            msg = "Command '%s' returned non-zero exit status %d." % (self.cmd, self.returncode,)
+
+        return f"{msg}\n" f"Stdout:\n" f"{self.output}\n" f"Stderr:\n" f"{self.stderr}"
 
 
 def _bash_iter(
@@ -68,7 +141,7 @@ def _bash_iter(
 
     if print_cmd:
         print_if_flag("+ " + cmd, print_cmd)
-    p = sp.Popen(cmd, shell=True, executable="/bin/bash", stdout=sp.PIPE, stderr=sp.PIPE)
+    p = subprocess.Popen(cmd, shell=True, executable="/bin/bash", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     output = []
     for line in p.stdout:
@@ -865,7 +938,7 @@ class BigBedReader(BedReader, IndexedRegionReader):
     def read_first_line(in_file):
         # TODO -- if we just care about the parts we can use bigBedInfo
         cmd = f"bigBedToBed -maxItems=1 {in_file} /dev/stdout"
-        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE)
+        res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, check=True)
         rv = io.StringIO(res.stdout.decode()).readline()
         if rv == "":
             raise StopIteration("No line to read")
@@ -1129,7 +1202,7 @@ class RegionWriter(abc.ABC):
         return cls.extensions[0]
 
     def _init_writer(self):
-        self._writer = smart_open.open(self.out_file, 'w')
+        self._writer = OptionalBgzipWriter(self.out_file)
 
     def __enter__(self):
         return self
