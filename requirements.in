@@ -1,0 +1,12 @@
+dacite
+pandas
+smart_open
+pyliftover
+matplotlib
+seaborn
+sparse
+sklearn
+bx-python
+pybigwig
+pybedtools
+intervaltree
