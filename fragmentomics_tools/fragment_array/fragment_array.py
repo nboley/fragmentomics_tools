@@ -76,7 +76,9 @@ def _concat_fragment_strands(fs1, fs2):
     elif (fs1 is None) and (len(fs2) == 0):
         return None
     elif fs1 is None or fs2 is None:
-        raise ValueError("Can not add two fragment arrays where one has fragment strands and the other does not.")
+        raise ValueError(
+            "Can not add two fragment arrays where one has fragment strands and the other does not."
+        )
     else:
         return numpy.concatenate([fs1, fs2])
 
@@ -85,6 +87,7 @@ def _fragment_strands_are_equal(fs1, fs2):
     if (fs1 is None or len(fs1) == 0) and (fs2 is None or len(fs2) == 0):
         return True
     return numpy.all(fs1 == fs2)
+
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +349,9 @@ class FragmentArray:
         last_covered_base_weights = numpy.concatenate(
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
-        fragment_strands = _concat_fragment_strands(self.fragment_strands, other.fragment_strands)
+        fragment_strands = _concat_fragment_strands(
+            self.fragment_strands, other.fragment_strands
+        )
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
         assert (
@@ -419,7 +424,9 @@ class FragmentArray:
             and numpy.allclose(
                 self.last_covered_base_weights, other.last_covered_base_weights
             )
-            and _fragment_strands_are_equal(self.fragment_strands, other.fragment_strands)
+            and _fragment_strands_are_equal(
+                self.fragment_strands, other.fragment_strands
+            )
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )
@@ -480,7 +487,7 @@ class FragmentArray:
         ), f"Frag len acceptance prbs shape: {frag_len_acceptance_prbs.shape} -- Max Frag Len: {self.max_frag_len}"
 
         # subtract 1 to account for the fact that valid fragment lengths start at 1, but the array is zero indexed
-        prbs = frag_len_acceptance_prbs[self.fragment_lengths-1]
+        prbs = frag_len_acceptance_prbs[self.fragment_lengths - 1]
         mask = numpy.random.rand(len(prbs)) < prbs
 
         return self.mask(mask)
@@ -1173,7 +1180,11 @@ class RegionFragmentArray(FragmentArray):
     @wraps(FragmentArray.shift_and_zero_pad)
     def shift_and_zero_pad(self, shift_amt):
         shifted_region = self.region.shift(shift_amt)
-        return super().shift_and_zero_pad(shift_amt)._replace(region=shifted_region, validate_data=False)
+        return (
+            super()
+            .shift_and_zero_pad(shift_amt)
+            ._replace(region=shifted_region, validate_data=False)
+        )
 
     def _shift_boundaries(self, /, left=0, right=0):
         """Modify the length of self.region without changin fragments.
@@ -1346,7 +1357,9 @@ class RegionFragmentArray(FragmentArray):
             [self.last_covered_base_weights, other.last_covered_base_weights]
         )
 
-        fragment_strands = _concat_fragment_strands(self.fragment_strands, other.fragment_strands)
+        fragment_strands = _concat_fragment_strands(
+            self.fragment_strands, other.fragment_strands
+        )
 
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
         num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
@@ -1408,7 +1421,9 @@ class RegionFragmentArray(FragmentArray):
             and numpy.allclose(
                 self.last_covered_base_weights, other.last_covered_base_weights
             )
-            and _fragment_strands_are_equal(self.fragment_strands, other.fragment_strands)
+            and _fragment_strands_are_equal(
+                self.fragment_strands, other.fragment_strands
+            )
             and numpy.all(self.num_cpgs == other.num_cpgs)
             and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
         )

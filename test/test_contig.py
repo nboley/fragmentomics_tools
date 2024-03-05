@@ -1,6 +1,9 @@
 import pytest
 
-from fragmentomics_tools.contig import infer_reference_genome_from_fname, ReferenceInferenceError
+from fragmentomics_tools.contig import (
+    infer_reference_genome_from_fname,
+    ReferenceInferenceError,
+)
 
 
 def test_infer_reference_genome_from_fname():

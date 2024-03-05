@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 from pathlib import Path
 
-from fragmentomics_tools.dataframe import RegionDataFrame, intersect_region_dataframes, SampleAndRegionDataFrame
+from fragmentomics_tools.dataframe import (
+    RegionDataFrame,
+    intersect_region_dataframes,
+    SampleAndRegionDataFrame,
+)
 from fragmentomics_tools.region import Region
 from fragmentomics_tools.fragment_array import RegionFragmentArray
 
@@ -32,8 +36,11 @@ TEST_GENE_ENSEMBLE_IDS = [
 TSS_ANNOTATION_FILE = os.path.join(TEST_DATA_DIR, "tss.all_rampage.hg19.bed.gz")
 TSS_ANNOTATION_FILE_HG38 = os.path.join(TEST_DATA_DIR, "tss.all_rampage.hg38.bed.gz")
 CTCF_BED_FILE = os.path.join(TEST_DATA_DIR, "CTCF.matches.known.hg38.bed.gz")
-H3K4ME3_SIGNAL = os.path.join(TEST_DATA_DIR, "E001-H3K4me3.imputed.pval.signal.hg38.bigwig")
+H3K4ME3_SIGNAL = os.path.join(
+    TEST_DATA_DIR, "E001-H3K4me3.imputed.pval.signal.hg38.bigwig"
+)
 BLACK_LIST_FILE_HG38 = os.path.join(TEST_DATA_DIR, "hg38-blacklist.v2.sorted.bed.gz")
+
 
 def load_bed_from_path(fpath, ref):
     pass
@@ -55,12 +62,12 @@ def test_load_tss_s():
 
 
 def test_resize_vs_vector():
-    rdf0 = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19").resize_regions(
-        2000, vectorized=True
-    )
-    rdf1 = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19").resize_regions(
-        2000, vectorized=False
-    )
+    rdf0 = RegionDataFrame(
+        pd.read_table(TSS_ANNOTATION_FILE), ref="hg19"
+    ).resize_regions(2000, vectorized=True)
+    rdf1 = RegionDataFrame(
+        pd.read_table(TSS_ANNOTATION_FILE), ref="hg19"
+    ).resize_regions(2000, vectorized=False)
     pd.testing.assert_frame_equal(rdf0, rdf1)
 
 
@@ -75,8 +82,12 @@ def test_get_pfm_consistent_with_resize():
     freqs = {}
     for region_size in [99, 100]:
         for motif_size in range(16, 21):
-            pfms[(region_size, motif_size)] = ctcf_rdf.resize_regions(100).get_pfm(motif_size)
-            freqs[(region_size, motif_size)] = pfms[(region_size, motif_size)].freqs.sum(axis=0)
+            pfms[(region_size, motif_size)] = ctcf_rdf.resize_regions(100).get_pfm(
+                motif_size
+            )
+            freqs[(region_size, motif_size)] = pfms[
+                (region_size, motif_size)
+            ].freqs.sum(axis=0)
 
     assert (freqs[(99, 16)] == freqs[(100, 16)]).all()
     expected_freq = freqs[(100, 16)]
@@ -87,10 +98,15 @@ def test_get_pfm_consistent_with_resize():
                 total_cut_off = motif_size - 16
                 left_cut_off = total_cut_off // 2
                 right_cut_off = total_cut_off - left_cut_off
-                assert (freqs[(region_size, motif_size)][left_cut_off:-right_cut_off] == expected_freq).all()
+                assert (
+                    freqs[(region_size, motif_size)][left_cut_off:-right_cut_off]
+                    == expected_freq
+                ).all()
             else:
                 cut_off = (motif_size - 16) // 2
-                assert (freqs[(region_size, motif_size)][cut_off:-cut_off] == expected_freq).all()
+                assert (
+                    freqs[(region_size, motif_size)][cut_off:-cut_off] == expected_freq
+                ).all()
 
 
 def test_load_tss_s_from_fname():
@@ -98,14 +114,20 @@ def test_load_tss_s_from_fname():
     assert len(rdf) == 18263
 
 
-def test_filter_tss_s(TSS_ANNOTATION_FILE=TSSs(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")):
+def test_filter_tss_s(
+    TSS_ANNOTATION_FILE=TSSs(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")
+):
     tss_s = TSS_ANNOTATION_FILE
     res = tss_s.query("peak_tpm > 10")
     assert len(res) == 8489
 
 
 def test_lift_over():
-    rdf = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19").resize_regions(2000).iloc[:5]
+    rdf = (
+        RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")
+        .resize_regions(2000)
+        .iloc[:5]
+    )
     lifted_rdf = rdf.lift_over("hg38", transfer_columns=True)
     assert list(lifted_rdf["start"]) == [719150, 777818, 777974, 783373, 826656]
     assert list(lifted_rdf["stop"]) == [721150, 779818, 779974, 785373, 828656]
@@ -124,7 +146,8 @@ def test_lift_over_no_id_column():
     the line which checked for id column in lif_over function was removed"""
 
     rdf = RegionDataFrame.from_regions(
-        [Region("chr1", 1000 + i * 500, 1500 + i * 500) for i in range(20, 100)], ref="hg19"
+        [Region("chr1", 1000 + i * 500, 1500 + i * 500) for i in range(20, 100)],
+        ref="hg19",
     )
     rdf_lift_over = rdf.lift_over("hg38", transfer_columns=True)
 
@@ -133,7 +156,9 @@ def test_lift_over_no_id_column():
 
 def test_get_fragment_coverage_sum():
     # tests that the sum bigwig signal over the first 10 TSSs is the values found below
-    rdf = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38").resize_regions(2000)
+    rdf = RegionDataFrame(
+        pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38"
+    ).resize_regions(2000)
     values = rdf.iloc[:10].get_fragment_coverage_sum(H3K4ME3_SIGNAL)
     assert numpy.isclose(
         values,
@@ -163,16 +188,86 @@ def test_get_fragment_coverage_track():
         numpy.array(
             [
                 [
-                    [108.98120117, 94.61039734, 94.61039734, 94.61039734, 94.61039734, 94.61039734],
-                    [97.06439972, 97.06439972, 97.06439972, 97.06439972, 97.06439972, 97.06439972],
-                    [56.41839981, 56.41839981, 56.41839981, 56.41839981, 56.41839981, 56.41839981],
-                    [0.99199998, 0.99199998, 1.09200001, 1.09200001, 1.09200001, 1.09200001],
-                    [25.83200073, 25.83200073, 25.83200073, 25.83200073, 25.83200073, 25.83200073],
-                    [11.46199989, 11.46199989, 11.46199989, 11.46199989, 11.46199989, 12.21640015],
-                    [48.31000137, 48.31000137, 48.31000137, 48.31000137, 48.31000137, 48.31000137],
-                    [46.19800186, 46.19800186, 46.19800186, 46.19800186, 65.94999695, 65.94999695],
-                    [55.59400177, 55.59400177, 55.59400177, 37.52799988, 37.52799988, 37.52799988],
-                    [34.10879898, 34.10879898, 34.10879898, 34.10879898, 34.10879898, 34.10879898],
+                    [
+                        108.98120117,
+                        94.61039734,
+                        94.61039734,
+                        94.61039734,
+                        94.61039734,
+                        94.61039734,
+                    ],
+                    [
+                        97.06439972,
+                        97.06439972,
+                        97.06439972,
+                        97.06439972,
+                        97.06439972,
+                        97.06439972,
+                    ],
+                    [
+                        56.41839981,
+                        56.41839981,
+                        56.41839981,
+                        56.41839981,
+                        56.41839981,
+                        56.41839981,
+                    ],
+                    [
+                        0.99199998,
+                        0.99199998,
+                        1.09200001,
+                        1.09200001,
+                        1.09200001,
+                        1.09200001,
+                    ],
+                    [
+                        25.83200073,
+                        25.83200073,
+                        25.83200073,
+                        25.83200073,
+                        25.83200073,
+                        25.83200073,
+                    ],
+                    [
+                        11.46199989,
+                        11.46199989,
+                        11.46199989,
+                        11.46199989,
+                        11.46199989,
+                        12.21640015,
+                    ],
+                    [
+                        48.31000137,
+                        48.31000137,
+                        48.31000137,
+                        48.31000137,
+                        48.31000137,
+                        48.31000137,
+                    ],
+                    [
+                        46.19800186,
+                        46.19800186,
+                        46.19800186,
+                        46.19800186,
+                        65.94999695,
+                        65.94999695,
+                    ],
+                    [
+                        55.59400177,
+                        55.59400177,
+                        55.59400177,
+                        37.52799988,
+                        37.52799988,
+                        37.52799988,
+                    ],
+                    [
+                        34.10879898,
+                        34.10879898,
+                        34.10879898,
+                        34.10879898,
+                        34.10879898,
+                        34.10879898,
+                    ],
                 ]
             ]
         ),
@@ -180,7 +275,9 @@ def test_get_fragment_coverage_track():
 
 
 def test_tf_annotation():
-    rdf_1 = RegionDataFrame.from_regions([Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19")
+    rdf_1 = RegionDataFrame.from_regions(
+        [Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19"
+    )
     motifs = rdf_1.center_regions_on_tf_motif(
         target_tfs=["CTCF"],
         target_len=11,
@@ -211,8 +308,12 @@ def test_tf_annotation():
 
 
 def test_intersect_region_dataframe():
-    rdf_1 = RegionDataFrame.from_regions([Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19")
-    rdf_2 = RegionDataFrame.from_regions([Region("chr1", 1300, 2100), Region("chr3", 4000, 4100)], ref="hg19")
+    rdf_1 = RegionDataFrame.from_regions(
+        [Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19"
+    )
+    rdf_2 = RegionDataFrame.from_regions(
+        [Region("chr1", 1300, 2100), Region("chr3", 4000, 4100)], ref="hg19"
+    )
     intersection_rdf = intersect_region_dataframes([rdf_1, rdf_2])
     assert isinstance(intersection_rdf, RegionDataFrame)
     intersection_regions = list(intersection_rdf.iter_regions())
@@ -228,14 +329,18 @@ def test_intersect_region_dataframe():
 
 def test_overlaps_with_bed():
     num_regions_checked = 20
-    rdf = RegionDataFrame(
-        pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38"
-    )[:num_regions_checked]
+    rdf = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38")[
+        :num_regions_checked
+    ]
 
     expected_values = []
-    blacklist_df = pd.read_csv(BLACK_LIST_FILE_HG38, sep="\t", names=["contig", "start", "stop"])
+    blacklist_df = pd.read_csv(
+        BLACK_LIST_FILE_HG38, sep="\t", names=["contig", "start", "stop"]
+    )
     for region in rdf.iter_regions():
-        q = blacklist_df.query("contig == @region.chrom and start < @region.stop and stop > @region.start")
+        q = blacklist_df.query(
+            "contig == @region.chrom and start < @region.stop and stop > @region.start"
+        )
         expected_values.append(len(q) > 0)
 
     values = rdf.overlaps_with_bed(blacklist_path)
@@ -265,7 +370,12 @@ def test_set_binary_label_by_threshold():
 
     # test that we can set labels using a string columns, and that drop_unlabeled_records works
     tss_s = tss_s.set_binary_label_by_thresholds(
-        ["peak_tpm",], on_threshold=25, off_threshold=10, drop_unlabeled_records=True
+        [
+            "peak_tpm",
+        ],
+        on_threshold=25,
+        off_threshold=10,
+        drop_unlabeled_records=True,
     )
     assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566})
 
@@ -278,11 +388,15 @@ def test_set_binary_label():
     assert Counter(tss_s.label.tolist()) == Counter({0: 12697, 1: 5566})
 
     # test that an on and off work
-    tss_s = tss_s.set_binary_label("peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=False)
+    tss_s = tss_s.set_binary_label(
+        "peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=False
+    )
     assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566, -1: 2924})
 
     # test that drop_unlabeled_records works
-    tss_s = tss_s.set_binary_label("peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=True)
+    tss_s = tss_s.set_binary_label(
+        "peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=True
+    )
     assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566})
 
 
@@ -308,7 +422,9 @@ def rdf():
 @pytest.fixture
 def sdf():
     assert False
-    return SAMPLE_DF.select_sample_set("ml_capture_batch3").get_sample_names(["W_1", "W_2"])
+    return SAMPLE_DF.select_sample_set("ml_capture_batch3").get_sample_names(
+        ["W_1", "W_2"]
+    )
 
 
 @pytest.fixture
@@ -336,7 +452,9 @@ def test_get_sample_df_keep_sample_metadata(rdf, sdf):
     assert all(x in srdf.columns for x in sdf)
 
 
-def test_get_sample_df_keep_sample_metadata_error_on_wrong_type(rdf, sample_id_to_h5_path):
+def test_get_sample_df_keep_sample_metadata_error_on_wrong_type(
+    rdf, sample_id_to_h5_path
+):
     with pytest.raises(ValueError):
         srdf = rdf.build_sample_region_dataframe(sdf, keep_sample_metadata=True)
 
@@ -354,12 +472,18 @@ def test_split_on_contig():
 
 
 def test_rdfs_equal():
-    rdf = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38").iloc[:5, :]
-    rdf_same = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38").iloc[:5, :]
-    rdf_different_1 = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38").iloc[
-        :10, :
+    rdf = RegionDataFrame(pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38").iloc[
+        :5, :
     ]
-    rdf_different_2 = RegionDataFrame(TSS_ANNOTATION_FILE_HG38, ref="hg38").iloc[5:10, :]
+    rdf_same = RegionDataFrame(
+        pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38"
+    ).iloc[:5, :]
+    rdf_different_1 = RegionDataFrame(
+        pd.read_table(TSS_ANNOTATION_FILE_HG38), ref="hg38"
+    ).iloc[:10, :]
+    rdf_different_2 = RegionDataFrame(TSS_ANNOTATION_FILE_HG38, ref="hg38").iloc[
+        5:10, :
+    ]
 
     assert rdf.equals(rdf_same)
     assert not rdf.equals(rdf_different_1)
@@ -370,8 +494,12 @@ def test__get_fragment_h5_paths_from_sdf(rdf, sdf):
     srdf = rdf.build_sample_region_dataframe(sdf)
     fragment_h5_paths = srdf._get_fragment_h5_paths()
     assert sorted(fragment_h5_paths.keys()) == ["SEQRUN8_LIBRARY8", "SEQRUN9_LIBRARY7"]
-    assert fragment_h5_paths["SEQRUN8_LIBRARY8"].endswith("fragment_h5s/v1/SEQRUN8_LIBRARY8.fragments.h5")
-    assert fragment_h5_paths["SEQRUN9_LIBRARY7"].endswith("fragment_h5s/v1/SEQRUN9_LIBRARY7.fragments.h5")
+    assert fragment_h5_paths["SEQRUN8_LIBRARY8"].endswith(
+        "fragment_h5s/v1/SEQRUN8_LIBRARY8.fragments.h5"
+    )
+    assert fragment_h5_paths["SEQRUN9_LIBRARY7"].endswith(
+        "fragment_h5s/v1/SEQRUN9_LIBRARY7.fragments.h5"
+    )
 
 
 def test__get_fragment_h5_paths_from_mapping(rdf, sample_id_to_h5_path):

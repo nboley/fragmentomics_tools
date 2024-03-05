@@ -2,6 +2,7 @@ import numpy
 from dataclasses import fields, dataclass, InitVar
 from typing import Iterable, List, Union, Optional, TextIO
 
+
 class ClassPropertyDescriptor(object):
     """
     used by classproperty() to make @classproperty decorator
@@ -37,6 +38,7 @@ def classproperty(func):
         func = classmethod(func)
 
     return ClassPropertyDescriptor(func)
+
 
 @dataclass
 class Fragment:
@@ -199,12 +201,16 @@ class Fragment:
 
     def __repr__(self):
         items = ",".join(
-            "%s=%r" % (k, getattr(self, k)) for k in self.field_names if getattr(self, k) is not None
+            "%s=%r" % (k, getattr(self, k))
+            for k in self.field_names
+            if getattr(self, k) is not None
         )
         return f"Fragment({items})"
 
     def __eq__(self, other):
-        return [getattr(self, k) for k in self.field_names] == [getattr(other, k) for k in self.field_names]
+        return [getattr(self, k) for k in self.field_names] == [
+            getattr(other, k) for k in self.field_names
+        ]
 
     @staticmethod
     def length_and_midpoint_to_start_and_stop(length, midpoint):
@@ -239,7 +245,9 @@ class Fragment:
         if parts[10] != ".":
             methyls = parts[10].split(",")
             num_cpgs = len(methyls)
-            num_meth_cpgs = int(numpy.array([methyl == "1" for methyl in methyls]).sum())
+            num_meth_cpgs = int(
+                numpy.array([methyl == "1" for methyl in methyls]).sum()
+            )
         else:
             num_cpgs = 0
             num_meth_cpgs = 0

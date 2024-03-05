@@ -25,7 +25,11 @@ import pandas
 import pyBigWig
 import pysam
 import smart_open
-from fragmentomics_tools.region import region_to_region_str, intervals_intersect_with_none, Region
+from fragmentomics_tools.region import (
+    region_to_region_str,
+    intervals_intersect_with_none,
+    Region,
+)
 from fragmentomics_tools.fragment import Fragment
 
 
@@ -42,7 +46,9 @@ class BgzipWriter:
         self.mode = stream.mode
 
         self.cmd = [self.bgzip_path, "-c"]
-        self.opstream_proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=self.stream)
+        self.opstream_proc = subprocess.Popen(
+            self.cmd, stdin=subprocess.PIPE, stdout=self.stream
+        )
         if self.mode == "w":
             self._ofp = TextIOWrapper(self.opstream_proc.stdin, write_through=True)
             self._newline = "\n"
@@ -82,9 +88,7 @@ class BgzipWriter:
 
 
 def OptionalBgzipWriter(fname, mode="wb", bgzip_path="bgzip"):
-    """Open fname for writing. If fname ends with .gz or .gzip then compress.
-
-    """
+    """Open fname for writing. If fname ends with .gz or .gzip then compress."""
     is_bgzip = any(fname.endswith(ext) for ext in [".gz", ".gzip", ".bgz"])
 
     if not is_bgzip:
@@ -100,7 +104,14 @@ def path_exists_s3(s3_prefix):
     """
     s3_client = boto3.client(service_name="s3")
     bucket, prefix = split_bucket_key(s3_prefix)
-    return len(s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1).get("Contents", [])) > 0
+    return (
+        len(
+            s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1).get(
+                "Contents", []
+            )
+        )
+        > 0
+    )
 
 
 def path_exists_s3_or_local(local_path_or_s3_uri):
@@ -114,17 +125,28 @@ class VerboseCalledProcessError(subprocess.CalledProcessError):
     def __str__(self):
         if self.returncode and self.returncode < 0:
             try:
-                msg = "Command '%s' died with %r." % (self.cmd, signal.Signals(-self.returncode),)
+                msg = "Command '%s' died with %r." % (
+                    self.cmd,
+                    signal.Signals(-self.returncode),
+                )
             except ValueError:
-                msg = "Command '%s' died with unknown signal %d." % (self.cmd, -self.returncode,)
+                msg = "Command '%s' died with unknown signal %d." % (
+                    self.cmd,
+                    -self.returncode,
+                )
         else:
-            msg = "Command '%s' returned non-zero exit status %d." % (self.cmd, self.returncode,)
+            msg = "Command '%s' returned non-zero exit status %d." % (
+                self.cmd,
+                self.returncode,
+            )
 
         return f"{msg}\n" f"Stdout:\n" f"{self.output}\n" f"Stderr:\n" f"{self.stderr}"
 
 
 def _bash_iter(
-    cmd, print_lines: Union[bool, TextIO] = False, print_cmd: Union[bool, TextIO] = False,
+    cmd,
+    print_lines: Union[bool, TextIO] = False,
+    print_cmd: Union[bool, TextIO] = False,
 ):
     assert not cmd.startswith("rm -rf /")
     cmd = f"set -eo pipefail && {cmd}"
@@ -141,7 +163,13 @@ def _bash_iter(
 
     if print_cmd:
         print_if_flag("+ " + cmd, print_cmd)
-    p = subprocess.Popen(cmd, shell=True, executable="/bin/bash", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen(
+        cmd,
+        shell=True,
+        executable="/bin/bash",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
     output = []
     for line in p.stdout:
@@ -151,11 +179,15 @@ def _bash_iter(
         yield line
     p.wait()
     if p.returncode != 0:
-        raise VerboseCalledProcessError(p.returncode, cmd, "\n".join(output[:100]), p.stderr.read().decode())
+        raise VerboseCalledProcessError(
+            p.returncode, cmd, "\n".join(output[:100]), p.stderr.read().decode()
+        )
 
 
 def _bash(
-    cmd, print_lines: Union[bool, TextIO] = False, print_cmd: Union[bool, TextIO] = False,
+    cmd,
+    print_lines: Union[bool, TextIO] = False,
+    print_cmd: Union[bool, TextIO] = False,
 ):
     return list(_bash_iter(cmd, print_lines=print_lines, print_cmd=print_cmd))
 
@@ -165,6 +197,7 @@ def _get_subclasses_of(cls, include_self=False):
         s for c in cls.__subclasses__() for s in get_subclasses_of(c)
     )
     return subclasses.union({cls}) if include_self else subclasses
+
 
 def _windowed_range(start, stop, window_size):
     """
@@ -184,6 +217,7 @@ def _windowed_range(start, stop, window_size):
 
     for start in range(start, stop, window_size):
         yield start, min(stop, start + window_size)
+
 
 def _is_s3_uri(s):
     return isinstance(s, str) and s.startswith("s3://")
@@ -208,8 +242,6 @@ def _get_file_path_and_file_hash_fast(path, n_bytes=1024, url_ok=False):
             m.update(fp.read(n_bytes))
 
         return m.hexdigest()
-
-
 
 
 @dataclass
@@ -255,7 +287,9 @@ class RegionRecord:
     @property
     def region(self) -> Region:
         """A Region object represted by this record"""
-        return Region(self.chrom, self.start, self.stop, strand=getattr(self, "strand", None))
+        return Region(
+            self.chrom, self.start, self.stop, strand=getattr(self, "strand", None)
+        )
 
     def __post_init__(self, strict):
         """
@@ -278,7 +312,9 @@ class RegionRecord:
                 setattr(self, field.name, raw_val)
             else:
                 if not isinstance(raw_val, str):
-                    raise TypeError(f"{field.name}'s value of `{raw_val}` is not type {field.type}")
+                    raise TypeError(
+                        f"{field.name}'s value of `{raw_val}` is not type {field.type}"
+                    )
                 try:
                     new_val = field.type(raw_val)
                     setattr(self, field.name, new_val)
@@ -428,9 +464,13 @@ class WigRecord(RegionRecord):
         scores = numpy.asarray(scores).copy()
 
         if region.length != len(scores):
-            raise ValueError(f"score length does not equal region length.  {len(scores)} != {region.length}")
+            raise ValueError(
+                f"score length does not equal region length.  {len(scores)} != {region.length}"
+            )
         if isinstance(scores, numpy.ndarray) and scores.ndim != 1:
-            raise ValueError(f"score must be a vector. score has {scores.ndim} dimensions")
+            raise ValueError(
+                f"score must be a vector. score has {scores.ndim} dimensions"
+            )
 
         # errstate is to ignore nan values that are in scores
         with numpy.errstate(invalid="ignore"):
@@ -441,7 +481,9 @@ class WigRecord(RegionRecord):
 
         # group identical scores together, and then yield a WiggleRecord of that score over the relevant
         # position
-        for score, positions in groupby(zip(range(region.start, region.stop), scores), lambda t: t[1]):
+        for score, positions in groupby(
+            zip(range(region.start, region.stop), scores), lambda t: t[1]
+        ):
             if numpy.isnan(score):
                 continue
             positions, score_group = list(zip(*positions))
@@ -556,7 +598,16 @@ class RegionReader(abc.ABC):
 
 
 class BedReader(RegionReader):
-    extensions = ["bed", "bed.gz", "narrowPeak", "narrowPeak.gz", "nPk", "nPk.gz", "tsv", "tsv.gz"]
+    extensions = [
+        "bed",
+        "bed.gz",
+        "narrowPeak",
+        "narrowPeak.gz",
+        "nPk",
+        "nPk.gz",
+        "tsv",
+        "tsv.gz",
+    ]
 
     def get_default_record_class(self):
         return type(self).infer_bed_record_class_from_file(self.in_file)
@@ -651,7 +702,9 @@ class IndexedRegionReader(RegionReader):
 
         log.debug(f"slice(**{locals()})")
         if cache_dir is None:
-            return cls._slice(in_file, chrom, start, stop, out_file, writer_class, writer_init_kwargs)
+            return cls._slice(
+                in_file, chrom, start, stop, out_file, writer_class, writer_init_kwargs
+            )
         else:
             """
             1) Get the file hash
@@ -667,14 +720,18 @@ class IndexedRegionReader(RegionReader):
             )
 
             # get the longest matching file extension, use that for the cache path
-            possible_extensions = list(filter(lambda ext: out_file.endswith(ext), writer_class.extensions))
+            possible_extensions = list(
+                filter(lambda ext: out_file.endswith(ext), writer_class.extensions)
+            )
             assert len(possible_extensions) > 0
             slice_ext = sorted(possible_extensions, key=len)[-1]
             cache_path = os.path.join(cache_dir, f"{hash}.{slice_ext}")
 
             # If the cache_path already exists, then use it
             if not os.path.exists(cache_path):
-                temp_sub_directory = "".join(random.choice(string.ascii_lowercase) for i in range(30))
+                temp_sub_directory = "".join(
+                    random.choice(string.ascii_lowercase) for i in range(30)
+                )
                 log.debug(f"Creating slice at {cache_path}")
 
                 # create a temp directory to store the data. We will then use an atomic move to avoid the race condition
@@ -685,11 +742,21 @@ class IndexedRegionReader(RegionReader):
 
                 temp_filename = os.path.join(temp_dir, f"{hash}.{slice_ext}")
 
-                cls._slice(in_file, chrom, start, stop, temp_filename, writer_class, writer_init_kwargs)
+                cls._slice(
+                    in_file,
+                    chrom,
+                    start,
+                    stop,
+                    temp_filename,
+                    writer_class,
+                    writer_init_kwargs,
+                )
 
                 # now move all of the files in temp_dir to the cache directory
                 for fname in os.listdir(temp_dir):
-                    os.rename(os.path.join(temp_dir, fname), os.path.join(cache_dir, fname))
+                    os.rename(
+                        os.path.join(temp_dir, fname), os.path.join(cache_dir, fname)
+                    )
                 # and remove the temp directory
                 os.rmdir(temp_dir)
 
@@ -712,7 +779,16 @@ class IndexedRegionReader(RegionReader):
                 os.symlink(source, target)
 
     @classmethod
-    def _slice(cls, in_file, chrom, start, stop, out_file, writer_class=None, writer_init_kwargs=None):
+    def _slice(
+        cls,
+        in_file,
+        chrom,
+        start,
+        stop,
+        out_file,
+        writer_class=None,
+        writer_init_kwargs=None,
+    ):
         log.debug(f"_slice(**{locals()})")
         if writer_class is None:
             writer_class = cls.get_writer_class()
@@ -806,7 +882,9 @@ class BigWigReader(IndexedRegionReader):
         return vals
 
     def stats(self, chrom, start=None, stop=None, nBins=1, exact=False, type="mean"):
-        return self._reader.stats(chrom, start, stop, nBins=nBins, exact=exact, type=type)
+        return self._reader.stats(
+            chrom, start, stop, nBins=nBins, exact=exact, type=type
+        )
 
     @property
     def header(self):
@@ -818,7 +896,16 @@ class BigWigReader(IndexedRegionReader):
         return WigRecord
 
     @classmethod
-    def _slice(cls, in_file, chrom, start, stop, out_file, writer_class=None, writer_init_kwargs=None):
+    def _slice(
+        cls,
+        in_file,
+        chrom,
+        start,
+        stop,
+        out_file,
+        writer_class=None,
+        writer_init_kwargs=None,
+    ):
         if writer_class == TabixBedWriter:
             # use the command line tool for speed.  It's also more reliable than pyBigWig for remote files
             # grep removes header lines like: "#bedGraph section chr1:0-630379"
@@ -839,7 +926,9 @@ class BigBedReader(BedReader, IndexedRegionReader):
 
     @staticmethod
     def _get_chroms_and_lens(in_file):
-        res = subprocess.run(["bigBedInfo", "-chroms", in_file], check=True, stdout=subprocess.PIPE)
+        res = subprocess.run(
+            ["bigBedInfo", "-chroms", in_file], check=True, stdout=subprocess.PIPE
+        )
         # exctract the chromosome sizes
         lines_iter = iter(io.StringIO(res.stdout.decode()))
         line = next(lines_iter)
@@ -894,7 +983,9 @@ class BigBedReader(BedReader, IndexedRegionReader):
         if stop is None:
             stop = self.chroms[chrom]
 
-        for parts in self._ucsc_bigbed_fetch_intervals(self.in_file, chrom, start, stop):
+        for parts in self._ucsc_bigbed_fetch_intervals(
+            self.in_file, chrom, start, stop
+        ):
             yield parts
 
     def _fetch_all(self):
@@ -907,7 +998,16 @@ class BigBedReader(BedReader, IndexedRegionReader):
         pass
 
     @classmethod
-    def _slice(cls, in_file, chrom, start, stop, out_file, writer_class=None, writer_init_kwargs=None):
+    def _slice(
+        cls,
+        in_file,
+        chrom,
+        start,
+        stop,
+        out_file,
+        writer_class=None,
+        writer_init_kwargs=None,
+    ):
         if writer_class == TabixBedWriter:
             # use the command line tool for speed.  It's also more reliable than pyBigWig for remote files
             _bash(
@@ -920,7 +1020,15 @@ class BigBedReader(BedReader, IndexedRegionReader):
                 # we can't read an empty bigbed, so just copy it since we know the slice will be empty
                 shutil.copy(in_file, out_file)
             else:
-                super()._slice(in_file, chrom, start, stop, out_file, writer_class, writer_init_kwargs)
+                super()._slice(
+                    in_file,
+                    chrom,
+                    start,
+                    stop,
+                    out_file,
+                    writer_class,
+                    writer_init_kwargs,
+                )
 
     @property
     def header(self):
@@ -981,7 +1089,9 @@ class TabixBedReader(IndexedRegionReader, BedReader):
                 if intervals_intersect_with_none(start, stop, start2, stop2):
                     yield parts
         if proc.wait() != 0:
-            raise subprocess.CalledProcessError(returncode=proc.returncode, cmd=f'{" ".join(cmd)}')
+            raise subprocess.CalledProcessError(
+                returncode=proc.returncode, cmd=f'{" ".join(cmd)}'
+            )
 
     def _fetch_all(self) -> Iterable:
         with smart_open.open(self.in_file) as reader:
@@ -1002,7 +1112,9 @@ class TabixBedReader(IndexedRegionReader, BedReader):
         """Return a count of entries that overlap each region."""
         rv = []
         for region in regions:
-            rv.append(sum(1 for _ in self.fetch(region.chrom, region.start, region.stop)))
+            rv.append(
+                sum(1 for _ in self.fetch(region.chrom, region.start, region.stop))
+            )
         return rv
 
     def close(self):
@@ -1063,7 +1175,9 @@ class NarrowPeakRecord(RegionRecord):
         super().__post_init__(strict=strict)
         if self.peak is not None:
             if self.peak < 0 or (self.peak > (self.stop - self.start)):
-                raise NarrowPeakValueError(f"Peak is outside bounds of the region: {self}")
+                raise NarrowPeakValueError(
+                    f"Peak is outside bounds of the region: {self}"
+                )
 
 
 class NarrowPeakBedReader(TabixBedReader):
@@ -1116,16 +1230,22 @@ class BedGraphReader:
         ii = 0
         stop_idx = start_idx + ii
         while stop_idx < len(chrom_data) and chrom_data[stop_idx][1] < stop:
-            stop_idx = min(start_idx + 2 ** ii, len(chrom_data))
+            stop_idx = min(start_idx + 2**ii, len(chrom_data))
             ii += 1
 
-        stop_idx = bisect.bisect_right(chrom_data[:, 1], stop, lo=start_idx, hi=stop_idx)
+        stop_idx = bisect.bisect_right(
+            chrom_data[:, 1], stop, lo=start_idx, hi=stop_idx
+        )
 
         return start_idx, stop_idx
 
     def fetch(self, chrom, start, stop, verbose=True):
-        start_idx, stop_idx = self.get_idxs_for_region(chrom, start, stop, verbose=verbose)
-        assert stop_idx >= start_idx, f"Found stop {stop_idx} less than start {start_idx}"
+        start_idx, stop_idx = self.get_idxs_for_region(
+            chrom, start, stop, verbose=verbose
+        )
+        assert (
+            stop_idx >= start_idx
+        ), f"Found stop {stop_idx} less than start {start_idx}"
         assert stop_idx <= len(self.data[chrom])
 
         return self.data[chrom][start_idx:stop_idx]
@@ -1135,13 +1255,22 @@ class MethylBedGraphReader(BedGraphReader):
     def __init__(self, bedgraph_file: str, check_format=True):
         super().__init__(None)
         if check_format:
-            assert bedgraph_file.endswith("_CpG.bedGraph"), "Expecting MethylDackel file"
+            assert bedgraph_file.endswith(
+                "_CpG.bedGraph"
+            ), "Expecting MethylDackel file"
         self.bedgraph_file = bedgraph_file
         m_df = pandas.read_csv(
             self.bedgraph_file,
             sep="\t",
             skiprows=1,
-            names=["chrom", "start", "stop", "pct_methyl", "methylated", "unmethylated"],
+            names=[
+                "chrom",
+                "start",
+                "stop",
+                "pct_methyl",
+                "methylated",
+                "unmethylated",
+            ],
             dtype={
                 "chrom": str,
                 "start": int,
@@ -1162,8 +1291,12 @@ class MethylBedGraphReader(BedGraphReader):
         """
         Returns the total number of methylated and unmethylated CpG-reads in a region
         """
-        start_idx, stop_idx = self.get_idxs_for_region(chrom, start, stop, verbose=verbose)
-        assert stop_idx >= start_idx, f"Found stop {stop_idx} less than start {start_idx}"
+        start_idx, stop_idx = self.get_idxs_for_region(
+            chrom, start, stop, verbose=verbose
+        )
+        assert (
+            stop_idx >= start_idx
+        ), f"Found stop {stop_idx} less than start {start_idx}"
         assert stop_idx <= len(self.data[chrom])
 
         num_meth, num_unmeth = 0, 0
@@ -1188,11 +1321,15 @@ class RegionWriter(abc.ABC):
     def __init__(self, out_file, check_extension=True):
         if check_extension and self.extensions is not None:
             if not any(out_file.endswith(e) for e in self.extensions):
-                raise ValueError(f"extension for {out_file} is not one of {self.extensions}")
+                raise ValueError(
+                    f"extension for {out_file} is not one of {self.extensions}"
+                )
 
         file_dir = os.path.dirname(os.path.abspath(out_file))
         if not os.access(file_dir, os.W_OK):
-            raise PermissionError(f"No permission to write {file_dir}, os.stat: {os.stat(file_dir)}")
+            raise PermissionError(
+                f"No permission to write {file_dir}, os.stat: {os.stat(file_dir)}"
+            )
 
         self.out_file = out_file
         self._init_writer()
@@ -1230,7 +1367,16 @@ class RegionWriter(abc.ABC):
 
 
 class BedWriter(RegionWriter):
-    extensions = ["bed", "bed.gz", "narrowPeak", "narrowPeak.gz", "nPk", "nPk.gz", "tsv", "tsv.gz"]
+    extensions = [
+        "bed",
+        "bed.gz",
+        "narrowPeak",
+        "narrowPeak.gz",
+        "nPk",
+        "nPk.gz",
+        "tsv",
+        "tsv.gz",
+    ]
 
     def write_record(self, record: RegionRecord):
         self._writer.write((record.to_line() + "\n").encode())
@@ -1274,11 +1420,16 @@ class BigWigWriter(RegionWriter):
 
     def write_record(self, record: WigRecord):
         assert record.chrom in self.header["chrom_lengths"], (
-            f"{record.chrom} is invalid, " f'must be one of {self.header["chrom_lengths"].keys()}'
+            f"{record.chrom} is invalid, "
+            f'must be one of {self.header["chrom_lengths"].keys()}'
         )
         if not isinstance(record.score, float):
-            raise TypeError(f"pybigwig can only write floats, record.score is {record.score}")
-        self._writer.addEntries([record.chrom], [record.start], ends=[record.stop], values=[record.score])
+            raise TypeError(
+                f"pybigwig can only write floats, record.score is {record.score}"
+            )
+        self._writer.addEntries(
+            [record.chrom], [record.start], ends=[record.stop], values=[record.score]
+        )
 
 
 class BigBedWriter(BedWriter):
@@ -1320,7 +1471,10 @@ class BigBedWriter(BedWriter):
 
             # warning: bedToBigBed is picky about the output, and likely to fail on public data
             # consider writing using a different format
-            subprocess.run(["bedToBigBed"] + params + [temp_path, "chrom.sizes", self.out_file], check=True)
+            subprocess.run(
+                ["bedToBigBed"] + params + [temp_path, "chrom.sizes", self.out_file],
+                check=True,
+            )
 
 
 class NarrowPeakBedWriter(TabixBedWriter):

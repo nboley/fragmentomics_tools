@@ -22,8 +22,8 @@ from tqdm.contrib.concurrent import process_map
 from tqdm import tqdm
 from joblib import delayed, Parallel
 
-#from tqdm.contrib.concurrent import process_map
-#from p_tqdm import p_map
+# from tqdm.contrib.concurrent import process_map
+# from p_tqdm import p_map
 
 import seaborn as sns
 
@@ -34,24 +34,28 @@ from fragmentomics_tools import Region
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
 
-#from fbio.contig import STANDARD_CHROMS, CONTIG_LENGTHS, REFERENCE_FASTA_DATA_MANIFEST_KEY
-#from fbio.formats import BedReader, BigWigReader
-#from fbio.fragments_h5 import FragmentsH5
-#from fbio.liftover import RegionLiftOver
-#from fbio.region import Region, OutOfBoundsError
-#from fbio.sequence import Pfm
-#from fbio.util import aws_utils
-#from fbio.util.iter_utils import windowed_range
-#from fbio.util.misc_utils import progress_bar
-#from ravel.data_manifest import load_data_manifest, DataManifest
-#from ravel.util.ml_utils import get_indices_of_balanced_labels
-#from ravel.util.pandas_utils import dataframe_region_mask
+# from fbio.contig import STANDARD_CHROMS, CONTIG_LENGTHS, REFERENCE_FASTA_DATA_MANIFEST_KEY
+# from fbio.formats import BedReader, BigWigReader
+# from fbio.fragments_h5 import FragmentsH5
+# from fbio.liftover import RegionLiftOver
+# from fbio.region import Region, OutOfBoundsError
+# from fbio.sequence import Pfm
+# from fbio.util import aws_utils
+# from fbio.util.iter_utils import windowed_range
+# from fbio.util.misc_utils import progress_bar
+# from ravel.data_manifest import load_data_manifest, DataManifest
+# from ravel.util.ml_utils import get_indices_of_balanced_labels
+# from ravel.util.pandas_utils import dataframe_region_mask
 
 
 logger = logging.getLogger(__name__)
 
 
-from fragmentomics_tools import RegionFragmentArray, FragmentArray, merge_fragment_arrays
+from fragmentomics_tools import (
+    RegionFragmentArray,
+    FragmentArray,
+    merge_fragment_arrays,
+)
 
 """
 from ravel.constants import (
@@ -72,21 +76,25 @@ DEFAULT_MAX_FRAG_LEN = 511
 
 
 def _bytes_to_float(b):
-    return float(crc32(b) & 0xFFFFFFFF) / 2 ** 32
+    return float(crc32(b) & 0xFFFFFFFF) / 2**32
 
 
 def _region_to_sequence(args: Tuple[Region, Optional[int], bool, str]):
     region, window_size, reverse_complement_sequence_if_minus_strand, ref = args
     return (
         region.resize(window_size)
-        .get_sequence(reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand)
+        .get_sequence(
+            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand
+        )
         .T
     )
 
 
 class DataFrameBase(pandas.DataFrame):
     _metadata = []  # Metadata is optional, you can pass it in
-    _required_metadata = []  # This must be a subset of metadata, but it is required for init
+    _required_metadata = (
+        []
+    )  # This must be a subset of metadata, but it is required for init
     _required_columns = []  # These columns will be checked for existence during init.
     _potentially_confused_columns = {}
 
@@ -136,14 +144,20 @@ class DataFrameBase(pandas.DataFrame):
         # TODO: account for capitalization
         for needed_column in self._potentially_confused_columns.keys():
             if needed_column not in self.columns:
-                for potential_confused_column in self._potentially_confused_columns[needed_column]:
+                for potential_confused_column in self._potentially_confused_columns[
+                    needed_column
+                ]:
                     if potential_confused_column in self.columns:
-                        self.rename(columns={potential_confused_column: needed_column}, inplace=True)
+                        self.rename(
+                            columns={potential_confused_column: needed_column},
+                            inplace=True,
+                        )
 
         # Sanity check on whether self.columns has everything needed
         missing_key_cols = set(self._required_columns) - set(self.columns)
         assert len(missing_key_cols) == 0, (
-            f"Missing these columns in dataframe: {missing_key_cols}, " f"found {self.columns}."
+            f"Missing these columns in dataframe: {missing_key_cols}, "
+            f"found {self.columns}."
         )
 
 
@@ -177,7 +191,9 @@ class RegionDataFrame(DataFrameBase):
             and len(set(self._critical_bed_columns) - set(data.columns)) > 0
         ):
             # Handle empty dataframes by imposing null columns
-            data = pd.DataFrame(columns=self._standard_bed_columns + self._critical_bed_columns)
+            data = pd.DataFrame(
+                columns=self._standard_bed_columns + self._critical_bed_columns
+            )
 
         super().__init__(data, *args, **kwargs)
 
@@ -222,8 +238,7 @@ class RegionDataFrame(DataFrameBase):
 
     @classmethod
     def from_bed(cls, in_bed_file, ref):
-        """Convenience function to load from a bed file.
-        """
+        """Convenience function to load from a bed file."""
         with open(in_bed_file) as infile:
             first_line_fields = infile.readline().split()
             if first_line_fields[0] in ["chrom", "chr", "contig"]:
@@ -267,7 +282,9 @@ class RegionDataFrame(DataFrameBase):
         ), "Must pass a peak BED file or a list of BED files"
         assert numpy.all(
             [
-                in_bed_file.lower().endswith((".bed", ".bed.gz", ".bed.npk.gz", ".narrowpeak"))
+                in_bed_file.lower().endswith(
+                    (".bed", ".bed.gz", ".bed.npk.gz", ".narrowpeak")
+                )
                 for in_bed_file in in_bed_files
             ]
         ), "All files must be BED files"
@@ -276,10 +293,15 @@ class RegionDataFrame(DataFrameBase):
             df = cls.from_bed(in_bed_files[0], ref)
         else:
             bedtool_files = [
-                pybedtools.BedTool(in_bed_file).filter(filter_func) for in_bed_file in in_bed_files
+                pybedtools.BedTool(in_bed_file).filter(filter_func)
+                for in_bed_file in in_bed_files
             ]
-            merged_bedtool = bedtool_files[0].cat(*bedtool_files[1:], postmerge=True, force_truncate=True)
-            df = cls(merged_bedtool.to_dataframe(names=["contig", "start", "stop"]), ref=ref)
+            merged_bedtool = bedtool_files[0].cat(
+                *bedtool_files[1:], postmerge=True, force_truncate=True
+            )
+            df = cls(
+                merged_bedtool.to_dataframe(names=["contig", "start", "stop"]), ref=ref
+            )
 
         if chroms is not None:
             df = df.query("contig == @chroms")
@@ -291,7 +313,10 @@ class RegionDataFrame(DataFrameBase):
         return self.stop - self.start
 
     def get_interval_dict(
-        self, data_cols: Optional[List[str]] = ["id"], expand_upstream: int = 0, expand_downstream: int = 0
+        self,
+        data_cols: Optional[List[str]] = ["id"],
+        expand_upstream: int = 0,
+        expand_downstream: int = 0,
     ) -> Dict[str, IntervalTree]:
         """
         :param data_cols: if None, use dataframe's row index as the return
@@ -320,7 +345,9 @@ class RegionDataFrame(DataFrameBase):
             interval_dict[row["contig"]][start:stop] = data
         return dict(interval_dict)
 
-    def overlaps_rdf(self, query: "RegionDataFrame", max_distance: int = 0) -> pd.Series:
+    def overlaps_rdf(
+        self, query: "RegionDataFrame", max_distance: int = 0
+    ) -> pd.Series:
         """Returns a boolean series of which regions overlap the other dataframe
 
         :param query: the query dataframe
@@ -331,7 +358,9 @@ class RegionDataFrame(DataFrameBase):
         assert max_distance >= 0
 
         query_intervals = query.get_interval_dict(
-            data_cols=None, expand_upstream=max_distance, expand_downstream=max_distance,
+            data_cols=None,
+            expand_upstream=max_distance,
+            expand_downstream=max_distance,
         )
 
         def is_olap(row: pd.Series) -> bool:
@@ -382,13 +411,19 @@ class RegionDataFrame(DataFrameBase):
         assert False
         with DataManifest() as dm:
             ref_path = dm.sync_and_get(REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref]).path
-            _ = dm.sync_and_get(REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".fai").path
-            _ = dm.sync_and_get(REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".gzi").path
+            _ = dm.sync_and_get(
+                REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".fai"
+            ).path
+            _ = dm.sync_and_get(
+                REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".gzi"
+            ).path
         assert os.path.exists(ref_path)
         assert os.path.exists(ref_path + ".fai")
         assert os.path.exists(ref_path + ".gzi")
         # check that we can actually open the fasta file
-        with pysam.FastaFile(filename=ref_path, filepath_index_compressed=ref_path + ".fai") as _:
+        with pysam.FastaFile(
+            filename=ref_path, filepath_index_compressed=ref_path + ".fai"
+        ) as _:
             pass
 
         return ref_path
@@ -403,7 +438,6 @@ class RegionDataFrame(DataFrameBase):
         self["stop"] = self.start + region_lengths
 
         return self.drop(columns=["summit"])
-
 
     def center_regions_on_tf_motif(
         self,
@@ -446,7 +480,8 @@ class RegionDataFrame(DataFrameBase):
 
         if min(self.region_lengths) < 500 and tf_search_width is None:
             warnings.warn(
-                "WARNING! Scanning for TFs with a window size of less than 500bp is not advised", UserWarning
+                "WARNING! Scanning for TFs with a window size of less than 500bp is not advised",
+                UserWarning,
             )
         assert (
             len(self.region_lengths.unique()) == 1
@@ -472,10 +507,16 @@ class RegionDataFrame(DataFrameBase):
 
         with torch.no_grad():
             sds = SeqDataSet(
-                region_dataframe=self if tf_search_width is None else self.resize_regions(tf_search_width)
+                region_dataframe=self
+                if tf_search_width is None
+                else self.resize_regions(tf_search_width)
             )
             sdl = torch.utils.data.DataLoader(
-                sds, shuffle=False, drop_last=False, num_workers=num_workers, batch_size=batch_size,
+                sds,
+                shuffle=False,
+                drop_last=False,
+                num_workers=num_workers,
+                batch_size=batch_size,
             )
             max_scores = []
             max_idxs = []
@@ -580,7 +621,11 @@ class RegionDataFrame(DataFrameBase):
             ), "Found more than 1 region length, please first resize this RDF to be one size."
             sds = SeqDataSet(region_dataframe=self)
             sdl = torch.utils.data.DataLoader(
-                sds, shuffle=False, drop_last=False, num_workers=num_workers, batch_size=batch_size,
+                sds,
+                shuffle=False,
+                drop_last=False,
+                num_workers=num_workers,
+                batch_size=batch_size,
             )
             max_scores = []
             max_strands = []
@@ -600,14 +645,22 @@ class RegionDataFrame(DataFrameBase):
             max_idxs = torch.cat(max_idxs, dim=0).numpy()
             assert max_idxs.shape == (len(self), len(tf_conv.tf_names)), max_idxs.shape
             max_strands = torch.cat(max_strands, dim=0).numpy()
-            assert max_strands.shape == (len(self), len(tf_conv.tf_names)), max_strands.shape
+            assert max_strands.shape == (
+                len(self),
+                len(tf_conv.tf_names),
+            ), max_strands.shape
             all_strands = max_strands.flatten().astype(int)
             assert np.all((all_strands == 0) | (all_strands == 1)), all_strands[
                 (all_strands != 0) & (all_strands != 1)
             ][:10]
             max_scores = torch.cat(max_scores, dim=0).numpy()
-            assert max_scores.shape == (len(self), len(tf_conv.tf_names)), max_scores.shape
-            for i, name in tqdm(enumerate(tf_conv.tf_names), total=len(tf_conv.tf_names)):
+            assert max_scores.shape == (
+                len(self),
+                len(tf_conv.tf_names),
+            ), max_scores.shape
+            for i, name in tqdm(
+                enumerate(tf_conv.tf_names), total=len(tf_conv.tf_names)
+            ):
                 self[f"{name}_max_motif_score"] = max_scores[:, i]
                 self[f"{name}_max_motif_strand"] = "+"
                 self.loc[max_strands[:, i] == 1, f"{name}_max_motif_strand"] = "-"
@@ -620,7 +673,7 @@ class RegionDataFrame(DataFrameBase):
         best_by: Optional[str] = "score",
         ascending_best: bool = False,
     ):
-        """ Remove
+        """Remove
         :param by: columns you want to use to define what a region is. Default is contig,start,stop
         :param best_by: which column you want to use to select ties. If None or the column doesn't exist, just do a random one
         :param ascending_best: Should the best column be ascending or descending, the first match is taken. Score should typically be False for example.
@@ -646,7 +699,9 @@ class RegionDataFrame(DataFrameBase):
 
     @classmethod
     def rdf_from_bed3(cls, fname, ref, nrows, label):
-        df = BedReader.load_dataframe(fname, nrows=nrows).rename(columns=dict(chrom="contig"))
+        df = BedReader.load_dataframe(fname, nrows=nrows).rename(
+            columns=dict(chrom="contig")
+        )
         df["id"] = [f"{r.contig}:{r.start}-{r.stop}" for _, r in df.iterrows()]
         df["strand"] = None
         df["label"] = label
@@ -667,13 +722,20 @@ class RegionDataFrame(DataFrameBase):
         # else:
         #     assert ref == ref_from_regions, f"{ref} is not the same as {ref_from_regions}"
         chroms, starts, stops, strands = zip(
-            *[(region.chrom, region.start, region.stop, region.strand) for region in regions]
+            *[
+                (region.chrom, region.start, region.stop, region.strand)
+                for region in regions
+            ]
         )
-        df = pandas.DataFrame(dict(contig=chroms, start=starts, stop=stops, strand=strands))
+        df = pandas.DataFrame(
+            dict(contig=chroms, start=starts, stop=stops, strand=strands)
+        )
         return cls(df, ref=ref)
 
     @classmethod
-    def from_random_regions(cls, size, region_lengths, ref, chroms=None) -> "RegionDataFrame":
+    def from_random_regions(
+        cls, size, region_lengths, ref, chroms=None
+    ) -> "RegionDataFrame":
         """
         Create a RegionDataFrame from a random set of regions
         :param size: number of regions
@@ -682,14 +744,23 @@ class RegionDataFrame(DataFrameBase):
         :param chroms: chromosomes to use, defaults to STANDARD_CHROMS
         """
         return cls.from_regions(
-            [Region.random(region_lengths, assembly=ref, chroms=chroms) for _ in range(size)], ref=ref,
+            [
+                Region.random(region_lengths, assembly=ref, chroms=chroms)
+                for _ in range(size)
+            ],
+            ref=ref,
         )
 
     def merge_regions(self, **kwargs):
         bedtool = pybedtools.BedTool.from_dataframe(self).sort()
-        return type(self)(bedtool.merge(**kwargs).to_dataframe(names=list(self.columns)), ref=self.ref,)
+        return type(self)(
+            bedtool.merge(**kwargs).to_dataframe(names=list(self.columns)),
+            ref=self.ref,
+        )
 
-    def intersect_with_rdf(self, other, sorted=False, rsuff="other", **intersect_kwargs):
+    def intersect_with_rdf(
+        self, other, sorted=False, rsuff="other", **intersect_kwargs
+    ):
         """
         Creates the intersection of RegionDataFrames
         :param other: other RegionDataFrame
@@ -700,7 +771,9 @@ class RegionDataFrame(DataFrameBase):
         :return: RegionDataFrame that is the intersection of two RegionDataFrames
         """
         # assert isinstance(other, RegionDataFrame)
-        assert self.ref == other.ref, f"RegionDataFrames must have the same reference: {self.ref, other.ref}"
+        assert (
+            self.ref == other.ref
+        ), f"RegionDataFrames must have the same reference: {self.ref, other.ref}"
 
         # Determine whether or not we want to return the columns of the other rdf
         return_all_cols = False
@@ -712,8 +785,12 @@ class RegionDataFrame(DataFrameBase):
         this_bedtool = pybedtools.BedTool.from_dataframe(self)
         other_bedtool = pybedtools.BedTool.from_dataframe(other)
         intersection_rdf = RegionDataFrame(
-            this_bedtool.intersect(other_bedtool, sorted=sorted, **intersect_kwargs).to_dataframe(
-                names=list(self.columns) + [f"{c}_{rsuff}" for c in other.columns] + ["overlap"]
+            this_bedtool.intersect(
+                other_bedtool, sorted=sorted, **intersect_kwargs
+            ).to_dataframe(
+                names=list(self.columns)
+                + [f"{c}_{rsuff}" for c in other.columns]
+                + ["overlap"]
             ),
             ref=self.ref,
         )
@@ -732,7 +809,9 @@ class RegionDataFrame(DataFrameBase):
         if not inplace:
             return rdf
 
-    def lift_over(self, new_ref, transfer_columns=False, remove_non_liftoverable_regions=True):
+    def lift_over(
+        self, new_ref, transfer_columns=False, remove_non_liftoverable_regions=True
+    ):
         """
         Lifts over RegionDataFrame to a new reference
         :param new_ref: str of new reference name ("hg18", "hg19", "hg38")
@@ -768,7 +847,9 @@ class RegionDataFrame(DataFrameBase):
             rv = rv.query("not contig.isnull()")
         return rv
 
-    def intersect_with_bed(self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs):
+    def intersect_with_bed(
+        self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
+    ):
         """
         Finds intersection between RegionDataFrame and some bed file
         :param bed_file_path: A BED file path, for example a blacklist or repeat annotation
@@ -777,7 +858,9 @@ class RegionDataFrame(DataFrameBase):
         :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
         """
         other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
-        overlap_rdf = self.intersect_with_rdf(other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs)
+        overlap_rdf = self.intersect_with_rdf(
+            other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
+        )
 
         return overlap_rdf
 
@@ -793,10 +876,15 @@ class RegionDataFrame(DataFrameBase):
         counts = numpy.zeros(len(self), dtype=int)
         max_counts = numpy.zeros(len(self), dtype=int)
 
-        region2idx = {(x.contig, x.start, x.stop): pp for pp, x in enumerate(self.itertuples())}
+        region2idx = {
+            (x.contig, x.start, x.stop): pp for pp, x in enumerate(self.itertuples())
+        }
         counts_column_key = "overlap"
         for region, overlaps in self.intersect_with_bed(
-            bed_file, rsuff=rsuff, sorted=sorted, wao=True,
+            bed_file,
+            rsuff=rsuff,
+            sorted=sorted,
+            wao=True,
         ).groupby(["contig", "start", "stop"]):
             inner_counts = overlaps[counts_column_key]
             max_counts[region2idx[region]] = inner_counts.max()
@@ -830,7 +918,8 @@ class RegionDataFrame(DataFrameBase):
         if isinstance(bed_files, str):
             bed_files = [bed_files]
         overlap_per_bed = Parallel(num_cores)(
-            delayed(self.overlaps_with_bed)(bed_file, *args, **kwargs) for bed_file in bed_files
+            delayed(self.overlaps_with_bed)(bed_file, *args, **kwargs)
+            for bed_file in bed_files
         )
         return overlap_per_bed
 
@@ -855,15 +944,20 @@ class RegionDataFrame(DataFrameBase):
         )
         return bases_overlap_per_bed
 
-    def mask_blacklist_and_repeats(self, mask_blacklist=True, max_repeat_size: Optional[int] = None):
+    def mask_blacklist_and_repeats(
+        self, mask_blacklist=True, max_repeat_size: Optional[int] = None
+    ):
         """
         Masks blacklist regions, returning a new dataframe with regions that don't overlap blacklist regions.
         OPTIONALLY, also masks repeat regions. To do this, must provide a max repeat size allowed
         """
-        assert self.ref == "hg38", "Must use hg38 reference if excluding blacklist regions"
+        assert (
+            self.ref == "hg38"
+        ), "Must use hg38 reference if excluding blacklist regions"
         if max_repeat_size is None:
             warnings.warn(
-                "Not filtering repeats. To filter, provide a max size of repeat allowed", UserWarning
+                "Not filtering repeats. To filter, provide a max size of repeat allowed",
+                UserWarning,
             )
         num_regions = len(self)
         if mask_blacklist:
@@ -877,8 +971,13 @@ class RegionDataFrame(DataFrameBase):
         if max_repeat_size is not None:
             assert isinstance(max_repeat_size, int)
             with load_data_manifest(DEFAULT_DATA_MANIFEST_PATH) as dm:
-                repeats_path = dm.sync_and_get("annotations/GRCh38_extras/hg38-repeats.sorted.bed.gz").path
-            repeats_mask = self.get_overlapping_base_counts(repeats_path)["max_counts"] <= max_repeat_size
+                repeats_path = dm.sync_and_get(
+                    "annotations/GRCh38_extras/hg38-repeats.sorted.bed.gz"
+                ).path
+            repeats_mask = (
+                self.get_overlapping_base_counts(repeats_path)["max_counts"]
+                <= max_repeat_size
+            )
         else:
             repeats_mask = numpy.ones(num_regions, dtype=bool)
 
@@ -919,7 +1018,11 @@ class RegionDataFrame(DataFrameBase):
 
     def iter_regions(self):
         for r in self.itertuples():
-            strand = None if r.strand in (".", "None", None) or pandas.isnull(r.strand) else r.strand
+            strand = (
+                None
+                if r.strand in (".", "None", None) or pandas.isnull(r.strand)
+                else r.strand
+            )
             # if "name" in r.columns:
             #    data = dict(name=r["name"])
             # else:
@@ -934,16 +1037,22 @@ class RegionDataFrame(DataFrameBase):
         """
         if in_fname.lower().endswith((".bw", ".bigwig")):
             with BigWigReader(in_fname) as reader:
-                numpy.warnings.filterwarnings("ignore", category=numpy.VisibleDeprecationWarning)
+                numpy.warnings.filterwarnings(
+                    "ignore", category=numpy.VisibleDeprecationWarning
+                )
                 return numpy.array(
-                    [reader.values(region.chrom, region.start, region.stop) for region in self.iter_regions()]
+                    [
+                        reader.values(region.chrom, region.start, region.stop)
+                        for region in self.iter_regions()
+                    ]
                 )
         # For fragment H5s, get the fragment matrix and make a coverage track
         elif in_fname.lower().endswith(".h5"):
             frag_h5 = FragmentsH5(in_fname)
             fms = self.apply(
                 lambda row: RegionFragmentMatrix.from_fragments_h5(
-                    frag_h5, Region(row["contig"], row["start"], row["stop"], ref=self.ref),
+                    frag_h5,
+                    Region(row["contig"], row["start"], row["stop"], ref=self.ref),
                 ),
                 axis=1,
             ).values
@@ -951,7 +1060,9 @@ class RegionDataFrame(DataFrameBase):
         else:
             raise NotImplementedError(f"{in_fname} is not supported")
 
-    def get_fragment_coverage_track(self, in_fnames: Union[List, str], num_cores=NUM_CORES, verbose=0):
+    def get_fragment_coverage_track(
+        self, in_fnames: Union[List, str], num_cores=NUM_CORES, verbose=0
+    ):
         """
         :param in_fnames: file or list of bigwig or fragment h5 files
         :return: coverage profiles over regions in self
@@ -961,7 +1072,8 @@ class RegionDataFrame(DataFrameBase):
 
         return numpy.array(
             Parallel(num_cores, verbose=verbose)(
-                delayed(self._get_fragment_coverage_track)(in_fname) for in_fname in in_fnames
+                delayed(self._get_fragment_coverage_track)(in_fname)
+                for in_fname in in_fnames
             )
         )
 
@@ -971,20 +1083,34 @@ class RegionDataFrame(DataFrameBase):
         """
 
         def get_column_names(bed_file):
-            default_cols = ["chrom_1", "start_1", "end_1", "name_1", "score_1", "strand_1"]
+            default_cols = [
+                "chrom_1",
+                "start_1",
+                "end_1",
+                "name_1",
+                "score_1",
+                "strand_1",
+            ]
             with open(bed_file) as infile:
                 num_fields = len(infile.readline().split())
             return default_cols[:num_fields]
 
         if in_fname.lower().endswith((".bw", ".bigwig")):
-            return numpy.array([track.sum() for track in self._get_fragment_coverage_track(in_fname)])
+            return numpy.array(
+                [track.sum() for track in self._get_fragment_coverage_track(in_fname)]
+            )
         elif in_fname.lower().endswith((".bed", ".bed.gz")):
             # Use pybedtools to intersect the read / fragment beds with the regions
             bed_columns = get_column_names(in_fname)
             rdf_columns = [col + "_2" for col in self.columns]
             intersect_df = (
                 pybedtools.BedTool(in_fname)
-                .intersect(pybedtools.BedTool.from_dataframe(self), wa=True, wb=True, sorted=sorted)
+                .intersect(
+                    pybedtools.BedTool.from_dataframe(self),
+                    wa=True,
+                    wb=True,
+                    sorted=sorted,
+                )
                 .to_dataframe(names=bed_columns + rdf_columns)
             )
             # This is just to map back to an array
@@ -999,7 +1125,10 @@ class RegionDataFrame(DataFrameBase):
         elif in_fname.lower().endswith(".h5"):
             frag_h5 = FragmentsH5(in_fname)
             return self.apply(
-                lambda row: frag_h5.fetch_counts(row["contig"], row["start"], row["stop"]), axis=1
+                lambda row: frag_h5.fetch_counts(
+                    row["contig"], row["start"], row["stop"]
+                ),
+                axis=1,
             ).values
         else:
             raise NotImplementedError(f"{in_fname} is not supported")
@@ -1016,7 +1145,8 @@ class RegionDataFrame(DataFrameBase):
 
         return numpy.array(
             Parallel(num_cores, verbose=verbose)(
-                delayed(self._get_fragment_coverage_sum)(in_fname, sorted=sorted) for in_fname in in_fnames
+                delayed(self._get_fragment_coverage_sum)(in_fname, sorted=sorted)
+                for in_fname in in_fnames
             )
         )
 
@@ -1033,7 +1163,10 @@ class RegionDataFrame(DataFrameBase):
         valid_contig_set = set(CONTIG_LENGTHS[rdf.ref].keys())
         for contig in sorted(set(rdf.contig)):
             new_stops_for_contig = new_stop[rdf.contig == contig]
-            if contig in valid_contig_set and new_stops_for_contig.max() > CONTIG_LENGTHS[rdf.ref][contig]:
+            if (
+                contig in valid_contig_set
+                and new_stops_for_contig.max() > CONTIG_LENGTHS[rdf.ref][contig]
+            ):
                 raise OutOfBoundsError(
                     f"There is not enough flanking sequence to expand a region "
                     f"(would result in a stop coordinate of '{new_stops_for_contig.max()}' at "
@@ -1042,24 +1175,24 @@ class RegionDataFrame(DataFrameBase):
                 )
 
     def _valid_regions_mask(self, new_start, new_stop, discard_buffer_bp=0):
-        #assert self.shape[0] == new_start.shape
-        #assert self.shape[0] == new_stop.shape
+        # assert self.shape[0] == new_start.shape
+        # assert self.shape[0] == new_stop.shape
         ok = (new_start - discard_buffer_bp) >= 0
         for contig in sorted(set(self.contig)):
             max_len = CONTIG_LENGTHS[self.ref][contig]
-            contig_good = ((new_stop + discard_buffer_bp) <= max_len)
-            contig_good |= (self.contig != contig)
+            contig_good = (new_stop + discard_buffer_bp) <= max_len
+            contig_good |= self.contig != contig
             ok &= contig_good
 
         return ok
 
     def expand_regions(
-            self,
-            left: int = 0,
-            right: int = 0,
-            inplace: bool = False,
-            strand_aware: bool = False,
-            discard_invalid_resizes: bool = False
+        self,
+        left: int = 0,
+        right: int = 0,
+        inplace: bool = False,
+        strand_aware: bool = False,
+        discard_invalid_resizes: bool = False,
     ):
         if not inplace:
             rdf = self.copy()
@@ -1067,28 +1200,31 @@ class RegionDataFrame(DataFrameBase):
             rdf = self
 
         if strand_aware:
-            neg_mask = (self.strand == '-')
+            neg_mask = self.strand == "-"
 
         # quick optimization for the common no-shift case
         new_start = rdf.start - left
         if strand_aware:
-            new_start[neg_mask] = rdf.loc[neg_mask, 'start'] - right
+            new_start[neg_mask] = rdf.loc[neg_mask, "start"] - right
 
         new_stop = rdf.stop + right
         if strand_aware:
-            new_stop[neg_mask] = rdf.loc[neg_mask, 'stop'] + left
+            new_stop[neg_mask] = rdf.loc[neg_mask, "stop"] + left
 
-        valid_regions_mask = self._valid_regions_mask(new_start, new_stop, discard_buffer_bp=0)
+        valid_regions_mask = self._valid_regions_mask(
+            new_start, new_stop, discard_buffer_bp=0
+        )
 
         rdf["start"] = new_start
         rdf["stop"] = new_stop
         if discard_invalid_resizes:
             rdf = rdf.loc[valid_regions_mask, :]
         elif (~valid_regions_mask).any():
-             raise OutOfBoundsError(f"There is not enough flanking sequence to expand {(~valid_regions_mask).sum()}/{self.shape[0]} regions.")
+            raise OutOfBoundsError(
+                f"There is not enough flanking sequence to expand {(~valid_regions_mask).sum()}/{self.shape[0]} regions."
+            )
 
         return rdf
-
 
     def resize_regions(
         self,
@@ -1115,7 +1251,9 @@ class RegionDataFrame(DataFrameBase):
                 filter = None
                 for contig in sorted(set(rdf.contig)):
                     max_len = CONTIG_LENGTHS[rdf.ref][contig]
-                    contig_bad = ((new_stop + discard_buffer_bp) > max_len) & (rdf.contig == contig)
+                    contig_bad = ((new_stop + discard_buffer_bp) > max_len) & (
+                        rdf.contig == contig
+                    )
                     if filter is None:
                         filter = contig_bad
                     else:
@@ -1125,7 +1263,9 @@ class RegionDataFrame(DataFrameBase):
                 rdf = rdf.loc[ok, :]
                 new_start = new_start[ok]
                 new_stop = new_stop[ok]
-                logger.warning(f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize.")
+                logger.warning(
+                    f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize."
+                )
 
             self._error_on_invalid_new_starts(new_start)
             self._error_on_invalid_new_stops(rdf, new_stop)
@@ -1159,7 +1299,9 @@ class RegionDataFrame(DataFrameBase):
                 new_row["stop"] = stop
                 new_rows.append(new_row)
 
-        return self.__class__(pandas.DataFrame.from_records(new_rows, index=new_index), ref=self.ref)
+        return self.__class__(
+            pandas.DataFrame.from_records(new_rows, index=new_index), ref=self.ref
+        )
 
     def split_on_query(self, query):
         """Split self into two dataframes.
@@ -1172,18 +1314,25 @@ class RegionDataFrame(DataFrameBase):
         df2 = self.query("not ({})".format(query))
         return df1, df2
 
-    def split_on_column(self, column_name: Union[bytes, str], value_groups: Iterable[str]):
+    def split_on_column(
+        self, column_name: Union[bytes, str], value_groups: Iterable[str]
+    ):
         # fix any string/bytes contigs
 
         if column_name not in self.columns:
             raise KeyError(f"Column {column_name} does not exist")
 
-        value_groups = [[x] if (isinstance(x, str) or isinstance(x, bytes)) else x for x in value_groups]
+        value_groups = [
+            [x] if (isinstance(x, str) or isinstance(x, bytes)) else x
+            for x in value_groups
+        ]
 
         # make sure that no value is in multiple groups
         all_values = set(chain.from_iterable(value_groups))
         if sum(len(x) for x in value_groups) != len(all_values):
-            raise ValueError(f"contigs in groups must not overlap (saw '{value_groups}')")
+            raise ValueError(
+                f"contigs in groups must not overlap (saw '{value_groups}')"
+            )
 
         dfs = []
         for values in value_groups:
@@ -1193,12 +1342,17 @@ class RegionDataFrame(DataFrameBase):
 
     def split_on_contig(self, contig_groups):
         # fix any string/bytes contigs
-        contig_groups = [[x] if (isinstance(x, str) or isinstance(x, bytes)) else x for x in contig_groups]
+        contig_groups = [
+            [x] if (isinstance(x, str) or isinstance(x, bytes)) else x
+            for x in contig_groups
+        ]
 
         # make sure that no chromosomes are in multiple groups
         all_chroms = set(chain.from_iterable(contig_groups))
         if sum(len(x) for x in contig_groups) != len(all_chroms):
-            raise ValueError(f"contigs in groups must not overlap (saw '{contig_groups}')")
+            raise ValueError(
+                f"contigs in groups must not overlap (saw '{contig_groups}')"
+            )
 
         dfs = []
         for contigs in contig_groups:
@@ -1214,7 +1368,9 @@ class RegionDataFrame(DataFrameBase):
             yield Region(row.contig, row.start, row.stop), row
 
     def to_tsv(
-        self, path_or_buf=None, columns=None,
+        self,
+        path_or_buf=None,
+        columns=None,
     ):
         """
         Using this function to write regions dataframes to disk facilitates writing and also
@@ -1225,7 +1381,12 @@ class RegionDataFrame(DataFrameBase):
         """
 
         self.to_csv(
-            path_or_buf=path_or_buf, sep="\t", columns=columns, header=True, index=False, index_label=None,
+            path_or_buf=path_or_buf,
+            sep="\t",
+            columns=columns,
+            header=True,
+            index=False,
+            index_label=None,
         )
 
     def get_one_hot_encoded_seq(
@@ -1247,7 +1408,12 @@ class RegionDataFrame(DataFrameBase):
         sequence = process_map(
             _region_to_sequence,
             [
-                (region, window_size, reverse_complement_sequence_if_minus_strand, self.ref)
+                (
+                    region,
+                    window_size,
+                    reverse_complement_sequence_if_minus_strand,
+                    self.ref,
+                )
                 for region in self.iter_regions()
             ],
             total=self.nrow,
@@ -1255,19 +1421,29 @@ class RegionDataFrame(DataFrameBase):
             chunksize=10,
         )
 
-        return pandas.Series(dict(zip(self.index, sequence)), name="one_hot_encoded_sequence")
+        return pandas.Series(
+            dict(zip(self.index, sequence)), name="one_hot_encoded_sequence"
+        )
 
     def get_pfm(
-        self, window_size=None, num_workers=1, reverse_complement_sequence_if_minus_strand=True, verbose=True
+        self,
+        window_size=None,
+        num_workers=1,
+        reverse_complement_sequence_if_minus_strand=True,
+        verbose=True,
     ):
         if window_size is None:
             region_lengths = self.region_lengths.unique().tolist()
             if len(region_lengths) == 1:
                 window_size = region_lengths.pop()
                 if window_size > 100:
-                    ValueError("window_size must be set if the region length is greater than 100")
+                    ValueError(
+                        "window_size must be set if the region length is greater than 100"
+                    )
             else:
-                raise ValueError("window_size must be set if all regions don't have the same length")
+                raise ValueError(
+                    "window_size must be set if all regions don't have the same length"
+                )
 
         assert isinstance(window_size, int)
         if not set(self.strand) == {"-", "+"}:
@@ -1277,7 +1453,10 @@ class RegionDataFrame(DataFrameBase):
         # (window_size, 4)
         sequences = numpy.array(
             self.get_one_hot_encoded_seq(
-                num_workers, window_size, reverse_complement_sequence_if_minus_strand, verbose
+                num_workers,
+                window_size,
+                reverse_complement_sequence_if_minus_strand,
+                verbose,
             )
         )
         sequences = numpy.swapaxes(sequences, 1, 2)
@@ -1289,7 +1468,11 @@ class RegionDataFrame(DataFrameBase):
 
     def split(self, num_sections):
         num_each_section, extras = divmod(self.nrow, num_sections)
-        section_sizes = [0] + extras * [num_each_section + 1] + (num_sections - extras) * [num_each_section]
+        section_sizes = (
+            [0]
+            + extras * [num_each_section + 1]
+            + (num_sections - extras) * [num_each_section]
+        )
         div_points = np.array(section_sizes, dtype=np.intp).cumsum()
 
         sub_rdfs = []
@@ -1307,14 +1490,23 @@ class RegionDataFrame(DataFrameBase):
     def label_balanced(self, random_state=None):
         """Return a copy of self with balanced labels."""
         if not hasattr(self, "label"):
-            raise ValueError("The data frame must have a 'label' column to balance labels")
+            raise ValueError(
+                "The data frame must have a 'label' column to balance labels"
+            )
 
-        keep_idxs = get_indices_of_balanced_labels(self.label, random_state=random_state)
+        keep_idxs = get_indices_of_balanced_labels(
+            self.label, random_state=random_state
+        )
 
         return self.iloc[keep_idxs].copy()
 
     def set_binary_label(
-        self, on_query, off_query=None, drop_unlabeled_records=True, inplace=False, label_column="label",
+        self,
+        on_query,
+        off_query=None,
+        drop_unlabeled_records=True,
+        inplace=False,
+        label_column="label",
     ):
         """Add a label column.
 
@@ -1371,8 +1563,12 @@ class RegionDataFrame(DataFrameBase):
                 columns,
             ]
 
-        on_query = " and ".join("{} > {}".format(column, on_threshold) for column in columns)
-        off_query = " and ".join("{} < {}".format(column, off_threshold) for column in columns)
+        on_query = " and ".join(
+            "{} > {}".format(column, on_threshold) for column in columns
+        )
+        off_query = " and ".join(
+            "{} < {}".format(column, off_threshold) for column in columns
+        )
         return self.set_binary_label(
             on_query,
             off_query,
@@ -1417,10 +1613,9 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         if "frag_h5" not in self.columns:
             raise ValueError("SampleDataFrame must have a frag_h5 column")
 
-
     @classmethod
     def init_from_rdf_and_sdf(cls, rdf, sdf):
-        return cls(rdf.merge(sdf, how='cross'), ref=rdf.ref)
+        return cls(rdf.merge(sdf, how="cross"), ref=rdf.ref)
         new_dfs = []
         for record in sdf.itertuples():
             new_df = rdf.copy()
@@ -1432,13 +1627,11 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         merged_df = pandas.concat(new_dfs).reset_index(drop=True)
         return cls(merged_df, ref=rdf.ref)
 
-
     def _check_has_fragment_array(self):
         assert "fragment_array" in self.columns, (
             "Please first call `srdf = srdf.attach_fragment_array(...)` to generate "
             "the required/missing fragment_array column"
         )
-
 
     def load_fragment_arrays(
         self,
@@ -1449,73 +1642,88 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         flip_data_to_match_region_strand: bool = False,
         **kwargs,
     ):
-        """
-
-        """
+        """ """
         assert self.index.is_unique
 
         def get_fa(record):
             region = Region(record.contig, record.start, record.stop, record.strand)
-            _kwargs = dict(region=region, min_mapq=min_mapq, max_frag_len=max_frag_len, include_fragment_strand=True, flip_data_to_match_region_strand=flip_data_to_match_region_strand, **kwargs)
-            return (record.Index, RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs))
+            _kwargs = dict(
+                region=region,
+                min_mapq=min_mapq,
+                max_frag_len=max_frag_len,
+                include_fragment_strand=True,
+                flip_data_to_match_region_strand=flip_data_to_match_region_strand,
+                **kwargs,
+            )
+            return (
+                record.Index,
+                RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs),
+            )
 
         if num_cores <= 1:
-            res = [get_fa(x) for x in tqdm(self.itertuples(), total=len(self), disable=(verbose <= 0))]
+            res = [
+                get_fa(x)
+                for x in tqdm(
+                    self.itertuples(), total=len(self), disable=(verbose <= 0)
+                )
+            ]
         else:
             # self.itertuples() breaks when it's passed fields containing a dash, so we subset the columns and copy it
             #  We're going to use only needed fields: ["contig", "start", "stop", "strand", sample_id_col_name]
-            field_subset = ["contig", "start", "stop", "strand", 'sample_id', 'frag_h5']
+            field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
             res = list(
                 tqdm.tqdm(
                     # Note the new return_as argument here, which requires joblib >= 1.3:
                     Parallel(n_jobs=num_cores, return_as="generator")(
-                        delayed(get_fa)(record) for record in list(self[field_subset].itertuples())
+                        delayed(get_fa)(record)
+                        for record in list(self[field_subset].itertuples())
                     ),
                     total=len(self),
                 )
             )
 
         index, fs = zip(*res)
-        return pandas.Series(fs, index=index, name='fa')
+        return pandas.Series(fs, index=index, name="fa")
 
     def attach_fragment_arrays(self, *args, rebuild_fragment_arrays=False, **kwargs):
         # If we've already attached
-        if not rebuild_fragment_arrays and 'fragment_array' in self.columns:
+        if not rebuild_fragment_arrays and "fragment_array" in self.columns:
             return self
 
         fas = self.load_fragment_arrays(*args, **kwargs)
-        self['fragment_array'] = fas
+        self["fragment_array"] = fas
         return self
 
-class FlDist():
+
+class FlDist:
     def __init__(self, sdf):
         max_frag_len = 512
         columns = {}
         for frag_h5 in sdf.frag_h5:
             cnts = frag_h5.fragment_length_counts[:max_frag_len]
             # normalize to library depth
-            cnts = cnts/cnts.sum()
-            columns['RD-' + frag_h5.sample_id.split('-')[1]] = cnts
+            cnts = cnts / cnts.sum()
+            columns["RD-" + frag_h5.sample_id.split("-")[1]] = cnts
 
         fl_df = pd.DataFrame(columns)
-        fl_df = fl_df.set_index(fl_df.index+1)
+        fl_df = fl_df.set_index(fl_df.index + 1)
 
         self.fl_df = fl_df
 
     def plot(self, figsize=(20, 8)):
-        sns.set(rc={'figure.figsize': figsize})
+        sns.set(rc={"figure.figsize": figsize})
 
         # add the reference
         fl_df = self.fl_df.copy()
         ref_fl_dist = fl_df.mean(axis=1)
-        ref_fl_dist = ref_fl_dist/ref_fl_dist.sum()
-        fl_df.loc[:, 'Reference'] = ref_fl_dist
+        ref_fl_dist = ref_fl_dist / ref_fl_dist.sum()
+        fl_df.loc[:, "Reference"] = ref_fl_dist
 
         fl_df.plot(legend=False)
 
 
 class SampleDataFrame(DataFrameBase):
-    _metadata = ['fl_dist']
+    _metadata = ["fl_dist"]
 
     def __init__(self, data, *args, **kwargs):
         super().__init__(data, *args, **kwargs)

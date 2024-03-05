@@ -8,57 +8,202 @@ from fragmentomics_tools.util.liftover import RegionLiftOver
 from fragmentomics_tools.region import Region
 from fragmentomics_tools.contig import get_reference_path
 
+
 @pytest.mark.parametrize(
     "start, stop, strand, resizes, flips",
     [
         # Odd length, even resize go smaller first
-        (1, 6, "+", [None, 2, 5, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            1,
+            6,
+            "+",
+            [None, 2, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (1, 6, "+", [None, 2, None, 5], [True, False, True, False]),  # flip resize flip resize
         # Even length, even resize go smaller first
-        (1, 7, "+", [None, 2, 6, None], [True, False, False, True]),  # flip resize resize flip
-        (1, 7, "+", [None, 2, None, 6], [True, False, True, False]),  # flip resize flip resize
+        (
+            1,
+            7,
+            "+",
+            [None, 2, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            1,
+            7,
+            "+",
+            [None, 2, None, 6],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Even length, odd resize go smaller first
-        (1, 7, "+", [None, 3, 6, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            1,
+            7,
+            "+",
+            [None, 3, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (1, 7, "+", [None, 3, None, 6], [True, False, True, False]),  # flip resize flip resize
         # Odd length, odd resize go smaller first
-        (1, 6, "+", [None, 3, 5, None], [True, False, False, True]),  # flip resize resize flip
-        (1, 6, "+", [None, 3, None, 5], [True, False, True, False]),  # flip resize flip resize
+        (
+            1,
+            6,
+            "+",
+            [None, 3, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            1,
+            6,
+            "+",
+            [None, 3, None, 5],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Odd length, even resize go bigger first
-        (5, 10, "+", [None, 8, 5, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            5,
+            10,
+            "+",
+            [None, 8, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (5, 10, "+", [None, 8, None, 5], [True, False, True, False]),  # flip resize flip resize
         # Even length, even resize go bigger first
-        (5, 11, "+", [None, 8, 6, None], [True, False, False, True]),  # flip resize resize flip
-        (5, 11, "+", [None, 8, None, 6], [True, False, True, False]),  # flip resize flip resize
+        (
+            5,
+            11,
+            "+",
+            [None, 8, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            5,
+            11,
+            "+",
+            [None, 8, None, 6],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Even length, odd resize go bigger first
-        (5, 11, "+", [None, 9, 6, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            5,
+            11,
+            "+",
+            [None, 9, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (5, 11, "+", [None, 9, None, 6], [True, False, True, False]),  # flip resize flip resize
         # Odd length, odd resize go bigger first
-        (5, 10, "+", [None, 9, 5, None], [True, False, False, True]),  # flip resize resize flip
-        (5, 10, "+", [None, 9, None, 5], [True, False, True, False]),  # flip resize flip resize
+        (
+            5,
+            10,
+            "+",
+            [None, 9, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            5,
+            10,
+            "+",
+            [None, 9, None, 5],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Odd length, even resize go smaller first
-        (2, 7, "+", [None, 2, 5, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            2,
+            7,
+            "+",
+            [None, 2, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (2, 7, "+", [None, 2, None, 5], [True, False, True, False]),  # flip resize flip resize
         # Even length, even resize go smaller first
-        (2, 8, "+", [None, 2, 6, None], [True, False, False, True]),  # flip resize resize flip
-        (2, 8, "+", [None, 2, None, 6], [True, False, True, False]),  # flip resize flip resize
+        (
+            2,
+            8,
+            "+",
+            [None, 2, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            2,
+            8,
+            "+",
+            [None, 2, None, 6],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Even length, odd resize go smaller first
-        (2, 8, "+", [None, 3, 6, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            2,
+            8,
+            "+",
+            [None, 3, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (2, 8, "+", [None, 3, None, 6], [True, False, True, False]),  # flip resize flip resize
         # Odd length, odd resize go smaller first
-        (2, 7, "+", [None, 3, 5, None], [True, False, False, True]),  # flip resize resize flip
-        (2, 7, "+", [None, 3, None, 5], [True, False, True, False]),  # flip resize flip resize
+        (
+            2,
+            7,
+            "+",
+            [None, 3, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            2,
+            7,
+            "+",
+            [None, 3, None, 5],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Odd length, even resize go bigger first
-        (6, 11, "+", [None, 8, 5, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            6,
+            11,
+            "+",
+            [None, 8, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (6, 11, "+", [None, 8, None, 5], [True, False, True, False]),  # flip resize flip resize
         # Even length, even resize go bigger first
-        (6, 12, "+", [None, 8, 6, None], [True, False, False, True]),  # flip resize resize flip
-        (6, 12, "+", [None, 8, None, 6], [True, False, True, False]),  # flip resize flip resize
+        (
+            6,
+            12,
+            "+",
+            [None, 8, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            6,
+            12,
+            "+",
+            [None, 8, None, 6],
+            [True, False, True, False],
+        ),  # flip resize flip resize
         # Even length, odd resize go bigger first
-        (6, 12, "+", [None, 9, 6, None], [True, False, False, True]),  # flip resize resize flip
+        (
+            6,
+            12,
+            "+",
+            [None, 9, 6, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
         # (6, 12, "+", [None, 9, None, 6], [True, False, True, False]),  # flip resize flip resize
         # Odd length, odd resize go bigger first
-        (6, 11, "+", [None, 9, 5, None], [True, False, False, True]),  # flip resize resize flip
-        (6, 11, "+", [None, 9, None, 5], [True, False, True, False]),  # flip resize flip resize
+        (
+            6,
+            11,
+            "+",
+            [None, 9, 5, None],
+            [True, False, False, True],
+        ),  # flip resize resize flip
+        (
+            6,
+            11,
+            "+",
+            [None, 9, None, 5],
+            [True, False, True, False],
+        ),  # flip resize flip resize
     ],
 )
 def test_region_resize_identity(
@@ -68,7 +213,9 @@ def test_region_resize_identity(
     region = Region("NA", start, stop, strand)
     r_mu = region
     for i, (r, fl) in enumerate(zip(resizes, flips)):
-        assert r is None or not fl, "One of r needs to be None or fl needs to be False so we have ordering"
+        assert (
+            r is None or not fl
+        ), "One of r needs to be None or fl needs to be False so we have ordering"
         if r is not None:
             r_mu = r_mu.resize(r)
         elif fl:
@@ -78,7 +225,9 @@ def test_region_resize_identity(
                 f"ERROR: index {i} has None in both resizes and flips, or nothing: {resizes}, {flips}"
             )
         if i == 0:
-            assert r_mu != region  # at least one change needs to happen which breaks equality
+            assert (
+                r_mu != region
+            )  # at least one change needs to happen which breaks equality
     assert r_mu == region  # make sure we have indeed perturbed the region
 
 
@@ -140,12 +289,24 @@ def test_get_sequence():
     with pysam.FastaFile(get_reference_path(region.ref)) as fasta:
         sequence = region.get_sequence(fasta)
 
-        assert sequence.shape[0] == region.length, "sequence and region must have the same length"
-        assert set(numpy.unique(sequence)) == {0, 1}, "output must be a one-hot encoding"
-        assert (sequence.sum(axis=1) == 1).all(), "Only one base must be on at each locus."
+        assert (
+            sequence.shape[0] == region.length
+        ), "sequence and region must have the same length"
+        assert set(numpy.unique(sequence)) == {
+            0,
+            1,
+        }, "output must be a one-hot encoding"
+        assert (
+            sequence.sum(axis=1) == 1
+        ).all(), "Only one base must be on at each locus."
         assert (
             numpy.array(
-                ["acgt".index(c) for c in "cctagagatccgcttgctgcgctgttccaactgattggggcactggccgc".replace(" ", "")]
+                [
+                    "acgt".index(c)
+                    for c in "cctagagatccgcttgctgcgctgttccaactgattggggcactggccgc".replace(
+                        " ", ""
+                    )
+                ]
             )
             == region.resize(50).get_sequence(fasta).argmax(axis=1)
         ).all(), (
@@ -164,6 +325,11 @@ def test_get_subregion_from_jitter_and_strand():
     for output_size in [1000, 2000, 5000, 10000]:
         for jitter in [1000, 100, 50, 0, -50, -100, -1000]:
             for strand in [None, "+", "-"]:
-                assert region.get_subregion_from_jitter_and_strand(output_size, jitter, strand) == Region(
-                    contig, center + jitter - (output_size // 2), center + jitter + (output_size // 2), strand
+                assert region.get_subregion_from_jitter_and_strand(
+                    output_size, jitter, strand
+                ) == Region(
+                    contig,
+                    center + jitter - (output_size // 2),
+                    center + jitter + (output_size // 2),
+                    strand,
                 )

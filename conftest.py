@@ -21,12 +21,21 @@ def environment_variables(**kwargs):
 
 
 def random_string(length):
-    return "".join([random.choice(string.ascii_letters + string.digits) for n in range(length)])
+    return "".join(
+        [random.choice(string.ascii_letters + string.digits) for n in range(length)]
+    )
 
 
 def pytest_addoption(parser):
-    parser.addoption("--runslow", action="store_true", default=False, help="run slow tests")
-    parser.addoption("--run-extra-slow", action="store_true", default=False, help="run extra slow tests")
+    parser.addoption(
+        "--runslow", action="store_true", default=False, help="run slow tests"
+    )
+    parser.addoption(
+        "--run-extra-slow",
+        action="store_true",
+        default=False,
+        help="run extra slow tests",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -68,8 +77,8 @@ def gpu_test_env():
 
 
 # from fbio.constants import FBIO_S3_TEST_BUCKET
-#@pytest.fixture()
-#def clean_s3_prefix():
+# @pytest.fixture()
+# def clean_s3_prefix():
 #    remote_datastore_prefix = f"s3://{FBIO_S3_TEST_BUCKET}/{random_string(16)}"
 #    yield remote_datastore_prefix
 #    subprocess.check_call(f"aws s3 rm --recursive {remote_datastore_prefix}".split())

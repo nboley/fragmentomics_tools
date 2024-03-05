@@ -28,8 +28,8 @@ from fragmentomics_tools.formats import (
 from fragmentomics_tools.region import Region, intervals_intersect
 from fragmentomics_tools.formats import path_exists_s3_or_local
 
-#from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
-#from fbio.viz_sequence import plot_weights_given_ax
+# from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
+# from fbio.viz_sequence import plot_weights_given_ax
 
 from matplotlib import pyplot, colors
 from matplotlib.cm import ScalarMappable
@@ -40,7 +40,10 @@ from matplotlib.ticker import FuncFormatter
 
 from scipy.ndimage import gaussian_filter
 
-from fragmentomics_tools.fragment_array.fragment_matrix_math import reverse_sum_pool, sum_pool
+from fragmentomics_tools.fragment_array.fragment_matrix_math import (
+    reverse_sum_pool,
+    sum_pool,
+)
 
 CHROMHMM_COLORS = {
     "blueprint": {
@@ -98,8 +101,13 @@ CHROMHMM_COLORS = {
 
 
 # TODO -- move this into config
-FBIO_BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # /home/user/projects/Ravel/fbio
-FBIO_DATA_DIR = os.path.join(FBIO_BASE_DIR, "data")  # /home/user/projects/Ravel/fbio/data
+FBIO_BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)  # /home/user/projects/Ravel/fbio
+FBIO_DATA_DIR = os.path.join(
+    FBIO_BASE_DIR, "data"
+)  # /home/user/projects/Ravel/fbio/data
+
 
 def obj_type_name_matches_class_name_str(obj, cls):
     """
@@ -130,15 +138,21 @@ def obj_type_name_matches_class_name_str(obj, cls):
         cls = tuple([cls])
 
     return isinstance(obj, cls) or any(
-        obj.__class__.__name__ == c.__name__ and obj.__class__.__module__ == getattr(c, "__module__", None)
+        obj.__class__.__name__ == c.__name__
+        and obj.__class__.__module__ == getattr(c, "__module__", None)
         for c in cls
     )
+
 
 ### UTILITY FUNCTIONS ###
 def gaussian(window_len, num_std):
     win = symmetric_arange(window_len)
     std = window_len / num_std / 2
-    win = 1.0 / numpy.sqrt(2.0 * numpy.pi * std ** 2) * numpy.exp(-(win ** 2) / (2.0 * std ** 2))
+    win = (
+        1.0
+        / numpy.sqrt(2.0 * numpy.pi * std**2)
+        * numpy.exp(-(win**2) / (2.0 * std**2))
+    )
 
     return win
 
@@ -280,9 +294,7 @@ class GenomeTrack:
         return self._data
 
     def __post_init__(self):
-        if isinstance(self.input, str) and not _path_exists_s3_or_local(
-            self.input
-        ):
+        if isinstance(self.input, str) and not _path_exists_s3_or_local(self.input):
             raise ValueError(f"{self.input} does not exist")
         if self.region is None:
             self.region = self.input.plot_region
@@ -927,7 +939,9 @@ class VplotTrack(GenomeTrack):
             FragmentArray,
         )
 
-        if isinstance(input, (RegionFragmentArray, FragmentArray)) or input.__class__.__name__ in [
+        if isinstance(
+            input, (RegionFragmentArray, FragmentArray)
+        ) or input.__class__.__name__ in [
             "FragmentArray",
             "RegionFragmentArray",
         ]:
@@ -1887,8 +1901,18 @@ class GeneTrack(GenomeTrack):
 @dataclass
 class CoverageDifferenceTrack(CoverageTrack):
     def _build_coverage(self, *args, **kwargs):
-        c1 = copy.deepcopy(self.data).subset_fragment_lengths(self.fraction[0], self.fraction[1]).subset_by_fragment_strand('+').get_midpoint_coverage_array()
-        c2 = copy.deepcopy(self.data).subset_fragment_lengths(self.fraction[0], self.fraction[1]).subset_by_fragment_strand('-').get_midpoint_coverage_array()
+        c1 = (
+            copy.deepcopy(self.data)
+            .subset_fragment_lengths(self.fraction[0], self.fraction[1])
+            .subset_by_fragment_strand("+")
+            .get_midpoint_coverage_array()
+        )
+        c2 = (
+            copy.deepcopy(self.data)
+            .subset_fragment_lengths(self.fraction[0], self.fraction[1])
+            .subset_by_fragment_strand("-")
+            .get_midpoint_coverage_array()
+        )
         return c2 - c1
 
     def _plot(self, ax):
@@ -1897,8 +1921,12 @@ class CoverageDifferenceTrack(CoverageTrack):
 
 
 def StrandSplitCoverageTrack(fa, *args, **kwargs):
-    p1 = CoverageTrack(fa.subset_by_fragment_strand('+'), *args, color='black', **kwargs)
-    p1.name = p1.name + ' - Fwd Strand'
-    p2 = CoverageTrack(fa.subset_by_fragment_strand('-'), *args, color='green', **kwargs)
-    p2.name = p2.name + ' - Rev Strand'
+    p1 = CoverageTrack(
+        fa.subset_by_fragment_strand("+"), *args, color="black", **kwargs
+    )
+    p1.name = p1.name + " - Fwd Strand"
+    p2 = CoverageTrack(
+        fa.subset_by_fragment_strand("-"), *args, color="green", **kwargs
+    )
+    p2.name = p2.name + " - Rev Strand"
     return p1 + p2

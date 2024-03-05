@@ -7,8 +7,10 @@ from pytest import mark, raises
 
 # TODO -- move this into config
 
+
 def get_test_path(*args):
     return os.path.join("/home/nboley/src/fragmentomics_tools/test/data", *args)
+
 
 DEFAULT_CACHE_DIR = get_test_path("./")
 
@@ -37,9 +39,11 @@ from fragmentomics_tools.formats import (
 from fragmentomics_tools.fragment import Fragment
 from fragmentomics_tools.region import Region
 
+
 def mkdir_p(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
+
 
 FRAG_BED_GZ = get_test_path("frags.bed.gz")
 
@@ -51,7 +55,9 @@ BED_RECS = [
 ]
 BED4_RECS = [Bed4Record(rec.chrom, rec.start, rec.stop, "asdf") for rec in BED_RECS]
 FRAG_RECS = [Fragment(rec.chrom, rec.start, rec.stop, 0, 1, 0.5) for rec in BED_RECS]
-WIGGLE_RECS = [WigRecord(rec.chrom, rec.start, rec.stop, i + 0.5) for i, rec in enumerate(BED_RECS)]
+WIGGLE_RECS = [
+    WigRecord(rec.chrom, rec.start, rec.stop, i + 0.5) for i, rec in enumerate(BED_RECS)
+]
 
 READER_CLASSES = [
     BedReader,
@@ -108,7 +114,9 @@ def test_get_default_reader_for_file(cleandir):
 def get_generic_reader_writer_params(indexed_reader_writers_only=False):
     for reader_class in READER_CLASSES:
         writer_class = reader_class.get_writer_class()
-        if indexed_reader_writers_only and not issubclass(reader_class, IndexedRegionReader):
+        if indexed_reader_writers_only and not issubclass(
+            reader_class, IndexedRegionReader
+        ):
             continue
 
         for extension in writer_class.extensions:
@@ -122,7 +130,9 @@ def get_generic_reader_writer_params(indexed_reader_writers_only=False):
                 records = BED_RECS
 
             if writer_class in [BigWigWriter, BigBedWriter]:
-                writer_init_kwargs = dict(header=dict(chrom_lengths=dict([("chr1", 10000), ("chr2", 10000)])))
+                writer_init_kwargs = dict(
+                    header=dict(chrom_lengths=dict([("chr1", 10000), ("chr2", 10000)]))
+                )
             else:
                 writer_init_kwargs = dict()
 
@@ -206,7 +216,9 @@ def test_indexed_region_reader_writer(
     # test slicing the file we just made
     region = Region("chr1", 200, 301)
     sliced_fname = f"sliced.{extension}"
-    reader_class.slice(fname, region.chrom, region.start, region.stop, sliced_fname, cache_dir=None)
+    reader_class.slice(
+        fname, region.chrom, region.start, region.stop, sliced_fname, cache_dir=None
+    )
     with reader_class(sliced_fname) as slice_reader:
         sliced_records = list(slice_reader)
         assert sliced_records == records[1:3]
@@ -230,7 +242,9 @@ def test_indexed_region_reader_writer(
     "reader_class, writer_class, extension, records, writer_init_kwargs",
     list(get_generic_reader_writer_params(indexed_reader_writers_only=True)),
 )
-def test_cached_slicing(cleandir, reader_class, writer_class, extension, records, writer_init_kwargs):
+def test_cached_slicing(
+    cleandir, reader_class, writer_class, extension, records, writer_init_kwargs
+):
     fname = f"x.{extension}"
     with writer_class(fname, **writer_init_kwargs) as writer:
         for rec in records:
@@ -240,7 +254,12 @@ def test_cached_slicing(cleandir, reader_class, writer_class, extension, records
 
     def slice_from_cache_get_mtime(out_path):
         reader_class.slice(
-            fname, region.chrom, region.start, region.stop, out_path, cache_dir="cache_dir",
+            fname,
+            region.chrom,
+            region.start,
+            region.stop,
+            out_path,
+            cache_dir="cache_dir",
         )
         with reader_class(out_path) as slice_reader:
             sliced_records = list(slice_reader)
@@ -280,7 +299,9 @@ def test_bed_record():
         GappedPeakRecord.from_line(bed_line)
 
     bed6_line = "chr11\t2\t3\tx\t1.1\t+"
-    bed6_rec = Bed6Record(chrom="chr11", start=2, stop=3, name="x", score=1.1, strand="+")
+    bed6_rec = Bed6Record(
+        chrom="chr11", start=2, stop=3, name="x", score=1.1, strand="+"
+    )
     with pytest.raises(TypeError):
         # wrong number of columns
         Bed3Record.from_line(bed6_line)
@@ -352,12 +373,16 @@ def test_slice_encode_big_wig():
 
 
 @mark.parametrize("cache_dir", [DEFAULT_CACHE_DIR, None])
-@mark.parametrize("reader_class, records", [(BigBedReader, BED4_RECS), (BigWigReader, WIGGLE_RECS)])
+@mark.parametrize(
+    "reader_class, records", [(BigBedReader, BED4_RECS), (BigWigReader, WIGGLE_RECS)]
+)
 def test_slice_with_different_writer(cleandir, cache_dir, reader_class, records):
     writer_class = reader_class.get_writer_class()
     ext = writer_class.extensions[0]
     fname = f"test.{ext}"
-    with writer_class(fname, header=dict(chrom_lengths=dict([("chr1", 10000), ("chr2", 10000)]))) as writer:
+    with writer_class(
+        fname, header=dict(chrom_lengths=dict([("chr1", 10000), ("chr2", 10000)]))
+    ) as writer:
         writer.write_records(records)
     region = Region("chr1", 200, 302)
 
