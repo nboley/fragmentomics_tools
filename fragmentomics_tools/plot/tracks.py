@@ -1882,3 +1882,23 @@ class GeneTrack(GenomeTrack):
                 return i
         rows.append([])
         return len(rows) - 1
+
+
+@dataclass
+class CoverageDifferenceTrack(CoverageTrack):
+    def _build_coverage(self, *args, **kwargs):
+        c1 = copy.deepcopy(self.data).subset_fragment_lengths(self.fraction[0], self.fraction[1]).subset_by_fragment_strand('+').get_midpoint_coverage_array()
+        c2 = copy.deepcopy(self.data).subset_fragment_lengths(self.fraction[0], self.fraction[1]).subset_by_fragment_strand('-').get_midpoint_coverage_array()
+        return c2 - c1
+
+    def _plot(self, ax):
+        super()._plot(ax)
+        ax.axhline(0)
+
+
+def StrandSplitCoverageTrack(fa, *args, **kwargs):
+    p1 = CoverageTrack(fa.subset_by_fragment_strand('+'), *args, color='black', **kwargs)
+    p1.name = p1.name + ' - Fwd Strand'
+    p2 = CoverageTrack(fa.subset_by_fragment_strand('-'), *args, color='green', **kwargs)
+    p2.name = p2.name + ' - Rev Strand'
+    return p1 + p2

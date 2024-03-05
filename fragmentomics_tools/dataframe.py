@@ -21,9 +21,11 @@ from smart_open import open
 from tqdm.contrib.concurrent import process_map
 from tqdm import tqdm
 from joblib import delayed, Parallel
+
 #from tqdm.contrib.concurrent import process_map
 #from p_tqdm import p_map
 
+import seaborn as sns
 
 import pysam
 import logging
@@ -1226,60 +1228,6 @@ class RegionDataFrame(DataFrameBase):
             path_or_buf=path_or_buf, sep="\t", columns=columns, header=True, index=False, index_label=None,
         )
 
-    def _build_sample_region_dataframe_from_sample_dataframe(self, sdf, keep_sample_metadata=False):
-        """Attach sample_id in sdf to the dataframe.
-
-        """
-        assert False
-
-        if keep_sample_metadata:
-            columns = copy.copy(sdf.columns)
-        else:
-            columns = ["sample_id"]
-            # if fragment_h5_path is set then use it
-            if "fragment_h5_path" in sdf.columns:
-                columns.append("fragment_h5_path")
-
-        sample_ids = sdf[columns]
-        assert sample_ids.sample_id.is_unique
-        return SampleAndRegionDataFrame(self.join(sample_ids, how="cross"), ref=self.ref)
-
-    def build_sample_region_dataframe(self, sdf, keep_sample_metadata=False):
-        """Attach sample_id in sdf to the dataframe.
-
-        """
-        if keep_sample_metadata and not isinstance(sdf, pandas.DataFrame):
-            raise ValueError(
-                "Does not make sense for keep_sample_metadata to be True unless sdf is a sample data frame"
-            )
-
-        # if this is a string or bytes then assume that it's a fragment h5 path
-        if isinstance(sdf, (str, bytes, FragmentsH5)):
-            sdf = [sdf]
-
-        # if this is another collection, assume that it's a collection of h5 paths. Extract
-        # the sample_id from the fragment h5 paths
-        if isinstance(sdf, (list, tuple, set)):
-            sample_id_to_fragment_h5_path = {}
-            for path in sdf:
-                sample_id = FragmentsH5(path, cache_pointers=False).sample_id
-                assert sample_id not in sample_id_to_fragment_h5_path
-                sample_id_to_fragment_h5_path[sample_id] = path
-            sdf = sample_id_to_fragment_h5_path
-
-        # if sdf is a dictionary, then assume it's a mapping from sample_id to fragment_h5_path
-        if isinstance(sdf, dict):
-            sdf = pandas.DataFrame(data=list(sdf.items()), columns=["sample_id", "fragment_h5_path"])
-
-        if isinstance(sdf, pandas.DataFrame):
-            return self._build_sample_region_dataframe_from_sample_dataframe(
-                sdf, keep_sample_metadata=keep_sample_metadata
-            )
-
-        raise TypeError(
-            "Expecting sdf to be either a fragment_h5_path, a list of fragment_h5_paths, a mapping from sample_ids to fragment_h5_paths, or a sample_dataframe"
-        )
-
     def get_one_hot_encoded_seq(
         self,
         num_workers: int = 1,
@@ -1434,25 +1382,7 @@ class RegionDataFrame(DataFrameBase):
         )
 
     # REQUIRES LABEL
-    def drop_unlabeled_records(self, inplace=False):
-        rv = self.drop(self.query("label < -1e-6").index, inplace=inplace)
-        # if inplace is true, pandas.drop returns None. We return self so that we
-        # can chain the methods together.
-        if inplace:
-            return self
-        else:
-            return rv
-
-    # REQUIRES LABEL AND SAMPLE_ID
-    def summarize(self):
-        return (
-            self[["sample_id", "label", "id", "fm_sum"]]
-            .groupby(["sample_id", "label"])
-            .agg(dict(id=len, fm_sum=["mean"]))
-        )
-
-    # REQUIRES LABEL
-    def miniaturize(self, max_features_per_label):
+    def downsample_stratified_by_label(self, max_features_per_label):
         """
         Downsample so that there is at most `max_number_of_samples_per_label` for each label.  Useful for quick
         testing.
@@ -1482,158 +1412,25 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             return
 
         if "sample_id" not in self.columns:
-            raise ValueError("SampleAndRegionDataFrame must have a sample_id column")
+            raise ValueError("SampleDataFrame must have a sample_id column")
 
-        return
-
-    def get_sample_df(self, all_samples_dataframe=None, sample_id_col_name=None, contains_sample_ids=False):
-        """Return a sample data frame subset by the samples in self.sample_id
-
-        :param sample_database: a dataframe containing all samples to join on.
-        """
-        # avoid a circular import
-        if all_samples_dataframe is None:
-            from ravel.samples import SAMPLE_DF
-
-            all_samples_dataframe = SAMPLE_DF
-
-        if sample_id_col_name is None:
-            if contains_sample_ids:
-                sample_id_col_name = "sample_ids"
-            else:
-                sample_id_col_name = "sample_id"
-
-        sample_ids = self[sample_id_col_name].unique()
-        from itertools import chain
-
-        if contains_sample_ids:
-            sample_ids = set(chain(*[x.split(",") for x in sample_ids]))
-
-        return all_samples_dataframe.query("sample_id in @sample_ids")
-
-    def get_region_df(
-        self, region_cols: List[str] = ["contig", "start", "stop", "strand"]
-    ) -> RegionDataFrame:
-        """Returns a region dataframe that contains all regions in this srdf without duplicates."""
-        return RegionDataFrame(self.loc[:, region_cols].drop_duplicates(keep="first"), ref=self.ref)
+        if "frag_h5" not in self.columns:
+            raise ValueError("SampleDataFrame must have a frag_h5 column")
 
 
-    def _get_fragment_h5_paths(
-        self, sample_id_col_name="sample_id", fragment_h5_path_col_name="fragment_h5_path"
-    ):
-        # first check if there is a fragment_h5_path column in self. If there is, then find the unique mapping from
-        # sample_id_col_name to fragment_h5_path_col_name, and then return the mapping as a dictionary
-        # if there is, then use it
-        if fragment_h5_path_col_name in self.columns:
-            df = self[[sample_id_col_name, fragment_h5_path_col_name]].reset_index(drop=True)
-            return df.drop_duplicates().set_index(sample_id_col_name).to_dict()[fragment_h5_path_col_name]
+    @classmethod
+    def init_from_rdf_and_sdf(cls, rdf, sdf):
+        return cls(rdf.merge(sdf, how='cross'), ref=rdf.ref)
+        new_dfs = []
+        for record in sdf.itertuples():
+            new_df = rdf.copy()
+            new_df["sample_id"] = record.sample_id
+            # assert record.frag_h5.ref == rdf.ref, "rdf reference must match frag_h5 reference"
+            new_df["frag_h5"] = record.frag_h5
+            new_dfs.append(new_df)
 
-        # get all of the h5 paths
-        return (
-            self.get_sample_df(sample_id_col_name=sample_id_col_name)
-            .get_fragments_h5_paths(sync=True)
-            .to_dict()
-        )
-
-    def _get_fragment_arrays_or_matrices(
-        self,
-        # a string indicating which type we want. either 'fragment_array' or 'fragment_matrix'
-        sample_id_col_name="sample_id",
-        num_cores=NUM_CORES,
-        verbose=1,
-        min_mapq: int = DEFAULT_MIN_MAPQ,
-        max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
-        include_fragment_strand: bool = False,
-        **kwargs,
-    ):
-        """
-
-        """
-        sample_id_to_fragment_h5_path = self._get_fragment_h5_paths(sample_id_col_name=sample_id_col_name)
-
-        def get_fm(record):
-            h5_path = sample_id_to_fragment_h5_path[getattr(record, sample_id_col_name)]
-            region = Region(record.contig, record.start, record.stop, record.strand)
-            _kwargs = dict(region=region, min_mapq=min_mapq, max_frag_len=max_frag_len, include_fragment_strand=include_fragment_strand, **kwargs)
-
-            return (record.Index, FragmentArray.from_fragments_h5(h5_path, **_kwargs))
-
-        if num_cores <= 1:
-            res = [get_fm(x) for x in tqdm(self.itertuples(), total=len(self), disable=(verbose <= 0))]
-        else:
-            # self.itertuples() breaks when it's passed fields containing a dash, so we subset the columns and copy it
-            #  We're going to use only needed fields: ["contig", "start", "stop", "strand", sample_id_col_name]
-            field_subset = ["contig", "start", "stop", "strand", sample_id_col_name]
-            res = p_map(
-                get_fm,
-                list(self[field_subset].copy().itertuples()),
-                num_cpus=num_cores,
-                disable=(verbose <= 0),
-            )
-        index, fs = zip(*res)
-        return pandas.Series(fs, index=index, name=fragment_matrix_or_fragment_array)
-
-    def get_fragment_arrays(
-        self,
-        *args,
-        num_cores: int = 10,
-        flip_data_to_match_region_strand: bool = True,
-        use_cached: bool = False,
-        **kwargs,
-    ):
-        """
-
-        :param args: any args to `self._get_fragment_arrays_or_matrices`
-        :param num_cores: number of cores to use for loading.
-        :param flip_data_to_match_region_strand: If true, the resulting fragment
-            arrays will have their data strand matching the region strand for this region.
-        :param use_cached: If true, use the cached fragment_arrays and just return them rather than recomputing.
-        :param kwargs: any extra kwargs to pass through to `FragmentArray.from_fragments_h5`
-
-        :return: Series of fragment_arrays
-        """
-        if use_cached and "fragment_array" in self.columns:
-            data_was_cached = True
-            fragment_arrays = self["fragment_array"]
-        else:
-            data_was_cached = False
-            fragment_arrays: pd.Series = self._get_fragment_arrays_or_matrices(
-                "fragment_array",
-                *args,
-                num_cores=num_cores,
-                flip_data_to_match_region_strand=flip_data_to_match_region_strand,
-                **kwargs,
-            )
-
-        return fragment_arrays
-
-    def attach_fragment_array(
-        self,
-        num_cores: int = 1,
-        flip_data_to_match_region_strand: bool = True,
-        always_rebuild=False,
-        **kwargs,
-    ) -> "SampleAndRegionDataFrame":
-        """
-        If fragment_array is not already in this srdf, add it in. Beware that if you call this twice with different arguments,
-            only the first call will be applied.
-
-        :param num_cores: Number of cores to use to load the fragment array
-        :param flip_data_to_match_region_strand: Flip the data to match the region strand, this is default.
-        :param kwargs: Additional kwargs to `SampleAndRegionDataFrame.get_fragment_arrays(...)`.
-        :return: Copy of self with a fragment_array column added.
-        """
-        if always_rebuild:
-            self = self.drop(columns=["fragment_array"])
-
-        if "fragment_array" not in self.columns:
-            fragment_arrays = self.get_fragment_arrays(
-                num_cores=num_cores,
-                flip_data_to_match_region_strand=flip_data_to_match_region_strand,
-                **kwargs,
-            )
-            self = self.join(fragment_arrays)
-        return self
+        merged_df = pandas.concat(new_dfs).reset_index(drop=True)
+        return cls(merged_df, ref=rdf.ref)
 
 
     def _check_has_fragment_array(self):
@@ -1641,6 +1438,102 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             "Please first call `srdf = srdf.attach_fragment_array(...)` to generate "
             "the required/missing fragment_array column"
         )
+
+
+    def load_fragment_arrays(
+        self,
+        num_cores=NUM_CORES,
+        verbose=1,
+        min_mapq: int = DEFAULT_MIN_MAPQ,
+        max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
+        flip_data_to_match_region_strand: bool = False,
+        **kwargs,
+    ):
+        """
+
+        """
+        assert self.index.is_unique
+
+        def get_fa(record):
+            region = Region(record.contig, record.start, record.stop, record.strand)
+            _kwargs = dict(region=region, min_mapq=min_mapq, max_frag_len=max_frag_len, include_fragment_strand=True, flip_data_to_match_region_strand=flip_data_to_match_region_strand, **kwargs)
+            return (record.Index, RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs))
+
+        if num_cores <= 1:
+            res = [get_fa(x) for x in tqdm(self.itertuples(), total=len(self), disable=(verbose <= 0))]
+        else:
+            # self.itertuples() breaks when it's passed fields containing a dash, so we subset the columns and copy it
+            #  We're going to use only needed fields: ["contig", "start", "stop", "strand", sample_id_col_name]
+            field_subset = ["contig", "start", "stop", "strand", 'sample_id', 'frag_h5']
+            res = list(
+                tqdm.tqdm(
+                    # Note the new return_as argument here, which requires joblib >= 1.3:
+                    Parallel(n_jobs=num_cores, return_as="generator")(
+                        delayed(get_fa)(record) for record in list(self[field_subset].itertuples())
+                    ),
+                    total=len(self),
+                )
+            )
+
+        index, fs = zip(*res)
+        return pandas.Series(fs, index=index, name='fa')
+
+    def attach_fragment_arrays(self, *args, rebuild_fragment_arrays=False, **kwargs):
+        # If we've already attached
+        if not rebuild_fragment_arrays and 'fragment_array' in self.columns:
+            return self
+
+        fas = self.load_fragment_arrays(*args, **kwargs)
+        self['fragment_array'] = fas
+        return self
+
+class FlDist():
+    def __init__(self, sdf):
+        max_frag_len = 512
+        columns = {}
+        for frag_h5 in sdf.frag_h5:
+            cnts = frag_h5.fragment_length_counts[:max_frag_len]
+            # normalize to library depth
+            cnts = cnts/cnts.sum()
+            columns['RD-' + frag_h5.sample_id.split('-')[1]] = cnts
+
+        fl_df = pd.DataFrame(columns)
+        fl_df = fl_df.set_index(fl_df.index+1)
+
+        self.fl_df = fl_df
+
+    def plot(self, figsize=(20, 8)):
+        sns.set(rc={'figure.figsize': figsize})
+
+        # add the reference
+        fl_df = self.fl_df.copy()
+        ref_fl_dist = fl_df.mean(axis=1)
+        ref_fl_dist = ref_fl_dist/ref_fl_dist.sum()
+        fl_df.loc[:, 'Reference'] = ref_fl_dist
+
+        fl_df.plot(legend=False)
+
+
+class SampleDataFrame(DataFrameBase):
+    _metadata = ['fl_dist']
+
+    def __init__(self, data, *args, **kwargs):
+        super().__init__(data, *args, **kwargs)
+
+        # hack around pandas not correctly using _constructor internally
+        # This line should always be first.  Pandas incorrectly passes this BlockManager to the constructor sometimes.
+        if isinstance(data, pd.core.internals.BlockManager):
+            return
+
+        if "sample_id" not in self.columns:
+            raise ValueError("SampleDataFrame must have a sample_id column")
+
+        if "frag_h5" not in self.columns:
+            raise ValueError("SampleDataFrame must have a frag_h5 column")
+
+        self.fl_dist = FlDist(self)
+
+        return
 
 
 def intersect_region_dataframes(region_dataframes, sort=False):
