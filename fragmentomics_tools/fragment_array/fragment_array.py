@@ -145,6 +145,18 @@ class FragmentArray:
         """
         return Region("NA", 0, self.shape[1])
 
+    def _ones_if_none(self, _x):
+        if _x is None:
+            return numpy.ones(self.starts_0.shape, dtype=float)
+        else:
+            return numpy.asarray(_x, dtype=float)
+
+    def _zeros_if_none(self, _x):
+        if _x is None:
+            return numpy.ones(self.starts_0.shape, dtype=int)
+        else:
+            return numpy.asarray(_x, dtype=int)
+
     def __init__(
         self,
         starts_0: Union[numpy.ndarray, List],
@@ -158,6 +170,7 @@ class FragmentArray:
         last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
         num_meth_cpgs: Union[numpy.ndarray, List, None] = None,
+        is_flipped: bool = False,
     ):
         """
         A FragmentArray is a collection of fragments stored in a spare-array-like coordinate format.  The
@@ -188,6 +201,7 @@ class FragmentArray:
             last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
+            is_flipped=is_flipped,
         )
         if isinstance(starts_0, numpy.ndarray) and starts_0.dtype != numpy.int32:
             raise TypeError("start array must by int32")
@@ -199,30 +213,17 @@ class FragmentArray:
         self.stops_0 = numpy.asarray(stops_0, dtype=numpy.int32)
         self.length = length
         self.max_frag_len = max_frag_len
+        self.weights = self._ones_if_none(weights)
         self.fragment_strands = fragment_strands
+        self.is_flipped = is_flipped
         if self.fragment_strands is not None:
             self.fragment_strands = numpy.asarray(self.fragment_strands, dtype="U1")
 
-        def _ones_if_none(_x):
-            if _x is None:
-                return numpy.ones(self.starts_0.shape, dtype=float)
-            else:
-                return numpy.asarray(_x, dtype=float)
+        self.first_covered_base_weights = self._ones_if_none(first_covered_base_weights)
+        self.last_covered_base_weights = self._ones_if_none(last_covered_base_weights)
 
-        self.weights = _ones_if_none(weights)
-        self.first_covered_base_weights = _ones_if_none(first_covered_base_weights)
-        self.last_covered_base_weights = _ones_if_none(last_covered_base_weights)
-
-        self.num_cpgs = (
-            numpy.zeros(len(starts_0), dtype=numpy.uint32)
-            if num_cpgs is None
-            else num_cpgs
-        )
-        self.num_meth_cpgs = (
-            numpy.zeros(len(starts_0), dtype=numpy.uint32)
-            if num_meth_cpgs is None
-            else num_meth_cpgs
-        )
+        self.num_cpgs = self._zeros_if_none(num_cpgs)
+        self.num_meth_cpgs = self._zeros_if_none(num_meth_cpgs)
 
         # Update the things that were just set above
         for k in self.init_kwargs.keys():
@@ -638,17 +639,20 @@ class FragmentArray:
             num_cpgs=self.num_cpgs[::-1],
             num_meth_cpgs=self.num_meth_cpgs[::-1],
             validate_data=False,
+            is_flipped=(not self.is_flipped),
         )
 
-    def reverse_strand_if_negative(self):
-        if self.strand == "+":
-            return self
-        elif self.strand == "-":
-            return self.reverse_strand()
-        else:
+    def make_data_direction_match_strand(self):
+        if self.strand not in "+-":
             raise TypeError(
                 f"Unrecognized strand '{self.strand}' (are you sure that you want to use this function?)"
             )
+        if self.strand == "+" and self.is_flipped:
+            return self.reverse_strand()
+        elif self.strand == "-" and not self.is_flipped:
+            return self.reverse_strand()
+        else:
+            return self
 
     @property
     def dense_array(self) -> numpy.ndarray:
@@ -1134,6 +1138,7 @@ class RegionFragmentArray(FragmentArray):
         last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
         num_meth_cpgs: Union[numpy.ndarray, List, None] = None,
+        is_flipped: bool = False,
     ):
         self.region = region
 
@@ -1148,6 +1153,7 @@ class RegionFragmentArray(FragmentArray):
             last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
             num_meth_cpgs=num_meth_cpgs,
+            is_flipped=is_flipped,
         )
 
         # assert obj_type_name_matches_class_name_str(region, Region)
@@ -1786,7 +1792,11 @@ def unpack_starts_and_stop_vals(starts, stops, counts):
     )
 
 
-def merge_fragment_arrays(ars):
+def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
+    assert len(ars) > 0
+    if make_data_direction_match_strand:
+        ars = [ar.make_data_direction_match_strand() for ar in ars]
+
     region_length = ars[0].length
     if not all(ar.length == region_length for ar in ars):
         raise ValueError("Can not merge regions of differing lengths")

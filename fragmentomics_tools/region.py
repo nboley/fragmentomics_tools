@@ -69,6 +69,61 @@ class Region(DataClassMixin):
     def shift(self, offset: int = 0):
         self.replace(start=self.start + offset, stop=self.stop + offset)
 
+    def shift(self, offset: int = 0):
+        return self.replace(start=self.start + offset, stop=self.stop + offset)
+
+    def left_shift(self, offset: int = 0):
+        return self.replace(start=self.start + offset)
+
+    def left_resize(self, new_length):
+        return self.left_shift(self.length - new_length)
+
+    def right_shift(self, offset: int = 0):
+        return self.replace(stop=self.stop + offset)
+
+    def right_resize(self, new_length):
+        return self.right_shift(new_length - self.length)
+
+    def five_prime_shift(self, offset: int = 0):
+        """Shift the five prime end of region 'offset' basepairs towards the three prime end.
+
+        # Region(100, 200, '+').five_prime_shift(-50) == Region(50, 200, '+')
+        # Region(100, 200, '-').five_prime_shift(-50) == Region(100, 250, '-')
+        # TODO -- add some doc tests
+        """
+        if not self.strand_is_set:
+            raise TypeError("Region must have strand set to resize the five prime end")
+
+        if self.strand == "+":
+            return self.left_shift(offset)
+        elif self.strand == "-":
+            return self.right_shift(-offset)
+        else:
+            assert False, "Unreachable -- this should be caught by checking that strand is set"
+
+    def five_prime_resize(self, new_length):
+        return self.five_prime_shift(self.length - new_length)
+
+    def three_prime_shift(self, offset: int = 0):
+        """Shift the three prime end of region 'offset' basepairs in the three prime direction.
+
+        # Region(100, 200, '+').three_prime_shift(-50) == Region(100, 150, '+')
+        # Region(100, 200, '-').three_prime_shift(-50) == Region(50, 200, '-')
+        # TODO -- add some doc tests
+        """
+        if not self.strand_is_set:
+            raise TypeError("Region must have strand set to resize the three prime end")
+
+        if self.strand == "+":
+            return self.right_shift(offset)
+        elif self.strand == "-":
+            return self.left_shift(-offset)
+        else:
+            assert False, "Unreachable -- this should be caught by checking that strand is set"
+
+    def three_prime_resize(self, new_length):
+        return self.three_prime_shift(new_length - self.length)
+
     def intersect_annotation(self, annotation_name: str) -> List:
         """
         Intersects this Region with a annotation_name

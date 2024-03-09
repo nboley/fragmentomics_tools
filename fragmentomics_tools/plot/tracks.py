@@ -26,7 +26,6 @@ from fragmentomics_tools.formats import (
     GenePredReader,
 )
 from fragmentomics_tools.region import Region, intervals_intersect
-from fragmentomics_tools.formats import path_exists_s3_or_local
 
 # from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
 # from fbio.viz_sequence import plot_weights_given_ax
@@ -294,7 +293,7 @@ class GenomeTrack:
         return self._data
 
     def __post_init__(self):
-        if isinstance(self.input, str) and not _path_exists_s3_or_local(self.input):
+        if isinstance(self.input, str) and not os.path.exists(self.input):
             raise ValueError(f"{self.input} does not exist")
         if self.region is None:
             self.region = self.input.plot_region

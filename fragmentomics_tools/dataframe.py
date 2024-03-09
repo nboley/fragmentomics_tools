@@ -1644,6 +1644,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
     ):
         """ """
         assert self.index.is_unique
+        # reset the progress bar
+        tqdm._instances.clear()
 
         def get_fa(record):
             region = Region(record.contig, record.start, record.stop, record.strand)
@@ -1655,10 +1657,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 flip_data_to_match_region_strand=flip_data_to_match_region_strand,
                 **kwargs,
             )
-            return (
-                record.Index,
-                RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs),
-            )
+            fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs).drop_duplicate_fragments()
+            return (record.Index, fa)
 
         if num_cores <= 1:
             res = [
@@ -1672,7 +1672,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             #  We're going to use only needed fields: ["contig", "start", "stop", "strand", sample_id_col_name]
             field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
             res = list(
-                tqdm.tqdm(
+                tqdm(
                     # Note the new return_as argument here, which requires joblib >= 1.3:
                     Parallel(n_jobs=num_cores, return_as="generator")(
                         delayed(get_fa)(record)
