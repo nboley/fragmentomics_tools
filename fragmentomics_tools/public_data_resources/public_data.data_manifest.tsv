@@ -1,0 +1,7 @@
+#REMOTE_DATA_MIRROR_URI=s3://test-data-manifest-2-2024/public_data
+#LOCAL_CACHE_PATH_SUFFIX=./DATA_MANIFEST_CACHE_GZwzLHJi9jgT6YMU/
+key	md5sum	size	notes
+annotations/roadmap/gene_expression_metadata.tsv	c232aa9503c0589a6cf5074529410c5f	12581	
+annotations/roadmap/gene_expression.tsv.gz	574d9968f5f34101b7352f9b7ee58bc9	3496748	
+annotations/encode/tss.all_rampage.hg38.bed.gz	806587d58d0464722c6a1658e524de4c	391485	
+annotations/encode/tss.all_rampage.hg19.bed.gz	eb8d5ed7ea040c98db30b86c355f7624	388491	
