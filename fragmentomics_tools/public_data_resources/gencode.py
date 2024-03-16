@@ -37,3 +37,65 @@ def load_gencode_genes_rdf(ref='hg38'):
     rdf['stop'] = rdf[['tss', 'tes']].max(axis=1)
 
     return RegionDataFrame(rdf.sort_values(["contig", "start"]), ref=ref)
+
+
+def build_bed_line(df):
+    """Build a transcript bed line from a df contianing gtf exons and a transcript.
+
+    This is useful for visualization.
+    """
+    # extract the transcript record
+    transcript = df.query("element == 'transcript'")
+    assert len(transcript) == 1
+    transcript = transcript.iloc[0]
+
+    # extract the exons
+    exons = df.query("element == 'exon'").sort_values('start', ascending=True)
+    # assert exons.start.min() == transcript.start
+    #assert exons.stop.max() == transcript.stop
+    blockCount = str(len(exons))
+    blockSizes = ",".join([str(e.stop - e.start) for e in exons.itertuples()]) + ","
+    blockStarts = ",".join([str(e.start - transcript.start) for e in exons.itertuples()]) + ","
+    rv = [
+        transcript.contig,
+        str(transcript.start),
+        str(transcript.stop),
+        transcript.gene_name,
+        "1000",
+        transcript.strand,
+        str(transcript.start),
+        str(transcript.start),
+        "0",
+        blockCount,
+        blockSizes,
+        blockStarts
+    ]
+    return "\t".join(rv)
+
+def load_gencode_gtf(path):
+    rdf = pd.read_table(
+        path,
+        usecols=[0, 2, 3, 4, 6, 8],
+        names=["contig", "element", "start", "stop", "strand", "meta"],
+        comment="#",
+    ).query("contig not in ['chrM', 'chrY'] and element in ['transcript', 'exon']")
+    rdf['gene_id'] = rdf.meta.str.extract('gene_id "(ENSG?\d+\.\d+)"; ')
+    rdf['gene_name'] = rdf.meta.str.extract('gene_name "(.+?)"; ')
+    rdf['transcript_id'] = rdf.meta.str.extract('transcript_id "(.+?)"; ')
+    rdf = rdf.drop(columns=['meta'])
+    rdf = rdf.drop_duplicates()
+
+
+def build_transcript_bed_from_gencode_gtf(input_fname, output_fname):
+    # "/scratch/karius/annotation/gencode/gencode.v45.basic.annotation.gtf.gz"
+    # "/scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed"
+    with open(output_fname, "w") as ofp:
+        for _, sub_df in tqdm.tqdm(rdf.groupby('transcript_id')):
+            ofp.write(build_bed_line(sub_df) + "\n")
+    # bedtools sort -i /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed > /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.sorted.bed
+    # rm /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed
+    # bgzip /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.sorted.bed
+    # mv /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.sorted.bed.gz /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed.gz
+
+
+

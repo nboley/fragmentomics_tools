@@ -32,7 +32,7 @@ def load_ibd_sample_df():
     return SampleDataFrame(metadata).sort_values('label')
     
 
-def make_single_strand_bndry(fa, vline_pos=None, include_vplot=True):
+def make_single_strand_bndry(fa, vline_pos=None, include_vplot=True, coverage_type='summed_endpoints', smooth_window=None):
     FRAGMENT_BANDS = [(40, 60), (60, 100), (110, 500)]
 
     if vline_pos is None:
@@ -48,9 +48,10 @@ def make_single_strand_bndry(fa, vline_pos=None, include_vplot=True):
 
     for fraction in FRAGMENT_BANDS:
         for TrackCls, ymin in zip((StrandSplitCoverageTrack, CoverageDifferenceTrack), (0, None)):
-            tracks.append(TrackCls(fa, fa.plot_region, coverage_type='midpoint', n_boot_coverage=0, fraction=fraction, smooth_window=10, ylim=(ymin, None),
+            tracks.append(TrackCls(fa, fa.plot_region, coverage_type=coverage_type, n_boot_coverage=0, fraction=fraction, smooth_window=smooth_window, ylim=(ymin, None),
                                     vlines=[VLine(x=vline_pos)], 
-                                    name=f'{fraction[0]} - {fraction[1]} bp Fraction)'))
+                                    name=f'{coverage_type} coverage ({fraction[0]} - {fraction[1]} bp Fraction)'))
+
     return tracks
 
 
@@ -87,12 +88,12 @@ def make_on_off_plots(_rdf_w_fas, tss_or_polya, max_region_length=1024*24):
 
     
     all_on_fa = merge_fragment_arrays([getattr(_, resize_method_name)(max_region_length) for _ in on_rdf.sample(n_regions).fragment_array.tolist()]) # cell_type == 'all' and 
-    tracks = make_single_strand_bndry(all_on_fa, vline_pos=vline_pos, include_vplot=True)
+    tracks = make_single_strand_bndry(all_on_fa, vline_pos=vline_pos, include_vplot=True, coverage_type='summed_endpoints', smooth_window=100)
     tracks.append(VectorTrack(make_gene_cov(on_rdf, tss_or_polya)[(slice(None, all_on_fa.length) if tss_or_polya == 'tss' else slice(-all_on_fa.length, None))], all_on_fa.plot_region, name='Gene Coverage', ylim=(0, 1)))
     tracks.plot()
 
     all_off_fa = merge_fragment_arrays([getattr(_, resize_method_name)(max_region_length) for _ in off_rdf.sample(n_regions).fragment_array.tolist()]) # cell_type == 'all' and 
-    tracks = make_single_strand_bndry(all_off_fa, vline_pos=vline_pos, include_vplot=True)
+    tracks = make_single_strand_bndry(all_off_fa, vline_pos=vline_pos, include_vplot=True, coverage_type='summed_endpoints', smooth_window=100)
     tracks.append(VectorTrack(make_gene_cov(off_rdf, tss_or_polya=tss_or_polya)[(slice(None, all_on_fa.length) if tss_or_polya == 'tss' else slice(-all_on_fa.length, None))], all_off_fa.plot_region, name='Gene Coverage', ylim=(0, 1)))
     tracks.plot()
 

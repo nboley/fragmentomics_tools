@@ -702,6 +702,16 @@ class Region(DataClassMixin):
     def get_sequence(
         self,
         reference_fasta: pysam.Fastafile,
+    ) -> numpy.ndarray:
+        """
+        get the sequence of a region from a fasta file
+        :return: a str
+        """
+        return reference_fasta.fetch(self.chrom, self.start, self.stop).encode()
+
+    def get_one_hot_encoded_sequence(
+        self,
+        reference_fasta: pysam.Fastafile,
         reverse_complement_sequence_if_minus_strand: bool = False,
     ) -> numpy.ndarray:
         """
@@ -714,9 +724,9 @@ class Region(DataClassMixin):
         ).astype("int8")
         one_hot = seq[0]
         if reverse_complement_sequence_if_minus_strand and self.is_minus_strand():
-            return one_hot[::-1, ::-1]
+            return one_hot[::-1, ::-1].T
         else:
-            return one_hot
+            return one_hot.T
 
     def get_subregion_from_jitter_and_strand(
         self, output_size: int, jitter: int, strand: Optional[str] = None

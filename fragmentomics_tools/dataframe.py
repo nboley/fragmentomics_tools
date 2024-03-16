@@ -1,4 +1,5 @@
 import os
+import math
 import copy
 import logging
 import warnings
@@ -75,19 +76,28 @@ DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
 
 
+def windowed_range(start, stop, window_size):
+    """
+    >>> list(windowed_range(0, 5, 2))
+    [(0, 2), (2, 4), (4, 5)]
+    >>> list(windowed_range(0, 1, 2))
+    [(0, 1)]
+    >>> list(windowed_range(0, 11, 3))
+    [(0, 3), (3, 6), (6, 9), (9, 11)]
+    >>> list(windowed_range(-3, 3, 3))
+    [(-3, 0), (0, 3)]
+    """
+    if window_size <= 0:
+        raise ValueError("invalid window size")
+    if stop <= start:
+        raise ValueError("invalid start/stop")
+
+    for start in range(start, stop, window_size):
+        yield start, min(stop, start + window_size)
+
+
 def _bytes_to_float(b):
     return float(crc32(b) & 0xFFFFFFFF) / 2**32
-
-
-def _region_to_sequence(args: Tuple[Region, Optional[int], bool, str]):
-    region, window_size, reverse_complement_sequence_if_minus_strand, ref = args
-    return (
-        region.resize(window_size)
-        .get_sequence(
-            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand
-        )
-        .T
-    )
 
 
 class DataFrameBase(pandas.DataFrame):
@@ -1283,25 +1293,49 @@ class RegionDataFrame(DataFrameBase):
             rdf["stop"] = stops
             return rdf
 
-    def bin_regions_into_windows(self, window_size):
-        """
-        Bins this RegionDataFrame's regions into bins of `window_size` and returns a new RegionDataFrame
 
-        :param window_size: size to bin regions into
+    def bin_regions_into_windows(self, window_size, mode, stride=None):
+        """Multiply all regions by tiling windows across each region in self.
+    
+        :param window_size: the size of the window
+        :param mode: 'full' or valid'
+                      full: expand the region boundaries to produce ceil(region_length/window_size) windows
+                      valid: shrink the region boundaries to produce ceil(region_length/window_size) windows
+        :param stride: stride length. window_size%stride must equal 0. Default: window_size 
         """
-        new_index = []
-        new_rows = []
-        for i, row in self.iterrows():
-            for start, stop in windowed_range(row.start, row.stop, window_size):
-                new_index.append(i)
-                new_row = row.copy()
-                new_row["start"] = start
-                new_row["stop"] = stop
-                new_rows.append(new_row)
+        assert mode in ['full', 'valid']
+        if stride is None:
+            stride = window_size
+        else:
+            if window_size%stride != 0:
+                raise ValueError(f"window size ({window_size}) must be evenly divisble by stride ({stride})")
+    
+        def _resize(region):
+            if mode == 'full':
+                return region.resize(int(stride*math.ceil(region.length/stride)))
+            elif mode == 'valid':
+                return region.resize(int(stride*math.floor(region.length/stride)))
+            else:
+                assert False, 'UNREACHABLE'
+    
+        # first build all the windows
+        index_name = self.index.name
+        self_copy = self.reset_index()
+        all_windows = []
+        for region, record in tqdm(self_copy.iter_region_row(), total=self_copy.shape[0], disable=True):
+            region = _resize(region)
+            all_windows.extend((record.name, x[0], x[1]) for x in windowed_range(region.start, region.stop, stride))
+    
+        window_df = pd.DataFrame(all_windows, columns=['index', 'new_start', 'new_stop']).set_index('index')
+        window_df['new_stop'] = (window_df['new_stop'] + window_size - stride)
 
-        return self.__class__(
-            pandas.DataFrame.from_records(new_rows, index=new_index), ref=self.ref
-        )
+        rv = self_copy.join(window_df)\
+            .rename(columns=dict(new_start='start', new_stop='stop', start='old_start', stop='old_stop'))\
+            .drop(columns=['old_start', 'old_stop'])\
+            .set_index('index')
+        rv.index.rename(index_name, inplace=True)
+        return rv
+
 
     def split_on_query(self, query):
         """Split self into two dataframes.
@@ -1389,41 +1423,38 @@ class RegionDataFrame(DataFrameBase):
             index_label=None,
         )
 
-    def get_one_hot_encoded_seq(
-        self,
-        num_workers: int = 1,
-        window_size: Optional[int] = None,
-        reverse_complement_sequence_if_minus_strand: bool = True,
-        verbose: bool = True,
-    ) -> Union[pandas.Series, numpy.array]:
-        """
+    def _get_seq(self, fasta_path, seq_type, reverse_complement_sequence_if_minus_strand, verbose=False):
+            assert seq_type in ['one_hot_encoded', 'bytearray']
+            if seq_type == 'one_hot_encoded':
+                method = 'get_one_hot_encoded_sequence'
+                name = 'one_hot_encoded_sequence'
+            elif seq_type == 'bytearray':
+                method = 'get_sequence'
+                name = 'sequence'
+            else:
+                assert False, 'UNREACHABLE'
+        
+            seqs = []
+            with pysam.FastaFile(fasta_path) as fasta:
+                for region in tqdm(self.iter_regions(), total=len(self), disable=(not verbose)):
+                    seqs.append(getattr(region, method)(fasta, reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand))
+            return pd.Series(seqs, index=self.index, name=name)
+        
+    def get_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand=False, verbose=False):
+        return self._get_seq(fasta_path, 'bytearray', reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand, verbose=verbose)
 
-        :param num_workers: Number of workers to do this in parallel
-        :param window_size: Optional window size to resize sequences to when returning.
-        :param reverse_complement_sequence_if_minus_strand: If the region is on the minus strand,
-            and this is true, sequences will be reverse complemented
-        :param verbose: ignored
-        :return:
-        """
-        sequence = process_map(
-            _region_to_sequence,
-            [
-                (
-                    region,
-                    window_size,
-                    reverse_complement_sequence_if_minus_strand,
-                    self.ref,
-                )
-                for region in self.iter_regions()
-            ],
-            total=self.nrow,
-            max_workers=num_workers,
-            chunksize=10,
-        )
+    def attach_sequence(self, *args, rebuild=False, **kwargs):
+        if 'sequence' in self.columns and not rebuild:
+            return self
+        return self.join(self.get_sequence(*args, **kwargs))
 
-        return pandas.Series(
-            dict(zip(self.index, sequence)), name="one_hot_encoded_sequence"
-        )
+    def get_one_hot_encoded_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand=False, verbose=False):
+        return self._get_seq(fasta_path, 'one_hot_encoded', reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand, verbose=verbose)
+
+    def attach_one_hot_encoded_sequence(self, *args, rebuild=False, **kwargs):
+        if 'one_hot_encoded_sequence' in self.columns and not rebuild:
+            return self
+        return self.join(self.get_one_hot_encoded_sequence(*args, **kwargs))
 
     def get_pfm(
         self,
@@ -1637,7 +1668,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         self,
         num_cores=NUM_CORES,
         verbose=1,
-        min_mapq: int = DEFAULT_MIN_MAPQ,
+        min_mapq: int = 0,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
         flip_data_to_match_region_strand: bool = False,
         **kwargs,

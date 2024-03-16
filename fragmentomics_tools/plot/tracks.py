@@ -296,7 +296,10 @@ class GenomeTrack:
         if isinstance(self.input, str) and not os.path.exists(self.input):
             raise ValueError(f"{self.input} does not exist")
         if self.region is None:
-            self.region = self.input.plot_region
+            self.region = getattr(self.input, 'plot_region', None)
+        if self.region is None:
+            self.region = Region('NA', 0, len(self.input))
+
 
     @abc.abstractmethod
     def _plot(self, ax):
@@ -1031,6 +1034,7 @@ class CoverageTrack(GenomeTrack):
     bootstrap_alpha: float = 0.1
     color: str = None
     fraction: str = None
+    strand: str=None,
     # scale the coverage to allow for putting densities on the
     # same scale as counts
     scaling_factor: int = 1
@@ -1047,26 +1051,29 @@ class CoverageTrack(GenomeTrack):
         else:
             return cov
 
-    def _build_coverage(self, coverage_type):
+    def _build_coverage(self, strand=None, fraction=None, coverage_type=None):
         data = copy.deepcopy(self.data)
 
-        if self.fraction is None:
+        if strand in (b"+", b"-", "+", "-"):
+            data = data.subset_by_fragment_strand(strand)
+
+        if fraction is None:
             pass
         elif isinstance(self.fraction, str):
-            if self.fraction in ("small", "sub_nucleosome"):
+            if fraction in ("small", "sub_nucleosome"):
                 data = data.subset_fragment_lengths(0, 125)
-            elif self.fraction == "single_nucleosome":
+            elif fraction == "single_nucleosome":
                 data = data.subset_fragment_lengths(125, 250)
-            elif self.fraction == "dual_nucleosome":
+            elif fraction == "dual_nucleosome":
                 data = data.subset_fragment_lengths(250, 375)
-            elif self.fraction == "triple_nucleosome":
+            elif fraction == "triple_nucleosome":
                 data = data.subset_fragment_lengths(375, 500)
             else:
-                raise ValueError(f"Unrecognized value for fraction: '{self.fraction}'")
-        elif isinstance(self.fraction, tuple):
-            data = data.subset_fragment_lengths(self.fraction[0], self.fraction[1])
+                raise ValueError(f"Unrecognized value for fraction: '{fraction}'")
+        elif isinstance(fraction, tuple):
+            data = data.subset_fragment_lengths(fraction[0], fraction[1])
         else:
-            raise ValueError(f"Unrecognized value for fraction: '{self.fraction}'")
+            raise ValueError(f"Unrecognized value for fraction: '{fraction}'")
 
         if coverage_type == "midpoint":
             return data.get_midpoint_coverage_array()
@@ -1094,7 +1101,7 @@ class CoverageTrack(GenomeTrack):
                 color = self.color
 
             cov = (
-                self._build_coverage(coverage_type=coverage_type) * self.scaling_factor
+                self._build_coverage(strand=self.strand, fraction=self.fraction, coverage_type=coverage_type) * self.scaling_factor
             )
             n = cov.sum()
             if self.name is None:
@@ -1900,18 +1907,9 @@ class GeneTrack(GenomeTrack):
 @dataclass
 class CoverageDifferenceTrack(CoverageTrack):
     def _build_coverage(self, *args, **kwargs):
-        c1 = (
-            copy.deepcopy(self.data)
-            .subset_fragment_lengths(self.fraction[0], self.fraction[1])
-            .subset_by_fragment_strand("+")
-            .get_midpoint_coverage_array()
-        )
-        c2 = (
-            copy.deepcopy(self.data)
-            .subset_fragment_lengths(self.fraction[0], self.fraction[1])
-            .subset_by_fragment_strand("-")
-            .get_midpoint_coverage_array()
-        )
+        del kwargs['strand']
+        c1 = super()._build_coverage(*args, strand='+', **kwargs)
+        c2 = super()._build_coverage(*args, strand='-', **kwargs)
         return c2 - c1
 
     def _plot(self, ax):

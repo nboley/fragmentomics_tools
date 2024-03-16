@@ -522,14 +522,14 @@ class FragmentArray:
     def sample_with_replacement(self, n):
         return self.mask(np.random.choice(self.n_frags, n))
 
-    def _shift_boundaries(self, /, left=0, right=0):
+    def _shift_boundaries(self, /, left=0, right=0, validate_data=True):
         """Modify the length of self.region without changin fragments.
 
         This is a utility function so that FragmentArray and RegionFragmentArray can share code.
         """
         new_length = self.length - left + right
         assert new_length >= 0
-        return self._replace(length=new_length)
+        return self._replace(length=new_length, validate_data=validate_data)
 
     def resize_offset(self, new_size: int, region=None) -> int:
         """Return the integer offset for fragment starts/ends when asking for
@@ -584,7 +584,14 @@ class FragmentArray:
         """Make self smaller by left_amt and/or right_amt"""
         assert left_amt >= 0 and right_amt >= 0
         if left_amt > 0:
-            self = self.shift_and_zero_pad(-left_amt)._shift_boundaries(left=left_amt)
+            self = self._replace(
+                starts_0=self.starts_0-left_amt,
+                stops_0=self.stops_0-left_amt,
+                validate_data=False,
+            )._shift_boundaries(left=left_amt, validate_data=False)
+            self = self.mask(
+                self.valid_idxs(self.starts_0, self.stops_0, self.length)
+            )
         if right_amt > 0:
             self = self.mask(
                 self.valid_idxs(self.starts_0, self.stops_0, self.length - right_amt)
@@ -1192,12 +1199,12 @@ class RegionFragmentArray(FragmentArray):
             ._replace(region=shifted_region, validate_data=False)
         )
 
-    def _shift_boundaries(self, /, left=0, right=0):
+    def _shift_boundaries(self, /, left=0, right=0, validate_data=True):
         """Modify the length of self.region without changin fragments.
 
         This is a utility function so that FragmentArray and RegionFragmentArray can share code.
         """
-        return self._replace(region=self.region.left_shift(left).right_shift(right))
+        return self._replace(region=self.region.left_shift(left).right_shift(right), validate_data=False)
 
     def resize_offset(self, new_size: int) -> int:
         """Return the offset for fragment starts/ends when asking for a resize of this region"""
@@ -1794,7 +1801,10 @@ def unpack_starts_and_stop_vals(starts, stops, counts):
 
 def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     assert len(ars) > 0
-    if make_data_direction_match_strand:
+    regions = list(set(getattr(ar, "region", None) for ar in ars))
+
+    # only flip data if we're merging arrays across multiple regions
+    if make_data_direction_match_strand and (len(regions) > 1 and regions[0] is not None):
         ars = [ar.make_data_direction_match_strand() for ar in ars]
 
     region_length = ars[0].length
@@ -1822,7 +1832,6 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     )
     num_cpgs = numpy.concatenate([ar.num_cpgs for ar in ars])
     num_meth_cpgs = numpy.concatenate([ar.num_meth_cpgs for ar in ars])
-    regions = list(set(getattr(ar, "region", None) for ar in ars))
 
     if len(regions) == 1 and regions[0] is not None:
         region = regions.pop()
