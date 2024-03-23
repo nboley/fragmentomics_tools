@@ -1240,7 +1240,6 @@ class RegionDataFrame(DataFrameBase):
         self,
         new_size: Union[int, Sequence[int]],
         inplace: bool = False,
-        vectorized: bool = True,
         discard_invalid_resizes: bool = False,
         discard_buffer_bp: int = 0,
     ):
@@ -1249,83 +1248,78 @@ class RegionDataFrame(DataFrameBase):
         else:
             rdf = self
 
-        if vectorized:
-            sizes = rdf.stop - rdf.start
-            # midpoints = rdf.start + sizes // 2
-            # new_start = midpoints - new_size // 2
-            new_start = Region.get_resize_starts(rdf.start, sizes, new_size, rdf.strand)
-            new_stop = new_start + new_size
+        sizes = rdf.stop - rdf.start
+        # midpoints = rdf.start + sizes // 2
+        # new_start = midpoints - new_size // 2
+        new_start = Region.get_resize_starts(rdf.start, sizes, new_size, rdf.strand)
+        new_stop = new_start + new_size
 
-            if discard_invalid_resizes:
-                ok = (new_start - discard_buffer_bp) >= 0
-                filter = None
-                for contig in sorted(set(rdf.contig)):
-                    max_len = CONTIG_LENGTHS[rdf.ref][contig]
-                    contig_bad = ((new_stop + discard_buffer_bp) > max_len) & (
-                        rdf.contig == contig
-                    )
-                    if filter is None:
-                        filter = contig_bad
-                    else:
-                        filter = filter | contig_bad
-                ok = ok & ~filter
-
-                rdf = rdf.loc[ok, :]
-                new_start = new_start[ok]
-                new_stop = new_stop[ok]
-                logger.warning(
-                    f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize."
+        if discard_invalid_resizes:
+            ok = (new_start - discard_buffer_bp) >= 0
+            filter = None
+            for contig in sorted(set(rdf.contig)):
+                max_len = CONTIG_LENGTHS[rdf.ref][contig]
+                contig_bad = ((new_stop + discard_buffer_bp) > max_len) & (
+                    rdf.contig == contig
                 )
+                if filter is None:
+                    filter = contig_bad
+                else:
+                    filter = filter | contig_bad
+            ok = ok & ~filter
 
-            self._error_on_invalid_new_starts(new_start)
-            self._error_on_invalid_new_stops(rdf, new_stop)
-            rdf["start"] = new_start
-            rdf["stop"] = new_stop
-            return rdf
-        else:
-            starts = []
-            stops = []
-            for region in rdf.iter_regions():
-                new_region = region.resize(new_size)
-                starts.append(new_region.start)
-                stops.append(new_region.stop)
-            rdf["start"] = starts
-            rdf["stop"] = stops
-            return rdf
+            rdf = rdf.loc[ok, :]
+            new_start = new_start[ok]
+            new_stop = new_stop[ok]
+            logger.warning(
+                f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize."
+            )
+
+        self._error_on_invalid_new_starts(new_start)
+        self._error_on_invalid_new_stops(rdf, new_stop)
+        rdf["start"] = new_start
+        rdf["stop"] = new_stop
+        return rdf
 
 
     def bin_regions_into_windows(self, window_size, mode, stride=None):
         """Multiply all regions by tiling windows across each region in self.
-    
+
         :param window_size: the size of the window
         :param mode: 'full' or valid'
                       full: expand the region boundaries to produce ceil(region_length/window_size) windows
-                      valid: shrink the region boundaries to produce ceil(region_length/window_size) windows
-        :param stride: stride length. window_size%stride must equal 0. Default: window_size 
+                      valid: shrink the region boundaries to produce floor(region_length/window_size) windows
+                      exact: raise an error if any region_length isn't even divisble by stride and window_size
+        :param stride: stride length. window_size%stride must equal 0. Default: window_size
         """
-        assert mode in ['full', 'valid']
+        assert mode in ['full', 'valid', 'exact']
         if stride is None:
             stride = window_size
         else:
             if window_size%stride != 0:
                 raise ValueError(f"window size ({window_size}) must be evenly divisble by stride ({stride})")
-    
+
         def _resize(region):
             if mode == 'full':
                 return region.resize(int(stride*math.ceil(region.length/stride)))
             elif mode == 'valid':
                 return region.resize(int(stride*math.floor(region.length/stride)))
+            elif mode == 'exact':
+                assert window_size%stride == 0
+                if region.length%stride != 0:
+                    raise ValueError("region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode.")
+                return region
             else:
                 assert False, 'UNREACHABLE'
-    
+
         # first build all the windows
         index_name = self.index.name
         self_copy = self.reset_index()
         all_windows = []
-        for region, record in tqdm(self_copy.iter_region_row(), total=self_copy.shape[0], disable=True):
+        for region, record in tqdm(self_copy.iter_region_row(), total=self_copy.shape[0], disable=False):
             region = _resize(region)
             all_windows.extend((record.name, x[0], x[1]) for x in windowed_range(region.start, region.stop, stride))
-    
+
         window_df = pd.DataFrame(all_windows, columns=['index', 'new_start', 'new_stop']).set_index('index')
         window_df['new_stop'] = (window_df['new_stop'] + window_size - stride)
 
@@ -1433,13 +1427,13 @@ class RegionDataFrame(DataFrameBase):
                 name = 'sequence'
             else:
                 assert False, 'UNREACHABLE'
-        
+
             seqs = []
             with pysam.FastaFile(fasta_path) as fasta:
                 for region in tqdm(self.iter_regions(), total=len(self), disable=(not verbose)):
                     seqs.append(getattr(region, method)(fasta, reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand))
             return pd.Series(seqs, index=self.index, name=name)
-        
+
     def get_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand=False, verbose=False):
         return self._get_seq(fasta_path, 'bytearray', reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand, verbose=verbose)
 
@@ -1658,8 +1652,12 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         merged_df = pandas.concat(new_dfs).reset_index(drop=True)
         return cls(merged_df, ref=rdf.ref)
 
+    @property
+    def has_fragment_array(self):
+        return bool("fragment_array" in self.columns)
+
     def _check_has_fragment_array(self):
-        assert "fragment_array" in self.columns, (
+        assert self.has_fragment_array, (
             "Please first call `srdf = srdf.attach_fragment_array(...)` to generate "
             "the required/missing fragment_array column"
         )
@@ -1688,7 +1686,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 flip_data_to_match_region_strand=flip_data_to_match_region_strand,
                 **kwargs,
             )
-            fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs).drop_duplicate_fragments()
+            fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
             return (record.Index, fa)
 
         if num_cores <= 1:
@@ -1725,6 +1723,22 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         self["fragment_array"] = fas
         return self
 
+    def bin_regions_into_windows(self, *args, mode, **kwargs):
+        # we can only shrink fragment arrays without going back to the fragmnet h5s, so
+        # the binning mode needs to be set accordingly
+        if self.has_fragment_array and mode not in ('exact', 'valid'):
+            raise ValueError(
+                "bin_regions_into_windows mode must be 'exact' or 'valid' if the srdf has fragment arrays."
+                "Hint: If you need to grow regions with fragment arrays you'll need to drop the fragment arrays, resize the regions, and then re-attach the fragment arrays"
+            )
+        self = super().bin_regions_into_windows(*args, mode=mode, **kwargs)
+
+        # if we have fragmnet arrays then resize them
+        if self.has_fragment_array:
+            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
+            self['fragment_array'] = fragment_arrays
+
+        return self
 
 class FlDist:
     def __init__(self, sdf):

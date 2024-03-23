@@ -580,7 +580,7 @@ class FragmentArray:
         else:
             raise ValueError("'left_amt' or 'right_amt' must be set")
 
-    def truncate(self, left_amt=0, right_amt=0):
+    def truncate(self, /, left_amt=0, right_amt=0):
         """Make self smaller by left_amt and/or right_amt"""
         assert left_amt >= 0 and right_amt >= 0
         if left_amt > 0:
@@ -1233,6 +1233,23 @@ class RegionFragmentArray(FragmentArray):
             return self.left_resize(new_length)
         else:
             assert False, "Unreachable -- should be caught by the region resize"
+
+    #def truncate(self, /, left_amt=0, right_amt=0):
+    #    # self = self._replace(region=self.region.truncate(left_amt=left_amt, right_amt=right_amt))
+    #    return super().truncate(left_amt=left_amt, right_amt=right_amt)
+
+    def subset_by_region(self, subregion: int):
+        new_region = self.region.intersect(subregion)
+        if new_region is None:
+            raise ValueError("sub_region ({sub_region{) must be a subregion of self.region ({self.region}) to take the subset (ensure that strands match)")
+
+        left_amt = (subregion.start - self.region.start)
+        assert left_amt >= 0 and left_amt < self.region.length
+
+        right_amt = (self.region.stop - subregion.stop)
+        assert right_amt >= 0 and right_amt < self.region.length
+
+        return self.truncate(left_amt=left_amt, right_amt=right_amt)
 
     def __str__(self):
         return (

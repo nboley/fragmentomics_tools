@@ -40,6 +40,17 @@ CACHED_READERS = {}
 GLOBAL_FASTA_FILE_CACHE = {}
 
 
+def cmp(x, y):
+    if x < y:
+        return -1
+    elif x == y:
+        return 0
+    elif x > y:
+        return 1
+    else:
+        assert False, "Unreachable"
+
+
 def flip_strand(strand: Optional[str]):
     if strand is None or strand == ".":
         return strand
@@ -67,9 +78,6 @@ class Region(DataClassMixin):
         return self.replace(strand=flip_strand(self.strand))
 
     def shift(self, offset: int = 0):
-        self.replace(start=self.start + offset, stop=self.stop + offset)
-
-    def shift(self, offset: int = 0):
         return self.replace(start=self.start + offset, stop=self.stop + offset)
 
     def left_shift(self, offset: int = 0):
@@ -83,6 +91,11 @@ class Region(DataClassMixin):
 
     def right_resize(self, new_length):
         return self.right_shift(new_length - self.length)
+
+    def truncate(self, /, left_amt=0, right_amt=0):
+        assert left_amt >= 0
+        assert right_amt >= 0
+        return self.replace(start=self.start + left_amt, stop=self.stop - right_amt)
 
     def five_prime_shift(self, offset: int = 0):
         """Shift the five prime end of region 'offset' basepairs towards the three prime end.
@@ -123,6 +136,45 @@ class Region(DataClassMixin):
 
     def three_prime_resize(self, new_length):
         return self.three_prime_shift(new_length - self.length)
+
+    def intersect(self, other: "Region") -> bool:
+        """
+        >>> x = Region('chr1', 10, 20)
+        >>> y = Region('chr1', 5, 15)
+        >>> z = Region('chr1', 20, 40)
+        >>> a = Region('chr1', 10, 20, '+')
+        >>> b = Region('chr1', 5, 15, '-')
+        >>> x.intersects(y)
+        Region(chr1:10-15)
+        >>> y.intersects(x)
+        Region(chr1:10-15)
+        >>> x.intersects(z)
+        None
+        >>> a.intersects(b)
+        None
+        """
+        if self.ref != other.ref:
+            raise ValueError(f"Can not take the intersection of two regions with different references ('{self.ref}' vs '{other.ref}'")
+
+        if self.chrom != other.chrom:
+            return None
+
+        if self.strand in "+-" and (other.strand is None or other.strand == '.'):
+            strand = self.strand
+        elif other.strand in "+-" and (self.strand is None or self.strand == '.'):
+            strand = other.strand
+        elif self.strand == other.strand:
+            strand = self.strand
+        else:
+            # returns none if both other and self strands are + or - but they don't match
+            return None
+
+        start = max(self.start, other.start)
+        stop = min(self.stop, other.stop)
+        if stop <= start:
+            return None
+
+        return type(self)(chrom=self.chrom, start=start, stop=stop, strand=self.strand)
 
     def intersect_annotation(self, annotation_name: str) -> List:
         """
@@ -492,6 +544,26 @@ class Region(DataClassMixin):
     def length(self):
         return self.stop - self.start
 
+    def is_subregion(self, other: "Region") -> bool:
+        """Returns True if other is contained within self.
+
+        >>> x = Region('chr1', 10, 20)
+        >>> y = Region('chr1', 10, 15)
+        >>> z = Region('chr1', 20, 40)
+        >>> x.is_subregion(y)
+        True
+        >>> y.is_subregion(x)
+        False
+        >>> x.is_subregion(z)
+        False
+        >>> x.is_subregion(x)
+        True
+        """
+        intersecting_region = self.intersect(other)
+        if intersecting_region is None:
+            return False
+        return (intersecting_region == other)
+
     def intersects(self, other: "Region") -> bool:
         """
         >>> x = Region('chr1', 10, 20)
@@ -504,9 +576,8 @@ class Region(DataClassMixin):
         >>> x.intersects(z)
         False
         """
-        return regions_intersect(
-            self.chrom, self.start, self.stop, other.chrom, other.start, other.stop
-        )
+        return not (self.intersect(other) is None)
+
 
     def cmp(self, region, chrom_ordering=ChromOrdering.natural):
         """
@@ -534,7 +605,7 @@ class Region(DataClassMixin):
                     CONTIGS[self.ref].index(region.chrom),
                 )
             else:
-                raise AssertionError("impossible")
+                raise AssertionError("impossible -- no chrom ordering")
 
         if c != 0:
             return c
