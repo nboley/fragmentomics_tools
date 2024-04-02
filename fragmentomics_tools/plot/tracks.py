@@ -108,6 +108,63 @@ FBIO_DATA_DIR = os.path.join(
 )  # /home/user/projects/Ravel/fbio/data
 
 
+def symmetric_arange(length):
+    """
+    Like np.arange but center midpoint at 0
+
+    :param length: length of range
+    :return:
+    >>> symmetric_arange(5)
+    array([-2., -1.,  0.,  1.,  2.])
+    >>> symmetric_arange(6)
+    array([-2.5, -1.5, -0.5,  0.5,  1.5,  2.5])
+
+    """
+    midpt = length / 2 - 0.5
+    win = np.arange(length) - midpt
+    assert len(win) == length
+    return win
+
+
+def gaussian(window_len, num_std):
+    win = symmetric_arange(window_len)
+    std = window_len / num_std / 2
+    win = 1.0 / numpy.sqrt(2.0 * numpy.pi * std**2) * numpy.exp(-(win**2) / (2.0 * std**2))
+
+    return win
+
+
+def smooth1d(arr, window_len, filter_shape="uniform", num_std=3, mode="mirror"):
+    """
+    Does 1d smoothing
+
+    :param arr: 1d vector
+    :param window_len: smoothing window length
+    :param filter_shape: "uniform" or "gaussian" smoothing
+    :param num_std: number of standard deviations to use (in each direction) for gaussian filter in window
+      e.g., a window_len of 12 and num_std=3 will make each std of size 2
+    :param mode: convolve mode
+    :return: smoothed 1d vector
+
+    >>> smooth1d([1,2,3,4,5,6,7,8,9,10], 4)
+    array([2. , 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9. , 9. ])
+    """
+    if window_len > len(arr):
+        raise ValueError(f"window length greater than array {window_len} > {len(arr)}")
+    if window_len is None:
+        return arr
+    else:
+        if filter_shape == "uniform":
+            win = numpy.ones(window_len)
+        elif filter_shape == "gaussian":
+            win = gaussian(window_len, num_std)
+        else:
+            raise NotImplementedError(f"{filter_shape} not implemented")
+
+    win /= win.sum()
+    return scipy.ndimage.convolve(numpy.array(arr, dtype=float), win, mode=mode)
+
+
 def obj_type_name_matches_class_name_str(obj, cls):
     """
     same as isinstance, but also checks for the class __name__, to handle autoreload()s of the class
