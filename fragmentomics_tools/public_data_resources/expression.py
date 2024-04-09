@@ -4,6 +4,7 @@ import numpy as np
 from fragmentomics_tools.dataframe import RegionDataFrame
 from fragmentomics_tools.public_data_resources.gencode import load_gencode_genes_rdf
 
+
 class HematopoieticGeneExpression(RegionDataFrame):
     """Hematopoietic Gene Expression from SC Bone Marrow and PBMC's
 
@@ -43,7 +44,10 @@ class HematopoieticGeneExpression(RegionDataFrame):
         26	Unk - Unkown
         """
         code_to_weight = [line.strip().split("\t") for line in _.strip().splitlines()]
-        code_to_weight = [(k.zfill(2), v.split(" - ")[0], v.split(" - ")[1]) for k, v in code_to_weight]
+        code_to_weight = [
+            (k.zfill(2), v.split(" - ")[0], v.split(" - ")[1])
+            for k, v in code_to_weight
+        ]
         return code_to_weight
 
     @staticmethod
@@ -59,37 +63,43 @@ class HematopoieticGeneExpression(RegionDataFrame):
         CD14+_Monocyte_Cells_2 0.04
         CD16+_Monocyte_Cells 0.04
         Lymphoid_Progenitor_2 0.08
-        """.strip().split("\n")
-        return dict((x.split()[0], float(x.split()[1])) for x in cluster_names_and_weights)
+        """.strip().split(
+            "\n"
+        )
+        return dict(
+            (x.split()[0], float(x.split()[1])) for x in cluster_names_and_weights
+        )
 
     @classmethod
     def load(cls):
-        grpd_counts = pd.read_table("data/expression/sc_rnaseq.counts.hematopoetic.tsv", index_col=0)
+        grpd_counts = pd.read_table(
+            "data/expression/sc_rnaseq.counts.hematopoetic.tsv", index_col=0
+        )
         cluster_names_and_weights = cls.cluster_names_and_weights()
-        
-        tpms = grpd_counts/(grpd_counts.sum()/1e6)
-        tpms = tpms[['02', '03', '05', '06', '07', '08', '11', '12', '13', '15']]
+
+        tpms = grpd_counts / (grpd_counts.sum() / 1e6)
+        tpms = tpms[["02", "03", "05", "06", "07", "08", "11", "12", "13", "15"]]
         # taking advantage of dict keys remaining sorted
         tpms.columns = list(cluster_names_and_weights.keys())
-        
+
         gencode_rdf = load_gencode_genes_rdf()
-    
+
         # join the tpms to gencode genes
-        tpms = pd.DataFrame(
-            gencode_rdf.drop(columns=['tss', 'tes']).reset_index()
-        ) \
-        .set_index('gene_name') \
-        .join(tpms) \
-        .reset_index() \
-        .rename(columns={'index': 'gene_name'}) \
-        .set_index(['gene_name', 'gene_id', 'contig', 'strand', 'start', 'stop']) \
-        .dropna()
-    
+        tpms = (
+            pd.DataFrame(gencode_rdf.drop(columns=["tss", "tes"]).reset_index())
+            .set_index("gene_name")
+            .join(tpms)
+            .reset_index()
+            .rename(columns={"index": "gene_name"})
+            .set_index(["gene_name", "gene_id", "contig", "strand", "start", "stop"])
+            .dropna()
+        )
+
         # set expression by taking a weighted sum over the relevant sub-types
         expression_df = pd.DataFrame(
-            np.matmul(tpms.values, np.array(list(cluster_names_and_weights.values()))), 
-            index=tpms.index, 
-            columns=['expression']
+            np.matmul(tpms.values, np.array(list(cluster_names_and_weights.values()))),
+            index=tpms.index,
+            columns=["expression"],
         ).reset_index()
-    
-        return cls(expression_df, ref='hg38')
+
+        return cls(expression_df, ref="hg38")

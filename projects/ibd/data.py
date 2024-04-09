@@ -5,6 +5,7 @@ import numpy as np
 from fragmentomics_tools.dataframe import RegionDataFrame
 from fragmentomics_tools.public_data_resources.gencode import load_gencode_genes_rdf
 
+
 class HematopoieticGeneExpression(RegionDataFrame):
     """Hematopoietic Gene Expression from SC Bone Marrow and PBMC's
 
@@ -44,7 +45,10 @@ class HematopoieticGeneExpression(RegionDataFrame):
         26	Unk - Unkown
         """
         code_to_weight = [line.strip().split("\t") for line in _.strip().splitlines()]
-        code_to_weight = [(k.zfill(2), v.split(" - ")[0], v.split(" - ")[1]) for k, v in code_to_weight]
+        code_to_weight = [
+            (k.zfill(2), v.split(" - ")[0], v.split(" - ")[1])
+            for k, v in code_to_weight
+        ]
         return code_to_weight
 
     @staticmethod
@@ -60,100 +64,126 @@ class HematopoieticGeneExpression(RegionDataFrame):
         CD14+_Monocyte_Cells_2 0.04
         CD16+_Monocyte_Cells 0.04
         Lymphoid_Progenitor_2 0.08
-        """.strip().split("\n")
-        return dict((x.split()[0], float(x.split()[1])) for x in cluster_names_and_weights)
+        """.strip().split(
+            "\n"
+        )
+        return dict(
+            (x.split()[0], float(x.split()[1])) for x in cluster_names_and_weights
+        )
 
     @classmethod
     def load(cls):
-        grpd_counts = pd.read_table(os.path.join(os.path.dirname(__file__), "./data/ibd/sc_expression/expression/sc_rnaseq.counts.hematopoetic.tsv"), index_col=0)
+        grpd_counts = pd.read_table(
+            os.path.join(
+                os.path.dirname(__file__),
+                "./data/ibd/sc_expression/expression/sc_rnaseq.counts.hematopoetic.tsv",
+            ),
+            index_col=0,
+        )
         cluster_names_and_weights = cls.cluster_names_and_weights()
-        
-        tpms = grpd_counts/(grpd_counts.sum()/1e6)
-        tpms = tpms[['02', '03', '05', '06', '07', '08', '11', '12', '13', '15']]
+
+        tpms = grpd_counts / (grpd_counts.sum() / 1e6)
+        tpms = tpms[["02", "03", "05", "06", "07", "08", "11", "12", "13", "15"]]
         # taking advantage of dict keys remaining sorted
         tpms.columns = list(cluster_names_and_weights.keys())
-        
+
         gencode_rdf = load_gencode_genes_rdf()
-    
+
         # join the tpms to gencode genes
-        tpms = pd.DataFrame(
-            gencode_rdf.drop(columns=['tss', 'tes']).reset_index()
-        ) \
-        .set_index('gene_name') \
-        .join(tpms) \
-        .reset_index() \
-        .rename(columns={'index': 'gene_name'}) \
-        .set_index(['gene_name', 'gene_id', 'contig', 'strand', 'start', 'stop']) \
-        .dropna()
-    
+        tpms = (
+            pd.DataFrame(gencode_rdf.drop(columns=["tss", "tes"]).reset_index())
+            .set_index("gene_name")
+            .join(tpms)
+            .reset_index()
+            .rename(columns={"index": "gene_name"})
+            .set_index(["gene_name", "gene_id", "contig", "strand", "start", "stop"])
+            .dropna()
+        )
+
         # set expression by taking a weighted sum over the relevant sub-types
         expression_df = pd.DataFrame(
-            np.matmul(tpms.values, np.array(list(cluster_names_and_weights.values()))), 
-            index=tpms.index, 
-            columns=['expression']
+            np.matmul(tpms.values, np.array(list(cluster_names_and_weights.values()))),
+            index=tpms.index,
+            columns=["expression"],
         ).reset_index()
-    
-        return cls(expression_df, ref='hg38')
+
+        return cls(expression_df, ref="hg38")
+
 
 def build_ctcf_binding_sites():
     ### load and merge all of the binding sites #######################################################################
     base_dir = "/scratch/ctcf_analysis/CTCF/cell_type_merged"
-    index_cols = ['contig', 'start', 'stop', 'strand']
+    index_cols = ["contig", "start", "stop", "strand"]
     dfs = []
     for fname in os.listdir(base_dir):
         # extract the biosample type from the filename
-        cell_type = fname.split('.')[1]
+        cell_type = fname.split(".")[1]
         # load the data into a region dataframe
         df = pd.read_table(os.path.join(base_dir, fname))
         # subset the dataframe by the binding site locations
-        df = df[['contig', 'start', 'stop', 'strand', 'tf_top_score']].set_index(index_cols)
+        df = df[["contig", "start", "stop", "strand", "tf_top_score"]].set_index(
+            index_cols
+        )
         # rename the score column to the biosample_type
-        df = df.rename(columns={'tf_top_score': cell_type})
+        df = df.rename(columns={"tf_top_score": cell_type})
         df = df.sort_values(df.columns[0], ascending=False).head(20000).sort_index()
         dfs.append(df)
 
     # merge everything
     df = dfs[0]
-    for i in range(1, len(dfs)): 
-        df = df.join(dfs[i], how='outer')
-        
+    for i in range(1, len(dfs)):
+        df = df.join(dfs[i], how="outer")
+
     # binarize based upon peak presence
     df = pd.DataFrame(df.fillna(0).sort_index())
     df = (df > 1e-6).astype(int)
-    
+
     # neutrophils look weird
-    df = df.drop(columns='neutrophil')
-    
+    df = df.drop(columns="neutrophil")
+
     ### Build all of the masks ########################################################################################
     # we're excluding one blood and one neural so that the counts remain the same
-    neural_columns = ['neural_progenitor_cell', 'neural_cell', 'dorsolateral_prefrontal_cortex'] # 'neural_crest_cell', 
-    colon_columns = ['stomach', 'transverse_colon', 'sigmoid_colon']
-    blood_columns = ['natural_killer_cell', 'B_cell', 'CD14-positive_monocyte'] # , 'CD8-positive,_alpha-beta_T_cell'
+    neural_columns = [
+        "neural_progenitor_cell",
+        "neural_cell",
+        "dorsolateral_prefrontal_cortex",
+    ]  # 'neural_crest_cell',
+    colon_columns = ["stomach", "transverse_colon", "sigmoid_colon"]
+    blood_columns = [
+        "natural_killer_cell",
+        "B_cell",
+        "CD14-positive_monocyte",
+    ]  # , 'CD8-positive,_alpha-beta_T_cell'
     all_columns = neural_columns + colon_columns + blood_columns
 
-    all_bnd_mask = (df.sum(axis=1) == df.shape[1])
+    all_bnd_mask = df.sum(axis=1) == df.shape[1]
 
+    all_neural_bnd_mask = df.loc[:, neural_columns].sum(axis=1) >= len(neural_columns)
+    no_non_neural_bnd_mask = df.loc[:, colon_columns + blood_columns].sum(axis=1) <= 2
+    only_neural_mask = all_neural_bnd_mask & no_non_neural_bnd_mask
 
-    all_neural_bnd_mask = (df.loc[:, neural_columns].sum(axis=1) >= len(neural_columns))
-    no_non_neural_bnd_mask = (df.loc[:, colon_columns + blood_columns].sum(axis=1) <= 2)
-    only_neural_mask = all_neural_bnd_mask&no_non_neural_bnd_mask
+    all_colon_bnd_mask = df.loc[:, colon_columns].sum(axis=1) >= len(colon_columns)
+    no_non_colon_bnd_mask = df.loc[:, neural_columns + blood_columns].sum(axis=1) <= 2
+    only_colon_mask = all_colon_bnd_mask & no_non_colon_bnd_mask
 
-    all_colon_bnd_mask = (df.loc[:, colon_columns].sum(axis=1) >= len(colon_columns))
-    no_non_colon_bnd_mask = (df.loc[:, neural_columns + blood_columns].sum(axis=1) <= 2)
-    only_colon_mask = all_colon_bnd_mask&no_non_colon_bnd_mask
+    all_blood_bnd_mask = df.loc[:, blood_columns].sum(axis=1) >= len(blood_columns)
+    no_non_blood_bnd_mask = df.loc[:, neural_columns + colon_columns].sum(axis=1) <= 2
+    only_blood_mask = all_blood_bnd_mask & no_non_blood_bnd_mask
 
-    all_blood_bnd_mask = (df.loc[:, blood_columns].sum(axis=1) >= len(blood_columns))
-    no_non_blood_bnd_mask = (df.loc[:, neural_columns + colon_columns].sum(axis=1) <= 2)
-    only_blood_mask = all_blood_bnd_mask&no_non_blood_bnd_mask
+    assert (
+        all_bnd_mask.sum()
+        + only_neural_mask.sum()
+        + only_colon_mask.sum()
+        + only_blood_mask.sum()
+        == (all_bnd_mask | only_neural_mask | only_colon_mask | only_blood_mask).sum()
+    )
 
-    assert all_bnd_mask.sum() + only_neural_mask.sum() + only_colon_mask.sum() + only_blood_mask.sum() == (all_bnd_mask | only_neural_mask | only_colon_mask | only_blood_mask).sum()
-    
     # set the class column, and drop all of the binary labels
-    df.loc[:, 'cell_type'] = None
-    df.loc[all_bnd_mask, 'cell_type'] = 'all'
-    df.loc[only_neural_mask, 'cell_type'] = 'neural'
-    df.loc[only_colon_mask, 'cell_type'] = 'colon'
-    df.loc[only_blood_mask, 'cell_type'] = 'blood'
-    df = df[['cell_type']].dropna()
+    df.loc[:, "cell_type"] = None
+    df.loc[all_bnd_mask, "cell_type"] = "all"
+    df.loc[only_neural_mask, "cell_type"] = "neural"
+    df.loc[only_colon_mask, "cell_type"] = "colon"
+    df.loc[only_blood_mask, "cell_type"] = "blood"
+    df = df[["cell_type"]].dropna()
 
-    return RegionDataFrame(df.reset_index(), ref='hg38')
+    return RegionDataFrame(df.reset_index(), ref="hg38")

@@ -129,7 +129,11 @@ def symmetric_arange(length):
 def gaussian(window_len, num_std):
     win = symmetric_arange(window_len)
     std = window_len / num_std / 2
-    win = 1.0 / numpy.sqrt(2.0 * numpy.pi * std**2) * numpy.exp(-(win**2) / (2.0 * std**2))
+    win = (
+        1.0
+        / numpy.sqrt(2.0 * numpy.pi * std**2)
+        * numpy.exp(-(win**2) / (2.0 * std**2))
+    )
 
     return win
 
@@ -353,10 +357,9 @@ class GenomeTrack:
         if isinstance(self.input, str) and not os.path.exists(self.input):
             raise ValueError(f"{self.input} does not exist")
         if self.region is None:
-            self.region = getattr(self.input, 'plot_region', None)
+            self.region = getattr(self.input, "plot_region", None)
         if self.region is None:
-            self.region = Region('NA', 0, len(self.input))
-
+            self.region = Region("NA", 0, len(self.input))
 
     @abc.abstractmethod
     def _plot(self, ax):
@@ -1091,7 +1094,7 @@ class CoverageTrack(GenomeTrack):
     bootstrap_alpha: float = 0.1
     color: str = None
     fraction: str = None
-    strand: str=None,
+    strand: str = (None,)
     # scale the coverage to allow for putting densities on the
     # same scale as counts
     scaling_factor: int = 1
@@ -1158,7 +1161,12 @@ class CoverageTrack(GenomeTrack):
                 color = self.color
 
             cov = (
-                self._build_coverage(strand=self.strand, fraction=self.fraction, coverage_type=coverage_type) * self.scaling_factor
+                self._build_coverage(
+                    strand=self.strand,
+                    fraction=self.fraction,
+                    coverage_type=coverage_type,
+                )
+                * self.scaling_factor
             )
             n = cov.sum()
             if self.name is None:
@@ -1964,9 +1972,9 @@ class GeneTrack(GenomeTrack):
 @dataclass
 class CoverageDifferenceTrack(CoverageTrack):
     def _build_coverage(self, *args, **kwargs):
-        del kwargs['strand']
-        c1 = super()._build_coverage(*args, strand='+', **kwargs)
-        c2 = super()._build_coverage(*args, strand='-', **kwargs)
+        del kwargs["strand"]
+        c1 = super()._build_coverage(*args, strand="+", **kwargs)
+        c2 = super()._build_coverage(*args, strand="-", **kwargs)
         return c2 - c1
 
     def _plot(self, ax):

@@ -18,9 +18,12 @@ from intervaltree import IntervalTree
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.utils import shuffle as sk_shuffle
 from smart_open import open
+from scipy.stats.mstats import trimmed_std
 
 from tqdm.contrib.concurrent import process_map
 from tqdm import tqdm
+
+tqdm.pandas()
 from joblib import delayed, Parallel
 
 # from tqdm.contrib.concurrent import process_map
@@ -807,9 +810,7 @@ class RegionDataFrame(DataFrameBase):
             ref=self.ref,
         )
 
-    def intersect_with_rdf(
-        self, other, sorted=False, rsuff="other"
-    ):
+    def intersect_with_rdf(self, other, sorted=False, rsuff="other"):
         """
         Creates the intersection of RegionDataFrames
         :param other: other RegionDataFrame
@@ -819,8 +820,9 @@ class RegionDataFrame(DataFrameBase):
             https://daler.github.io/pybedtools/autodocs/pybedtools.bedtool.BedTool.intersect.html
         :return: RegionDataFrame that is the intersection of two RegionDataFrames
         """
+
         def reordered_columns(rdf):
-            bed_columns = ['contig', 'start', 'stop', 'strand']
+            bed_columns = ["contig", "start", "stop", "strand"]
             return bed_columns + [c for c in rdf.columns if c not in bed_columns]
 
         # assert isinstance(other, RegionDataFrame)
@@ -828,21 +830,22 @@ class RegionDataFrame(DataFrameBase):
             self.ref == other.ref
         ), f"RegionDataFrames must have the same reference: {self.ref, other.ref}"
 
-
         self_index = self.index
         self = self.reset_index()
         this_bed_df = self.bed_df
-        this_bed_df['index'] = self_index
-        this_bedtool = pybedtools.BedTool.from_dataframe(this_bed_df )
-        other_bedtool = pybedtools.BedTool.from_dataframe(other[reordered_columns(other)])
+        this_bed_df["index"] = self_index
+        this_bedtool = pybedtools.BedTool.from_dataframe(this_bed_df)
+        other_bedtool = pybedtools.BedTool.from_dataframe(
+            other[reordered_columns(other)]
+        )
         other_column_names = [f"{c}_{rsuff}" for c in reordered_columns(other)]
         intersection_rdf = pd.DataFrame(
             this_bedtool.intersect(
                 other_bedtool, sorted=sorted, wa=True, wb=True
             ).to_dataframe(names=this_bed_df.columns.tolist() + other_column_names),
-        ).set_index('index')
+        ).set_index("index")
         intersection_rdf = intersection_rdf[other_column_names]
-        intersection_rdf.columns = [c[:-(1 + len(rsuff))] for c in other_column_names]
+        intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
         return RegionDataFrame(intersection_rdf, ref=self.ref)
 
     def intersect_with_bed(
@@ -909,7 +912,6 @@ class RegionDataFrame(DataFrameBase):
         if remove_non_liftoverable_regions:
             rv = rv.query("not contig.isnull()")
         return rv
-
 
     def get_overlapping_base_counts(self, bed_file, rsuff="bed", sorted=False):
         """
@@ -1003,9 +1005,18 @@ class RegionDataFrame(DataFrameBase):
         return self.loc[self.index.difference(tmp.index), :]
 
     def attach_blacklist_regions(self, bed_fname):
-        tmp = self.set_index('gene_name').intersect_with_rdf(RegionDataFrame.from_bed(bed_fname, ref=self.ref))
-        blacklist_regions = tmp.reset_index().groupby(tmp.index.names).apply(lambda x: list(x.iter_regions())).rename("blacklist_regions")
-        return self.set_index('gene_name').join(blacklist_regions).fillna('').reset_index()
+        tmp = self.set_index("gene_name").intersect_with_rdf(
+            RegionDataFrame.from_bed(bed_fname, ref=self.ref)
+        )
+        blacklist_regions = (
+            tmp.reset_index()
+            .groupby(tmp.index.names)
+            .apply(lambda x: list(x.iter_regions()))
+            .rename("blacklist_regions")
+        )
+        return (
+            self.set_index("gene_name").join(blacklist_regions).fillna("").reset_index()
+        )
 
     def region_mask(self, region):
         """
@@ -1236,30 +1247,34 @@ class RegionDataFrame(DataFrameBase):
         return rdf
 
     def expand_regions(
-            self,
-            /,
-            left_amt: int = 0,
-            right_amt: int = 0,
-            inplace: bool = False,
-            strand_aware: bool = False,
-            discard_invalid_resizes: bool = False,
+        self,
+        /,
+        left_amt: int = 0,
+        right_amt: int = 0,
+        inplace: bool = False,
+        strand_aware: bool = False,
+        discard_invalid_resizes: bool = False,
     ):
         assert (left_amt >= 0).all()
         assert (right_amt >= 0).all()
-        return self._resize_region_boundaries(-left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes)
+        return self._resize_region_boundaries(
+            -left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes
+        )
 
     def truncate(
-            self,
-            /,
-            left_amt: int = 0,
-            right_amt: int = 0,
-            inplace: bool = False,
-            strand_aware: bool = False,
-            discard_invalid_resizes: bool = False,
+        self,
+        /,
+        left_amt: int = 0,
+        right_amt: int = 0,
+        inplace: bool = False,
+        strand_aware: bool = False,
+        discard_invalid_resizes: bool = False,
     ):
         assert (np.array(left_amt) >= 0).all()
         assert (np.array(right_amt) >= 0).all()
-        return self._resize_region_boundaries(left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes)
+        return self._resize_region_boundaries(
+            left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes
+        )
 
     def resize_regions(
         self,
@@ -1306,7 +1321,6 @@ class RegionDataFrame(DataFrameBase):
         rdf["stop"] = new_stop
         return rdf
 
-
     def bin_regions_into_windows(self, window_size, mode, stride=None):
         """Multiply all regions by tiling windows across each region in self.
 
@@ -1317,44 +1331,63 @@ class RegionDataFrame(DataFrameBase):
                       exact: raise an error if any region_length isn't even divisble by stride and window_size
         :param stride: stride length. window_size%stride must equal 0. Default: window_size
         """
-        assert mode in ['full', 'valid', 'exact']
+        assert mode in ["full", "valid", "exact"]
         if stride is None:
             stride = window_size
         else:
-            if window_size%stride != 0:
-                raise ValueError(f"window size ({window_size}) must be evenly divisble by stride ({stride})")
+            if window_size % stride != 0:
+                raise ValueError(
+                    f"window size ({window_size}) must be evenly divisble by stride ({stride})"
+                )
 
         def _resize(region):
-            if mode == 'full':
-                return region.resize(int(stride*math.ceil(region.length/stride)))
-            elif mode == 'valid':
-                return region.resize(int(stride*math.floor(region.length/stride)))
-            elif mode == 'exact':
-                assert window_size%stride == 0
-                if region.length%stride != 0:
-                    raise ValueError("region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode.")
+            if mode == "full":
+                return region.resize(int(stride * math.ceil(region.length / stride)))
+            elif mode == "valid":
+                return region.resize(int(stride * math.floor(region.length / stride)))
+            elif mode == "exact":
+                assert window_size % stride == 0
+                if region.length % stride != 0:
+                    raise ValueError(
+                        "region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
+                    )
                 return region
             else:
-                assert False, 'UNREACHABLE'
+                assert False, "UNREACHABLE"
 
         # first build all the windows
         index_name = self.index.name
         self_copy = self.reset_index()
         all_windows = []
-        for region, record in tqdm(self_copy.iter_region_row(), total=self_copy.shape[0], disable=False):
+        for region, record in tqdm(
+            self_copy.iter_region_row(), total=self_copy.shape[0], disable=False
+        ):
             region = _resize(region)
-            all_windows.extend((record.name, x[0], x[1]) for x in windowed_range(region.start, region.stop, stride))
+            all_windows.extend(
+                (record.name, x[0], x[1])
+                for x in windowed_range(region.start, region.stop, stride)
+            )
 
-        window_df = pd.DataFrame(all_windows, columns=['index', 'new_start', 'new_stop']).set_index('index')
-        window_df['new_stop'] = (window_df['new_stop'] + window_size - stride)
+        window_df = pd.DataFrame(
+            all_windows, columns=["index", "new_start", "new_stop"]
+        ).set_index("index")
+        window_df["new_stop"] = window_df["new_stop"] + window_size - stride
 
-        rv = self_copy.join(window_df)\
-            .rename(columns=dict(new_start='start', new_stop='stop', start='old_start', stop='old_stop'))\
-            .drop(columns=['old_start', 'old_stop'])\
-            .set_index('index')
+        rv = (
+            self_copy.join(window_df)
+            .rename(
+                columns=dict(
+                    new_start="start",
+                    new_stop="stop",
+                    start="old_start",
+                    stop="old_stop",
+                )
+            )
+            .drop(columns=["old_start", "old_stop"])
+            .set_index("index")
+        )
         rv.index.rename(index_name, inplace=True)
         return rv
-
 
     def split_on_query(self, query):
         """Split self into two dataframes.
@@ -1442,36 +1475,69 @@ class RegionDataFrame(DataFrameBase):
             index_label=None,
         )
 
-    def _get_seq(self, fasta_path, seq_type, reverse_complement_sequence_if_minus_strand, verbose=False):
-            assert seq_type in ['one_hot_encoded', 'bytearray']
-            if seq_type == 'one_hot_encoded':
-                method = 'get_one_hot_encoded_sequence'
-                name = 'one_hot_encoded_sequence'
-            elif seq_type == 'bytearray':
-                method = 'get_sequence'
-                name = 'sequence'
-            else:
-                assert False, 'UNREACHABLE'
+    def _get_seq(
+        self,
+        fasta_path,
+        seq_type,
+        reverse_complement_sequence_if_minus_strand,
+        verbose=False,
+    ):
+        assert seq_type in ["one_hot_encoded", "bytearray"]
+        if seq_type == "one_hot_encoded":
+            method = "get_one_hot_encoded_sequence"
+            name = "one_hot_encoded_sequence"
+        elif seq_type == "bytearray":
+            method = "get_sequence"
+            name = "sequence"
+        else:
+            assert False, "UNREACHABLE"
 
-            seqs = []
-            with pysam.FastaFile(fasta_path) as fasta:
-                for region in tqdm(self.iter_regions(), total=len(self), disable=(not verbose)):
-                    seqs.append(getattr(region, method)(fasta, reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand))
-            return pd.Series(seqs, index=self.index, name=name)
+        seqs = []
+        with pysam.FastaFile(fasta_path) as fasta:
+            for region in tqdm(
+                self.iter_regions(), total=len(self), disable=(not verbose)
+            ):
+                seqs.append(
+                    getattr(region, method)(
+                        fasta,
+                        reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                    )
+                )
+        return pd.Series(seqs, index=self.index, name=name)
 
-    def get_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand=False, verbose=False):
-        return self._get_seq(fasta_path, 'bytearray', reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand, verbose=verbose)
+    def get_sequence(
+        self,
+        fasta_path,
+        reverse_complement_sequence_if_minus_strand=False,
+        verbose=False,
+    ):
+        return self._get_seq(
+            fasta_path,
+            "bytearray",
+            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            verbose=verbose,
+        )
 
     def attach_sequence(self, *args, rebuild=False, **kwargs):
-        if 'sequence' in self.columns and not rebuild:
+        if "sequence" in self.columns and not rebuild:
             return self
         return self.join(self.get_sequence(*args, **kwargs))
 
-    def get_one_hot_encoded_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand=False, verbose=False):
-        return self._get_seq(fasta_path, 'one_hot_encoded', reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand, verbose=verbose)
+    def get_one_hot_encoded_sequence(
+        self,
+        fasta_path,
+        reverse_complement_sequence_if_minus_strand=False,
+        verbose=False,
+    ):
+        return self._get_seq(
+            fasta_path,
+            "one_hot_encoded",
+            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            verbose=verbose,
+        )
 
     def attach_one_hot_encoded_sequence(self, *args, rebuild=False, **kwargs):
-        if 'one_hot_encoded_sequence' in self.columns and not rebuild:
+        if "one_hot_encoded_sequence" in self.columns and not rebuild:
             return self
         return self.join(self.get_one_hot_encoded_sequence(*args, **kwargs))
 
@@ -1540,9 +1606,7 @@ class RegionDataFrame(DataFrameBase):
     def label_balanced(self, column_name, random_state=None):
         """Return a copy of self with balanced labels."""
         if not hasattr(self, column_name):
-            raise ValueError(
-                f"The data frame must have column '{column_name}'"
-            )
+            raise ValueError(f"The data frame must have column '{column_name}'")
 
         keep_idxs = get_indices_of_balanced_labels(
             self[column_name], random_state=random_state
@@ -1739,7 +1803,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
     def bin_regions_into_windows(self, *args, mode, **kwargs):
         # we can only shrink fragment arrays without going back to the fragmnet h5s, so
         # the binning mode needs to be set accordingly
-        if self.has_fragment_array and mode not in ('exact', 'valid'):
+        if self.has_fragment_array and mode not in ("exact", "valid"):
             raise ValueError(
                 "bin_regions_into_windows mode must be 'exact' or 'valid' if the srdf has fragment arrays."
                 "Hint: If you need to grow regions with fragment arrays you'll need to drop the fragment arrays, resize the regions, and then re-attach the fragment arrays"
@@ -1748,8 +1812,11 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 
         # if we have fragmnet arrays then resize them
         if self.has_fragment_array:
-            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
-            self['fragment_array'] = fragment_arrays
+            fragment_arrays = [
+                record.fragment_array.subset_by_region(region)
+                for region, record in tqdm(self.iter_region_row(), total=self.nrow)
+            ]
+            self["fragment_array"] = fragment_arrays
 
         return self
 
@@ -1761,12 +1828,21 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        self = super()._resize_region_boundaries(left=left, right=right, inplace=inplace, strand_aware=strand_aware, discard_invalid_resizes=discard_invalid_resizes)
+        self = super()._resize_region_boundaries(
+            left=left,
+            right=right,
+            inplace=inplace,
+            strand_aware=strand_aware,
+            discard_invalid_resizes=discard_invalid_resizes,
+        )
 
         # if we have fragmnet arrays then resize them
         if self.has_fragment_array:
-            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
-            self['fragment_array'] = fragment_arrays
+            fragment_arrays = [
+                record.fragment_array.subset_by_region(region)
+                for region, record in tqdm(self.iter_region_row(), total=self.nrow)
+            ]
+            self["fragment_array"] = fragment_arrays
             assert False
 
         return self
@@ -1788,10 +1864,53 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 )
         self = super().resize_regions(new_size, *args, **kwargs)
         if self.has_fragment_array:
-            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
-            self['fragment_array'] = fragment_arrays
+            fragment_arrays = [
+                record.fragment_array.subset_by_region(region)
+                for region, record in tqdm(self.iter_region_row(), total=self.nrow)
+            ]
+            self["fragment_array"] = fragment_arrays
 
         return self
+
+    def get_sample_count_bounds(self, num_sd):
+        res = []
+        for sample_id, sub_df in self.groupby("sample_id"):
+            counts = pd.DataFrame(
+                [x.n_fragments for x in sub_df.fragment_array], columns=[sample_id]
+            )
+            means = counts.median().rename("mean_fragment_counts")
+            stds = counts.apply(lambda x: trimmed_std(x, (0.05, 0.05))).rename(
+                "std_fragment_counts"
+            )
+            mins = (means - num_sd * stds).rename("min_fragments")
+            maxs = (means + num_sd * stds).rename("max_fragments")
+            res.append(pd.DataFrame([mins, maxs]))
+        return pd.concat(res, axis=1).T
+
+    def filter_outlier_counts(self, min_frags, num_sd=3, return_stat_columns=False):
+        n_fragments = self.df.progress_apply(
+            lambda x: pd.Series(
+                dict(sample_id=x.sample_id, n_fragments=x.fragment_array.n_fragments)
+            ),
+            axis=1,
+        )
+        n_fragments.index = self.index
+        tmp = n_fragments.merge(
+            self.get_sample_count_bounds(num_sd=num_sd),
+            left_on="sample_id",
+            right_index=True,
+            how="inner",
+        ).drop(columns="sample_id")
+        self = self.join(tmp)
+        mask = (
+            (self.n_fragments >= min_frags)
+            & (self.n_fragments >= self.min_fragments)
+            & (self.n_fragments <= self.max_fragments)
+        )
+        rv = self.loc[mask.values, :]
+        if not return_stat_columns:
+            rv = rv.drop(columns=["n_fragments", "min_fragments", "max_fragments"])
+        return rv
 
 
 class FlDist:

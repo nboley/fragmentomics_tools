@@ -8,8 +8,6 @@ import torch
 from fragmentomics_tools.region import Region
 
 
-
-
 def calculate_start_and_stop_from_jitter(
     input_length, output_length, jitter_value, strand: Optional[str] = None
 ):
@@ -37,11 +35,14 @@ def calculate_start_and_stop_from_jitter(
     jitter_stop = jitter_start + output_length
     return jitter_start, jitter_stop
 
+
 def jitter_matrix(input_arr, jitter_value, output_length, strand: Optional[str] = None):
     input_length = input_arr.shape[-1]
 
     if round(jitter_value) != jitter_value:
-        raise ValueError(f"jitter_range must be a whole number, received {jitter_value}.")
+        raise ValueError(
+            f"jitter_range must be a whole number, received {jitter_value}."
+        )
 
     if input_length < output_length + numpy.abs(jitter_value):
         raise ValueError(
@@ -50,7 +51,10 @@ def jitter_matrix(input_arr, jitter_value, output_length, strand: Optional[str] 
         )
 
     new_start, new_stop = calculate_start_and_stop_from_jitter(
-        input_length=input_length, output_length=output_length, jitter_value=jitter_value, strand=strand
+        input_length=input_length,
+        output_length=output_length,
+        jitter_value=jitter_value,
+        strand=strand,
     )
     assert new_stop - new_start == output_length, (output_length, new_stop, new_start)
     assert new_start >= 0, new_start
@@ -59,7 +63,9 @@ def jitter_matrix(input_arr, jitter_value, output_length, strand: Optional[str] 
     if isinstance(input_arr, numpy.ndarray) or isinstance(input_arr, torch.Tensor):
         jittered_output = input_arr[..., new_start:new_stop]
     elif scipy.sparse.issparse(input_arr):
-        indices = numpy.where((input_arr.col < new_stop) & (input_arr.col >= new_start))[0]
+        indices = numpy.where(
+            (input_arr.col < new_stop) & (input_arr.col >= new_start)
+        )[0]
 
         jittered_output = coo_matrix(
             (
@@ -89,7 +95,9 @@ class SpatialDropout(torch.nn.Module):
     def forward(self, x):
         if self.training:
             ori_shape = x.shape
-            x = x.view(*ori_shape[:2], -1)  # flatten everything beyond the channel dimension
+            x = x.view(
+                *ori_shape[:2], -1
+            )  # flatten everything beyond the channel dimension
             x = x.permute(0, 2, 1)
             x = self.do2(x)
             x = x.permute(0, 2, 1)
@@ -137,14 +145,16 @@ class ResNetDilatedBlock(torch.nn.Module):
             out_channels=input_channels,
             stride=1,
             kernel_size=profile_kernel_size,
-            padding=(dilation_rate * (profile_kernel_size - 1)) // 2 if padding == "same" else padding,
+            padding=(dilation_rate * (profile_kernel_size - 1)) // 2
+            if padding == "same"
+            else padding,
             dilation=dilation_rate,
         )
         self.preact_residual_normalization = preact_residual_normalization
         if self.preact_residual_normalization:
             self.bn_preact = torch.nn.BatchNorm1d(input_channels)
         else:
-            self.bn_preact = None        
+            self.bn_preact = None
         if not skip_batchnorm:
             self.bn = torch.nn.BatchNorm1d(input_channels)
         else:
@@ -175,4 +185,3 @@ class ResNetDilatedBlock(torch.nn.Module):
         else:
             out = self.activation(out)
             return out + x
-

@@ -2,6 +2,7 @@ import torch
 from torch.nn.modules.loss import _Loss
 from torch.distributions.utils import logits_to_probs, probs_to_logits
 
+
 def _loss_reduce(nll, reduction):
     if reduction == "mean":
         return nll.mean()
@@ -55,9 +56,13 @@ class MultinomialNLLLoss(torch.nn.modules.loss._Loss):
         if self.is_probs:
             # Note total_count is not used when calculating log_prob, and for log_prob,
             # validate_args is just a check that throws errors if the sum doesn't match total_count
-            dist = torch.distributions.Multinomial(probs=inputs_flat, validate_args=False)
+            dist = torch.distributions.Multinomial(
+                probs=inputs_flat, validate_args=False
+            )
         else:
-            dist = torch.distributions.Multinomial(logits=inputs_flat, validate_args=False)
+            dist = torch.distributions.Multinomial(
+                logits=inputs_flat, validate_args=False
+            )
 
         if self.scale_loss_to_d:
             d = inputs_flat.shape[-1]
@@ -73,6 +78,7 @@ class MultinomialNLLLoss(torch.nn.modules.loss._Loss):
         nll = -dist.log_prob(target_flat) * scale
         return _loss_reduce(nll, self.reduction)
 
+
 def convert_params(mu, alpha):
     """
     Convert mean/dispersion parameterization of a negative binomial to the ones scipy supports
@@ -86,10 +92,11 @@ def convert_params(mu, alpha):
 
     See https://en.wikipedia.org/wiki/Negative_binomial_distribution#Alternative_formulations
     """
-    var = mu + alpha * mu ** 2
+    var = mu + alpha * mu**2
     p = mu / var
-    n = mu ** 2 / (var - mu)
+    n = mu**2 / (var - mu)
     return n, p
+
 
 class NegativeBinomialNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(self, reduction: str = "mean") -> None:
@@ -106,13 +113,12 @@ class NegativeBinomialNLLLoss(torch.nn.modules.loss._Loss):
         """
         super().__init__(size_average=None, reduce=None, reduction=reduction)
 
-
     @staticmethod
     def to_natural_param(param_1_output, param_2_output):
         means = torch.sigmoid(torch.Tensor(param_1_output) - 2)
         dispersion = torch.exp(-(torch.Tensor(param_2_output) - 6))
-        return convert_params(means, dispersion) # returns n, p
-        
+        return convert_params(means, dispersion)  # returns n, p
+
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         means_input = torch.sigmoid(input[:, :2, :] - 2)
         # expected input is r, or total count, which is >0
@@ -127,8 +133,10 @@ class NegativeBinomialNLLLoss(torch.nn.modules.loss._Loss):
         target_flat = target.contiguous().view(*dims[:2], -1)
 
         n, p = convert_params(means_input_flat, dispersion_input_flat)
-        
-        dist = torch.distributions.NegativeBinomial(total_count=n, probs=p, validate_args=False)
+
+        dist = torch.distributions.NegativeBinomial(
+            total_count=n, probs=p, validate_args=False
+        )
 
         nll = -dist.log_prob(target_flat)
         return _loss_reduce(nll, self.reduction)
@@ -152,32 +160,38 @@ class NegativeBinomialNLLLossOld(torch.nn.modules.loss._Loss):
         self.max_alpha = max_alpha
 
     def to_natural_param(self, param_1_output, param_2_output):
-        n = self.min_alpha + self.max_alpha*torch.sigmoid(torch.Tensor(param_2_output))
-        p = 1-logits_to_probs(torch.Tensor(param_1_output), is_binary=True)
+        n = self.min_alpha + self.max_alpha * torch.sigmoid(
+            torch.Tensor(param_2_output)
+        )
+        p = 1 - logits_to_probs(torch.Tensor(param_1_output), is_binary=True)
         return n, p
-
 
     @staticmethod
     def transform_counts(min_alpha, max_alpha, total_count_flat):
-        return min_alpha + max_alpha*torch.sigmoid(total_count_flat)
+        return min_alpha + max_alpha * torch.sigmoid(total_count_flat)
 
     def _transform_counts(self, total_count_flat):
         return self.transform_counts(self.min_alpha, self.max_alpha, total_count_flat)
-        
+
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         logits_input = input[:, :2, :]
         total_count_input = input[:, 2:, :]
         dims = logits_input.shape
         assert dims == total_count_input.shape
-    
+
         logits_flat = logits_input.contiguous().view(*dims[:2], -1)
-        total_count_flat = self._transform_counts(total_count_input.contiguous().view(*dims[:2], -1))
+        total_count_flat = self._transform_counts(
+            total_count_input.contiguous().view(*dims[:2], -1)
+        )
         target_flat = target.contiguous().view(*dims[:2], -1)
-        
-        dist = torch.distributions.NegativeBinomial(total_count=total_count_flat, logits=logits_flat, validate_args=False)
+
+        dist = torch.distributions.NegativeBinomial(
+            total_count=total_count_flat, logits=logits_flat, validate_args=False
+        )
 
         nll = -dist.log_prob(target_flat)
         return _loss_reduce(nll, self.reduction)
+
 
 class NegativeBinomialFixedTotalCountNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(self, total_count, reduction: str = "mean") -> None:
@@ -195,15 +209,16 @@ class NegativeBinomialFixedTotalCountNLLLoss(torch.nn.modules.loss._Loss):
         super().__init__(size_average=None, reduce=None, reduction=reduction)
         self.total_count = total_count
 
-
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         logits_input = input[:, :2, :]
         dims = logits_input.shape
-    
+
         logits_flat = logits_input.contiguous().view(*dims[:2], -1)
         target_flat = target.contiguous().view(*dims[:2], -1)
-        
-        dist = torch.distributions.NegativeBinomial(total_count=self.total_count, logits=logits_flat, validate_args=False)
+
+        dist = torch.distributions.NegativeBinomial(
+            total_count=self.total_count, logits=logits_flat, validate_args=False
+        )
 
         nll = -dist.log_prob(target_flat)
         return _loss_reduce(nll, self.reduction)

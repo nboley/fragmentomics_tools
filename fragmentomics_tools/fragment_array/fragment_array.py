@@ -585,13 +585,11 @@ class FragmentArray:
         assert left_amt >= 0 and right_amt >= 0
         if left_amt > 0:
             self = self._replace(
-                starts_0=self.starts_0-left_amt,
-                stops_0=self.stops_0-left_amt,
+                starts_0=self.starts_0 - left_amt,
+                stops_0=self.stops_0 - left_amt,
                 validate_data=False,
             )._shift_boundaries(left=left_amt, validate_data=False)
-            self = self.mask(
-                self.valid_idxs(self.starts_0, self.stops_0, self.length)
-            )
+            self = self.mask(self.valid_idxs(self.starts_0, self.stops_0, self.length))
         if right_amt > 0:
             self = self.mask(
                 self.valid_idxs(self.starts_0, self.stops_0, self.length - right_amt)
@@ -1204,7 +1202,9 @@ class RegionFragmentArray(FragmentArray):
 
         This is a utility function so that FragmentArray and RegionFragmentArray can share code.
         """
-        return self._replace(region=self.region.left_shift(left).right_shift(right), validate_data=False)
+        return self._replace(
+            region=self.region.left_shift(left).right_shift(right), validate_data=False
+        )
 
     def resize_offset(self, new_size: int) -> int:
         """Return the offset for fragment starts/ends when asking for a resize of this region"""
@@ -1234,19 +1234,21 @@ class RegionFragmentArray(FragmentArray):
         else:
             assert False, "Unreachable -- should be caught by the region resize"
 
-    #def truncate(self, /, left_amt=0, right_amt=0):
+    # def truncate(self, /, left_amt=0, right_amt=0):
     #    # self = self._replace(region=self.region.truncate(left_amt=left_amt, right_amt=right_amt))
     #    return super().truncate(left_amt=left_amt, right_amt=right_amt)
 
     def subset_by_region(self, subregion):
         new_region = self.region.intersect(subregion)
         if new_region is None:
-            raise ValueError("sub_region ({sub_region{) must be a subregion of self.region ({self.region}) to take the subset (ensure that strands match)")
+            raise ValueError(
+                "sub_region ({sub_region{) must be a subregion of self.region ({self.region}) to take the subset (ensure that strands match)"
+            )
 
-        left_amt = (subregion.start - self.region.start)
+        left_amt = subregion.start - self.region.start
         assert left_amt >= 0 and left_amt < self.region.length
 
-        right_amt = (self.region.stop - subregion.stop)
+        right_amt = self.region.stop - subregion.stop
         assert right_amt >= 0 and right_amt < self.region.length
 
         return self.truncate(left_amt=left_amt, right_amt=right_amt)
@@ -1258,7 +1260,9 @@ class RegionFragmentArray(FragmentArray):
 
         mask = numpy.ones(self.n_fragments, dtype=bool)
         for region in mask_regions:
-            region = region.shift(-min(self.start, region.start)).resize(region.length + expansion*2, truncate_when_out_of_bounds=True)
+            region = region.shift(-min(self.start, region.start)).resize(
+                region.length + expansion * 2, truncate_when_out_of_bounds=True
+            )
             mask[(self.starts_0 >= region.start) & (self.stops_0 <= region.stop)] = 0
         mask = mask.astype(bool)
         return self.subset(mask)
@@ -1833,7 +1837,9 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     regions = list(set(getattr(ar, "region", None) for ar in ars))
 
     # only flip data if we're merging arrays across multiple regions
-    if make_data_direction_match_strand and (len(regions) > 1 and regions[0] is not None):
+    if make_data_direction_match_strand and (
+        len(regions) > 1 and regions[0] is not None
+    ):
         ars = [ar.make_data_direction_match_strand() for ar in ars]
 
     region_length = ars[0].length

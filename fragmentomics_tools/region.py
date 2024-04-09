@@ -112,7 +112,9 @@ class Region(DataClassMixin):
         elif self.strand == "-":
             return self.right_shift(-offset)
         else:
-            assert False, "Unreachable -- this should be caught by checking that strand is set"
+            assert (
+                False
+            ), "Unreachable -- this should be caught by checking that strand is set"
 
     def five_prime_resize(self, new_length):
         return self.five_prime_shift(self.length - new_length)
@@ -132,7 +134,9 @@ class Region(DataClassMixin):
         elif self.strand == "-":
             return self.left_shift(-offset)
         else:
-            assert False, "Unreachable -- this should be caught by checking that strand is set"
+            assert (
+                False
+            ), "Unreachable -- this should be caught by checking that strand is set"
 
     def three_prime_resize(self, new_length):
         return self.three_prime_shift(new_length - self.length)
@@ -154,14 +158,16 @@ class Region(DataClassMixin):
         None
         """
         if self.ref != other.ref:
-            raise ValueError(f"Can not take the intersection of two regions with different references ('{self.ref}' vs '{other.ref}'")
+            raise ValueError(
+                f"Can not take the intersection of two regions with different references ('{self.ref}' vs '{other.ref}'"
+            )
 
         if self.chrom != other.chrom:
             return None
 
-        if self.strand in "+-" and (other.strand is None or other.strand == '.'):
+        if self.strand in "+-" and (other.strand is None or other.strand == "."):
             strand = self.strand
-        elif other.strand in "+-" and (self.strand is None or self.strand == '.'):
+        elif other.strand in "+-" and (self.strand is None or self.strand == "."):
             strand = other.strand
         elif self.strand == other.strand:
             strand = self.strand
@@ -269,7 +275,7 @@ class Region(DataClassMixin):
     def intersect_with_bed(self, bed_path):
         # Prevents circular import
         from fragmentomics_tools.formats import TabixBedReader
-    
+
         if bed_path not in CACHED_READERS:
             # Create a new reader
             CACHED_READERS[(bed_path, self.ref)] = TabixBedReader(bed_path)
@@ -568,7 +574,7 @@ class Region(DataClassMixin):
         intersecting_region = self.intersect(other)
         if intersecting_region is None:
             return False
-        return (intersecting_region == other)
+        return intersecting_region == other
 
     def intersects(self, other: "Region") -> bool:
         """
@@ -583,7 +589,6 @@ class Region(DataClassMixin):
         False
         """
         return not (self.intersect(other) is None)
-
 
     def cmp(self, region, chrom_ordering=ChromOrdering.natural):
         """
