@@ -7,6 +7,9 @@ import tqdm
 import pandas as pd
 import numpy as np
 import matplotlib
+from smart_open import open as smart_open
+import io
+
 
 from scipy.stats import nbinom, multinomial
 from scipy.special import softmax
@@ -20,6 +23,10 @@ from fragmentomics_tools.plot.tracks import Tracks, StrandSplitCoverageTrack, Ve
 from fragmentomics_tools.fragment_array import RegionFragmentArray, merge_fragment_arrays
 from fragmentomics_tools.dataframe import RegionDataFrame, SampleAndRegionDataFrame, DataFrameBase, windowed_range
 from fragmentomics_tools.region import one_hot_encode_sequences
+
+# ignore a known warning
+import warnings
+warnings.filterwarnings("ignore", ".*Received a 3D input to dropout2d*")
 
 FASTA_PATH = "/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz"
 
@@ -120,7 +127,10 @@ class BackgroundModelModule(L.LightningModule):
 
     @classmethod
     def load(cls, path):
-        state_dict = torch.load(path)
+        with smart_open(path, 'rb') as f:
+            buffer = io.BytesIO(f.read())
+            state_dict = torch.load(buffer)
+
         rv = cls(**state_dict.pop('model_params'))
         rv.model.load_state_dict(state_dict)
         return rv
@@ -166,7 +176,6 @@ class BackgroundModelModule(L.LightningModule):
         self.num_workers = 64
 
         self.model = self.get_model()
-        self.model.cuda()
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
@@ -192,17 +201,16 @@ class BackgroundModelModule(L.LightningModule):
         return optimizer
 
     def predict_from_seq(self, seq):
+        self.eval()
         try:
             seq = seq.encode()
         except AttributeError:
             assert isinstance(seq, bytes)
     
         x = one_hot_encode_sequences([seq])[0].T
-        return self.model(torch.Tensor(x).cuda()).cpu().detach().numpy()
+        return self.model(torch.Tensor(x).to(self.device)).cpu().detach().numpy()
     
-    def predict_from_fasta(self, fa, max_region_size=100000):
-        self.cuda()
-    
+    def predict_from_fasta(self, fa, max_region_size=100000):    
         # calculate how much context each region needs to make a prediction
         region_expansion = self.calc_input_region_size(max_region_size) - max_region_size
     
@@ -232,9 +240,8 @@ class BackgroundModelModule(L.LightningModule):
         rdf = rdf.resize_regions(self.calc_input_region_size(rdf.region_lengths))
         seq = rdf.get_one_hot_encoded_sequence(FASTA_PATH, verbose=True)
     
-        self.cuda()
         self.eval()
-        pred = seq.progress_apply(lambda x: self.model(torch.Tensor(x).cuda()).cpu().detach().numpy())
+        pred = seq.progress_apply(lambda x: self.model(torch.Tensor(x).to(self.device)).cpu().detach().numpy())
         dists = [self._build_dist(x) for x in tqdm.tqdm(pred)]
     
         return pd.DataFrame(dists, columns=[x + "_dist" for x in self.output_columns], index=rdf.index)
