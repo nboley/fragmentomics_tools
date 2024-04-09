@@ -268,8 +268,8 @@ class Region(DataClassMixin):
 
     def intersect_with_bed(self, bed_path):
         # Prevents circular import
-        from fbio.formats import TabixBedReader
-
+        from fragmentomics_tools.formats import TabixBedReader
+    
         if bed_path not in CACHED_READERS:
             # Create a new reader
             CACHED_READERS[(bed_path, self.ref)] = TabixBedReader(bed_path)
@@ -390,7 +390,7 @@ class Region(DataClassMixin):
 
         return new_start
 
-    def resize(self, new_size):
+    def resize(self, new_size, truncate_when_out_of_bounds=False):
         """
         You can think about resizing as an iterative process
         If increasing a region, you keep adding one base pair at a time, alternating right and left
@@ -424,18 +424,24 @@ class Region(DataClassMixin):
         )
 
         if new_start < 0:
-            raise OutOfBoundsError(
-                f"There is not enough flanking sequence to center this region "
-                f"(would result in a start coordinate of '{new_start}')"
-            )
+            if truncate_when_out_of_bounds:
+                new_start = 0
+            else:
+                raise OutOfBoundsError(
+                    f"There is not enough flanking sequence to center this region "
+                    f"(would result in a start coordinate of '{new_start}')"
+                )
 
         new_stop = new_start + new_size
         if self.chrom != "NA" and new_stop > CONTIG_LENGTHS[self.ref][self.chrom]:
-            raise OutOfBoundsError(
-                f"There is not enough flanking sequence to center this region "
-                f"(would result in a stop coordinate of '{new_stop}' but the "
-                f"chrom length is '{CONTIG_LENGTHS[self.chrom]}')"
-            )
+            if truncate_when_out_of_bounds:
+                new_stop = CONTIG_LENGTHS[self.ref][self.chrom]
+            else:
+                raise OutOfBoundsError(
+                    f"There is not enough flanking sequence to center this region "
+                    f"(would result in a stop coordinate of '{new_stop}' but the "
+                    f"chrom length is '{CONTIG_LENGTHS[self.chrom]}')"
+                )
 
         rv = type(self)(
             self.chrom, new_start, new_stop, self.strand, self.ref, self.data

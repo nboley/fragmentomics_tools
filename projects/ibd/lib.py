@@ -17,11 +17,11 @@ BOUNDARY_EXPANSION_SIZE = 1024*4
 ##### Samples ############################################################################################################
 
 def load_ibd_sample_df():
-    label_mapping = {'Remission': 1, 'Mild': 2, 'Moderate': 3, 'Severe': 4}
+    label_mapping = {'Asymptomatic': 0, 'Remission': 1, 'Mild': 2, 'Moderate': 3, 'Severe': 4}
 
     sample_ids_to_samples = {}
-    for fname in glob.glob("/scratch/karius/*.fragments.h5"):
-        sample_id = fname.split("/")[3].split('.')[1].split('_')[0][:-5]
+    for fname in glob.glob("/scratch/karius/frag_h5s/*.fragments.h5"):
+        sample_id = fname.split("/")[4].split('.')[1].split('_')[0][:-5]
         sample_ids_to_samples[sample_id] = fname
 
     assert 1 == pd.read_csv("/scratch/karius/Merged_meta_data_CD_UC_foundation.csv")["SampleID"].value_counts().max()
@@ -31,6 +31,14 @@ def load_ibd_sample_df():
     metadata = metadata.assign(frag_h5 = metadata.apply(lambda x: FragmentsH5(sample_ids_to_samples[x.sample_id]), 1))[['sample_id', 'label', 'frag_h5', 'DIAGNOSIS', 'ENDO_CATEGORY', 'Cluster', 'SITE_NUMBER']]
     return SampleDataFrame(metadata).sort_values('label')
     
+
+def build_marker_gene_rdf(genes_rdf):
+    marker_genes = pd.read_table("/scratch/karius/reference/markers.immune_vs_epithelial.tsv", sep=" ")
+    up_marker_genes = marker_genes.query("p_val_adj < 0.01 and avg_log2FC < -3").assign(direction='up_in_colon')
+    down_marker_genes = marker_genes.query("p_val_adj < 0.01 and avg_log2FC > 7").assign(direction='down_in_colon')
+    marker_genes = pd.concat([up_marker_genes, down_marker_genes])
+    return genes_rdf.set_index("gene_name").join(marker_genes, how='inner').reset_index().reset_index(drop=True) # .query("direction == 'up_in_colon' and expression < 0.2")
+
 
 def make_single_strand_bndry(fa, vline_pos=None, include_vplot=True, coverage_type='summed_endpoints', smooth_window=None):
     FRAGMENT_BANDS = [(40, 60), (60, 100), (110, 500)]

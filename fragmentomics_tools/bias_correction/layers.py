@@ -1,9 +1,13 @@
 import numpy
 import scipy
 
-from torch import nn, Tensor
+from typing import Dict, Optional, List, Set, Type, Union
+
+import torch
 
 from fragmentomics_tools.region import Region
+
+
 
 
 def calculate_start_and_stop_from_jitter(
@@ -71,7 +75,7 @@ def jitter_matrix(input_arr, jitter_value, output_length, strand: Optional[str] 
     return jittered_output
 
 
-class SpatialDropout(nn.Module):
+class SpatialDropout(torch.nn.Module):
     def __init__(self, p=0.2):
         """TLDR; Full Channel Dropout in ND. This replicates keras SpatialDropout1D but with the pytorch expected
             channel ordering. See https://discuss.pytorch.org/t/spatial-dropout-in-pytorch/21400/4
@@ -80,7 +84,7 @@ class SpatialDropout(nn.Module):
         """
         super().__init__()
         self.p = p
-        self.do2 = nn.Dropout2d(p)
+        self.do2 = torch.nn.Dropout2d(p)
 
     def forward(self, x):
         if self.training:
@@ -95,13 +99,13 @@ class SpatialDropout(nn.Module):
         return x
 
 
-class ResNetDilatedBlock(nn.Module):
+class ResNetDilatedBlock(torch.nn.Module):
     def __init__(
         self,
         input_channels: int = 64,
         profile_kernel_size: int = 20,
         dilation_rate: int = 1,
-        activation: Type[nn.Module] = nn.ReLU,
+        activation: Type[torch.nn.Module] = torch.nn.ReLU,
         activation_post_sum: bool = False,
         skip_batchnorm: bool = False,
         preact_residual_normalization: bool = False,
@@ -116,7 +120,7 @@ class ResNetDilatedBlock(nn.Module):
         :param profile_kernel_size: Profile kernel size.
             This should be odd unless the dilation rate is even, then it can be either.
         :param dilation_rate: rate of dilation
-        :param activation: module of desired activation function. Defaults to nn.ReLU.
+        :param activation: module of desired activation function. Defaults to torch.nn.ReLU.
         :param preact_residual_normalization: Apply a pre-activation layer (recommended) to limit
             accumulation of variance in deeper networks. See:
             https://iclr-blog-track.github.io/2022/03/25/unnormalized-resnets/#moment-control
@@ -128,7 +132,7 @@ class ResNetDilatedBlock(nn.Module):
             profile_kernel_size % 2 == 1 or dilation_rate % 2 == 0
         ), f"Please provide an odd kernel size, you gave {profile_kernel_size}"
         self.activation_post_sum = activation_post_sum
-        self.conv1 = nn.Conv1d(
+        self.conv1 = torch.nn.Conv1d(
             in_channels=input_channels,
             out_channels=input_channels,
             stride=1,
@@ -138,21 +142,24 @@ class ResNetDilatedBlock(nn.Module):
         )
         self.preact_residual_normalization = preact_residual_normalization
         if self.preact_residual_normalization:
-            self.bn_preact = nn.BatchNorm1d(input_channels)
+            self.bn_preact = torch.nn.BatchNorm1d(input_channels)
         else:
-            self.bn_preact = None
-        self.bn = nn.BatchNorm1d(input_channels)
+            self.bn_preact = None        
+        if not skip_batchnorm:
+            self.bn = torch.nn.BatchNorm1d(input_channels)
+        else:
+            self.bn = None
         self.skip_batchnorm = skip_batchnorm
         self.activation = activation()
 
-    def forward(self, x: Tensor):
+    def forward(self, x: torch.Tensor):
         """
-        :param x: Tensor
-        :return: Tensor of the same shape as input.
+        :param x: torch.Tensor
+        :return: torch.Tensor of the same shape as input.
         """
         if self.preact_residual_normalization:
             # https://iclr-blog-track.github.io/2022/03/25/unnormalized-resnets/#moment-control
-            # where preact is later defined as nn.Sequential([norm_layer(inplanes), nn.ReLU()])
+            # where preact is later defined as torch.nn.Sequential([norm_layer(inplanes), torch.nn.ReLU()])
             # in PreResidualBottleneck. The alpha/beta terms are stored inside of the norm_layer.
             assert self.bn_preact is not None
             x = self.activation(self.bn_preact(x))

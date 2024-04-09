@@ -1,5 +1,6 @@
+import torch
 from torch.nn.modules.loss import _Loss
-from torch import Tensor
+from torch.distributions.utils import logits_to_probs, probs_to_logits
 
 def _loss_reduce(nll, reduction):
     if reduction == "mean":
@@ -12,7 +13,7 @@ def _loss_reduce(nll, reduction):
         raise NotImplementedError(f"Reduction {reduction} is not implemented.")
 
 
-class MultinomialNLLLoss(_Loss):
+class MultinomialNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(
         self,
         size_average=None,
@@ -46,7 +47,7 @@ class MultinomialNLLLoss(_Loss):
         self.scale_loss_to_d = scale_loss_to_d
         self.is_probs = is_probs
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         dims = input.shape
         # *dims[:2] is batch, channel
         inputs_flat = input.contiguous().view(*dims[:2], -1)
@@ -90,7 +91,7 @@ def convert_params(mu, alpha):
     n = mu ** 2 / (var - mu)
     return n, p
 
-class NegativeBinomialNLLLoss(_Loss):
+class NegativeBinomialNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(self, reduction: str = "mean") -> None:
         """Multinomial Negative Log Likelihood Loss
 
@@ -112,7 +113,7 @@ class NegativeBinomialNLLLoss(_Loss):
         dispersion = torch.exp(-(torch.Tensor(param_2_output) - 6))
         return convert_params(means, dispersion) # returns n, p
         
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         means_input = torch.sigmoid(input[:, :2, :] - 2)
         # expected input is r, or total count, which is >0
         # we let the model fit log(alpha = 1/r) = -log(r)
@@ -133,7 +134,7 @@ class NegativeBinomialNLLLoss(_Loss):
         return _loss_reduce(nll, self.reduction)
 
 
-class NegativeBinomialNLLLossOld(_Loss):
+class NegativeBinomialNLLLossOld(torch.nn.modules.loss._Loss):
     def __init__(self, reduction: str = "mean", min_alpha=0.0, max_alpha=0.05) -> None:
         """Multinomial Negative Log Likelihood Loss
 
@@ -163,7 +164,7 @@ class NegativeBinomialNLLLossOld(_Loss):
     def _transform_counts(self, total_count_flat):
         return self.transform_counts(self.min_alpha, self.max_alpha, total_count_flat)
         
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         logits_input = input[:, :2, :]
         total_count_input = input[:, 2:, :]
         dims = logits_input.shape
@@ -178,7 +179,7 @@ class NegativeBinomialNLLLossOld(_Loss):
         nll = -dist.log_prob(target_flat)
         return _loss_reduce(nll, self.reduction)
 
-class NegativeBinomialFixedTotalCountNLLLoss(_Loss):
+class NegativeBinomialFixedTotalCountNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(self, total_count, reduction: str = "mean") -> None:
         """Multinomial Negative Log Likelihood Loss
 
@@ -195,7 +196,7 @@ class NegativeBinomialFixedTotalCountNLLLoss(_Loss):
         self.total_count = total_count
 
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         logits_input = input[:, :2, :]
         dims = logits_input.shape
     

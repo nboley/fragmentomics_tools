@@ -3,7 +3,7 @@ import math
 import copy
 import logging
 import warnings
-from collections import defaultdict
+from collections import defaultdict, Counter
 from functools import reduce
 from itertools import chain
 from typing import Dict, List, Union, Optional, Sequence, Iterable, Tuple
@@ -31,7 +31,7 @@ import seaborn as sns
 import pysam
 import logging
 
-from fragmentomics_tools import Region
+from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
 
@@ -74,6 +74,40 @@ from ravel.constants import (
 NUM_CORES = -1
 DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
+
+
+def get_indices_of_balanced_labels(labels, random_state=None):
+    """
+    >>> labels = np.array([1, 0, 0, 0, 1])
+    >>> idxs = get_indices_of_balanced_labels(labels, random_state=1)
+    >>> idxs
+    array([0, 1, 3, 4])
+    >>> Counter(labels[idxs])
+    Counter({1: 2, 0: 2})
+    >>> get_indices_of_balanced_labels([])
+    array([], dtype=int64)
+    >>> get_indices_of_balanced_labels([1])
+    array([0])
+    >>> get_indices_of_balanced_labels([0,1,2,2], random_state=1)
+    array([0, 1, 2])
+    """
+    if len(labels) == 0:
+        return np.array([], int)
+
+    labels = np.array(labels)
+    counts = Counter(labels)
+    min_count = min(counts.values())
+
+    keep_idxs = []
+    for label in counts.keys():
+        label_idxs = np.where(labels == label)[0]
+        keep_label_idxs = sk_shuffle(label_idxs, random_state=random_state)[:min_count]
+        keep_idxs += keep_label_idxs.tolist()
+
+    # sanity check
+    assert len(set(Counter(labels[keep_idxs]).values())) == 1
+
+    return np.array(sorted(keep_idxs))
 
 
 def windowed_range(start, stop, window_size):
@@ -184,6 +218,11 @@ class RegionDataFrame(DataFrameBase):
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
     _additional_required_columns = []
     _required_columns = _critical_bed_columns + _additional_required_columns
+
+    @property
+    def df(self):
+        """Cast to a normal pandas dataframe"""
+        return pd.DataFrame(self)
 
     @classmethod
     def from_fname_s3_or_local(cls, fname, *args, **kwargs):
@@ -769,7 +808,7 @@ class RegionDataFrame(DataFrameBase):
         )
 
     def intersect_with_rdf(
-        self, other, sorted=False, rsuff="other", **intersect_kwargs
+        self, other, sorted=False, rsuff="other"
     ):
         """
         Creates the intersection of RegionDataFrames
@@ -780,34 +819,48 @@ class RegionDataFrame(DataFrameBase):
             https://daler.github.io/pybedtools/autodocs/pybedtools.bedtool.BedTool.intersect.html
         :return: RegionDataFrame that is the intersection of two RegionDataFrames
         """
+        def reordered_columns(rdf):
+            bed_columns = ['contig', 'start', 'stop', 'strand']
+            return bed_columns + [c for c in rdf.columns if c not in bed_columns]
+
         # assert isinstance(other, RegionDataFrame)
         assert (
             self.ref == other.ref
         ), f"RegionDataFrames must have the same reference: {self.ref, other.ref}"
 
-        # Determine whether or not we want to return the columns of the other rdf
-        return_all_cols = False
-        for keyword in ["wo", "wb", "wao", "u", "v", "c", "C"]:
-            if keyword in intersect_kwargs and intersect_kwargs[keyword]:
-                return_all_cols = True
-                break
 
-        this_bedtool = pybedtools.BedTool.from_dataframe(self)
-        other_bedtool = pybedtools.BedTool.from_dataframe(other)
-        intersection_rdf = RegionDataFrame(
+        self_index = self.index
+        self = self.reset_index()
+        this_bed_df = self.bed_df
+        this_bed_df['index'] = self_index
+        this_bedtool = pybedtools.BedTool.from_dataframe(this_bed_df )
+        other_bedtool = pybedtools.BedTool.from_dataframe(other[reordered_columns(other)])
+        other_column_names = [f"{c}_{rsuff}" for c in reordered_columns(other)]
+        intersection_rdf = pd.DataFrame(
             this_bedtool.intersect(
-                other_bedtool, sorted=sorted, **intersect_kwargs
-            ).to_dataframe(
-                names=list(self.columns)
-                + [f"{c}_{rsuff}" for c in other.columns]
-                + ["overlap"]
-            ),
-            ref=self.ref,
+                other_bedtool, sorted=sorted, wa=True, wb=True
+            ).to_dataframe(names=this_bed_df.columns.tolist() + other_column_names),
+        ).set_index('index')
+        intersection_rdf = intersection_rdf[other_column_names]
+        intersection_rdf.columns = [c[:-(1 + len(rsuff))] for c in other_column_names]
+        return RegionDataFrame(intersection_rdf, ref=self.ref)
+
+    def intersect_with_bed(
+        self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
+    ):
+        """
+        Finds intersection between RegionDataFrame and some bed file
+        :param bed_file_path: A BED file path, for example a blacklist or repeat annotation
+        :param rsuff: Suffix to append to fields of bed file
+        :param sorted: Whether BED is sorted
+        :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
+        """
+        other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
+        overlap_rdf = self.intersect_with_rdf(
+            other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
         )
-        if return_all_cols:
-            return intersection_rdf
-        else:
-            return intersection_rdf[self.columns]
+
+        return overlap_rdf
 
     def sort(self, inplace=False):
         """
@@ -857,22 +910,6 @@ class RegionDataFrame(DataFrameBase):
             rv = rv.query("not contig.isnull()")
         return rv
 
-    def intersect_with_bed(
-        self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
-    ):
-        """
-        Finds intersection between RegionDataFrame and some bed file
-        :param bed_file_path: A BED file path, for example a blacklist or repeat annotation
-        :param rsuff: Suffix to append to fields of bed file
-        :param sorted: Whether BED is sorted
-        :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
-        """
-        other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
-        overlap_rdf = self.intersect_with_rdf(
-            other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
-        )
-
-        return overlap_rdf
 
     def get_overlapping_base_counts(self, bed_file, rsuff="bed", sorted=False):
         """
@@ -954,9 +991,7 @@ class RegionDataFrame(DataFrameBase):
         )
         return bases_overlap_per_bed
 
-    def mask_blacklist_and_repeats(
-        self, mask_blacklist=True, max_repeat_size: Optional[int] = None
-    ):
+    def drop_overlapping_regions(self, other_rdf):
         """
         Masks blacklist regions, returning a new dataframe with regions that don't overlap blacklist regions.
         OPTIONALLY, also masks repeat regions. To do this, must provide a max repeat size allowed
@@ -964,34 +999,13 @@ class RegionDataFrame(DataFrameBase):
         assert (
             self.ref == "hg38"
         ), "Must use hg38 reference if excluding blacklist regions"
-        if max_repeat_size is None:
-            warnings.warn(
-                "Not filtering repeats. To filter, provide a max size of repeat allowed",
-                UserWarning,
-            )
-        num_regions = len(self)
-        if mask_blacklist:
-            with load_data_manifest(DEFAULT_DATA_MANIFEST_PATH) as dm:
-                blacklist_path = dm.sync_and_get(
-                    "annotations/GRCh38_extras/hg38-blacklist.v2.sorted.bed.gz"
-                ).path
-            blacklist_mask = self.overlaps_with_bed(blacklist_path, invert=True)
-        else:
-            blacklist_mask = numpy.ones(num_regions, dtype=bool)
-        if max_repeat_size is not None:
-            assert isinstance(max_repeat_size, int)
-            with load_data_manifest(DEFAULT_DATA_MANIFEST_PATH) as dm:
-                repeats_path = dm.sync_and_get(
-                    "annotations/GRCh38_extras/hg38-repeats.sorted.bed.gz"
-                ).path
-            repeats_mask = (
-                self.get_overlapping_base_counts(repeats_path)["max_counts"]
-                <= max_repeat_size
-            )
-        else:
-            repeats_mask = numpy.ones(num_regions, dtype=bool)
+        tmp = self.intersect_with_rdf(other_rdf)
+        return self.loc[self.index.difference(tmp.index), :]
 
-        return self.loc[blacklist_mask & repeats_mask]
+    def attach_blacklist_regions(self, bed_fname):
+        tmp = self.set_index('gene_name').intersect_with_rdf(RegionDataFrame.from_bed(bed_fname, ref=self.ref))
+        blacklist_regions = tmp.reset_index().groupby(tmp.index.names).apply(lambda x: list(x.iter_regions())).rename("blacklist_regions")
+        return self.set_index('gene_name').join(blacklist_regions).fillna('').reset_index()
 
     def region_mask(self, region):
         """
@@ -1002,26 +1016,12 @@ class RegionDataFrame(DataFrameBase):
 
     @property
     def bed_df(self):
-        assert all(c in self.columns for c in self._critical_bed_columns)
+        columns = self._required_columns
+        assert all(c in self.columns for c in columns)
 
         bed_df = self.copy(deep=True)
 
-        if "id" not in bed_df.columns:
-            if "name" in bed_df.columns:
-                bed_df = bed_df.rename(columns={"name": "id"})
-            else:
-                # use region string as default
-                bed_df["id"] = bed_df.reset_index()[["contig", "start", "stop"]].apply(
-                    lambda x: f"{x[0]}:{x[1]}-{x[2]}", axis=1
-                )
-
-        if "strand" not in bed_df.columns:
-            bed_df["strand"] = None
-
-        if "score" not in bed_df.columns:
-            bed_df["score"] = 0
-
-        return bed_df[self._standard_bed_columns]
+        return bed_df[columns]
 
     def save_as_bed(self, path):
         self.bed_df.to_csv(path, index=False, sep="\t", header=False)
@@ -1164,7 +1164,7 @@ class RegionDataFrame(DataFrameBase):
     def _error_on_invalid_new_starts(new_start):
         if (new_start < 0).any():
             raise OutOfBoundsError(
-                f"There is not enough flanking sequence to expand this region"
+                f"There is not enough flanking sequence to modify this region"
                 f"(would result in a start coordinate of '{new_start.min()} at idx {new_start.argmin()}')"
             )
 
@@ -1178,7 +1178,7 @@ class RegionDataFrame(DataFrameBase):
                 and new_stops_for_contig.max() > CONTIG_LENGTHS[rdf.ref][contig]
             ):
                 raise OutOfBoundsError(
-                    f"There is not enough flanking sequence to expand a region "
+                    f"There is not enough flanking sequence to modify a region "
                     f"(would result in a stop coordinate of '{new_stops_for_contig.max()}' at "
                     f"idx {new_stops_for_contig.argmax()} but the "
                     f"chrom length is '{CONTIG_LENGTHS[rdf.ref][contig]}')"
@@ -1196,7 +1196,7 @@ class RegionDataFrame(DataFrameBase):
 
         return ok
 
-    def expand_regions(
+    def _resize_region_boundaries(
         self,
         left: int = 0,
         right: int = 0,
@@ -1212,29 +1212,54 @@ class RegionDataFrame(DataFrameBase):
         if strand_aware:
             neg_mask = self.strand == "-"
 
-        # quick optimization for the common no-shift case
-        new_start = rdf.start - left
+        new_starts = rdf.start + left
         if strand_aware:
-            new_start[neg_mask] = rdf.loc[neg_mask, "start"] - right
+            new_starts[neg_mask] = rdf.loc[neg_mask, "start"] - right
+        # assert (new_starts > 0).all(), pd.DataFrame(dict(right=right, length=self.region_lengths, total=self.region_lengths+right)).total.value_counts()
 
-        new_stop = rdf.stop + right
+        new_stops = rdf.stop + right
         if strand_aware:
-            new_stop[neg_mask] = rdf.loc[neg_mask, "stop"] + left
+            new_stops[neg_mask] = rdf.loc[neg_mask, "stop"] - left
 
         valid_regions_mask = self._valid_regions_mask(
-            new_start, new_stop, discard_buffer_bp=0
+            new_starts, new_stops, discard_buffer_bp=0
         )
 
-        rdf["start"] = new_start
-        rdf["stop"] = new_stop
+        rdf["start"] = new_starts
+        rdf["stop"] = new_stops
         if discard_invalid_resizes:
             rdf = rdf.loc[valid_regions_mask, :]
-        elif (~valid_regions_mask).any():
-            raise OutOfBoundsError(
-                f"There is not enough flanking sequence to expand {(~valid_regions_mask).sum()}/{self.shape[0]} regions."
-            )
+        else:
+            self._error_on_invalid_new_starts(new_starts)
+            self._error_on_invalid_new_stops(self, new_stops)
 
         return rdf
+
+    def expand_regions(
+            self,
+            /,
+            left_amt: int = 0,
+            right_amt: int = 0,
+            inplace: bool = False,
+            strand_aware: bool = False,
+            discard_invalid_resizes: bool = False,
+    ):
+        assert (left_amt >= 0).all()
+        assert (right_amt >= 0).all()
+        return self._resize_region_boundaries(-left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes)
+
+    def truncate(
+            self,
+            /,
+            left_amt: int = 0,
+            right_amt: int = 0,
+            inplace: bool = False,
+            strand_aware: bool = False,
+            discard_invalid_resizes: bool = False,
+    ):
+        assert (np.array(left_amt) >= 0).all()
+        assert (np.array(right_amt) >= 0).all()
+        return self._resize_region_boundaries(left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes)
 
     def resize_regions(
         self,
@@ -1512,15 +1537,15 @@ class RegionDataFrame(DataFrameBase):
     # #  These are methods that require a label column
     # #  this should probably be split into a subclass
 
-    def label_balanced(self, random_state=None):
+    def label_balanced(self, column_name, random_state=None):
         """Return a copy of self with balanced labels."""
-        if not hasattr(self, "label"):
+        if not hasattr(self, column_name):
             raise ValueError(
-                "The data frame must have a 'label' column to balance labels"
+                f"The data frame must have column '{column_name}'"
             )
 
         keep_idxs = get_indices_of_balanced_labels(
-            self.label, random_state=random_state
+            self[column_name], random_state=random_state
         )
 
         return self.iloc[keep_idxs].copy()
@@ -1624,19 +1649,7 @@ class RegionDataFrame(DataFrameBase):
 
 
 class SampleAndRegionDataFrame(RegionDataFrame):
-    def __init__(self, data, *args, **kwargs):
-        super().__init__(data, *args, **kwargs)
-
-        # hack around pandas not correctly using _constructor internally
-        # This line should always be first.  Pandas incorrectly passes this BlockManager to the constructor sometimes.
-        if isinstance(data, pandas.core.internals.BlockManager):
-            return
-
-        if "sample_id" not in self.columns:
-            raise ValueError("SampleDataFrame must have a sample_id column")
-
-        if "frag_h5" not in self.columns:
-            raise ValueError("SampleDataFrame must have a frag_h5 column")
+    _additional_required_columns = ["sample_id", "frag_h5"]
 
     @classmethod
     def init_from_rdf_and_sdf(cls, rdf, sdf):
@@ -1740,6 +1753,47 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 
         return self
 
+    def _resize_region_boundaries(
+        self,
+        left: int = 0,
+        right: int = 0,
+        inplace: bool = False,
+        strand_aware: bool = False,
+        discard_invalid_resizes: bool = False,
+    ):
+        self = super()._resize_region_boundaries(left=left, right=right, inplace=inplace, strand_aware=strand_aware, discard_invalid_resizes=discard_invalid_resizes)
+
+        # if we have fragmnet arrays then resize them
+        if self.has_fragment_array:
+            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
+            self['fragment_array'] = fragment_arrays
+            assert False
+
+        return self
+
+    def expand_regions(self, *args, **kwargs):
+        if self.has_fragment_array:
+            raise ValueError(
+                "can not expand regions if the srdf has fragment arrays."
+                "Hint: If you need to grow regions with fragment arrays you'll need to drop the fragment arrays, resize the regions, and then re-attach the fragment arrays"
+            )
+        self = super().expand_regions(*args, **kwargs)
+
+    def resize_regions(self, new_size, *args, **kwargs):
+        if self.has_fragment_array:
+            if (self.region_lengths < numpy.array(new_size)).any():
+                raise ValueError(
+                    "can not expand regions if the srdf has fragment arrays."
+                    "Hint: If you need to grow regions with fragment arrays you'll need to drop the fragment arrays, resize the regions, and then re-attach the fragment arrays"
+                )
+        self = super().resize_regions(new_size, *args, **kwargs)
+        if self.has_fragment_array:
+            fragment_arrays = [record.fragment_array.subset_by_region(region) for region, record in tqdm(self.iter_region_row(), total=self.nrow)]
+            self['fragment_array'] = fragment_arrays
+
+        return self
+
+
 class FlDist:
     def __init__(self, sdf):
         max_frag_len = 512
@@ -1769,6 +1823,7 @@ class FlDist:
 
 class SampleDataFrame(DataFrameBase):
     _metadata = ["fl_dist"]
+    _required_columns = ["sample_id", "frag_h5"]
 
     def __init__(self, data, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
@@ -1777,12 +1832,6 @@ class SampleDataFrame(DataFrameBase):
         # This line should always be first.  Pandas incorrectly passes this BlockManager to the constructor sometimes.
         if isinstance(data, pd.core.internals.BlockManager):
             return
-
-        if "sample_id" not in self.columns:
-            raise ValueError("SampleDataFrame must have a sample_id column")
-
-        if "frag_h5" not in self.columns:
-            raise ValueError("SampleDataFrame must have a frag_h5 column")
 
         self.fl_dist = FlDist(self)
 

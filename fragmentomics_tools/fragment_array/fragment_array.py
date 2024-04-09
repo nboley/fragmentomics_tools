@@ -1238,7 +1238,7 @@ class RegionFragmentArray(FragmentArray):
     #    # self = self._replace(region=self.region.truncate(left_amt=left_amt, right_amt=right_amt))
     #    return super().truncate(left_amt=left_amt, right_amt=right_amt)
 
-    def subset_by_region(self, subregion: int):
+    def subset_by_region(self, subregion):
         new_region = self.region.intersect(subregion)
         if new_region is None:
             raise ValueError("sub_region ({sub_region{) must be a subregion of self.region ({self.region}) to take the subset (ensure that strands match)")
@@ -1250,6 +1250,18 @@ class RegionFragmentArray(FragmentArray):
         assert right_amt >= 0 and right_amt < self.region.length
 
         return self.truncate(left_amt=left_amt, right_amt=right_amt)
+
+    def mask_overlapping_fragments(self, mask_regions, expansion=0):
+        # fast path when we don't have anuy regions to mask
+        if len(mask_regions) == 0:
+            return self
+
+        mask = numpy.ones(self.n_fragments, dtype=bool)
+        for region in mask_regions:
+            region = region.shift(-min(self.start, region.start)).resize(region.length + expansion*2, truncate_when_out_of_bounds=True)
+            mask[(self.starts_0 >= region.start) & (self.stops_0 <= region.stop)] = 0
+        mask = mask.astype(bool)
+        return self.subset(mask)
 
     def __str__(self):
         return (
