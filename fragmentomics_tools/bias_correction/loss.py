@@ -120,11 +120,11 @@ class NegativeBinomialNLLLoss(torch.nn.modules.loss._Loss):
         return convert_params(means, dispersion)  # returns n, p
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        means_input = torch.sigmoid(input[:, :2, :] - 2)
+        means_input = torch.sigmoid(input[:, :target.shape[1], :] - 2)
         # expected input is r, or total count, which is >0
         # we let the model fit log(alpha = 1/r) = -log(r)
         # => exp(x) = 1/r => r = exp(-x)
-        dispersion_input = torch.exp(-(input[:, 2:, :] - 6))
+        dispersion_input = torch.exp(-(input[:, target.shape[1]:, :] - 6))
 
         dims = means_input.shape
         assert dims == dispersion_input.shape
@@ -174,8 +174,8 @@ class NegativeBinomialNLLLossOld(torch.nn.modules.loss._Loss):
         return self.transform_counts(self.min_alpha, self.max_alpha, total_count_flat)
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        logits_input = input[:, :2, :]
-        total_count_input = input[:, 2:, :]
+        logits_input = input[:, :target.shape[1], :]
+        total_count_input = input[:, target.shape[1]:, :]
         dims = logits_input.shape
         assert dims == total_count_input.shape
 

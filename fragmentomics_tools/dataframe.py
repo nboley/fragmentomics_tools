@@ -843,7 +843,11 @@ class RegionDataFrame(DataFrameBase):
             this_bedtool.intersect(
                 other_bedtool, sorted=sorted, wa=True, wb=True
             ).to_dataframe(names=this_bed_df.columns.tolist() + other_column_names),
-        ).set_index("index")
+        )
+        if len(intersection_rdf) == 0:
+            return pd.DataFrame(columns=[c[: -(1 + len(rsuff))] for c in other_column_names])
+
+        intersection_rdf = intersection_rdf.set_index('index')
         intersection_rdf = intersection_rdf[other_column_names]
         intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
         return RegionDataFrame(intersection_rdf, ref=self.ref)
@@ -1005,17 +1009,21 @@ class RegionDataFrame(DataFrameBase):
         return self.loc[self.index.difference(tmp.index), :]
 
     def attach_blacklist_regions(self, bed_fname):
-        tmp = self.set_index("gene_name").intersect_with_rdf(
+        tmp = self.intersect_with_rdf(
             RegionDataFrame.from_bed(bed_fname, ref=self.ref)
         )
+        if len(tmp) == 0:
+            self['blacklist_regions'] = ""
+            return self
+
         blacklist_regions = (
-            tmp.reset_index()
+            tmp
             .groupby(tmp.index.names)
             .apply(lambda x: list(x.iter_regions()))
             .rename("blacklist_regions")
         )
         return (
-            self.set_index("gene_name").join(blacklist_regions).fillna("").reset_index()
+            self.join(blacklist_regions).fillna("")
         )
 
     def region_mask(self, region):

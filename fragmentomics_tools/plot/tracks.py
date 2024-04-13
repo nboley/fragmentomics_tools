@@ -570,17 +570,21 @@ class OverlaidTracks(GenomeTrack):
         ), "All tracks must have the same region"
         self.vlines = list(itertools.chain(*[tr.vlines for tr in tracks_to_overlay]))
         self.lines = list(itertools.chain(*[tr.lines for tr in tracks_to_overlay]))
+        """
         names = [
             tr.name
             for tr in tracks_to_overlay
             if hasattr(tr, "name") and tr.name is not None
         ]
         self.name = " ".join(names) if names else ""
+        """
 
     def _plot(self, ax):
         ylims = []
+        labels = []
         for track in self.tracks_to_overlay:
             track.plot(ax)
+            labels.append(track.name)
             ylims.append(track.ylim)
 
         # if none of the ylims are set, then autoscale
@@ -612,6 +616,8 @@ class OverlaidTracks(GenomeTrack):
             # enable auto-scale to account for any None values
             ax.autoscale(enable=True, axis="y", tight=None)
             ax.set_ylim((ylim_lower, ylim_upper))
+
+        ax.legend(labels, loc='upper right')
 
 
 @dataclass

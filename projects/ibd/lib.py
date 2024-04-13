@@ -34,7 +34,7 @@ def load_ibd_sample_df():
     }
 
     sample_ids_to_samples = {}
-    for fname in glob.glob("/scratch/karius/frag_h5s/*.fragments.h5"):
+    for fname in glob.glob("/ssd/karius/frag_h5s/*.fragments.h5"):
         sample_id = fname.split("/")[4].split(".")[1].split("_")[0][:-5]
         sample_ids_to_samples[sample_id] = fname
 

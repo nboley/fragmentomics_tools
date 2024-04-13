@@ -11,10 +11,10 @@ import lightning as L
 
 from fragmentomics_tools.bias_correction.model import BackgroundModelModule
 from fragmentomics_tools.bias_correction.data import FragmentEndpointsDataset
+from fragmentomics_tools.dataframe import RegionDataFrame
 
-from ibd.data import HematopoieticGeneExpression
+from ibd.data import HematopoieticGeneExpression, build_ctcf_binding_sites
 from ibd.lib import load_ibd_sample_df
-
 
 def build_marker_gene_rdf(genes_rdf):
     marker_genes = pd.read_table(
@@ -35,7 +35,7 @@ def build_marker_gene_rdf(genes_rdf):
     )  # .query("direction == 'up_in_colon' and expression < 0.2")
 
 
-def build_rdfs():
+def build_gene_rdfs():
     hge_raw = HematopoieticGeneExpression.load().expand_regions(2048, 2048)
     test_rdf = build_marker_gene_rdf(hge_raw)
     non_test_rdf = hge_raw.query(
@@ -44,6 +44,20 @@ def build_rdfs():
     train_rdf = non_test_rdf.head(3800)
     val_rdf = non_test_rdf.tail(200)
     return train_rdf, val_rdf, test_rdf
+
+
+def build_ctcf_rdfs():
+    dhs_rdf = RegionDataFrame(
+        pd.read_csv("/scratch/karius/annotation/DHS_Index_and_Vocabulary_hg38_WM20190703.min2samp.random500k.blacklist_filt.bed", sep="\t"),
+        ref='hg38'
+    ).resize_regions(1024).sample(frac=0.01)
+    dhs_rdf['strand'] = '.'
+    ctcf_rdf = build_ctcf_binding_sites().resize_regions(1024)
+    intersect_rdf = dhs_rdf.intersect_with_rdf(ctcf_rdf).drop_duplicates()
+    train_and_val_rdf = dhs_rdf.loc[~dhs_rdf.index.isin(intersect_rdf.index), :].sample(frac=1.0)
+    train_rdf = train_and_val_rdf.head(500000).sample(1000)
+    val_rdf = train_and_val_rdf.tail(40000).sample(100)
+    return train_rdf, val_rdf, ctcf_rdf
 
 
 def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
@@ -64,13 +78,28 @@ def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
 
     return model
 
+valid_columns = [
+    'strand_+__fl_40_65__coverage_first',
+    'strand_+__fl_40_65__coverage_last',
+    'strand_+__fl_40_65__coverage_midpoint',
+    'strand_+__fl_120_175__coverage_first',
+    'strand_+__fl_120_175__coverage_last',
+    'strand_+__fl_120_175__coverage_midpoint',
+    'strand_-__fl_40_65__coverage_first',
+    'strand_-__fl_40_65__coverage_last',
+    'strand_-__fl_40_65__coverage_midpoint',
+    'strand_-__fl_120_175__coverage_first',
+    'strand_-__fl_120_175__coverage_last',
+    'strand_-__fl_120_175__coverage_midpoint'
+]
 
 def main():
-    sdf = load_ibd_sample_df()
-    train_rdf, val_rdf, test_rdf = build_rdfs()
-    # model = BackgroundModelModule(num_residual_layers=2, output_columns=['fwd_start_counts', 'bkwd_stop_counts'], loss="negative_binomial")
-    # model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
-    # model.save('/scratch/karius/bias_correction_model/merged.negative_binomial.base_model.3.res')
+    sdf = load_ibd_sample_df().sample(1)
+    train_rdf, val_rdf, test_rdf = build_ctcf_rdfs()
+    model = BackgroundModelModule(num_residual_layers=2, output_columns=valid_columns, loss="negative_binomial")
+    model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
+    model.save('/scratch/karius/bias_correction_model/merged.accessible_regions.multinomial.res')
+    return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):
         if os.path.exists(
             f"/scratch/karius/bias_correction_model/merged.negative_binomial.{sample_id}.2.res"
