@@ -280,7 +280,7 @@ class BackgroundModelModule(L.LightningModule):
         return pd.DataFrame(
             dists,
             columns=["contig", "start", "stop"]
-            + [c + "_dist" for c in self.output_columns],
+            + ["pred_dist." for c in self.output_columns],
         )
 
     def predict_from_rdf(self, rdf):
@@ -294,7 +294,7 @@ class BackgroundModelModule(L.LightningModule):
         dists = [self._build_dist(x) for x in tqdm.tqdm(pred)]
 
         return pd.DataFrame(
-            dists, columns=[x + "_dist" for x in self.output_columns], index=rdf.index
+            dists, columns=["pred_dist."  + x for x in self.output_columns], index=rdf.index
         )
 
     def predict_from_rdf_and_sdf(self, rdf, sdf):

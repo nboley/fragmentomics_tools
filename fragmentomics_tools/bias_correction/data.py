@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import scipy
 
 import torch
 from tqdm import tqdm
@@ -12,6 +13,8 @@ from fragmentomics_tools.fragment_array import merge_fragment_arrays
 TILE_REGION_SIZE = 2048 * 8
 FASTA_PATH = "/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz"
 
+def _identity_fn(x):
+    return x
 
 def index_key_to_track_name(args):
     strand, fl, coverage_type = args
@@ -20,7 +23,9 @@ def index_key_to_track_name(args):
 def track_name_to_index_key(track_name):
     return re.fullmatch("strand_({+-})__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)", track_name)
 
-def build_counts(record):
+def build_counts(record, return_sparse=False):
+    compress = scipy.sparse.csr_array if return_sparse else _identity_fn        
+        
     # drop duplicates
     rfa = record.fragment_array.drop_duplicate_fragments()
     if hasattr(record, 'blacklist_regions'):
@@ -33,15 +38,15 @@ def build_counts(record):
             sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
             key = (strand, fl, 'first')
             assert key not in res
-            res[key] = sub_sub_rfa.first_covered_base_counts
+            res[key] = compress(sub_sub_rfa.first_covered_base_counts)
 
             key = (strand, fl, 'last')
             assert key not in res
-            res[key] = sub_sub_rfa.last_covered_base_counts
+            res[key] = compress(sub_sub_rfa.last_covered_base_counts)
 
             key = (strand, fl, 'midpoint')
             assert key not in res
-            res[key] = sub_sub_rfa.get_midpoint_coverage_array()
+            res[key] = compress(sub_sub_rfa.get_midpoint_coverage_array())
 
     res = pd.Series(res)
     res.index = [index_key_to_track_name(x) for x in res.index]

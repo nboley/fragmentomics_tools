@@ -47,16 +47,17 @@ def build_gene_rdfs():
 
 
 def build_ctcf_rdfs():
+    n_train, n_val = 100000, 5000
     dhs_rdf = RegionDataFrame(
         pd.read_csv("/scratch/karius/annotation/DHS_Index_and_Vocabulary_hg38_WM20190703.min2samp.random500k.blacklist_filt.bed", sep="\t"),
         ref='hg38'
-    ).resize_regions(1024).sample(frac=0.01)
+    ).resize_regions(1024)
     dhs_rdf['strand'] = '.'
     ctcf_rdf = build_ctcf_binding_sites().resize_regions(1024)
     intersect_rdf = dhs_rdf.intersect_with_rdf(ctcf_rdf).drop_duplicates()
-    train_and_val_rdf = dhs_rdf.loc[~dhs_rdf.index.isin(intersect_rdf.index), :].sample(frac=1.0)
-    train_rdf = train_and_val_rdf.head(500000).sample(1000)
-    val_rdf = train_and_val_rdf.tail(40000).sample(100)
+    train_and_val_rdf = dhs_rdf.loc[~dhs_rdf.index.isin(intersect_rdf.index), :].sample(n_train + n_val)
+    train_rdf = train_and_val_rdf.head(n_train)
+    val_rdf = train_and_val_rdf.tail(n_val)
     return train_rdf, val_rdf, ctcf_rdf
 
 
@@ -94,11 +95,11 @@ valid_columns = [
 ]
 
 def main():
-    sdf = load_ibd_sample_df().sample(1)
+    sdf = load_ibd_sample_df().sample(20)
     train_rdf, val_rdf, test_rdf = build_ctcf_rdfs()
     model = BackgroundModelModule(num_residual_layers=2, output_columns=valid_columns, loss="negative_binomial")
     model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
-    model.save('/scratch/karius/bias_correction_model/merged.accessible_regions.multinomial.res')
+    model.save('/scratch/karius/bias_correction_model/merged.accessible_regions.negative_binomial.2.res')
     return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):
         if os.path.exists(
