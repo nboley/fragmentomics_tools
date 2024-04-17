@@ -294,7 +294,9 @@ class BackgroundModelModule(L.LightningModule):
         dists = [self._build_dist(x) for x in tqdm.tqdm(pred)]
 
         return pd.DataFrame(
-            dists, columns=["pred_dist."  + x for x in self.output_columns], index=rdf.index
+            dists,
+            columns=["pred_dist." + x for x in self.output_columns],
+            index=rdf.index,
         )
 
     def predict_from_rdf_and_sdf(self, rdf, sdf):

@@ -857,9 +857,11 @@ class RegionDataFrame(DataFrameBase):
             ).to_dataframe(names=this_bed_df.columns.tolist() + other_column_names),
         )
         if len(intersection_rdf) == 0:
-            return pd.DataFrame(columns=[c[: -(1 + len(rsuff))] for c in other_column_names])
+            return pd.DataFrame(
+                columns=[c[: -(1 + len(rsuff))] for c in other_column_names]
+            )
 
-        intersection_rdf = intersection_rdf.set_index('index')
+        intersection_rdf = intersection_rdf.set_index("index")
         intersection_rdf = intersection_rdf[other_column_names]
         intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
         return RegionDataFrame(intersection_rdf, ref=self.ref)
@@ -1021,22 +1023,17 @@ class RegionDataFrame(DataFrameBase):
         return self.loc[self.index.difference(tmp.index), :]
 
     def attach_blacklist_regions(self, bed_fname):
-        tmp = self.intersect_with_rdf(
-            RegionDataFrame.from_bed(bed_fname, ref=self.ref)
-        )
+        tmp = self.intersect_with_rdf(RegionDataFrame.from_bed(bed_fname, ref=self.ref))
         if len(tmp) == 0:
-            self['blacklist_regions'] = ""
+            self["blacklist_regions"] = ""
             return self
 
         blacklist_regions = (
-            tmp
-            .groupby(tmp.index.names)
+            tmp.groupby(tmp.index.names)
             .apply(lambda x: list(x.iter_regions()))
             .rename("blacklist_regions")
         )
-        return (
-            self.join(blacklist_regions).fillna("")
-        )
+        return self.join(blacklist_regions).fillna("")
 
     def region_mask(self, region):
         """
@@ -1621,17 +1618,23 @@ class RegionDataFrame(DataFrameBase):
 
     def parallel_apply(self, fn, n_workers=None, verbose=True):
         # do this in a fork context so that we don't need to serialize the data into the new process
-        ctx = multiprocessing.get_context('fork')
+        ctx = multiprocessing.get_context("fork")
         # if the number of workers isn't set then use all available cpus
         if n_workers is None:
             n_workers = multiprocessing.cpu_count()
 
         # set a shared counter to track the row index to process
-        counter = ctx.Value('i', 0)
+        counter = ctx.Value("i", 0)
         recv_conn, send_conn = ctx.Pipe(duplex=False)
         pipe_lock = multiprocessing.Lock()
-        ps = [ctx.Process(target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)) for _ in range(n_workers)]
-        for p in ps: p.start()
+        ps = [
+            ctx.Process(
+                target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)
+            )
+            for _ in range(n_workers)
+        ]
+        for p in ps:
+            p.start()
 
         # clear any cache -- works around a jupyter display bug
         tqdm._instances.clear()
@@ -1644,13 +1647,14 @@ class RegionDataFrame(DataFrameBase):
             recv_conn.close()
 
             # join all of the worker processes
-            for p in ps: p.join()
+            for p in ps:
+                p.join()
 
             if verbose:
                 pbar.close()
 
         # store the returned row indices and records
-        # we track the indices so that we can re-sort into the original order and then 
+        # we track the indices so that we can re-sort into the original order and then
         # join with the input dataframe index
         indices = []
         records = []
@@ -1661,7 +1665,8 @@ class RegionDataFrame(DataFrameBase):
 
                 # if a worker raised an exception kill any active process, cleanup, and then re-raise the exception
                 if isinstance(res, Exception):
-                    for p in ps: p.kill()
+                    for p in ps:
+                        p.kill()
                     _cleanup()
                     raise res
 
@@ -1681,8 +1686,8 @@ class RegionDataFrame(DataFrameBase):
         # re-attach the original index
         rv.index = self.index
 
-
         return rv
+
     ###############################################################################################
     # #  These are methods that require a label column
     # #  this should probably be split into a subclass

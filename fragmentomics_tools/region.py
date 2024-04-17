@@ -801,9 +801,9 @@ class Region(DataClassMixin):
         :param reverse_complement_sequence_if_minus_strand: If set to True, then flip/RC the sequence if it is on the minus strand.
         :return: a 4xlength one-hot encoded numpy array
         """
-        seq = one_hot_encode_sequences(
-            [self.get_sequence(reference_fasta)]
-        ).astype("int8")
+        seq = one_hot_encode_sequences([self.get_sequence(reference_fasta)]).astype(
+            "int8"
+        )
         one_hot = seq[0]
         if reverse_complement_sequence_if_minus_strand and self.is_minus_strand():
             return one_hot[::-1, ::-1].T

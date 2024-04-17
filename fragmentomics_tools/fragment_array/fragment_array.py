@@ -790,25 +790,29 @@ class FragmentArray:
         return coverage_array
 
     def build_coverage_counts(self, fl_bands=None, return_sparse=False):
-        compress = (lambda x: scipy.sparse.csr_array(x[None, :])) if return_sparse else _identity_fn
+        compress = (
+            (lambda x: scipy.sparse.csr_array(x[None, :]))
+            if return_sparse
+            else _identity_fn
+        )
 
         if fl_bands is None:
             fl_bands = [(0, self.max_frag_len)]
 
         res = {}
-        for strand in ['+', '-']:
+        for strand in ["+", "-"]:
             sub_rfa = self.subset_by_fragment_strand(strand)
             for fl in fl_bands:
                 sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
-                key = (strand, fl, 'first')
+                key = (strand, fl, "first")
                 assert key not in res
                 res[key] = compress(sub_sub_rfa.first_covered_base_counts)
 
-                key = (strand, fl, 'last')
+                key = (strand, fl, "last")
                 assert key not in res
                 res[key] = compress(sub_sub_rfa.last_covered_base_counts)
 
-                key = (strand, fl, 'midpoint')
+                key = (strand, fl, "midpoint")
                 assert key not in res
                 res[key] = compress(sub_sub_rfa.get_midpoint_coverage_array())
 
@@ -1867,7 +1871,10 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     if make_data_direction_match_strand and (
         len(regions) > 1 and regions[0] is not None
     ):
-        ars = [(ar.make_data_direction_match_strand() if hasattr(ar, 'strand') else ar) for ar in ars]
+        ars = [
+            (ar.make_data_direction_match_strand() if hasattr(ar, "strand") else ar)
+            for ar in ars
+        ]
 
     region_length = ars[0].length
     if not all(ar.length == region_length for ar in ars):

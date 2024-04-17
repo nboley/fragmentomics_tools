@@ -13,39 +13,56 @@ from fragmentomics_tools.fragment_array import merge_fragment_arrays
 TILE_REGION_SIZE = 2048 * 8
 FASTA_PATH = "/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz"
 
+
 def _identity_fn(x):
     return x
+
 
 def index_key_to_track_name(args):
     strand, fl, coverage_type = args
     return f"strand_{strand}__fl_{fl[0]}_{fl[1]}__coverage_{coverage_type}"
 
+
 def track_name_to_index_key(track_name):
-    return re.fullmatch("strand_({+-})__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)", track_name)
+    return re.fullmatch(
+        "strand_({+-})__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)", track_name
+    )
+
 
 def build_counts(record, return_sparse=False):
-    compress = (lambda x: scipy.sparse.csr_array(x[None, :])) if return_sparse else _identity_fn
+    compress = (
+        (lambda x: scipy.sparse.csr_array(x[None, :]))
+        if return_sparse
+        else _identity_fn
+    )
 
     # drop duplicates
     rfa = record.fragment_array.drop_duplicate_fragments()
-    if hasattr(record, 'blacklist_regions'):
+    if hasattr(record, "blacklist_regions"):
         rfa = rfa.mask_overlapping_fragments(record.blacklist_regions, expansion=120)
 
-    res = rfa.build_coverage_counts(fl_bands=[(40, 65), (120, 175)], return_sparse=return_sparse)
+    res = rfa.build_coverage_counts(
+        fl_bands=[(40, 65), (120, 175)], return_sparse=return_sparse
+    )
     res.index = [index_key_to_track_name(x) for x in res.index]
 
     return res
 
+
 def build_tss_coverage_counts(record):
     return build_counts(record)
 
+
 def build_gene_coverage_counts(record):
-    return build_counts(record)['strand_+__fl_40_65__coverage_first', 'strand_-__fl_40_65__coverage_last']
+    return build_counts(record)[
+        "strand_+__fl_40_65__coverage_first", "strand_-__fl_40_65__coverage_last"
+    ]
+
 
 class FragmentEndpointsDataset(torch.utils.data.Dataset):
     @staticmethod
     def build_resized_one_hot_encoded_seq(rdf, input_region_size):
-        rdf = RegionDataFrame(rdf[['contig', 'start', 'stop', 'strand']], ref=rdf.ref)
+        rdf = RegionDataFrame(rdf[["contig", "start", "stop", "strand"]], ref=rdf.ref)
         sizes = list(rdf.region_lengths.drop_duplicates())
         assert len(sizes) == 1
         output_region_size = sizes[0]
@@ -65,9 +82,9 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
         ).apply(np.ceil).astype(int)
         rdf = rdf.resize_regions(new_region_sizes)
         if "gene_id" in rdf.columns:
-            rdf['id'] = rdf.gene_id
+            rdf["id"] = rdf.gene_id
         else:
-            rdf['id'] = [str(x) for x in rdf.iter_regions()]
+            rdf["id"] = [str(x) for x in rdf.iter_regions()]
 
         srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
         srdf = srdf.attach_fragment_arrays(num_cores=num_workers, min_mapq=10)
@@ -88,7 +105,10 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
         srdf["frag_h5"] = "none"
         srdf = SampleAndRegionDataFrame(srdf, ref=rdf.ref)
 
-        if not all(x == TILE_REGION_SIZE for x in srdf.region_lengths.value_counts().index.tolist()):
+        if not all(
+            x == TILE_REGION_SIZE
+            for x in srdf.region_lengths.value_counts().index.tolist()
+        ):
             # TODO -- optimize by building sequence on rdf and then joining
             # note that this subsets the fragment arrays
             srdf = srdf.bin_regions_into_windows(TILE_REGION_SIZE, mode="exact")
@@ -107,22 +127,25 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
     @staticmethod
     def get_targets_from_record(record, columns):
         valid_columns = [
-            'strand_+__fl_40_65__coverage_first',
-            'strand_+__fl_40_65__coverage_last',
-            'strand_+__fl_40_65__coverage_midpoint',
-            'strand_+__fl_120_175__coverage_first',
-            'strand_+__fl_120_175__coverage_last',
-            'strand_+__fl_120_175__coverage_midpoint',
-            'strand_-__fl_40_65__coverage_first',
-            'strand_-__fl_40_65__coverage_last',
-            'strand_-__fl_40_65__coverage_midpoint',
-            'strand_-__fl_120_175__coverage_first',
-            'strand_-__fl_120_175__coverage_last',
-            'strand_-__fl_120_175__coverage_midpoint'
+            "strand_+__fl_40_65__coverage_first",
+            "strand_+__fl_40_65__coverage_last",
+            "strand_+__fl_40_65__coverage_midpoint",
+            "strand_+__fl_120_175__coverage_first",
+            "strand_+__fl_120_175__coverage_last",
+            "strand_+__fl_120_175__coverage_midpoint",
+            "strand_-__fl_40_65__coverage_first",
+            "strand_-__fl_40_65__coverage_last",
+            "strand_-__fl_40_65__coverage_midpoint",
+            "strand_-__fl_120_175__coverage_first",
+            "strand_-__fl_120_175__coverage_last",
+            "strand_-__fl_120_175__coverage_midpoint",
         ]
         assert all(c in valid_columns for c in columns)
 
-        targets = [torch.Tensor(x.astype(float))[:, None] for x in build_counts(record)[columns]]
+        targets = [
+            torch.Tensor(x.astype(float))[:, None]
+            for x in build_counts(record)[columns]
+        ]
         targets = torch.cat(targets, dim=1).T
         return targets
 

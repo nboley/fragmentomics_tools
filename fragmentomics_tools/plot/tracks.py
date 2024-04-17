@@ -617,7 +617,7 @@ class OverlaidTracks(GenomeTrack):
             ax.autoscale(enable=True, axis="y", tight=None)
             ax.set_ylim((ylim_lower, ylim_upper))
 
-        ax.legend(labels, loc='upper right')
+        ax.legend(labels, loc="upper right")
 
 
 @dataclass
