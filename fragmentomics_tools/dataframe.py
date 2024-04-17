@@ -26,6 +26,10 @@ from tqdm import tqdm
 tqdm.pandas()
 from joblib import delayed, Parallel
 
+import multiprocessing
+import pickle
+import traceback
+
 # from tqdm.contrib.concurrent import process_map
 # from p_tqdm import p_map
 
@@ -61,22 +65,30 @@ from fragmentomics_tools import (
     merge_fragment_arrays,
 )
 
-"""
-from ravel.constants import (
-    DEFAULT_WINDOW_SIZE,
-    DEFAULT_MAX_FRAG_LEN,
-    DEFAULT_MIN_MAPQ,
-    DEFAULT_DEDUP,
-    NUM_CORES,
-    DEFAULT_DATA_MANIFEST_PATH,
-    DEFAULT_MIN_SCALING_FACTOR,
-    DEFAULT_MAX_SCALING_FACTOR,
-)
-"""
 
 NUM_CORES = -1
 DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
+
+
+def _apply_fn(df, fn, counter, send_conn, send_conn_lock):
+    rv = []
+    while True:
+        with counter.get_lock():
+            idx = counter.value
+            counter.value += 1
+        if idx >= df.shape[0]:
+            return
+
+        try:
+            res = fn(df.iloc[idx])
+        except Exception as inst:
+            traceback.print_exception(inst)
+            msg = pickle.dumps(inst)
+        else:
+            msg = pickle.dumps((idx, res))
+        with send_conn_lock:
+            send_conn.send_bytes(msg)
 
 
 def get_indices_of_balanced_labels(labels, random_state=None):
@@ -1607,6 +1619,70 @@ class RegionDataFrame(DataFrameBase):
 
         return sub_rdfs
 
+    def parallel_apply(self, fn, n_workers=None, verbose=True):
+        # do this in a fork context so that we don't need to serialize the data into the new process
+        ctx = multiprocessing.get_context('fork')
+        # if the number of workers isn't set then use all available cpus
+        if n_workers is None:
+            n_workers = multiprocessing.cpu_count()
+
+        # set a shared counter to track the row index to process
+        counter = ctx.Value('i', 0)
+        recv_conn, send_conn = ctx.Pipe(duplex=False)
+        pipe_lock = multiprocessing.Lock()
+        ps = [ctx.Process(target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)) for _ in range(n_workers)]
+        for p in ps: p.start()
+
+        # clear any cache -- works around a jupyter display bug
+        tqdm._instances.clear()
+        if verbose:
+            pbar = tqdm(total=self.shape[0])
+
+        def _cleanup():
+            # close the pipe
+            send_conn.close()
+            recv_conn.close()
+
+            # join all of the worker processes
+            for p in ps: p.join()
+
+            if verbose:
+                pbar.close()
+
+        # store the returned row indices and records
+        # we track the indices so that we can re-sort into the original order and then 
+        # join with the input dataframe index
+        indices = []
+        records = []
+        # keep processing new data until the returned records equals the inputs
+        while len(indices) < self.shape[0]:
+            if recv_conn.poll(0.1):
+                res = pickle.loads(recv_conn.recv_bytes())
+
+                # if a worker raised an exception kill any active process, cleanup, and then re-raise the exception
+                if isinstance(res, Exception):
+                    for p in ps: p.kill()
+                    _cleanup()
+                    raise res
+
+                i, rec = res
+                indices.append(i)
+                records.append(rec)
+                if verbose:
+                    pbar.update(1)
+
+        _cleanup()
+
+        # concatanate all records into a dataframe
+        rv = pandas.DataFrame(records)
+        # add the numeric indices and sort to the original order
+        rv.index = indices
+        rv = rv.sort_index()
+        # re-attach the original index
+        rv.index = self.index
+
+
+        return rv
     ###############################################################################################
     # #  These are methods that require a label column
     # #  this should probably be split into a subclass
