@@ -1576,7 +1576,7 @@ class RegionDataFrame(DataFrameBase):
             )
         # (window_size, 4)
         sequences = numpy.array(
-            self.get_one_hot_encoded_seq(
+            self.get_one_hot_encoded_sequence(
                 num_workers,
                 window_size,
                 reverse_complement_sequence_if_minus_strand,

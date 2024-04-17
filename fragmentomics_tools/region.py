@@ -802,7 +802,7 @@ class Region(DataClassMixin):
         :return: a 4xlength one-hot encoded numpy array
         """
         seq = one_hot_encode_sequences(
-            [reference_fasta.fetch(self.chrom, self.start, self.stop).encode()]
+            [self.get_sequence(reference_fasta)]
         ).astype("int8")
         one_hot = seq[0]
         if reverse_complement_sequence_if_minus_strand and self.is_minus_strand():

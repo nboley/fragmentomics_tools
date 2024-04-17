@@ -647,18 +647,6 @@ class FragmentArray:
             is_flipped=(not self.is_flipped),
         )
 
-    def make_data_direction_match_strand(self):
-        if self.strand not in "+-":
-            raise TypeError(
-                f"Unrecognized strand '{self.strand}' (are you sure that you want to use this function?)"
-            )
-        if self.strand == "+" and self.is_flipped:
-            return self.reverse_strand()
-        elif self.strand == "-" and not self.is_flipped:
-            return self.reverse_strand()
-        else:
-            return self
-
     @property
     def dense_array(self) -> numpy.ndarray:
         """
@@ -1181,6 +1169,18 @@ class RegionFragmentArray(FragmentArray):
             .reverse_strand()
             ._replace(region=self.region.flip_strand(), validate_data=False)
         )
+
+    def make_data_direction_match_strand(self):
+        if self.strand not in "+-":
+            raise TypeError(
+                f"Unrecognized strand '{self.strand}' (are you sure that you want to use this function?)"
+            )
+        if self.strand == "+" and self.is_flipped:
+            return self.reverse_strand()
+        elif self.strand == "-" and not self.is_flipped:
+            return self.reverse_strand()
+        else:
+            return self
 
     @wraps(FragmentArray.resize)
     def resize(self, new_size: int):
@@ -1840,7 +1840,7 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     if make_data_direction_match_strand and (
         len(regions) > 1 and regions[0] is not None
     ):
-        ars = [ar.make_data_direction_match_strand() for ar in ars]
+        ars = [(ar.make_data_direction_match_strand() if hasattr(ar, 'strand') else ar) for ar in ars]
 
     region_length = ars[0].length
     if not all(ar.length == region_length for ar in ars):

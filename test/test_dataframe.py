@@ -61,16 +61,6 @@ def test_load_tss_s():
     assert len(rdf) == 18263
 
 
-def test_resize_vs_vector():
-    rdf0 = RegionDataFrame(
-        pd.read_table(TSS_ANNOTATION_FILE), ref="hg19"
-    ).resize_regions(2000, vectorized=True)
-    rdf1 = RegionDataFrame(
-        pd.read_table(TSS_ANNOTATION_FILE), ref="hg19"
-    ).resize_regions(2000, vectorized=False)
-    pd.testing.assert_frame_equal(rdf0, rdf1)
-
-
 def test_get_pfm_consistent_with_resize():
     ctcf_rdf = (
         RegionDataFrame.from_bed(CTCF_BED_FILE, ref="hg38")

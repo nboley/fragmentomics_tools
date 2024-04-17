@@ -14,15 +14,6 @@ setup(
     version="1.0",
     packages=["fragmentomics_tools"],
     # scripts=["bin/build-fragments-h5"],
-    install_requires=[
-        "dacite",
-        "pandas",
-        "smart_open",
-        "pyliftover",
-        "matplotlib",
-        "seaborn",
-        "sparse",
-    ],
     include_dirs=[np.get_include()],
     ext_modules=extensions,
 )

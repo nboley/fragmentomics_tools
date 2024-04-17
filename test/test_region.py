@@ -284,20 +284,20 @@ def test_convert_region_fails_chrom_length():
     assert r is None
 
 
-def test_get_sequence():
+def test_get_one_hot_encoded_sequence():
     region = Region("chr11", 106022048, 106023072, ref="hg38")
     with pysam.FastaFile(get_reference_path(region.ref)) as fasta:
-        sequence = region.get_sequence(fasta)
+        sequence = region.get_one_hot_encoded_sequence(fasta)
 
         assert (
-            sequence.shape[0] == region.length
+            sequence.shape[1] == region.length
         ), "sequence and region must have the same length"
         assert set(numpy.unique(sequence)) == {
             0,
             1,
         }, "output must be a one-hot encoding"
         assert (
-            sequence.sum(axis=1) == 1
+            sequence.sum(axis=0) == 1
         ).all(), "Only one base must be on at each locus."
         assert (
             numpy.array(
@@ -308,7 +308,7 @@ def test_get_sequence():
                     )
                 ]
             )
-            == region.resize(50).get_sequence(fasta).argmax(axis=1)
+            == region.resize(50).get_one_hot_encoded_sequence(fasta).argmax(axis=0)
         ).all(), (
             "computed sequence does not match the fetched sequence from UCSC Genome Browser"
             "http://genome.ucsc.edu/cgi-bin/das/hg38/dna?segment=chr11:106022536,106022585"
