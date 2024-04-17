@@ -18,3 +18,6 @@ ucsc-bedtobigbed
 ucsc-bigbedinfo
 ucsc-bigbedtobed
 ucsc-bigwigtowig
+pytorch
+pytorch-cuda
+pytorch-lightning

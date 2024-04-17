@@ -11,6 +11,7 @@ import numpy
 import numpy as np
 import pandas
 import sparse
+import scipy
 from scipy.sparse import coo_matrix
 
 import numba
@@ -787,6 +788,32 @@ class FragmentArray:
         add_at_intervals_inplace(coverage_array, starts, stops, 1)
 
         return coverage_array
+
+    def build_coverage_counts(self, fl_bands=None, return_sparse=False):
+        compress = (lambda x: scipy.sparse.csr_array(x[None, :])) if return_sparse else _identity_fn
+
+        if fl_bands is None:
+            fl_bands = [(0, self.max_frag_len)]
+
+        res = {}
+        for strand in ['+', '-']:
+            sub_rfa = self.subset_by_fragment_strand(strand)
+            for fl in fl_bands:
+                sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
+                key = (strand, fl, 'first')
+                assert key not in res
+                res[key] = compress(sub_sub_rfa.first_covered_base_counts)
+
+                key = (strand, fl, 'last')
+                assert key not in res
+                res[key] = compress(sub_sub_rfa.last_covered_base_counts)
+
+                key = (strand, fl, 'midpoint')
+                assert key not in res
+                res[key] = compress(sub_sub_rfa.get_midpoint_coverage_array())
+
+        res = pandas.Series(res)
+        return res
 
     def to_fragment_matrix(self):
         warnings.warn("deprecated, use .fragment_matrix", DeprecationWarning)

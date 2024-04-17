@@ -24,32 +24,16 @@ def track_name_to_index_key(track_name):
     return re.fullmatch("strand_({+-})__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)", track_name)
 
 def build_counts(record, return_sparse=False):
-    compress = scipy.sparse.csr_array if return_sparse else _identity_fn        
-        
+    compress = (lambda x: scipy.sparse.csr_array(x[None, :])) if return_sparse else _identity_fn
+
     # drop duplicates
     rfa = record.fragment_array.drop_duplicate_fragments()
     if hasattr(record, 'blacklist_regions'):
         rfa = rfa.mask_overlapping_fragments(record.blacklist_regions, expansion=120)
 
-    res = {}
-    for strand in ['+', '-']:
-        sub_rfa = rfa.subset_by_fragment_strand(strand)
-        for fl in [(40, 65), (120, 175)]:
-            sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
-            key = (strand, fl, 'first')
-            assert key not in res
-            res[key] = compress(sub_sub_rfa.first_covered_base_counts)
-
-            key = (strand, fl, 'last')
-            assert key not in res
-            res[key] = compress(sub_sub_rfa.last_covered_base_counts)
-
-            key = (strand, fl, 'midpoint')
-            assert key not in res
-            res[key] = compress(sub_sub_rfa.get_midpoint_coverage_array())
-
-    res = pd.Series(res)
+    res = rfa.build_coverage_counts(fl_bands=[(40, 65), (120, 175)], return_sparse=return_sparse)
     res.index = [index_key_to_track_name(x) for x in res.index]
+
     return res
 
 def build_tss_coverage_counts(record):
