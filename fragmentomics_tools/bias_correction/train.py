@@ -1,6 +1,19 @@
+import os
+
+os.environ["NCCL_P2P_DISABLE"] = "1"
+
 import sys
 
 sys.path.insert(0, "/home/nboley/src/fragmentomics_tools/projects/")
+
+import torch
+
+try:
+    torch.multiprocessing.set_start_method("spawn")
+except RuntimeError:
+    pass
+
+torch.set_float32_matmul_precision("high")
 
 import os
 
@@ -67,6 +80,35 @@ def build_ctcf_rdfs():
     return train_rdf, val_rdf, ctcf_rdf
 
 
+def build_promoter_rdfs():
+    hge_raw = HematopoieticGeneExpression.load()
+    hge = hge_raw.truncate(
+        right_amt=hge_raw.region_lengths - 1, strand_aware=True
+    ).resize_regions(2048)
+
+    repeats_rdf = RegionDataFrame.from_bed(
+        "/scratch/karius/annotation/mappability.simple_repeats.sorted.bed.gz",
+        ref=hge_raw.ref,
+    )
+
+    hge = hge.drop_overlapping_regions(repeats_rdf)
+
+    marker_genes = pd.read_table(
+        "/scratch/karius/reference/markers.immune_vs_epithelial.tsv", sep=" "
+    ).query("p_val_adj < 1e-6 and abs(avg_log2FC) > 2")
+    test_rdf = hge.set_index("gene_name").join(marker_genes, how="inner").reset_index()
+
+    # find all off genes, and then randomly shuffle
+    train_and_val_rdf = hge.query(
+        "expression < 0.1 and gene_id not in @test_rdf.gene_id"
+    ).sample(frac=1.0)
+    n_train = int(0.95 * len(train_and_val_rdf))
+    train_rdf = train_and_val_rdf.head(n_train)
+    val_rdf = train_and_val_rdf.tail(len(train_and_val_rdf) - n_train)
+
+    return train_rdf, val_rdf, test_rdf
+
+
 def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
     import warnings
 
@@ -75,8 +117,16 @@ def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
     train_dataset = FragmentEndpointsDataset(train_rdf, sdf, model)
     val_dataset = FragmentEndpointsDataset(val_rdf, sdf, model)
 
-    val_loader = utils.data.DataLoader(val_dataset, batch_size=32)
-    train_loader = utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = utils.data.DataLoader(
+        val_dataset, batch_size=32, num_workers=1, persistent_workers=True
+    )
+    train_loader = utils.data.DataLoader(
+        train_dataset,
+        batch_size=32,
+        shuffle=True,
+        num_workers=8,
+        persistent_workers=True,
+    )
 
     trainer = L.Trainer(
         max_epochs=max_epochs
@@ -103,14 +153,14 @@ valid_columns = [
 
 
 def main():
-    sdf = load_ibd_sample_df().sample(20)
-    train_rdf, val_rdf, test_rdf = build_ctcf_rdfs()
+    sdf = load_ibd_sample_df().sample(1)
+    train_rdf, val_rdf, test_rdf = build_promoter_rdfs()
     model = BackgroundModelModule(
         num_residual_layers=2, output_columns=valid_columns, loss="negative_binomial"
     )
     model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
     model.save(
-        "/scratch/karius/bias_correction_model/merged.accessible_regions.negative_binomial.2.res"
+        "/scratch/karius/bias_correction_model/merged.off_promoters.negative_binomial.1.res"
     )
     return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):

@@ -790,6 +790,9 @@ class FragmentArray:
         return coverage_array
 
     def build_coverage_counts(self, fl_bands=None, return_sparse=False):
+        def _identity_fn(x):
+            return x
+
         compress = (
             (lambda x: scipy.sparse.csr_array(x[None, :]))
             if return_sparse

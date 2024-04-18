@@ -186,6 +186,9 @@ class BackgroundModelModule(L.LightningModule):
             self.loss_fn = MultinomialNLLLoss()
             self.output_tracks_multiplier = 1
         elif loss == "negative_binomial":
+            self.loss_fn = NegativeBinomialNLLLoss()
+            self.output_tracks_multiplier = 2
+        elif loss == "negative_binomial_old":
             self.loss_fn = NegativeBinomialNLLLossOld()
             self.output_tracks_multiplier = 2
         elif loss == "negative_binomial_fixed_total_count":
@@ -221,7 +224,7 @@ class BackgroundModelModule(L.LightningModule):
         y_hat = self.model(x)
         loss = self.loss_fn(y_hat, y[:, :, :])
         # Logging to TensorBoard (if installed) by default
-        self.log("train_loss", loss, prog_bar=True)
+        self.log("train_loss", loss, prog_bar=True, sync_dist=True)
         # self.plot_on_epoch_end(batch_idx)
         return loss
 
@@ -231,7 +234,7 @@ class BackgroundModelModule(L.LightningModule):
         y_hat = self.model(x)
         loss = self.loss_fn(y_hat, y[:, :, :])
         # Logging to TensorBoard (if installed) by default
-        self.log("val_loss", loss, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self, learning_rate=1e-4):
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
