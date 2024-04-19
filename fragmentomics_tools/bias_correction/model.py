@@ -89,7 +89,7 @@ class BackgroundModelModule(L.LightningModule):
                 ps = 1 - logits_to_probs(torch.Tensor(pred[i]), is_binary=True)
                 total_counts = self.loss_fn.total_count
                 dist = nbinom(n=total_counts, p=ps)
-            elif self.model_params["loss"] == "multinomiall":
+            elif self.model_params["loss"] == "multinomial":
                 dist = multinomial(n=1, p=softmax(pred[i]))
             else:
                 raise ValueError(f"Unrecognized loss '{self.model_params['loss']}'")

@@ -14,9 +14,6 @@ TILE_REGION_SIZE = 2048 * 8
 FASTA_PATH = "/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz"
 
 
-def _identity_fn(x):
-    return x
-
 
 def index_key_to_track_name(args):
     strand, fl, coverage_type = args
@@ -30,12 +27,6 @@ def track_name_to_index_key(track_name):
 
 
 def build_counts(record, return_sparse=False):
-    compress = (
-        (lambda x: scipy.sparse.csr_array(x[None, :]))
-        if return_sparse
-        else _identity_fn
-    )
-
     # drop duplicates
     rfa = record.fragment_array.drop_duplicate_fragments()
     if hasattr(record, "blacklist_regions"):

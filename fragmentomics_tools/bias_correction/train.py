@@ -102,11 +102,14 @@ def build_promoter_rdfs():
     train_and_val_rdf = hge.query(
         "expression < 0.1 and gene_id not in @test_rdf.gene_id"
     ).sample(frac=1.0)
+    remaining_rdf = hge.query(
+        "expression >= 0.1 and gene_id not in @test_rdf.gene_id"
+    ).sample(frac=1.0)
     n_train = int(0.95 * len(train_and_val_rdf))
     train_rdf = train_and_val_rdf.head(n_train)
     val_rdf = train_and_val_rdf.tail(len(train_and_val_rdf) - n_train)
 
-    return train_rdf, val_rdf, test_rdf
+    return train_rdf, val_rdf, test_rdf, remaining_rdf
 
 
 def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
@@ -153,14 +156,14 @@ valid_columns = [
 
 
 def main():
-    sdf = load_ibd_sample_df().sample(1)
-    train_rdf, val_rdf, test_rdf = build_promoter_rdfs()
+    sdf = load_ibd_sample_df().sample(20)
+    train_rdf, val_rdf, test_rdf, _ = build_promoter_rdfs()
     model = BackgroundModelModule(
-        num_residual_layers=2, output_columns=valid_columns, loss="negative_binomial"
+        num_residual_layers=8, output_columns=valid_columns, loss="multinomial"
     )
     model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
     model.save(
-        "/scratch/karius/bias_correction_model/merged.off_promoters.negative_binomial.1.res"
+        "/scratch/karius/bias_correction_model/tss_model/merged.off_promoters.multinomial.3.res"
     )
     return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):

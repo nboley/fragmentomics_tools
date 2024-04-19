@@ -83,7 +83,7 @@ def _apply_fn(df, fn, counter, send_conn, send_conn_lock):
         try:
             res = fn(df.iloc[idx])
         except Exception as inst:
-            traceback.print_exception(inst)
+            # traceback.print_exception(inst)
             msg = pickle.dumps(inst)
         else:
             msg = pickle.dumps((idx, res))

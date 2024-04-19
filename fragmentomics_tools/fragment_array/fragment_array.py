@@ -41,6 +41,58 @@ DEFAULT_MIN_SCALING_FACTOR: float = 1e-6
 DEFAULT_MAX_SCALING_FACTOR: float = 10.0
 
 
+import numpy
+
+@numba.njit
+def _todense(coords, values, length):
+    rv = numpy.zeros(length, dtype=values.dtype)
+    for x, v in zip(coords, values):
+        rv[x] += v
+    return rv
+
+class SparseIntVector():
+    def __init__(self, coords, data, length, check=True):
+        self.coords = numpy.array(coords).astype(int)
+        if check and len(self.coords) > 0 and self.coords.min() < 0:
+            raise IndexError("All coordinates must be >= 0")
+        if check and len(self.coords) > 0 and self.coords.max() >= length:
+            raise IndexError(f"All coordinates must be < the array length ({length})")
+
+        self.data = numpy.array(data)
+        self.length = length
+
+    def __add__(self, other):
+        if other.length != self.length:
+            raise ValueError("Can not add sparse arrays of different lengths")
+
+        return type(self)(coords=numpy.concatenate([self.coords, other.coords]), data=numpy.concatenate([self.data, other.data]), length=self.length, check=False)
+
+    def __radd__(self, other):
+        if other == 0:
+            return self
+        else:
+            return self.__add__(other)
+
+    def todense(self):
+        return _todense(self.coords, self.data, self.length)
+
+    def __repr__(self):
+        return self.coords.__repr__().replace('array', type(self).__name__)
+
+    def __str__(self):
+        return self.coords.__str__().replace('array', type(self).__name__)
+
+    @staticmethod
+    def sum(ars):
+        coords = numpy.concatenate([x.coords for x in ars])
+        data = numpy.concatenate([x.data for x in ars])
+        lengths = numpy.unique([x.length for x in ars])
+        if len(lengths) != 1:
+            raise ValueError("All arrays must be the same size to sum over them")
+        else:
+            length = lengths[0]
+        return SparseIntVector(coords, data, length)
+
 @numba.njit
 def add_at_intervals_inplace(arr, starts, stops, amount):
     """
@@ -719,8 +771,31 @@ class FragmentArray:
 
         return self.mask(mask)
 
-    @property
-    def first_covered_base_counts(self) -> numpy.ndarray:
+    def _get_covered_base_array(self, positions_attr, weights_attr, return_sparse):
+        def _empty():
+            if return_sparse:
+                return SparseIntVector([], [], self.shape[1])
+            else:
+                return numpy.zeros(self.length, dtype=numpy.uint32)
+            
+        if self.n_frags == 0: return _empty()
+    
+        # The following should (intentionally) remove the straddle case
+        mask = (getattr(self, positions_attr) >= 0) & (getattr(self, positions_attr) < self.length)
+        x = getattr(self, positions_attr)[mask]
+
+        # deal with the empty fragment array case
+        if len(x) == 0: return _empty()
+
+        weights = getattr(self, weights_attr)[mask]
+        x = SparseIntVector(x, weights, self.shape[1])
+        if return_sparse:
+            return x
+        else:
+            return x.todense()
+        pass
+
+    def get_first_covered_base_array(self, return_sparse=False) -> numpy.ndarray:
         """
         1d array of fragment start counts at each position that intersect self.region
 
@@ -728,19 +803,13 @@ class FragmentArray:
         >>> fa.first_covered_base_counts
         array([0., 0., 2., 0., 0.])
         """
-        if self.n_frags == 0:
-            return numpy.zeros(self.length, dtype=numpy.uint32)
-        # The following should (intentionally) remove the straddle case
-        mask = self.first_covered_bases_0 >= 0
-        x = self.first_covered_bases_0[mask]
-        weights = self.first_covered_base_weights[mask]
-        if len(x) == 0:
-            return numpy.zeros(self.length, dtype=numpy.uint32)
-        x = sparse.COO(x, weights, self.shape[1])
-        return x.todense()
+        return self._get_covered_base_array(positions_attr='first_covered_bases_0', weights_attr='first_covered_base_weights', return_sparse=return_sparse)
 
     @property
-    def last_covered_base_counts(self) -> numpy.ndarray:
+    def first_covered_base_counts(self) -> numpy.ndarray:
+        self.get_first_covered_base_array(return_sparse=False)
+
+    def get_last_covered_base_array(self, return_sparse=False) -> numpy.ndarray:
         """
         1d array of fragment end counts at each position that intersect the region
 
@@ -751,19 +820,14 @@ class FragmentArray:
         >>> fa.last_covered_base_counts
         array([0., 1., 0., 2., 0.])
         """
-        if self.n_frags == 0:
-            return numpy.zeros(self.length, dtype=numpy.uint32)
-        # The following should (intentionally) remove the straddle case
-        mask = self.last_covered_bases_0 < self.length
-        x = self.last_covered_bases_0[mask]
-        weights = self.last_covered_base_weights[mask]
-        if len(x) == 0:
-            return numpy.zeros(self.length, dtype=numpy.uint32)
-        x = sparse.COO(x, weights, self.shape[1])
-        return x.todense()
+        return self._get_covered_base_array(positions_attr='last_covered_bases_0', weights_attr='last_covered_base_weights', return_sparse=return_sparse)
 
-    def get_midpoint_coverage_array(self) -> numpy.ndarray:
-        return self.dense_array.sum(0).squeeze()
+    @property
+    def last_covered_base_counts(self) -> numpy.ndarray:
+        self.get_last_covered_base_array(return_sparse=False)
+    
+    def get_midpoint_coverage_array(self, return_sparse=False) -> numpy.ndarray:
+        return self._get_covered_base_array(positions_attr='midpoints_0', weights_attr='weights', return_sparse=return_sparse)
 
     def get_fragment_coverage_array(self) -> numpy.ndarray:
         """
@@ -790,15 +854,6 @@ class FragmentArray:
         return coverage_array
 
     def build_coverage_counts(self, fl_bands=None, return_sparse=False):
-        def _identity_fn(x):
-            return x
-
-        compress = (
-            (lambda x: scipy.sparse.csr_array(x[None, :]))
-            if return_sparse
-            else _identity_fn
-        )
-
         if fl_bands is None:
             fl_bands = [(0, self.max_frag_len)]
 
@@ -809,15 +864,15 @@ class FragmentArray:
                 sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
                 key = (strand, fl, "first")
                 assert key not in res
-                res[key] = compress(sub_sub_rfa.first_covered_base_counts)
+                res[key] = sub_sub_rfa.get_first_covered_base_array(return_sparse=return_sparse)
 
                 key = (strand, fl, "last")
                 assert key not in res
-                res[key] = compress(sub_sub_rfa.last_covered_base_counts)
+                res[key] = sub_sub_rfa.get_last_covered_base_array(return_sparse=return_sparse)
 
                 key = (strand, fl, "midpoint")
                 assert key not in res
-                res[key] = compress(sub_sub_rfa.get_midpoint_coverage_array())
+                res[key] = sub_sub_rfa.get_midpoint_coverage_array(return_sparse=return_sparse)
 
         res = pandas.Series(res)
         return res
