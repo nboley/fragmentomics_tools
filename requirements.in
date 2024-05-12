@@ -20,5 +20,4 @@ ucsc-bigbedtobed
 ucsc-bigwigtowig
 ucsc-liftover
 pytorch
-pytorch-cuda
 pytorch-lightning
