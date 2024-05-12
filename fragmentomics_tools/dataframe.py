@@ -1877,7 +1877,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 
     def load_fragment_arrays(
         self,
-        num_cores=NUM_CORES,
+        n_workers=NUM_CORES,
         verbose=1,
         min_mapq: int = 0,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
@@ -1901,33 +1901,22 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
             if fragment_array_callback is not None:
                 fa = fragment_array_callback(fa)
-            return (record.Index, fa)
+            return fa
 
-        if num_cores <= 1:
+        if n_workers <= 1:
             res = [
                 get_fa(x)
                 for x in tqdm(
                     self.itertuples(), total=len(self), disable=(verbose <= 0)
                 )
             ]
+            return pandas.Series(res, index=self.Index, name="fragment_array")
         else:
-            # self.itertuples() breaks when it's passed fields containing a dash, so we subset the columns and copy it
-            #  We're going to use only needed fields: ["contig", "start", "stop", "strand", sample_id_col_name]
             field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
-            res = list(
-                tqdm(
-                    # Note the new return_as argument here, which requires joblib >= 1.3:
-                    Parallel(n_jobs=num_cores, return_as="generator")(
-                        delayed(get_fa)(record)
-                        for record in list(self[field_subset].itertuples())
-                    ),
-                    total=len(self),
-                    disable=(verbose <= 0),
-                )
-            )
+            rv = self[field_subset].parallel_apply(get_fa, n_workers=n_workers, verbose=verbose)
+            rv.columns = ['fragment_array']
+            return rv
 
-        index, fs = zip(*res)
-        return pandas.Series(fs, index=index, name="fragment_array")
 
     def attach_fragment_arrays(self, *args, rebuild_fragment_arrays=False, **kwargs):
         # If we've already attached

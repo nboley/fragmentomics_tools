@@ -302,6 +302,7 @@ class BackgroundModelModule(L.LightningModule):
             lambda x: self.model(torch.Tensor(x).to(self.device)).cpu().detach().numpy()
         )
         dists = [self._build_dist(x) for x in tqdm.tqdm(pred, desc='build background dists')]
+        tqdm.tqdm.pandas(desc="")
 
         return pd.DataFrame(
             dists,
