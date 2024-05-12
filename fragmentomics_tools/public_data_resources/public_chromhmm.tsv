@@ -1,0 +1,301 @@
+cell_type	cell_source	clean_cell_name	model	key	reference	comment
+ES-I3_Cell_Line		Es-I3 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E001_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+ES-WA7_Cell_Line		Es-Wa7 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E002_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H1_Cell_Line		H1 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E003_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H1_BMP4_Derived_Mesendoderm_Cultured_Cells		H1 Bmp4 Derived Mesendoderm Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E004_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H1_BMP4_Derived_Trophoblast_Cultured_Cells		H1 Bmp4 Derived Trophoblast Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E005_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H1_Derived_Mesenchymal_Stem_Cells		H1 Derived Mesenchymal Stem Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E006_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H1_Derived_Neuronal_Progenitor_Cultured_Cells		H1 Derived Neuronal Progenitor Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E007_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H9_Cell_Line		H9 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E008_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H9_Derived_Neuronal_Progenitor_Cultured_Cells		H9 Derived Neuronal Progenitor Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E009_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+H9_Derived_Neuron_Cultured_Cells		H9 Derived Neuron Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E010_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+hESC_Derived_CD184+_Endoderm_Cultured_Cells		Hesc Derived CD184+ Endoderm Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E011_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+hESC_Derived_CD56+_Ectoderm_Cultured_Cells		Hesc Derived CD56+ Ectoderm Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E012_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+hESC_Derived_CD56+_Mesoderm_Cultured_Cells		Hesc Derived CD56+ Mesoderm Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E013_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HUES48_Cell_Line		Hues48 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E014_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HUES6_Cell_Line		Hues6 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E015_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HUES64_Cell_Line		Hues64 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E016_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+IMR90_Cell_Line		Imr90 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E017_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+iPS-15b_Cell_Line		Ips-15B Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E018_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+iPS-18_Cell_Line		Ips-18 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E019_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+iPS-20b_Cell_Line		Ips-20B Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E020_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+iPS_DF_6.9_Cell_Line		Ips Df 6.9 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E021_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+iPS_DF_19.11_Cell_Line		Ips Df 19.11 Cell Line	roadmap_15	roadmap_chromhmm/hg38_lift/E022_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Mesenchymal_Stem_Cell_Derived_Adipocyte_Cultured_Cells		Mesenchymal Stem Cell Derived Adipocyte Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E023_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+4star		4Star	roadmap_15	roadmap_chromhmm/hg38_lift/E024_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Adipose_Derived_Mesenchymal_Stem_Cell_Cultured_Cells		Adipose Derived Mesenchymal Stem Cell Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E025_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Bone_Marrow_Derived_Mesenchymal_Stem_Cell_Cultured_Cells		Bone Marrow Derived Mesenchymal Stem Cell Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E026_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Breast_Myoepithelial_Cells		Breast Myoepithelial Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E027_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Breast_vHMEC		Breast Vhmec	roadmap_15	roadmap_chromhmm/hg38_lift/E028_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD14_Primary_Cells		CD14 Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E029_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD15_Primary_Cells		CD15 Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E030_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD19_Primary_Cells_Cord_BI		CD19 Primary Cells Cord Bi	roadmap_15	roadmap_chromhmm/hg38_lift/E031_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD19_Primary_Cells_Peripheral_UW		CD19 Primary Cells Peripheral Uw	roadmap_15	roadmap_chromhmm/hg38_lift/E032_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD3_Primary_Cells_Cord_BI		CD3 Primary Cells Cord Bi	roadmap_15	roadmap_chromhmm/hg38_lift/E033_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD3_Primary_Cells_Peripheral_UW		CD3 Primary Cells Peripheral Uw	roadmap_15	roadmap_chromhmm/hg38_lift/E034_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD34_Primary_Cells		CD34 Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E035_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD34_Cultured_Cells		CD34 Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E036_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4_Memory_Primary_Cells		CD4 Memory Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E037_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4_Naive_Primary_Cells		CD4 Naive Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E038_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25-_CD45RA+_Naive_Primary_Cells		CD4+ CD25- CD45Ra+ Naive Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E039_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25-_CD45RO+_Memory_Primary_Cells		CD4+ CD25- CD45Ro+ Memory Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E040_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25-_IL17-_PMA-Ionomycin_stimulated_MACS_purified_Th_Primary_Cells		CD4+ CD25- Il17- Pma-Ionomycin Stimulated Macs Purified Th Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E041_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25-_IL17+_PMA-Ionomcyin_stimulated_Th17_Primary_Cells		CD4+ CD25- Il17+ Pma-Ionomcyin Stimulated Th17 Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E042_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25-_Th_Primary_Cells		CD4+ CD25- Th Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E043_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25+_CD127-_Treg_Primary_Cells		CD4+ CD25+ CD127- Treg Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E044_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4+_CD25int_CD127+_Tmem_Primary_Cells		CD4+ CD25Int CD127+ Tmem Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E045_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD56_Primary_Cells		CD56 Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E046_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD8_Naive_Primary_Cells		CD8 Naive Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E047_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD8_Memory_Primary_Cells		CD8 Memory Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E048_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Chondrocytes_from_Bone_Marrow_Derived_Mesenchymal_Stem_Cell_Cultured_Cells		Chondrocytes From Bone Marrow Derived Mesenchymal Stem Cell Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E049_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Mobilized_CD34_Primary_Cells_Female		Mobilized CD34 Primary Cells Female	roadmap_15	roadmap_chromhmm/hg38_lift/E050_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Mobilized_CD34_Primary_Cells_Male		Mobilized CD34 Primary Cells Male	roadmap_15	roadmap_chromhmm/hg38_lift/E051_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Muscle_Satellite_Cultured_Cells		Muscle Satellite Cultured Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E052_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Neurosphere_Cultured_Cells_Cortex_Derived		Neurosphere Cultured Cells Cortex Derived	roadmap_15	roadmap_chromhmm/hg38_lift/E053_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Neurosphere_Cultured_Cells_Ganglionic_Eminence_Derived		Neurosphere Cultured Cells Ganglionic Eminence Derived	roadmap_15	roadmap_chromhmm/hg38_lift/E054_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Fibroblast_Primary_Cells_skin01		Penis Foreskin Fibroblast Primary Cells Skin01	roadmap_15	roadmap_chromhmm/hg38_lift/E055_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Fibroblast_Primary_Cells_skin02		Penis Foreskin Fibroblast Primary Cells Skin02	roadmap_15	roadmap_chromhmm/hg38_lift/E056_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Keratinocyte_Primary_Cells_skin02		Penis Foreskin Keratinocyte Primary Cells Skin02	roadmap_15	roadmap_chromhmm/hg38_lift/E057_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Keratinocyte_Primary_Cells_skin03		Penis Foreskin Keratinocyte Primary Cells Skin03	roadmap_15	roadmap_chromhmm/hg38_lift/E058_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Melanocyte_Primary_Cells_skin01		Penis Foreskin Melanocyte Primary Cells Skin01	roadmap_15	roadmap_chromhmm/hg38_lift/E059_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Penis_Foreskin_Melanocyte_Primary_Cells_skin03		Penis Foreskin Melanocyte Primary Cells Skin03	roadmap_15	roadmap_chromhmm/hg38_lift/E061_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Peripheral_Blood_Mononuclear_Primary_Cells		Peripheral Blood Mononuclear Primary Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E062_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Adipose_Nuclei		Adipose Nuclei	roadmap_15	roadmap_chromhmm/hg38_lift/E063_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Aorta		Aorta	roadmap_15	roadmap_chromhmm/hg38_lift/E065_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Adult_Liver		Adult Liver	roadmap_15	roadmap_chromhmm/hg38_lift/E066_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Angular_Gyrus		Brain Angular Gyrus	roadmap_15	roadmap_chromhmm/hg38_lift/E067_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Anterior_Caudate		Brain Anterior Caudate	roadmap_15	roadmap_chromhmm/hg38_lift/E068_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Cingulate_Gyrus		Brain Cingulate Gyrus	roadmap_15	roadmap_chromhmm/hg38_lift/E069_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Germinal_Matrix		Brain Germinal Matrix	roadmap_15	roadmap_chromhmm/hg38_lift/E070_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Hippocampus_Middle		Brain Hippocampus Middle	roadmap_15	roadmap_chromhmm/hg38_lift/E071_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Inferior_Temporal_Lobe		Brain Inferior Temporal Lobe	roadmap_15	roadmap_chromhmm/hg38_lift/E072_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Mid_Frontal_Lobe		Brain Mid Frontal Lobe	roadmap_15	roadmap_chromhmm/hg38_lift/E073_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Brain_Substantia_Nigra		Brain Substantia Nigra	roadmap_15	roadmap_chromhmm/hg38_lift/E074_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Colonic_Mucosa		Colonic Mucosa	roadmap_15	roadmap_chromhmm/hg38_lift/E075_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Colon_Smooth_Muscle		Colon Smooth Muscle	roadmap_15	roadmap_chromhmm/hg38_lift/E076_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Duodenum_Mucosa		Duodenum Mucosa	roadmap_15	roadmap_chromhmm/hg38_lift/E077_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Duodenum_Smooth_Muscle		Duodenum Smooth Muscle	roadmap_15	roadmap_chromhmm/hg38_lift/E078_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Esophagus		Esophagus	roadmap_15	roadmap_chromhmm/hg38_lift/E079_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Adrenal_Gland		Fetal Adrenal Gland	roadmap_15	roadmap_chromhmm/hg38_lift/E080_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Brain_Male		Fetal Brain Male	roadmap_15	roadmap_chromhmm/hg38_lift/E081_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Brain_Female		Fetal Brain Female	roadmap_15	roadmap_chromhmm/hg38_lift/E082_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Heart		Fetal Heart	roadmap_15	roadmap_chromhmm/hg38_lift/E083_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Intestine_Large		Fetal Intestine Large	roadmap_15	roadmap_chromhmm/hg38_lift/E084_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Intestine_Small		Fetal Intestine Small	roadmap_15	roadmap_chromhmm/hg38_lift/E085_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Kidney		Fetal Kidney	roadmap_15	roadmap_chromhmm/hg38_lift/E086_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Pancreatic_Islets		Pancreatic Islets	roadmap_15	roadmap_chromhmm/hg38_lift/E087_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Lung		Fetal Lung	roadmap_15	roadmap_chromhmm/hg38_lift/E088_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Muscle_Trunk		Fetal Muscle Trunk	roadmap_15	roadmap_chromhmm/hg38_lift/E089_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Muscle_Leg		Fetal Muscle Leg	roadmap_15	roadmap_chromhmm/hg38_lift/E090_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Placenta		Fetal Placenta	roadmap_15	roadmap_chromhmm/hg38_lift/E091_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Stomach		Fetal Stomach	roadmap_15	roadmap_chromhmm/hg38_lift/E092_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Fetal_Thymus		Fetal Thymus	roadmap_15	roadmap_chromhmm/hg38_lift/E093_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Gastric		Gastric	roadmap_15	roadmap_chromhmm/hg38_lift/E094_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Left_Ventricle		Left Ventricle	roadmap_15	roadmap_chromhmm/hg38_lift/E095_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Lung		Lung	roadmap_15	roadmap_chromhmm/hg38_lift/E096_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Ovary		Ovary	roadmap_15	roadmap_chromhmm/hg38_lift/E097_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Pancreas		Pancreas	roadmap_15	roadmap_chromhmm/hg38_lift/E098_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Placenta_Amnion		Placenta Amnion	roadmap_15	roadmap_chromhmm/hg38_lift/E099_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Psoas_Muscle		Psoas Muscle	roadmap_15	roadmap_chromhmm/hg38_lift/E100_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Rectal_Mucosa.Donor_29		Rectal Mucosa.Donor 29	roadmap_15	roadmap_chromhmm/hg38_lift/E101_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Rectal_Mucosa.Donor_31		Rectal Mucosa.Donor 31	roadmap_15	roadmap_chromhmm/hg38_lift/E102_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Rectal_Smooth_Muscle		Rectal Smooth Muscle	roadmap_15	roadmap_chromhmm/hg38_lift/E103_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Right_Atrium		Right Atrium	roadmap_15	roadmap_chromhmm/hg38_lift/E104_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Right_Ventricle		Right Ventricle	roadmap_15	roadmap_chromhmm/hg38_lift/E105_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Sigmoid_Colon		Sigmoid Colon	roadmap_15	roadmap_chromhmm/hg38_lift/E106_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Skeletal_Muscle_Male		Skeletal Muscle Male	roadmap_15	roadmap_chromhmm/hg38_lift/E107_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Skeletal_Muscle_Female		Skeletal Muscle Female	roadmap_15	roadmap_chromhmm/hg38_lift/E108_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Small_Intestine		Small Intestine	roadmap_15	roadmap_chromhmm/hg38_lift/E109_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Stomach_Mucosa		Stomach Mucosa	roadmap_15	roadmap_chromhmm/hg38_lift/E110_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Stomach_Smooth_Muscle		Stomach Smooth Muscle	roadmap_15	roadmap_chromhmm/hg38_lift/E111_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Thymus		Thymus	roadmap_15	roadmap_chromhmm/hg38_lift/E112_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Spleen		Spleen	roadmap_15	roadmap_chromhmm/hg38_lift/E113_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+A549_EtOH_0.02pct_Lung_Carcinoma		A549 Etoh 0.02Pct Lung Carcinoma	roadmap_15	roadmap_chromhmm/hg38_lift/E114_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Dnd41_TCell_Leukemia		Dnd41 Tcell Leukemia	roadmap_15	roadmap_chromhmm/hg38_lift/E115_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+GM12878_Lymphoblastoid		Gm12878 Lymphoblastoid	roadmap_15	roadmap_chromhmm/hg38_lift/E116_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HeLa-S3_Cervical_Carcinoma		Hela-S3 Cervical Carcinoma	roadmap_15	roadmap_chromhmm/hg38_lift/E117_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HepG2_Hepatocellular_Carcinoma		Hepg2 Hepatocellular Carcinoma	roadmap_15	roadmap_chromhmm/hg38_lift/E118_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HMEC_Mammary_Epithelial		Hmec Mammary Epithelial	roadmap_15	roadmap_chromhmm/hg38_lift/E119_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HSMM_Skeletal_Muscle_Myoblasts		Hsmm Skeletal Muscle Myoblasts	roadmap_15	roadmap_chromhmm/hg38_lift/E120_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HSMMtube_Skeletal_Muscle_Myotubes_Derived_from_HSMM		Hsmmtube Skeletal Muscle Myotubes Derived From Hsmm	roadmap_15	roadmap_chromhmm/hg38_lift/E121_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+HUVEC_Umbilical_Vein_Endothelial_Cells		Huvec Umbilical Vein Endothelial Cells	roadmap_15	roadmap_chromhmm/hg38_lift/E122_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+K562_Leukemia		K562 Leukemia	roadmap_15	roadmap_chromhmm/hg38_lift/E123_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Monocytes-CD14+_RO01746		Monocytes-CD14+ Ro01746	roadmap_15	roadmap_chromhmm/hg38_lift/E124_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+NH-A_Astrocytes		Nh-A Astrocytes	roadmap_15	roadmap_chromhmm/hg38_lift/E125_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+NHDF-Ad_Adult_Dermal_Fibroblasts		Nhdf-Ad Adult Dermal Fibroblasts	roadmap_15	roadmap_chromhmm/hg38_lift/E126_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+NHEK-Epidermal_Keratinocytes		Nhek-Epidermal Keratinocytes	roadmap_15	roadmap_chromhmm/hg38_lift/E127_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+NHLF_Lung_Fibroblasts		Nhlf Lung Fibroblasts	roadmap_15	roadmap_chromhmm/hg38_lift/E128_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+Osteoblasts		Osteoblasts	roadmap_15	roadmap_chromhmm/hg38_lift/E129_15_coreMarks_hg38lift_mnemonics.bed.gz	hg38	lift
+CD4-positive, alpha-beta T cell	cord blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C00280H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C002Q1H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+effector memory CD8-positive, alpha-beta T cell	venous blood	Effector Memory CD8+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C003UQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD38-negative naive B cell	cord blood	CD38- Naive B Cell	blueprint	blueprint_chromhmm/hg38/C005QQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD34-negative, CD41-positive, CD42-positive megakaryocyte cell	cord blood	CD34- CD41+ CD42+ Megakaryocyte Cell	blueprint	blueprint_chromhmm/hg38/S004BTH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	venous blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S006VIH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S007DDH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	cord blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S00C1HH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/S00FWHH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	cord blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S00T2LH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+germinal center B cell	tonsil	Germinal Center B Cell	blueprint	blueprint_chromhmm/hg38/S00Y9OH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+naive B cell	venous blood	Naive B Cell	blueprint	blueprint_chromhmm/hg38/S00X9SH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature eosinophil	venous blood	Mature Eosinophil	blueprint	blueprint_chromhmm/hg38/S006XEH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+segmented neutrophil of bone marrow	bone marrow	Segmented Neutrophil Of Bone Marrow	blueprint	blueprint_chromhmm/hg38/S00JHVH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+cytotoxic CD56-dim natural killer cell	cord blood	Cytotoxic CD56-Dim Natural Killer Cell	blueprint	blueprint_chromhmm/hg38/S01E4WH0_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+class switched memory B cell	venous blood	Class Switched Memory B Cell	blueprint	blueprint_chromhmm/hg38/S00YPTH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+osteoclast	venous blood	Osteoclast	blueprint	blueprint_chromhmm/hg38/S01GMPH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	cord blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S01H5IH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+osteoclast	venous blood	Osteoclast	blueprint	blueprint_chromhmm/hg38/S01GKTH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+adult endothelial progenitor cell	venous blood	Adult Endothelial Progenitor Cell	blueprint	blueprint_chromhmm/hg38/S013GFH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+naive B cell	venous blood	Naive B Cell	blueprint	blueprint_chromhmm/hg38/S0159LH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+adult endothelial progenitor cell	venous blood	Adult Endothelial Progenitor Cell	blueprint	blueprint_chromhmm/hg38/S00UJKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+band form neutrophil	bone marrow	Band Form Neutrophil	blueprint	blueprint_chromhmm/hg38/S00JGXH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	venous blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S01F8KH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mesenchymal stem cell of the bone marrow	venous blood	Mesenchymal Stem Cell Of The Bone Marrow	blueprint	blueprint_chromhmm/hg38/S00YAMH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD8-positive, alpha-beta T cell	venous blood	CD8+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S014WGH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic metamyelocyte	bone marrow	Neutrophilic Metamyelocyte	blueprint	blueprint_chromhmm/hg38/S00G03H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/S00K7AH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+immature conventional dendritic cell - GM-CSF_IL4_T=6_days	venous blood	Immature Conventional Dendritic Cell - Gm-Csf Il4 T=6 Days	blueprint	blueprint_chromhmm/hg38/S00TU2H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+naive B cell	venous blood	Naive B Cell	blueprint	blueprint_chromhmm/hg38/S00W1BH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mesenchymal stem cell of the bone marrow	venous blood	Mesenchymal Stem Cell Of The Bone Marrow	blueprint	blueprint_chromhmm/hg38/S00W8YH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+plasma cell	tonsil	Plasma Cell	blueprint	blueprint_chromhmm/hg38/S00VKEH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+class switched memory B cell	venous blood	Class Switched Memory B Cell	blueprint	blueprint_chromhmm/hg38/S015BHH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+class switched memory B cell	venous blood	Class Switched Memory B Cell	blueprint	blueprint_chromhmm/hg38/S015CFH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+unswitched memory B cell	venous blood	Unswitched Memory B Cell	blueprint	blueprint_chromhmm/hg38/S015DDH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	venous blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S01F8KH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	venous blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S01FW9H2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C000S5H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD14-positive, CD16-negative classical monocyte	venous blood	CD14+ CD16- Classical Monocyte	blueprint	blueprint_chromhmm/hg38/C000S5H2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C0010KH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	cord blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C00184H2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C001UYH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C0011IH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD14-positive, CD16-negative classical monocyte	cord blood	CD14+ CD16- Classical Monocyte	blueprint	blueprint_chromhmm/hg38/C00264H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C002TWH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+central memory CD4-positive, alpha-beta T cell	venous blood	Central Memory CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C002TWH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD8-positive, alpha-beta T cell	cord blood	CD8+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C002YMH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	cord blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C004GDH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD14-positive, CD16-negative classical monocyte	venous blood	CD14+ CD16- Classical Monocyte	blueprint	blueprint_chromhmm/hg38/C004SQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD14-positive, CD16-negative classical monocyte	cord blood	CD14+ CD16- Classical Monocyte	blueprint	blueprint_chromhmm/hg38/C005PSH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	venous blood	Macrophage	blueprint	blueprint_chromhmm/hg38/C005VGH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD8-positive, alpha-beta T cell	cord blood	CD8+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/C0066PH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/C12012H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	cord blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S000RDH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD14-positive, CD16-negative classical monocyte	cord blood	CD14+ CD16- Classical Monocyte	blueprint	blueprint_chromhmm/hg38/S000RDH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	cord blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S0018AH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	venous blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S001MJH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	venous blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S001S7H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	venous blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S001S7H2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	venous blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S0022IH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	venous blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S0022IH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+erythroblast	cord blood	Erythroblast	blueprint	blueprint_chromhmm/hg38/S002R5H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+erythroblast	cord blood	Erythroblast	blueprint	blueprint_chromhmm/hg38/S002S3H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	venous blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S00390H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD38-negative naive B cell	venous blood	CD38- Naive B Cell	blueprint	blueprint_chromhmm/hg38/S004KBH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+cytotoxic CD56-dim natural killer cell	cord blood	Cytotoxic CD56-Dim Natural Killer Cell	blueprint	blueprint_chromhmm/hg38/S005YGH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	venous blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S00622H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S007G7H4_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	cord blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S007SKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S008H1H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD4-positive, alpha-beta T cell	venous blood	CD4+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S009W4H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	cord blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S00BHQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+endothelial cell of umbilical vein (proliferating)	cord blood	Endothelial Cell Of Umbilical Vein (Proliferating)	blueprint	blueprint_chromhmm/hg38/S00BJMH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+endothelial cell of umbilical vein (resting)	cord blood	Endothelial Cell Of Umbilical Vein (Resting)	blueprint	blueprint_chromhmm/hg38/S00BJMH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature eosinophil	venous blood	Mature Eosinophil	blueprint	blueprint_chromhmm/hg38/S00BKKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	venous blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S00BS4H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD8-positive, alpha-beta T cell	cord blood	CD8+ Alpha-Beta T Cell	blueprint	blueprint_chromhmm/hg38/S00C2FH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+endothelial cell of umbilical vein (proliferating)	cord blood	Endothelial Cell Of Umbilical Vein (Proliferating)	blueprint	blueprint_chromhmm/hg38/S00DCSH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+macrophage	cord blood	Macrophage	blueprint	blueprint_chromhmm/hg38/S00DVRH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+alternatively activated macrophage	venous blood	Alternatively Activated Macrophage	blueprint	blueprint_chromhmm/hg38/S00FTNH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil - G-CSF/Dex. Treatment (16-20 hrs)	venous blood	Mature Neutrophil - G-Csf/Dex. Treatment (16-20 Hrs)	blueprint	blueprint_chromhmm/hg38/S00FXFH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic myelocyte	bone marrow	Neutrophilic Myelocyte	blueprint	blueprint_chromhmm/hg38/S00FYDH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+band form neutrophil	bone marrow	Band Form Neutrophil	blueprint	blueprint_chromhmm/hg38/S00G11H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+segmented neutrophil of bone marrow	bone marrow	Segmented Neutrophil Of Bone Marrow	blueprint	blueprint_chromhmm/hg38/S00G3YH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+inflammatory macrophage	venous blood	Inflammatory Macrophage	blueprint	blueprint_chromhmm/hg38/S00H6OH2_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic myelocyte	bone marrow	Neutrophilic Myelocyte	blueprint	blueprint_chromhmm/hg38/S00JE0H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic metamyelocyte	bone marrow	Neutrophilic Metamyelocyte	blueprint	blueprint_chromhmm/hg38/S00JFZH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil	venous blood	Mature Neutrophil	blueprint	blueprint_chromhmm/hg38/S00K5EH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil - G-CSF/Dex. Treatment (16-20 hrs)	venous blood	Mature Neutrophil - G-Csf/Dex. Treatment (16-20 Hrs)	blueprint	blueprint_chromhmm/hg38/S00K6CH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature neutrophil - G-CSF/Dex. Treatment (16-20 hrs)	venous blood	Mature Neutrophil - G-Csf/Dex. Treatment (16-20 Hrs)	blueprint	blueprint_chromhmm/hg38/S00K88H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+immature conventional dendritic cell - GM-CSF_IL4_T=6_days	venous blood	Immature Conventional Dendritic Cell - Gm-Csf Il4 T=6 Days	blueprint	blueprint_chromhmm/hg38/S00TV0H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+mature conventional dendritic cell - GM-CSF_IL4_T=6_days_R848_T=24hrs	venous blood	Mature Conventional Dendritic Cell - Gm-Csf Il4 T=6 Days R848 T=24Hrs	blueprint	blueprint_chromhmm/hg38/S00TYVH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic myelocyte	bone marrow	Neutrophilic Myelocyte	blueprint	blueprint_chromhmm/hg38/S00VCUH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+neutrophilic metamyelocyte	bone marrow	Neutrophilic Metamyelocyte	blueprint	blueprint_chromhmm/hg38/S00VDSH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+band form neutrophil	bone marrow	Band Form Neutrophil	blueprint	blueprint_chromhmm/hg38/S00VEQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+segmented neutrophil of bone marrow	bone marrow	Segmented Neutrophil Of Bone Marrow	blueprint	blueprint_chromhmm/hg38/S00VFOH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+CD34-negative, CD41-positive, CD42-positive megakaryocyte cell	cord blood	CD34- CD41+ CD42+ Megakaryocyte Cell	blueprint	blueprint_chromhmm/hg38/S00VHKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+germinal center B cell	tonsil	Germinal Center B Cell	blueprint	blueprint_chromhmm/hg38/S00W0DH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+naive B cell	venous blood	Naive B Cell	blueprint	blueprint_chromhmm/hg38/S00XAQH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+plasma cell	tonsil	Plasma Cell	blueprint	blueprint_chromhmm/hg38/S00Y8QH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Sporadic Burkitt lymphoma	Cell Line	Sporadic Burkitt Lymphoma	blueprint	blueprint_chromhmm/hg38/BL-2_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Sporadic Burkitt lymphoma	Cell Line	Sporadic Burkitt Lymphoma	blueprint	blueprint_chromhmm/hg38/DG-75_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	Cell Line	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/JVM-2_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Germinal Center B-Cell-Like Diffuse Large B-Cell Lymphoma	Cell Line	Germinal Center B-Cell-Like Diffuse Large B-Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/KARPAS-422_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Germinal Center B-Cell-Like Diffuse Large B-Cell Lymphoma	Cell Line	Germinal Center B-Cell-Like Diffuse Large B-Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/SU-DHL-5_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Multiple Myeloma	Cell Line	Multiple Myeloma	blueprint	blueprint_chromhmm/hg38/U-266_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	Cell Line	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/Z-138_c01_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	venous blood	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/S01FE8H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	venous blood	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/S01FF6H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y05H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - CTR	bone marrow	Acute Promyelocytic Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S01GW5H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	venous blood	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/S01FH2H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00XXHH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - ATRA	bone marrow	Acute Promyelocytic Leukemia - Atra	blueprint	blueprint_chromhmm/hg38/S01GX3H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+T-cell Acute Lymphocytic Leukemia	capillary blood	T-Cell Acute Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S01PTCH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	venous blood	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/S01FJZH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Multiple Myeloma	bone marrow	Multiple Myeloma	blueprint	blueprint_chromhmm/hg38/S00XCMH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Mantle Cell Lymphoma	venous blood	Mantle Cell Lymphoma	blueprint	blueprint_chromhmm/hg38/S01FKXH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia	bone marrow	Acute Promyelocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S01NTKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+T-cell Prolymphocytic Leukemia	venous blood	T-Cell Prolymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S016KWH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - MS275	bone marrow	Acute Promyelocytic Leukemia - Ms275	blueprint	blueprint_chromhmm/hg38/S004YKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - ATRA	bone marrow	Acute Promyelocytic Leukemia - Atra	blueprint	blueprint_chromhmm/hg38/S0050AH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - MC2392	bone marrow	Acute Promyelocytic Leukemia - Mc2392	blueprint	blueprint_chromhmm/hg38/S00518H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	bone marrow	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S005CNH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - SAHA	bone marrow	Acute Myeloid Leukemia - Saha	blueprint	blueprint_chromhmm/hg38/S005DLH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S005EJH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S005FHH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	bone marrow	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S005GFH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00AXZH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00AYXH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00B0NH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00B1LH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00B2JH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00CWTH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00CXRH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00CYPH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D0FH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D1DH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D2BH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D39H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D47H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D55H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00D63H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	bone marrow	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S00FGCH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Lymphocytic Leukemia - CTR	bone marrow	Acute Lymphocytic Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S00DFMH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S00GPRH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	bone marrow	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S00KPBH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	venous blood	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S00Q7NH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia - CTR	bone marrow	Acute Myeloid Leukemia - Ctr	blueprint	blueprint_chromhmm/hg38/S00SB7H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Multiple Myeloma	bone marrow	Multiple Myeloma	blueprint	blueprint_chromhmm/hg38/S00XDKH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Multiple Myeloma	bone marrow	Multiple Myeloma	blueprint	blueprint_chromhmm/hg38/S00XEIH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Multiple Myeloma	bone marrow	Multiple Myeloma	blueprint	blueprint_chromhmm/hg38/S00XFGH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00XUNH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00XVLH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00XWJH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00XYFH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y21H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y13H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y4YH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y5WH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S00Y6UH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013M3H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013N1H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013PYH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	bone marrow	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013QWH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013RUH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Myeloid Leukemia	venous blood	Acute Myeloid Leukemia	blueprint	blueprint_chromhmm/hg38/S013SSH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+T-cell Prolymphocytic Leukemia	venous blood	T-Cell Prolymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S0145XH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+T-cell Prolymphocytic Leukemia	venous blood	T-Cell Prolymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S016MSH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Lymphocytic Leukemia	bone marrow	Acute Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S017E3H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Chronic Lymphocytic Leukemia	venous blood	Chronic Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S01FG4H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+Acute Promyelocytic Leukemia - MC2884	bone marrow	Acute Promyelocytic Leukemia - Mc2884	blueprint	blueprint_chromhmm/hg38/S01H0SH1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	
+T-cell Acute Lymphocytic Leukemia	capillary blood	T-Cell Acute Lymphocytic Leukemia	blueprint	blueprint_chromhmm/hg38/S01PV8H1_12_12_Blueprint_release_201608_segments.bed.gz	hg38	

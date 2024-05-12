@@ -11,7 +11,7 @@ from smart_open import open as smart_open
 import io
 
 
-from scipy.stats import nbinom, multinomial
+from scipy.stats import nbinom, multinomial, binom
 from scipy.special import softmax
 
 from .layers import ResNetDilatedBlock, SpatialDropout
@@ -20,8 +20,9 @@ from .loss import (
     NegativeBinomialFixedTotalCountNLLLoss,
     NegativeBinomialNLLLossOld,
     NegativeBinomialNLLLoss,
+    BinomialNLLLoss,
 )
-from .data import FragmentEndpointsDataset
+from .data import FragmentEndpointsDataset, track_name_to_index_key
 from .predict import calc_stats, make_qc_plots, make_tracks
 
 from fragmentomics_tools.plot.tracks import (
@@ -91,6 +92,8 @@ class BackgroundModelModule(L.LightningModule):
                 dist = nbinom(n=total_counts, p=ps)
             elif self.model_params["loss"] == "multinomial":
                 dist = multinomial(n=1, p=softmax(pred[i]))
+            elif self.model_params["loss"] == "binomial":
+                dist = binom(n=1, p=softmax(pred[i]))
             else:
                 raise ValueError(f"Unrecognized loss '{self.model_params['loss']}'")
             rv.append(dist)
@@ -185,6 +188,9 @@ class BackgroundModelModule(L.LightningModule):
         if loss == "multinomial":
             self.loss_fn = MultinomialNLLLoss()
             self.output_tracks_multiplier = 1
+        elif loss == "binomial":
+            self.loss_fn = BinomialNLLLoss()
+            self.output_tracks_multiplier = 1
         elif loss == "negative_binomial":
             self.loss_fn = NegativeBinomialNLLLoss()
             self.output_tracks_multiplier = 2
@@ -220,9 +226,9 @@ class BackgroundModelModule(L.LightningModule):
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
         # it is independent of forward
-        x, y = batch
+        x, y, total_count = batch
         y_hat = self.model(x)
-        loss = self.loss_fn(y_hat, y[:, :, :])
+        loss = self.loss_fn(y_hat, y[:, :, :], total_count=total_count)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss, prog_bar=True, sync_dist=True)
         # self.plot_on_epoch_end(batch_idx)
@@ -230,9 +236,9 @@ class BackgroundModelModule(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         # this is the test loop
-        x, y = batch
+        x, y, total_count = batch
         y_hat = self.model(x)
-        loss = self.loss_fn(y_hat, y[:, :, :])
+        loss = self.loss_fn(y_hat, y[:, :, :], total_count=total_count)
         # Logging to TensorBoard (if installed) by default
         self.log("val_loss", loss, prog_bar=True, sync_dist=True)
 
@@ -291,14 +297,19 @@ class BackgroundModelModule(L.LightningModule):
         seq = rdf.get_one_hot_encoded_sequence(FASTA_PATH, verbose=True)
 
         self.eval()
+        tqdm.tqdm.pandas(desc="predict bias")
         pred = seq.progress_apply(
             lambda x: self.model(torch.Tensor(x).to(self.device)).cpu().detach().numpy()
         )
-        dists = [self._build_dist(x) for x in tqdm.tqdm(pred)]
+        dists = [self._build_dist(x) for x in tqdm.tqdm(pred, desc='build background dists')]
 
         return pd.DataFrame(
             dists,
             columns=["pred_dist." + x for x in self.output_columns],
+            #columns=pd.MultiIndex.from_tuples(
+            #    [tuple(['pred_dist'] + list(track_name_to_index_key(x))) for x in self.output_columns],
+            #    names=["type", "strand", "fl_band", 'coverage_type']
+            #),
             index=rdf.index,
         )
 

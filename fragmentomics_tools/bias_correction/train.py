@@ -121,14 +121,14 @@ def train(model, sdf, train_rdf, val_rdf, max_epochs=10):
     val_dataset = FragmentEndpointsDataset(val_rdf, sdf, model)
 
     val_loader = utils.data.DataLoader(
-        val_dataset, batch_size=32, num_workers=1, persistent_workers=True
+        val_dataset, batch_size=1, num_workers=4, persistent_workers=False
     )
     train_loader = utils.data.DataLoader(
         train_dataset,
         batch_size=32,
         shuffle=True,
         num_workers=8,
-        persistent_workers=True,
+        persistent_workers=False,
     )
 
     trainer = L.Trainer(
@@ -156,14 +156,14 @@ valid_columns = [
 
 
 def main():
-    sdf = load_ibd_sample_df().sample(20)
+    sdf = load_ibd_sample_df().query("label == 1")
     train_rdf, val_rdf, test_rdf, _ = build_promoter_rdfs()
     model = BackgroundModelModule(
-        num_residual_layers=8, output_columns=valid_columns, loss="multinomial"
+        num_residual_layers=2, output_columns=valid_columns, loss="binomial"
     )
-    model = train(model, sdf, train_rdf, val_rdf, max_epochs=3)
+    model = train(model, sdf, train_rdf, val_rdf, max_epochs=5)
     model.save(
-        "/scratch/karius/bias_correction_model/tss_model/merged.off_promoters.multinomial.3.res"
+        "/scratch/karius/bias_correction_model/tss_model/merged.off_promoters.binomial.2.res"
     )
     return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):

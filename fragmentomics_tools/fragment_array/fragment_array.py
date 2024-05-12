@@ -206,7 +206,7 @@ class FragmentArray:
 
     def _zeros_if_none(self, _x):
         if _x is None:
-            return numpy.ones(self.starts_0.shape, dtype=int)
+            return numpy.zeros(self.starts_0.shape, dtype=int)
         else:
             return numpy.asarray(_x, dtype=int)
 
@@ -777,9 +777,9 @@ class FragmentArray:
                 return SparseIntVector([], [], self.shape[1])
             else:
                 return numpy.zeros(self.length, dtype=numpy.uint32)
-            
+
         if self.n_frags == 0: return _empty()
-    
+
         # The following should (intentionally) remove the straddle case
         mask = (getattr(self, positions_attr) >= 0) & (getattr(self, positions_attr) < self.length)
         x = getattr(self, positions_attr)[mask]
@@ -807,7 +807,7 @@ class FragmentArray:
 
     @property
     def first_covered_base_counts(self) -> numpy.ndarray:
-        self.get_first_covered_base_array(return_sparse=False)
+        return self.get_first_covered_base_array(return_sparse=False)
 
     def get_last_covered_base_array(self, return_sparse=False) -> numpy.ndarray:
         """
@@ -824,8 +824,8 @@ class FragmentArray:
 
     @property
     def last_covered_base_counts(self) -> numpy.ndarray:
-        self.get_last_covered_base_array(return_sparse=False)
-    
+        return self.get_last_covered_base_array(return_sparse=False)
+
     def get_midpoint_coverage_array(self, return_sparse=False) -> numpy.ndarray:
         return self._get_covered_base_array(positions_attr='midpoints_0', weights_attr='weights', return_sparse=return_sparse)
 
@@ -853,13 +853,17 @@ class FragmentArray:
 
         return coverage_array
 
-    def build_coverage_counts(self, fl_bands=None, return_sparse=False):
+    def build_coverage_counts(self, fl_bands=None, split_strand=True, return_sparse=False):
         if fl_bands is None:
             fl_bands = [(0, self.max_frag_len)]
 
         res = {}
-        for strand in ["+", "-"]:
-            sub_rfa = self.subset_by_fragment_strand(strand)
+        strands = ["+", "-"] if split_strand else ['.']
+        for strand in strands:
+            if strand != '.':
+                sub_rfa = self.subset_by_fragment_strand(strand)
+            else:
+                sub_rfa = self
             for fl in fl_bands:
                 sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
                 key = (strand, fl, "first")
@@ -875,7 +879,8 @@ class FragmentArray:
                 res[key] = sub_sub_rfa.get_midpoint_coverage_array(return_sparse=return_sparse)
 
         res = pandas.Series(res)
-        return res
+        res.index = res.index.set_names(['strand', 'fl_band', 'position'])
+        return res.rename("coverage")
 
     def to_fragment_matrix(self):
         warnings.warn("deprecated, use .fragment_matrix", DeprecationWarning)
@@ -1260,7 +1265,7 @@ class RegionFragmentArray(FragmentArray):
         )
 
     def make_data_direction_match_strand(self):
-        if self.strand not in "+-":
+        if self.strand not in ["+", "-"]:
             raise TypeError(
                 f"Unrecognized strand '{self.strand}' (are you sure that you want to use this function?)"
             )
@@ -1686,11 +1691,6 @@ class RegionFragmentArray(FragmentArray):
             raise TypeError(
                 f"{type(in_fragments_h5)} must be a str or FragmentsH5 {str(type(FragmentsH5))}"
             )
-
-        if region.ref is not None:
-            assert (
-                region.ref == "hg38"
-            ), "Fragment h5s are only generated for ref 'hg38'"
 
         return_methyl = fragments_h5.has_methyl
         if include_fragment_strand:

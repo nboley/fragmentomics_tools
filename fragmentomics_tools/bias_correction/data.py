@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import numpy as np
 import scipy
@@ -21,9 +23,12 @@ def index_key_to_track_name(args):
 
 
 def track_name_to_index_key(track_name):
-    return re.fullmatch(
-        "strand_({+-})__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)", track_name
-    )
+    pat = "strand_([+-.])__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)"
+    res = re.fullmatch(pat, track_name)
+    if res is None:
+        raise ValueError(f"track name (${track_name}$) does not match pattern (${pat}$)")
+    res = re.fullmatch(pat, track_name).groups()
+    return (res[0], res[1:3], res[3])
 
 
 def build_counts(record, return_sparse=False):
@@ -65,6 +70,7 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
     def __init__(self, rdf, sdf, model, num_workers=24):
         self.rdf = rdf.copy()
         self.sdf = sdf.copy()
+        self.total_count = 1000 # self.sdf.frag_h5.apply(lambda x: x.fragment_length_counts[:512].sum().astype(int)).sum()
         self.output_columns = model.output_columns
 
         # init the srdf, and resize so that the regions are a multiple of the tile size, and then tile across the regions
@@ -144,4 +150,4 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
         record = self.srdf.iloc[idx, :]
         inputs = torch.Tensor(record.one_hot_encoded_sequence).cuda()
         targets = self.get_targets_from_record(record, self.output_columns).cuda()
-        return inputs, targets
+        return inputs, targets, torch.tensor(self.total_count)[None, None].cuda()

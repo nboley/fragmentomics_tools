@@ -14,6 +14,35 @@ def _loss_reduce(nll, reduction):
         raise NotImplementedError(f"Reduction {reduction} is not implemented.")
 
 
+class BinomialNLLLoss(torch.nn.modules.loss._Loss):
+    def __init__(self, reduction: str = "mean") -> None:
+        """Binomial Negative Log Likelihood Loss
+
+
+        :param reduction:  (string, optional) Specifies the reduction to apply to the output:
+            ``'none'`` | ``'mean'`` | ``'sum'``. ``'none'``: no reduction will be applied,
+            ``'mean'``: the sum of the output will be divided by the number of
+            elements in the output, ``'sum'``: the output will be summed. Note: :attr:`size_average`
+            and :attr:`reduce` are in the process of being deprecated, and in the meantime,
+            specifying either of those two args will override :attr:`reduction`. Default: ``'mean'``
+
+        """
+        super().__init__(size_average=None, reduce=None, reduction=reduction)
+
+
+    def forward(self, input: torch.Tensor, target: torch.Tensor, total_count: torch.Tensor) -> torch.Tensor:
+        dims = input.shape
+        inputs_flat = input.contiguous().view(*dims[:2], -1)
+        target_flat = target.contiguous().view(*dims[:2], -1)
+
+        dist = torch.distributions.Binomial(
+            total_count=total_count, logits=inputs_flat
+        )
+
+        nll = -dist.log_prob(target_flat)
+        return _loss_reduce(nll, self.reduction)
+
+
 class MultinomialNLLLoss(torch.nn.modules.loss._Loss):
     def __init__(
         self,
@@ -48,7 +77,7 @@ class MultinomialNLLLoss(torch.nn.modules.loss._Loss):
         self.scale_loss_to_d = scale_loss_to_d
         self.is_probs = is_probs
 
-    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, target: torch.Tensor, total_count: torch.Tensor) -> torch.Tensor:
         dims = input.shape
         # *dims[:2] is batch, channel
         inputs_flat = input.contiguous().view(*dims[:2], -1)

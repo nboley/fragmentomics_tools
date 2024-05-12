@@ -42,7 +42,7 @@ from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
 
-# from fbio.contig import STANDARD_CHROMS, CONTIG_LENGTHS, REFERENCE_FASTA_DATA_MANIFEST_KEY
+
 # from fbio.formats import BedReader, BigWigReader
 # from fbio.fragments_h5 import FragmentsH5
 # from fbio.liftover import RegionLiftOver
@@ -498,7 +498,15 @@ class RegionDataFrame(DataFrameBase):
             raise TypeError("Must contain a 'summit' column to center on the summit.")
 
         region_lengths = (self.stop - self.start).copy()
-        self["start"] = self.start + self.summit - region_lengths // 2
+
+        # check if the summit is within start
+        if ((self.summit >= self.start) & (self.summit <= self.stop)).all():
+            self["start"] = self.summit - region_lengths // 2
+        elif (self.summit <= self.region_lengths).all():
+            self["start"] = self.start + self.summit - region_lengths // 2
+        else:
+            raise ValueError("summits must either be within the region interval or less than the length of the region.")
+
         self["stop"] = self.start + region_lengths
 
         return self.drop(columns=["summit"])
@@ -539,8 +547,8 @@ class RegionDataFrame(DataFrameBase):
         :return:
         """
         # Keep the following two import lines here to avoid a big circular import refactor
-        from ravel.learn.functional_genomics.data import SeqDataSet
-        from ravel.learn.functional_genomics.model import TFConv1D
+        import torch
+        from fragmentomics_tools.motif import TFConv1D, SeqDataSet
 
         if min(self.region_lengths) < 500 and tf_search_width is None:
             warnings.warn(
@@ -573,7 +581,8 @@ class RegionDataFrame(DataFrameBase):
             sds = SeqDataSet(
                 region_dataframe=self
                 if tf_search_width is None
-                else self.resize_regions(tf_search_width)
+                else self.resize_regions(tf_search_width),
+                ref_path="/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz",
             )
             sdl = torch.utils.data.DataLoader(
                 sds,
@@ -1198,6 +1207,9 @@ class RegionDataFrame(DataFrameBase):
 
     @staticmethod
     def _error_on_invalid_new_stops(rdf, new_stop):
+        if rdf.ref == 'NA':
+            return
+
         valid_contig_set = set(CONTIG_LENGTHS[rdf.ref].keys())
         for contig in sorted(set(rdf.contig)):
             new_stops_for_contig = new_stop[rdf.contig == contig]
@@ -1272,8 +1284,8 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        assert (left_amt >= 0).all()
-        assert (right_amt >= 0).all()
+        assert (np.array(left_amt) >= 0).all()
+        assert (np.array(right_amt) >= 0).all()
         return self._resize_region_boundaries(
             -left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes
         )
@@ -1512,7 +1524,7 @@ class RegionDataFrame(DataFrameBase):
         seqs = []
         with pysam.FastaFile(fasta_path) as fasta:
             for region in tqdm(
-                self.iter_regions(), total=len(self), disable=(not verbose)
+                self.iter_regions(), total=len(self), disable=(not verbose), desc="get sequences"
             ):
                 seqs.append(
                     getattr(region, method)(
@@ -1801,6 +1813,41 @@ class RegionDataFrame(DataFrameBase):
     ###############################################################################################
 
 
+def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_expansion):
+    # avoid circular import
+    from fragmentomics_tools.bias_correction.data import track_name_to_index_key, index_key_to_track_name
+
+    cov_type_to_weights_attr = {'first': 'first_covered_base_weights', 'last': 'last_covered_base_weights', 'midpoint': 'weights'}
+    cov_type_to_fragment_coord = {'first': 'starts_0', 'last': 'stops_0', 'midpoint': 'midpoints_0'}
+
+    pred_column_to_key = {c[10:]: track_name_to_index_key(c[10:]) for c in record.index if c.startswith("pred_dist.")}
+    strands = list(set(x[0] for x in pred_column_to_key.values()))
+    fl_bands = list(set(x[1] for x in pred_column_to_key.values()))
+    cov_types = list(set(x[2] for x in pred_column_to_key.values()))
+
+    # zero out all of the weights
+    for attr in cov_type_to_weights_attr.values():
+        getattr(fragment_array, attr)[:] = 0
+
+    # set all of the valid weights 
+    for strand in strands:
+        assert strand in ".+-"
+        for fl_lb, fl_ub in [(40, 65), (120, 175)]:
+            for cov_type in ['first', 'last', 'midpoint']:
+                mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
+                mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
+                if strand in '-+':
+                    mask = (mask | (fragment_array.fragment_strands == strand))
+                means = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))].mean()
+                weights = means.mean()/means
+                count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
+                assert (count_indices >= 0).all()
+                getattr(fragment_array, cov_type_to_weights_attr[cov_type])[mask] = weights[count_indices[mask]]
+
+    # drop all fragments with 0 weights (this probably means that they were out of the fl bands)
+    return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
+
+
 class SampleAndRegionDataFrame(RegionDataFrame):
     _additional_required_columns = ["sample_id", "frag_h5"]
 
@@ -1834,7 +1881,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         verbose=1,
         min_mapq: int = 0,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
-        flip_data_to_match_region_strand: bool = False,
+        fragment_array_callback = None,
         **kwargs,
     ):
         """ """
@@ -1843,16 +1890,17 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         tqdm._instances.clear()
 
         def get_fa(record):
-            region = Region(record.contig, record.start, record.stop, record.strand)
+            region = Region(record.contig, record.start, record.stop, record.strand, ref=self.ref)
             _kwargs = dict(
                 region=region,
                 min_mapq=min_mapq,
                 max_frag_len=max_frag_len,
                 include_fragment_strand=True,
-                flip_data_to_match_region_strand=flip_data_to_match_region_strand,
                 **kwargs,
             )
             fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
+            if fragment_array_callback is not None:
+                fa = fragment_array_callback(fa)
             return (record.Index, fa)
 
         if num_cores <= 1:
@@ -1874,11 +1922,12 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                         for record in list(self[field_subset].itertuples())
                     ),
                     total=len(self),
+                    disable=(verbose <= 0),
                 )
             )
 
         index, fs = zip(*res)
-        return pandas.Series(fs, index=index, name="fa")
+        return pandas.Series(fs, index=index, name="fragment_array")
 
     def attach_fragment_arrays(self, *args, rebuild_fragment_arrays=False, **kwargs):
         # If we've already attached
@@ -2000,6 +2049,20 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         if not return_stat_columns:
             rv = rv.drop(columns=["n_fragments", "min_fragments", "max_fragments"])
         return rv
+
+    def set_fragment_array_weights(self, model):
+        # find the maximum fragment length so that we can ensure that we have enough context to set
+        # start and end wweights
+        expansion = 511 # self.fragment_array.apply(lambda x: x.max_frag_len)
+        # these are the columns that we use to produce fixed regions
+        columns = ['contig', 'strand', 'start', 'stop']
+        # predict on all of the unique regions
+        tmp_rdf = RegionDataFrame(self[columns].drop_duplicates(), ref=self.ref)
+        # join the model back
+        pred = tmp_rdf.join(model.predict_from_rdf(tmp_rdf.expand_regions(left_amt=expansion, right_amt=expansion)))
+        pred = SampleAndRegionDataFrame(self.df.set_index(columns).join(pred.df.set_index(columns), how='inner').reset_index(), ref=self.ref)
+        pred.progress_apply(lambda record: _set_fragment_array_weights_from_pred_record(record.fragment_array, record, expansion), axis=1)
+        return None
 
 
 class FlDist:

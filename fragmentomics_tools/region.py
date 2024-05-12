@@ -439,7 +439,7 @@ class Region(DataClassMixin):
                 )
 
         new_stop = new_start + new_size
-        if self.chrom != "NA" and new_stop > CONTIG_LENGTHS[self.ref][self.chrom]:
+        if self.ref != 'NA' and self.chrom != "NA" and new_stop > CONTIG_LENGTHS[self.ref][self.chrom]:
             if truncate_when_out_of_bounds:
                 new_stop = CONTIG_LENGTHS[self.ref][self.chrom]
             else:
@@ -511,7 +511,7 @@ class Region(DataClassMixin):
         """
         assert isinstance(self.chrom, str)
 
-        if self.ref not in CONTIG_LENGTHS:
+        if self.ref != 'NA' and self.ref not in CONTIG_LENGTHS:
             raise ValueError(f"{self.ref} is not in CONTIG_LENGTHS")
 
         if ":" in self.chrom or "\t" in self.chrom:
@@ -519,7 +519,8 @@ class Region(DataClassMixin):
                 self.chrom
             )
 
-        if self.chrom != "NA" and self.chrom not in CONTIG_LENGTHS[self.ref]:
+        if self.ref != 'NA' and self.chrom != "NA" and self.chrom not in CONTIG_LENGTHS[self.ref]:
+            assert False, self.ref
             raise ValueError(f"{self.chrom} not found in CONTIG_LENGTHS for {self.ref}")
 
         assert (
@@ -529,6 +530,8 @@ class Region(DataClassMixin):
         if self.start is None:
             self.start = 0
         if self.stop is None:
+            if self.ref == "NA":
+                raise ValueError("cannot infer stop when ref is NA")
             if self.chrom == "NA":
                 raise ValueError("cannot infer stop when chrom is NA")
             self.stop = CONTIG_LENGTHS[self.ref][self.chrom]
@@ -539,7 +542,7 @@ class Region(DataClassMixin):
         # In these situations, we have a "NA" chromosome and coordinates that go from -x to x
         assert self.chrom == "NA" or self.start >= 0
 
-        if self.chrom != "NA" and self.stop > CONTIG_LENGTHS[self.ref][self.chrom]:
+        if self.ref != 'NA' and self.chrom != "NA" and self.stop > CONTIG_LENGTHS[self.ref][self.chrom]:
             raise ValueError(
                 f"stop ({self.stop}) is greater than {self.chrom} length ({CONTIG_LENGTHS[self.ref][self.chrom]})"
             )

@@ -48,7 +48,7 @@ def load_ibd_sample_df():
     )
     metadata = pd.read_csv("/scratch/karius/Merged_meta_data_CD_UC_foundation.csv")
     metadata = metadata.query("SampleID in @sample_ids_to_samples.keys()")[
-        ["SampleID", "DIAGNOSIS", "ENDO_CATEGORY", "Cluster", "SITE_NUMBER"]
+        ["SampleID", "SeqRun", "DIAGNOSIS", "ENDO_CATEGORY", "Cluster", "SITE_NUMBER"]
     ].rename(columns={"SampleID": "sample_id"})
     metadata = metadata.assign(
         label=metadata.apply(lambda x: label_mapping[x.ENDO_CATEGORY], 1)
@@ -60,6 +60,7 @@ def load_ibd_sample_df():
     )[
         [
             "sample_id",
+            "SeqRun",
             "label",
             "frag_h5",
             "DIAGNOSIS",

@@ -456,3 +456,21 @@ def load_tss_s_df(ref):
     # strip off the gene id patch id
     rv["ens_id"] = [x.split(".")[0] for x in rv["ens_id"].tolist()]
     return rv
+
+
+def load_chrom_hmm_states():
+    rdf = RegionDataFrame(
+        pd.read_table(
+            "/scratch/nboley/test_unet_pytorch/DHS_Index_and_Vocabulary_hg38_WM20190703.min2samp.noblacklist.bed", 
+            low_memory=False,
+            # dtype=dict(zip(['contig', 'start', 'stop', 'identifier', 'mean_signal', 'numsamples', 'summit', 'core_start', 'core_end', 'component', 'strand'], [str, int, int, str, float, int, int, int, int, str]))
+        ).rename(columns={'seqname': 'contig'}).dropna(),
+        ref='hg38'
+    ).convert_dtypes()
+    
+    blood_rdf = rdf.query("component in ['Lymphoid', 'Myeloid / erythroid']").copy().center_on_summit().resize_regions(1024)
+    all_rdf = rdf.query("component in ['Tissue invariant']").copy().center_on_summit().resize_regions(1024)
+    digestive_rdf = rdf.query("component in ['Digestive']").copy().center_on_summit().resize_regions(1024)
+    neural_rdf = rdf.query("component in ['Neural']").copy().center_on_summit().resize_regions(1024)
+    
+    srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf.sample(10000), sdf.query("label == 1").sample(10)).attach_fragment_arrays(num_cores=32, min_mapq=10, fragment_array_callback=lambda fa: fa.drop_duplicate_fragments())
