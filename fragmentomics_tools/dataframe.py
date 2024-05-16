@@ -41,13 +41,13 @@ import logging
 from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
+from fragmentomics_tools.motif import Pfm
 
 
 # from fbio.formats import BedReader, BigWigReader
 # from fbio.fragments_h5 import FragmentsH5
 # from fbio.liftover import RegionLiftOver
 # from fbio.region import Region, OutOfBoundsError
-# from fbio.sequence import Pfm
 # from fbio.util import aws_utils
 # from fbio.util.iter_utils import windowed_range
 # from fbio.util.misc_utils import progress_bar
@@ -233,6 +233,12 @@ class RegionDataFrame(DataFrameBase):
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
     _additional_required_columns = []
     _required_columns = _critical_bed_columns + _additional_required_columns
+
+    def get_fasta_path(self):
+        if self.ref == 'hg38':
+            return "/scratch/karius/annotation/GRCh38.p12.genome.fa.gz"
+        else:
+            raise ValueError(f"No fasta associated with reference '{self.ref}'")
 
     @property
     def df(self):
@@ -1511,6 +1517,9 @@ class RegionDataFrame(DataFrameBase):
         reverse_complement_sequence_if_minus_strand,
         verbose=False,
     ):
+        if fasta_path is None:
+            fasta_path = self.get_fasta_path()
+
         assert seq_type in ["one_hot_encoded", "bytearray"]
         if seq_type == "one_hot_encoded":
             method = "get_one_hot_encoded_sequence"
@@ -1536,7 +1545,7 @@ class RegionDataFrame(DataFrameBase):
 
     def get_sequence(
         self,
-        fasta_path,
+        fasta_path=None,
         reverse_complement_sequence_if_minus_strand=False,
         verbose=False,
     ):
@@ -1554,7 +1563,7 @@ class RegionDataFrame(DataFrameBase):
 
     def get_one_hot_encoded_sequence(
         self,
-        fasta_path,
+        fasta_path=None,
         reverse_complement_sequence_if_minus_strand=False,
         verbose=False,
     ):
@@ -1572,25 +1581,24 @@ class RegionDataFrame(DataFrameBase):
 
     def get_pfm(
         self,
-        window_size=None,
-        num_workers=1,
         reverse_complement_sequence_if_minus_strand=True,
         verbose=True,
     ):
-        if window_size is None:
-            region_lengths = self.region_lengths.unique().tolist()
-            if len(region_lengths) == 1:
-                window_size = region_lengths.pop()
-                if window_size > 100:
-                    ValueError(
-                        "window_size must be set if the region length is greater than 100"
-                    )
-            else:
-                raise ValueError(
-                    "window_size must be set if all regions don't have the same length"
-                )
+        """Get the pfm by stacking up the sequence over all regions.
 
-        assert isinstance(window_size, int)
+        :param reverse_complement_sequence_if_minus_strand: If the region is on the minus strand,
+            and this is true, sequences will be reverse complemented
+        :param verbose: ignored
+        :param return_series: if True the result is returned as a
+        :return:
+        """
+
+        region_lengths = self.region_lengths.unique().tolist()
+        if len(region_lengths) > 1:
+            raise ValueError(
+                "window_size must be set if all regions don't have the same length"
+            )
+
         if not set(self.strand) == {"-", "+"}:
             warnings.warn(
                 "RegionDataFrame does not seem to have strand information. Finding PFM may be problematic"
@@ -1598,12 +1606,11 @@ class RegionDataFrame(DataFrameBase):
         # (window_size, 4)
         sequences = numpy.array(
             self.get_one_hot_encoded_sequence(
-                num_workers,
-                window_size,
-                reverse_complement_sequence_if_minus_strand,
-                verbose,
+                reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                verbose=verbose,
             )
         )
+        sequences = np.stack(sequences, axis=0)
         sequences = numpy.swapaxes(sequences, 1, 2)
         pfm = Pfm(freqs=sequences)
         return pfm
@@ -1628,12 +1635,9 @@ class RegionDataFrame(DataFrameBase):
 
         return sub_rdfs
 
-    def parallel_apply(self, fn, n_workers=None, verbose=True):
+    def _parallel_apply(self, fn, n_workers, verbose):
         # do this in a fork context so that we don't need to serialize the data into the new process
         ctx = multiprocessing.get_context("fork")
-        # if the number of workers isn't set then use all available cpus
-        if n_workers is None:
-            n_workers = multiprocessing.cpu_count()
 
         # set a shared counter to track the row index to process
         counter = ctx.Value("i", 0)
@@ -1689,6 +1693,21 @@ class RegionDataFrame(DataFrameBase):
                     pbar.update(1)
 
         _cleanup()
+        return indices, records
+
+    def parallel_apply(self, fn, n_workers=None, verbose=True):
+        # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
+        if n_workers == 1:
+            indices = []
+            records = []
+            for idx in tqdm(range(self.shape[0]), disable=(not verbose)):
+                indices.append(idx)
+                records.append(fn(self.iloc[idx]))
+        else:
+            # if the number of workers isn't set then use all available cpus
+            if n_workers is None:
+                n_workers = multiprocessing.cpu_count()
+            indices, records = self._parallel_apply(fn, n_workers, verbose)
 
         # concatanate all records into a dataframe
         rv = pandas.DataFrame(records)
@@ -1814,6 +1833,7 @@ class RegionDataFrame(DataFrameBase):
 
 
 def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_expansion):
+    assert False
     # avoid circular import
     from fragmentomics_tools.bias_correction.data import track_name_to_index_key, index_key_to_track_name
 
@@ -1829,7 +1849,7 @@ def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_ex
     for attr in cov_type_to_weights_attr.values():
         getattr(fragment_array, attr)[:] = 0
 
-    # set all of the valid weights 
+    # set all of the valid weights
     for strand in strands:
         assert strand in ".+-"
         for fl_lb, fl_ub in [(40, 65), (120, 175)]:
@@ -1838,11 +1858,46 @@ def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_ex
                 mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
                 if strand in '-+':
                     mask = (mask | (fragment_array.fragment_strands == strand))
-                means = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))].mean()
+                means = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
                 weights = means.mean()/means
                 count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
                 assert (count_indices >= 0).all()
                 getattr(fragment_array, cov_type_to_weights_attr[cov_type])[mask] = weights[count_indices[mask]]
+
+    # drop all fragments with 0 weights (this probably means that they were out of the fl bands)
+    return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
+
+
+def _set_fragment_array_weights_from_weights_record(fragment_array, record, left_expansion):
+    # avoid circular import
+    from fragmentomics_tools.bias_correction.data import track_name_to_index_key, index_key_to_track_name
+
+    cov_type_to_weights_attr = {'first': 'first_covered_base_weights', 'last': 'last_covered_base_weights', 'midpoint': 'weights'}
+    cov_type_to_fragment_coord = {'first': 'starts_0', 'last': 'stops_0', 'midpoint': 'midpoints_0'}
+
+    pred_column_to_key = {c[10:]: track_name_to_index_key(c[10:]) for c in record.index if c.startswith("pred_dist.")}
+    strands = list(set(x[0] for x in pred_column_to_key.values()))
+    fl_bands = list(set(x[1] for x in pred_column_to_key.values()))
+    cov_types = list(set(x[2] for x in pred_column_to_key.values()))
+
+    # zero out all of the weights
+    for attr in cov_type_to_weights_attr.values():
+        getattr(fragment_array, attr)[:] = 0
+
+    # set all of the valid weights
+    for strand in strands:
+        assert strand in ".+-"
+        for fl_lb, fl_ub in fl_bands:
+            for cov_type in cov_types:
+                mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
+                mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
+                if strand in '-+':
+                    mask = (mask | (fragment_array.fragment_strands == strand))
+                weights = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
+                count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
+                assert (count_indices >= 0).all()
+                assert not np.isnan(weights[count_indices[mask]]).any()
+                getattr(fragment_array, cov_type_to_weights_attr[cov_type])[mask] = 1./weights[count_indices[mask]]
 
     # drop all fragments with 0 weights (this probably means that they were out of the fl bands)
     return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
@@ -1854,16 +1909,6 @@ class SampleAndRegionDataFrame(RegionDataFrame):
     @classmethod
     def init_from_rdf_and_sdf(cls, rdf, sdf):
         return cls(rdf.merge(sdf, how="cross"), ref=rdf.ref)
-        new_dfs = []
-        for record in sdf.itertuples():
-            new_df = rdf.copy()
-            new_df["sample_id"] = record.sample_id
-            # assert record.frag_h5.ref == rdf.ref, "rdf reference must match frag_h5 reference"
-            new_df["frag_h5"] = record.frag_h5
-            new_dfs.append(new_df)
-
-        merged_df = pandas.concat(new_dfs).reset_index(drop=True)
-        return cls(merged_df, ref=rdf.ref)
 
     @property
     def has_fragment_array(self):
@@ -1877,7 +1922,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 
     def load_fragment_arrays(
         self,
-        n_workers=NUM_CORES,
+        n_workers=None,
         verbose=1,
         min_mapq: int = 0,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
@@ -1903,7 +1948,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 fa = fragment_array_callback(fa)
             return fa
 
-        if n_workers <= 1:
+        if n_workers == 1:
             res = [
                 get_fa(x)
                 for x in tqdm(
@@ -1912,6 +1957,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             ]
             return pandas.Series(res, index=self.Index, name="fragment_array")
         else:
+            if n_workers == None:
+                n_workers = multiprocessing.cpu_count()
             field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
             rv = self[field_subset].parallel_apply(get_fa, n_workers=n_workers, verbose=verbose)
             rv.columns = ['fragment_array']
@@ -2039,7 +2086,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             rv = rv.drop(columns=["n_fragments", "min_fragments", "max_fragments"])
         return rv
 
-    def set_fragment_array_weights(self, model):
+    def set_fragment_array_weights(self, model, n_workers=None):
         # find the maximum fragment length so that we can ensure that we have enough context to set
         # start and end wweights
         expansion = 511 # self.fragment_array.apply(lambda x: x.max_frag_len)
@@ -2048,14 +2095,28 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         # predict on all of the unique regions
         tmp_rdf = RegionDataFrame(self[columns].drop_duplicates(), ref=self.ref)
         # join the model back
-        pred = tmp_rdf.join(model.predict_from_rdf(tmp_rdf.expand_regions(left_amt=expansion, right_amt=expansion)))
+        pred = tmp_rdf.join(model.predict_weights_from_rdf(tmp_rdf.expand_regions(left_amt=expansion, right_amt=expansion)))
         pred = SampleAndRegionDataFrame(self.df.set_index(columns).join(pred.df.set_index(columns), how='inner').reset_index(), ref=self.ref)
-        pred.progress_apply(lambda record: _set_fragment_array_weights_from_pred_record(record.fragment_array, record, expansion), axis=1)
+        assert pred.shape[0] == self.shape[0]
+        fas = pred.parallel_apply(
+            lambda record: _set_fragment_array_weights_from_weights_record(record.fragment_array, record, expansion),
+            n_workers=n_workers
+        ).iloc[:, 0].rename('fragment_array')
+        fas.index = self.index
+        self['fragment_array'] = fas
+        return
+
+    def reset_fragment_array_weights(self):
+        """Set the fragment array weights to zero.
+
+        """
+        self.progress_apply(lambda record: record.fragment_array.reset_cutsite_bias_weights(), axis=1)
         return None
 
 
 class FlDist:
-    def __init__(self, sdf):
+    @classmethod
+    def init_from_sdf(cls, sdf):
         max_frag_len = 512
         columns = {}
         for frag_h5 in sdf.frag_h5:
@@ -2067,6 +2128,13 @@ class FlDist:
         fl_df = pd.DataFrame(columns)
         fl_df = fl_df.set_index(fl_df.index + 1)
 
+        return cls(fl_df)
+
+    def subset_by_sample_ids(self, sample_ids):
+        fl_df = self.fl_df.T.loc[sample_ids].T
+        return type(self)(fl_df)
+
+    def __init__(self, fl_df):
         self.fl_df = fl_df
 
     def plot(self, figsize=(20, 8)):
@@ -2082,8 +2150,12 @@ class FlDist:
 
 
 class SampleDataFrame(DataFrameBase):
-    _metadata = ["fl_dist"]
+    _metadata = ["_fl_dist"]
     _required_columns = ["sample_id", "frag_h5"]
+
+    @property
+    def df(self):
+        return pd.DataFrame(self)
 
     def __init__(self, data, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
@@ -2093,9 +2165,24 @@ class SampleDataFrame(DataFrameBase):
         if isinstance(data, pd.core.internals.BlockManager):
             return
 
-        self.fl_dist = FlDist(self)
+        self._fl_dist = FlDist.init_from_sdf(self)
 
         return
+
+    @property
+    def fl_dist(self):
+        return self._fl_dist.subset_by_sample_ids(self.sample_id)
+
+    def label_balanced(self, column_name, random_state=None):
+        """Return a copy of self with balanced labels."""
+        if not hasattr(self, column_name):
+            raise ValueError(f"The data frame must have column '{column_name}'")
+
+        keep_idxs = get_indices_of_balanced_labels(
+            self[column_name], random_state=random_state
+        )
+
+        return self.iloc[keep_idxs].copy()
 
 
 def intersect_region_dataframes(region_dataframes, sort=False):

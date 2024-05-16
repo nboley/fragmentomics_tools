@@ -2,10 +2,6 @@ import os
 
 os.environ["NCCL_P2P_DISABLE"] = "1"
 
-import sys
-
-sys.path.insert(0, "/home/nboley/src/fragmentomics_tools/projects/")
-
 import torch
 
 try:
@@ -26,8 +22,10 @@ from fragmentomics_tools.bias_correction.model import BackgroundModelModule
 from fragmentomics_tools.bias_correction.data import FragmentEndpointsDataset
 from fragmentomics_tools.dataframe import RegionDataFrame
 
-from ibd.data import HematopoieticGeneExpression, build_ctcf_binding_sites
-from ibd.lib import load_ibd_sample_df
+import sys
+sys.path.insert(0, "/home/nboley/src/biomarker-projects/projects/")
+from fragmentomics.data import HematopoieticGeneExpression, build_ctcf_binding_sites
+from fragmentomics.lib import load_ibd_sample_df
 
 
 def build_marker_gene_rdf(genes_rdf):
@@ -61,7 +59,7 @@ def build_gene_rdfs():
 
 
 def build_ctcf_rdfs():
-    n_train, n_val = 100000, 5000
+    n_train, n_val = 10000, 5000
     dhs_rdf = RegionDataFrame(
         pd.read_csv(
             "/scratch/karius/annotation/DHS_Index_and_Vocabulary_hg38_WM20190703.min2samp.random500k.blacklist_filt.bed",
@@ -154,16 +152,23 @@ valid_columns = [
     "strand_-__fl_120_175__coverage_midpoint",
 ]
 
+small_columns = [
+    "strand_+__fl_40_65__coverage_first",
+    "strand_+__fl_40_65__coverage_last",
+    "strand_-__fl_40_65__coverage_first",
+    "strand_-__fl_40_65__coverage_last",
+]
+
 
 def main():
     sdf = load_ibd_sample_df().query("label == 1")
-    train_rdf, val_rdf, test_rdf, _ = build_promoter_rdfs()
+    train_rdf, val_rdf, test_rdf = build_ctcf_rdfs()
     model = BackgroundModelModule(
-        num_residual_layers=2, output_columns=valid_columns, loss="binomial"
+        num_residual_layers=2, output_columns=valid_columns, loss="multinomial"
     )
-    model = train(model, sdf, train_rdf, val_rdf, max_epochs=5)
+    model = train(model, sdf, train_rdf, val_rdf, max_epochs=2)
     model.save(
-        "/scratch/karius/bias_correction_model/tss_model/merged.off_promoters.binomial.2.res"
+        "/scratch/karius/bias_correction_model/new/merged.accessible_regions.multinomial.3.res"
     )
     return
     for i, sample_id in enumerate(sdf.sample_id.tolist()):

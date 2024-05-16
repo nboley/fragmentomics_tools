@@ -26,9 +26,8 @@ from fragmentomics_tools.formats import (
     GenePredReader,
 )
 from fragmentomics_tools.region import Region, intervals_intersect
-
+from fragmentomics_tools.plot.viz_sequence import plot_weights_given_ax
 # from fbio.util.misc_utils import igv_link, obj_type_name_matches_class_name_str
-# from fbio.viz_sequence import plot_weights_given_ax
 
 from matplotlib import pyplot, colors
 from matplotlib.cm import ScalarMappable
@@ -97,15 +96,6 @@ CHROMHMM_COLORS = {
         "18_Quies": "White",
     },
 }
-
-
-# TODO -- move this into config
-FBIO_BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)  # /home/user/projects/Ravel/fbio
-FBIO_DATA_DIR = os.path.join(
-    FBIO_BASE_DIR, "data"
-)  # /home/user/projects/Ravel/fbio/data
 
 
 def symmetric_arange(length):
@@ -568,8 +558,8 @@ class OverlaidTracks(GenomeTrack):
                 for track_to_overlay in tracks_to_overlay
             ]
         ), "All tracks must have the same region"
-        self.vlines = list(itertools.chain(*[tr.vlines for tr in tracks_to_overlay]))
-        self.lines = list(itertools.chain(*[tr.lines for tr in tracks_to_overlay]))
+        self.vlines = list(itertools.chain(*[tr.vlines for tr in tracks_to_overlay if hasattr(tr, 'vlines')]))
+        self.lines = list(itertools.chain(*[tr.lines for tr in tracks_to_overlay if hasattr(tr, 'lines')]))
         """
         names = [
             tr.name
@@ -617,7 +607,7 @@ class OverlaidTracks(GenomeTrack):
             ax.autoscale(enable=True, axis="y", tight=None)
             ax.set_ylim((ylim_lower, ylim_upper))
 
-        ax.legend(labels, loc="upper right")
+        ax.legend([l for l in labels if l is not None and l != ''], loc="upper right")
 
 
 @dataclass
@@ -1030,7 +1020,7 @@ class MotifTrack(GenomeTrack):
     input is a pwm numpy array
     """
 
-    rel_width: float = 0.25
+    rel_width: float = 0.50
 
     def _plot(self, ax):
         assert 0 < self.rel_width <= 1

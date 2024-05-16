@@ -9,9 +9,86 @@ from torch import nn
 import torch.nn.functional as F
 
 from fragmentomics_tools.public_data_resources.jaspar import BindingModel, get_all_human_pfms
-from fragmentomics_tools.dataframe import RegionDataFrame
 from sequence import one_hot_encode_sequences
 # logger = logging.getLogger(__name__)
+
+
+class Pfm:
+    @staticmethod
+    def entropy(x):
+        ent = np.zeros_like(x)
+        valid_pos = x != 0
+        ent[valid_pos] = -x[valid_pos] * np.log2(x[valid_pos])
+        return ent
+
+    def __init__(self, freqs: np.ndarray, pseudocount: int = 0):
+        assert freqs.ndim == 3
+        self.num_regions, self.length, self.num_chars = freqs.shape
+        self.freqs = freqs + pseudocount
+
+        assert self.num_chars in {4, 5}, f"Invalid number of characters: {self.num_chars}"
+        assert (
+            (self.freqs == 0) | (self.freqs == 1)
+        ).all(), "Some positions in one-hot matrix are not 0 or 1"
+
+        self.colors = {
+            "A": "xkcd:green",
+            "C": "xkcd:blue",
+            "G": "xkcd:orange",
+            "T": "xkcd:red",
+            "N": "xkcd:grey",
+        }
+        self.base_map = dict(list(zip("ACGTN", list(range(5)))) + list(zip(list(range(5)), "ACGTN")))
+
+        for ii, ll in enumerate("ACGTN"):
+            self.colors[ii] = self.colors[ll]
+
+        self.pwm = self.freqs.mean(axis=0)
+
+        # H_ib: Information at position i for base b
+        self.H_ib = self.entropy(self.pwm)
+
+        # H_i: Shannon entropy at position i
+        self.H_i = self.H_ib.sum(axis=1)
+
+        # e_n: Smoothing factor for small samples
+        self.e_n = 1 / np.log(2) * (4 - 1) / (2 * self.num_regions)
+
+        # R_i: Information content at position i
+        self.R_i = 2 - (self.H_i + self.e_n)  # log2(4) - (H_i + e_n)
+
+        # Total information content
+        self.R = np.sum(self.R_i)
+
+        # The height of each letter in the sequence
+        self.seq_heights = self.freqs.sum(axis=0) * self.R_i[:, None]
+
+    def __len__(self):
+        return self.pwm.shape[0]
+
+    def __str__(self):
+        return str(self.freqs.sum(axis=0))
+
+    def __repr__(self):
+        return f"{repr(self.__class__)}: {repr(self.freqs.sum(axis=0))}"
+
+    @property
+    def sequence_logo(self):
+        # This is normalized to bit space
+        return self.seq_heights / self.num_regions
+
+    @property
+    def consensus_logo(self):
+        return self.seq_heights.argmax(axis=1), self.seq_heights.max(axis=1)
+
+    @property
+    def score(self):
+        return self.R
+
+    def plot(self):
+        from fragmentomics_tools.plot.tracks import MotifTrack
+        from fragmentomics_tools.region import Region
+        return MotifTrack(self.sequence_logo, region=Region("NA", 0, len(self)), rel_width=1.0).plot()
 
 
 def get_pfms(tfs, all_pfms=None, default_jaspar: bool = False) -> List[BindingModel]:
@@ -41,7 +118,7 @@ def get_pfms(tfs, all_pfms=None, default_jaspar: bool = False) -> List[BindingMo
 
 
 class RegionDataset(torch.utils.data.Dataset):
-    def __init__(self, region_dataframe: RegionDataFrame, seed: Optional[int] = None):
+    def __init__(self, region_dataframe, seed: Optional[int] = None):
         """
         This dataset is a superclass of probably all Datasets the functional genomics team will use
         """
@@ -79,7 +156,7 @@ class RegionDataset(torch.utils.data.Dataset):
 class SeqDataSet(RegionDataset):
     def __init__(
         self,
-        region_dataframe: RegionDataFrame,
+        region_dataframe,
         ref_path: str,
         seed: Optional[int] = None,
         output_dict: bool = False,

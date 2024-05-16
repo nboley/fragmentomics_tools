@@ -28,7 +28,7 @@ def track_name_to_index_key(track_name):
     if res is None:
         raise ValueError(f"track name (${track_name}$) does not match pattern (${pat}$)")
     res = re.fullmatch(pat, track_name).groups()
-    return (res[0], res[1:3], res[3])
+    return (res[0], tuple([int(x) for x in res[1:3]]), res[3])
 
 
 def build_counts(record, return_sparse=False):
@@ -84,7 +84,8 @@ class FragmentEndpointsDataset(torch.utils.data.Dataset):
             rdf["id"] = [str(x) for x in rdf.iter_regions()]
 
         srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
-        srdf = srdf.attach_fragment_arrays(num_cores=num_workers, min_mapq=10)
+        print("attaching fragment arrays")
+        srdf = srdf.attach_fragment_arrays(n_workers=num_workers, min_mapq=10)
 
         # merge fragment arrays
         fa_df = (

@@ -91,9 +91,11 @@ class BackgroundModelModule(L.LightningModule):
                 total_counts = self.loss_fn.total_count
                 dist = nbinom(n=total_counts, p=ps)
             elif self.model_params["loss"] == "multinomial":
-                dist = multinomial(n=1, p=softmax(pred[i]))
+                p = softmax(pred[i]).clip(1e-6, 1-1e-6)
+                dist = multinomial(n=1, p=p/p.sum())
             elif self.model_params["loss"] == "binomial":
-                dist = binom(n=1, p=softmax(pred[i]))
+                p = softmax(pred[i]).clip(1e-6, 1-1e-6)
+                dist = binom(n=1, p=p/p.sum())
             else:
                 raise ValueError(f"Unrecognized loss '{self.model_params['loss']}'")
             rv.append(dist)
@@ -301,6 +303,7 @@ class BackgroundModelModule(L.LightningModule):
         pred = seq.progress_apply(
             lambda x: self.model(torch.Tensor(x).to(self.device)).cpu().detach().numpy()
         )
+        # return pred
         dists = [self._build_dist(x) for x in tqdm.tqdm(pred, desc='build background dists')]
         tqdm.tqdm.pandas(desc="")
 
@@ -313,6 +316,16 @@ class BackgroundModelModule(L.LightningModule):
             #),
             index=rdf.index,
         )
+
+    def predict_weights_from_rdf(self, rdf, max_scaling_factor=4):
+        pred = self.predict_from_rdf(rdf)
+
+        rv = {}
+        for c in pred.columns:
+            means = pred.loc[:, c].apply(lambda x: x.mean())
+            scaling_factor = means.mean().mean()
+            rv[c] = (means/scaling_factor).apply(lambda x: x.clip(1./max_scaling_factor, max_scaling_factor))
+        return pd.DataFrame(rv)
 
     def predict_from_rdf_and_sdf(self, rdf, sdf):
         print("Predicting dists (1/5)")
