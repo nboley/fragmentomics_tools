@@ -829,6 +829,10 @@ class FragmentArray:
     def get_midpoint_coverage_array(self, return_sparse=False) -> numpy.ndarray:
         return self._get_covered_base_array(positions_attr='midpoints_0', weights_attr='weights', return_sparse=return_sparse)
 
+    @property
+    def midpoint_covered_base_counts(self) -> numpy.ndarray:
+        return self.get_midpoint_coverage_array(return_sparse=False)
+
     def get_fragment_coverage_array(self) -> numpy.ndarray:
         """
         Get a vector of fragment pileup coverage

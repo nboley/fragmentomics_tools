@@ -319,12 +319,11 @@ class BackgroundModelModule(L.LightningModule):
 
     def predict_weights_from_rdf(self, rdf, max_scaling_factor=4):
         pred = self.predict_from_rdf(rdf)
-
         rv = {}
         for c in pred.columns:
             means = pred.loc[:, c].apply(lambda x: x.mean())
             scaling_factor = means.mean().mean()
-            rv[c] = (means/scaling_factor).apply(lambda x: x.clip(1./max_scaling_factor, max_scaling_factor))
+            rv[c] = (means/scaling_factor).apply(lambda x: x.clip(1./2, max_scaling_factor))
         return pd.DataFrame(rv)
 
     def predict_from_rdf_and_sdf(self, rdf, sdf):
