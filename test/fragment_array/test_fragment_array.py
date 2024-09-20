@@ -113,7 +113,7 @@ def test_fragment_array_assertions():
             numpy.array([137, 363, 317, 511, 404, 668, 447, 531]),
         ),
         (  # Slice with no fragments is empty
-            Region("chr1", 0, 100),
+            Region("chr6", 0, 100),
             numpy.array([], dtype=int),
             numpy.array([], dtype=int),
         ),

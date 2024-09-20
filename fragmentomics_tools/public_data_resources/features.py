@@ -460,7 +460,7 @@ def load_tss_s_df(ref):
 
 def load_chrom_hmm_states():
     rdf = RegionDataFrame(
-        pd.read_table(
+        pandas.read_table(
             "/scratch/nboley/test_unet_pytorch/DHS_Index_and_Vocabulary_hg38_WM20190703.min2samp.noblacklist.bed", 
             low_memory=False,
             # dtype=dict(zip(['contig', 'start', 'stop', 'identifier', 'mean_signal', 'numsamples', 'summit', 'core_start', 'core_end', 'component', 'strand'], [str, int, int, str, float, int, int, int, int, str]))

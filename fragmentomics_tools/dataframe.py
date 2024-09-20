@@ -15,7 +15,6 @@ import pandas
 import pandas as pd
 import pybedtools
 from intervaltree import IntervalTree
-from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.utils import shuffle as sk_shuffle
 from smart_open import open
 from scipy.stats.mstats import trimmed_std
@@ -42,7 +41,7 @@ from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
 from fragmentomics_tools.motif import Pfm
-
+from fragmentomics_tools.util.liftover import RegionLiftOver
 
 # from fbio.formats import BedReader, BigWigReader
 # from fbio.fragments_h5 import FragmentsH5
@@ -859,13 +858,13 @@ class RegionDataFrame(DataFrameBase):
 
         self_index = self.index
         self = self.reset_index()
-        this_bed_df = self.bed_df
+        this_bed_df = self[reordered_columns(self)]
         this_bed_df["index"] = self_index
         this_bedtool = pybedtools.BedTool.from_dataframe(this_bed_df)
         other_bedtool = pybedtools.BedTool.from_dataframe(
             other[reordered_columns(other)]
         )
-        other_column_names = [f"{c}_{rsuff}" for c in reordered_columns(other)]
+        other_column_names = [(f"{c}_{rsuff}" if c in this_bed_df.columns else c) for c in reordered_columns(other)]
         intersection_rdf = pd.DataFrame(
             this_bedtool.intersect(
                 other_bedtool, sorted=sorted, wa=True, wb=True
@@ -877,8 +876,8 @@ class RegionDataFrame(DataFrameBase):
             )
 
         intersection_rdf = intersection_rdf.set_index("index")
-        intersection_rdf = intersection_rdf[other_column_names]
-        intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
+        # intersection_rdf = intersection_rdf[other_column_names]
+        # intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
         return RegionDataFrame(intersection_rdf, ref=self.ref)
 
     def intersect_with_bed(
@@ -909,7 +908,7 @@ class RegionDataFrame(DataFrameBase):
             return rdf
 
     def lift_over(
-        self, new_ref, transfer_columns=False, remove_non_liftoverable_regions=True
+        self, new_ref, transfer_columns=True, remove_non_liftoverable_regions=True
     ):
         """
         Lifts over RegionDataFrame to a new reference
@@ -1955,7 +1954,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                     self.itertuples(), total=len(self), disable=(verbose <= 0)
                 )
             ]
-            return pandas.Series(res, index=self.Index, name="fragment_array")
+            return pandas.Series(res, index=self.index, name="fragment_array")
         else:
             if n_workers == None:
                 n_workers = multiprocessing.cpu_count()
@@ -2123,7 +2122,7 @@ class FlDist:
             cnts = frag_h5.fragment_length_counts[:max_frag_len]
             # normalize to library depth
             cnts = cnts / cnts.sum()
-            columns["RD-" + frag_h5.sample_id.split("-")[1]] = cnts
+            columns[frag_h5.sample_id] = cnts
 
         fl_df = pd.DataFrame(columns)
         fl_df = fl_df.set_index(fl_df.index + 1)

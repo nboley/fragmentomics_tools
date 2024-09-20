@@ -382,10 +382,17 @@ class GenomeTrack:
         self._plot(ax_main)
         self._plot_extras(ax_main)
 
-        ax_main.set_xlim(plot_region.start, plot_region.stop)
+        xticks = numpy.linspace(plot_region.start, plot_region.stop, 9)
+        if plot_region.chrom == 'NA':
+            # assume that this is a pseudo region
+            assert plot_region.start == 0
+            xtick_labels = [str(x) for x in numpy.linspace(-plot_region.length//2, plot_region.length - plot_region.length//2, 9)]
+        else:
+            xtick_labels = [str(x) for x in xticks]
 
-        ax_main.xaxis.set_major_formatter(FuncFormatter(lambda x, y: f"{int(x):,}"))
-        ax_main.set_xticks(numpy.linspace(plot_region.start, plot_region.stop, 4))
+        # ax_main.set_xlim(xticks[0], xticks[-1])
+        # ax_main.xaxis.set_major_formatter(FuncFormatter(lambda x, y: f"{int(x):,}"))
+        ax_main.set_xticks(xticks, xtick_labels)
 
         if self.ylim is not None:
             ax_main.set_ylim(self.ylim)
@@ -400,11 +407,13 @@ class GenomeTrack:
         for line in self.lines:
             if line.x is not None:
                 x = line.x
+                y = line.y
             else:
                 x = numpy.arange(self.region.start, self.region.stop)
+                y = numpy.repeat(line.y, self.region.length)
             ax_main.plot(
                 x,
-                line.y,
+                y,
                 linestyle=line.linestyle,
                 color=line.color,
                 alpha=line.alpha,
@@ -430,7 +439,11 @@ class GenomeTrack:
         return ax_main
 
 
-class Tracks(UserList):
+class Tracks(List):
+    #def __init__(self, *args, vlines=[]):
+    #    super().__init__(self, *args)
+    #    self.plot_kwargs = {'vlines': vlines}
+
     def get_igv_link(self, local_mount, region, ipython_link=False):
         """
         Load all tracks into IGV.  Prepends 'local_mout' to track.data
@@ -465,8 +478,10 @@ class Tracks(UserList):
          For example, [0] means to display on the top plot only, [0, -1] for top and bottom plots
         :return: figure, axes
         """
+
         if vlines is None:
             vlines = []
+        # vlines = vlines + self.kwargs
 
         height_sum = sum(t.height for t in self)
         fig = pyplot.figure(figsize=(width, height_multiplier * height_sum))
@@ -548,7 +563,7 @@ class EmptyTrack(GenomeTrack):
 
 
 class OverlaidTracks(GenomeTrack):
-    def __init__(self, tracks_to_overlay):
+    def __init__(self, tracks_to_overlay, legend=True):
         self.tracks_to_overlay = tracks_to_overlay
         self.region = tracks_to_overlay[0].region
         assert numpy.all(
@@ -560,21 +575,16 @@ class OverlaidTracks(GenomeTrack):
         ), "All tracks must have the same region"
         self.vlines = list(itertools.chain(*[tr.vlines for tr in tracks_to_overlay if hasattr(tr, 'vlines')]))
         self.lines = list(itertools.chain(*[tr.lines for tr in tracks_to_overlay if hasattr(tr, 'lines')]))
-        """
-        names = [
-            tr.name
-            for tr in tracks_to_overlay
-            if hasattr(tr, "name") and tr.name is not None
-        ]
-        self.name = " ".join(names) if names else ""
-        """
+        self.legend = legend
 
     def _plot(self, ax):
         ylims = []
         labels = []
+        colors = []
         for track in self.tracks_to_overlay:
             track.plot(ax)
             labels.append(track.name)
+            colors.append(track.color)
             ylims.append(track.ylim)
 
         # if none of the ylims are set, then autoscale
@@ -607,7 +617,8 @@ class OverlaidTracks(GenomeTrack):
             ax.autoscale(enable=True, axis="y", tight=None)
             ax.set_ylim((ylim_lower, ylim_upper))
 
-        ax.legend([l for l in labels if l is not None and l != ''], loc="upper right")
+        if self.legend:
+            ax.legend([l for l in labels if l is not None and l != ''], labelcolor=colors, loc="upper right")
 
 
 @dataclass
@@ -1142,7 +1153,7 @@ class CoverageTrack(GenomeTrack):
         elif coverage_type == "right_endpoint":
             return data.last_covered_base_counts
         else:
-            raise ValueError(f"Unrecognized coverage type: '{self.coverage_type}'")
+            raise ValueError(f"Unrecognized coverage type: '{coverage_type}'")
 
     def _plot(self, ax):
         if isinstance(self.coverage_type, str):
@@ -1165,10 +1176,16 @@ class CoverageTrack(GenomeTrack):
                 * self.scaling_factor
             )
             n = cov.sum()
-            if self.name is None:
-                label = f"\nsm_win {self.smooth_window}"
-            else:
+
+            if self.name != None and len(coverage_types) == 1:
                 label = self.name
+            else:
+                label = ""
+
+            label += f" | {coverage_type} coverage"
+            if self.smooth_window is not None and self.smooth_window > 1:
+                label += f" | ({self.smooth_window} sm win)"
+
             # label = f"{self.name + ' ' if self.name is not None else ''}{coverage_type}"
             # if self.smooth_window is not None:
             #    label += f"\nsm_win {self.smooth_window}"
@@ -1968,7 +1985,8 @@ class GeneTrack(GenomeTrack):
 @dataclass
 class CoverageDifferenceTrack(CoverageTrack):
     def _build_coverage(self, *args, **kwargs):
-        del kwargs["strand"]
+        if "strand" in kwargs:
+            del kwargs["strand"]
         c1 = super()._build_coverage(*args, strand="+", **kwargs)
         c2 = super()._build_coverage(*args, strand="-", **kwargs)
         return c2 - c1
@@ -1978,13 +1996,15 @@ class CoverageDifferenceTrack(CoverageTrack):
         ax.axhline(0)
 
 
-def StrandSplitCoverageTrack(fa, *args, **kwargs):
+def StrandSplitCoverageTrack(fa, *args, name, **kwargs):
     p1 = CoverageTrack(
         fa.subset_by_fragment_strand("+"), *args, color="black", **kwargs
     )
-    p1.name = p1.name + " - Fwd Strand"
+    p1.name = name + " - Fwd Strand"
     p2 = CoverageTrack(
         fa.subset_by_fragment_strand("-"), *args, color="green", **kwargs
     )
-    p2.name = p2.name + " - Rev Strand"
-    return p1 + p2
+    p2.name = name + " - Rev Strand"
+    track = p1 + p2
+    track.name = name
+    return track

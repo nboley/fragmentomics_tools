@@ -222,7 +222,9 @@ class FragmentArray:
         first_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
-        num_meth_cpgs: Union[numpy.ndarray, List, None] = None,
+        num_converted_cpgs: Union[numpy.ndarray, List, None] = None,
+        num_cytosines: Union[numpy.ndarray, List, None] = None,
+        num_converted_cytosines: Union[numpy.ndarray, List, None] = None,
         is_flipped: bool = False,
     ):
         """
@@ -239,8 +241,10 @@ class FragmentArray:
         :param weights: weight to be applied to each fragment
         :param first_covered_base_weights: regularization weights for the first base
         :param last_covered_base_weights: regularization weights for the last base
-        :param num_cpgs: number of cpgs in the entire fragment (not just the sequenced reads)
-        :param num_meth_cpgs: number of converted cpgs (e.g. from emseq)
+        :param num_cpgs: number of cpgs in the sequenced reads. Overlaps are only counted once.
+        :param num_converted_cpgs: number of converted cpgs (e.g. from emseq)
+        :param num_cytosines: number of cytosines in the entire fragment (not just the sequenced reads)
+        :param num_comverted_cytosines: number of converted cytosines (e.g. from emseq). Overlaps are only counted once.
         """
         # do not add validate_data yet.
         self.init_kwargs = dict(
@@ -253,7 +257,9 @@ class FragmentArray:
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
             is_flipped=is_flipped,
         )
         if isinstance(starts_0, numpy.ndarray) and starts_0.dtype != numpy.int32:
@@ -264,19 +270,25 @@ class FragmentArray:
         # cast starts/stops to array
         self.starts_0 = numpy.asarray(starts_0, dtype=numpy.int32)
         self.stops_0 = numpy.asarray(stops_0, dtype=numpy.int32)
-        self.length = length
-        self.max_frag_len = max_frag_len
-        self.weights = self._ones_if_none(weights)
-        self.fragment_strands = fragment_strands
-        self.is_flipped = is_flipped
-        if self.fragment_strands is not None:
-            self.fragment_strands = numpy.asarray(self.fragment_strands, dtype="U1")
 
+        self.weights = self._ones_if_none(weights)
         self.first_covered_base_weights = self._ones_if_none(first_covered_base_weights)
         self.last_covered_base_weights = self._ones_if_none(last_covered_base_weights)
 
+        self.fragment_strands = fragment_strands
+        if self.fragment_strands is not None:
+            self.fragment_strands = numpy.asarray(self.fragment_strands, dtype="U1")
+
+
         self.num_cpgs = self._zeros_if_none(num_cpgs)
-        self.num_meth_cpgs = self._zeros_if_none(num_meth_cpgs)
+        self.num_converted_cpgs = self._zeros_if_none(num_converted_cpgs)
+        self.num_cytosines = self._zeros_if_none(num_cytosines)
+        self.num_converted_cytosines = self._zeros_if_none(num_converted_cytosines)
+
+
+        self.length = length
+        self.max_frag_len = max_frag_len
+        self.is_flipped = is_flipped
 
         # Update the things that were just set above
         for k in self.init_kwargs.keys():
@@ -338,6 +350,7 @@ class FragmentArray:
 
     @property
     def pct_meth_cpgs(self):
+        assert False
         output = np.zeros_like(self.num_cpgs, dtype=float)
         valid_pos = self.num_cpgs > 0
         output[~valid_pos] = -1
@@ -407,7 +420,11 @@ class FragmentArray:
             self.fragment_strands, other.fragment_strands
         )
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
-        num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
+        num_converted_cpgs = numpy.concatenate([self.num_converted_cpgs, other.num_converted_cpgs])
+        num_cytosines = numpy.concatenate([self.num_cytosines, other.num_cytosines])
+        num_converted_cytosines = numpy.concatenate([self.num_converted_cytosines, other.num_converted_cytosines])
+
+
         assert (
             self.max_frag_len == other.max_frag_len
         ), "Max fragment length mismatch: {self.max_frag_len} != {other.max_frag_len}"
@@ -420,7 +437,9 @@ class FragmentArray:
             last_covered_base_weights=last_covered_base_weights,
             fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
             validate_data=False,
         )
 
@@ -432,18 +451,22 @@ class FragmentArray:
                     self.stops_0,
                     self.weights,
                     self.num_cpgs,
-                    self.num_meth_cpgs,
+                    self.num_converted_cpgs,
+                    self.num_cytosines,
+                    self.num_converted_cytosines,
                 )
             ),
             dtype=[
                 ("s", numpy.int32),
                 ("e", numpy.int32),
                 ("w", numpy.float32),
-                ("c", numpy.uint32),
-                ("m", numpy.uint32),
+                ("m1", numpy.uint32),
+                ("m2", numpy.uint32),
+                ("m3", numpy.uint32),
+                ("m4", numpy.uint32),
             ],
         )
-        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "c", "m"))
+        srt_idx = numpy.argsort(starts_ends, order=("s", "e", "w", "m1", "m2", "m3", "m4"))
         return self.mask(srt_idx)
 
     def __eq__(self, other: "FragmentArray"):
@@ -482,7 +505,9 @@ class FragmentArray:
                 self.fragment_strands, other.fragment_strands
             )
             and numpy.all(self.num_cpgs == other.num_cpgs)
-            and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
+            and numpy.all(self.num_converted_cpgs == other.num_converted_cpgs)
+            and numpy.all(self.num_cytosines == other.num_cytosines)
+            and numpy.all(self.num_converted_cytosines == other.num_converted_cytosines)
         )
 
     @staticmethod
@@ -695,7 +720,9 @@ class FragmentArray:
             first_covered_base_weights=self.last_covered_base_weights[::-1],
             last_covered_base_weights=self.first_covered_base_weights[::-1],
             num_cpgs=self.num_cpgs[::-1],
-            num_meth_cpgs=self.num_meth_cpgs[::-1],
+            num_converted_cpgs=self.num_converted_cpgs[::-1],
+            num_cytosines=self.num_cytosines[::-1],
+            num_converted_cytosines=self.num_converted_cytosines[::-1],
             validate_data=False,
             is_flipped=(not self.is_flipped),
         )
@@ -719,7 +746,9 @@ class FragmentArray:
             f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
             f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
             f"num_cpgs={self.frag_str(self.num_cpgs)}, "
-            f"num_meth_cpgs={self.frag_str(self.num_meth_cpgs)}, "
+            f"num_converted_cpgs={self.frag_str(self.num_converted_cpgs)}, "
+            f"num_cytosines={self.frag_str(self.num_cytosines)}, "
+            f"num_converted_cytosines={self.frag_str(self.num_converted_cytosines)}, "
             f"max_frag_len={self.max_frag_len})"
         )
 
@@ -922,7 +951,9 @@ class FragmentArray:
             last_covered_base_weights=self.last_covered_base_weights[mask],
             fragment_strands=fragment_strands,
             num_cpgs=self.num_cpgs[mask],
-            num_meth_cpgs=self.num_meth_cpgs[mask],
+            num_converted_cpgs=self.num_converted_cpgs[mask],
+            num_cytosines=self.num_cytosines[mask],
+            num_converted_cytosines=self.num_converted_cytosines[mask],
             validate_data=validate_data,
         )
 
@@ -1018,6 +1049,7 @@ class FragmentArray:
         Filters by the min and max number of CpGs, max and min number that are methylated, and / or pct methylated
         Intervals are all half-open, except for percent methyl, where 1 includes 100% methylation
         """
+        assert False
         assert len(num_cpgs) == len(num_meth_cpgs) == len(pct_meth_cpgs) == 2
         mask = np.ones_like(self.num_cpgs, dtype=bool)
         if num_cpgs[0] is not None:
@@ -1228,7 +1260,9 @@ class RegionFragmentArray(FragmentArray):
         first_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
-        num_meth_cpgs: Union[numpy.ndarray, List, None] = None,
+        num_converted_cpgs: Union[numpy.ndarray, List, None] = None,
+        num_cytosines: Union[numpy.ndarray, List, None] = None,
+        num_converted_cytosines: Union[numpy.ndarray, List, None] = None,
         is_flipped: bool = False,
     ):
         self.region = region
@@ -1243,7 +1277,9 @@ class RegionFragmentArray(FragmentArray):
             first_covered_base_weights=first_covered_base_weights,
             last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
             is_flipped=is_flipped,
         )
 
@@ -1377,7 +1413,9 @@ class RegionFragmentArray(FragmentArray):
             f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
             f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
             f"num_cpgs={self.frag_str(self.num_cpgs)}, "
-            f"num_meth_cpgs={self.frag_str(self.num_meth_cpgs)}, "
+            f"num_converted_cpgs={self.frag_str(self.num_converted_cpgs)}, "
+            f"num_cytosines={self.frag_str(self.num_cytosines)}, "
+            f"num_converted_cytosines={self.frag_str(self.num_converted_cytosines)}, "
             f"max_frag_len={self.max_frag_len})"
         )
 
@@ -1506,7 +1544,9 @@ class RegionFragmentArray(FragmentArray):
         )
 
         num_cpgs = numpy.concatenate([self.num_cpgs, other.num_cpgs])
-        num_meth_cpgs = numpy.concatenate([self.num_meth_cpgs, other.num_meth_cpgs])
+        num_converted_cpgs = numpy.concatenate([self.num_converted_cpgs, other.num_converted_cpgs])
+        num_cytosines = numpy.concatenate([self.num_cytosines, other.num_cytosines])
+        num_converted_cytosines = numpy.concatenate([self.num_converted_cytosines, other.num_converted_cytosines])
         if region is None:
             return FragmentArray(
                 starts_0=starts_0,
@@ -1517,7 +1557,9 @@ class RegionFragmentArray(FragmentArray):
                 last_covered_base_weights=last_covered_base_weights,
                 fragment_strands=fragment_strands,
                 num_cpgs=num_cpgs,
-                num_meth_cpgs=num_meth_cpgs,
+                num_converted_cpgs=num_converted_cpgs,
+                num_cytosines=num_cytosines,
+                num_converted_cytosines=num_converted_cytosines,
                 max_frag_len=max_frag_len,
                 validate_data=False,
             )
@@ -1530,7 +1572,9 @@ class RegionFragmentArray(FragmentArray):
             last_covered_base_weights=last_covered_base_weights,
             fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
             region=region,
             validate_data=False,
         )
@@ -1569,7 +1613,9 @@ class RegionFragmentArray(FragmentArray):
                 self.fragment_strands, other.fragment_strands
             )
             and numpy.all(self.num_cpgs == other.num_cpgs)
-            and numpy.all(self.num_meth_cpgs == other.num_meth_cpgs)
+            and numpy.all(self.num_converted_cpgs == other.num_converted_cpgs)
+            and numpy.all(self.num_cytosines == other.num_cytosines)
+            and numpy.all(self.num_converted_cytosines == other.num_converted_cytosines)
         )
 
     @classmethod
@@ -1651,7 +1697,9 @@ class RegionFragmentArray(FragmentArray):
             validate_data=True,
             fragment_strands=df.strand,
             num_cpgs=None,
-            num_meth_cpgs=None,
+            num_converted_cpgs=None,
+            num_cytosines=None,
+            num_converted_cytosines=None,
         )
 
     @classmethod
@@ -1720,9 +1768,11 @@ class RegionFragmentArray(FragmentArray):
 
         if return_methyl:
             num_cpgs = supp_data["num_cpgs"][mask]
-            num_meth_cpgs = supp_data["num_meth_cpgs"][mask]
+            num_converted_cpgs = supp_data["num_converted_cpgs"][mask]
+            num_cytosines = supp_data["num_cytosines"][mask]
+            num_converted_cytosines = supp_data["num_converted_cytosines"][mask]
         else:
-            num_cpgs, num_meth_cpgs = None, None
+            num_cpgs, num_converted_cpgs, num_cytosines, num_converted_cytosines = None, None, None, None
 
         if include_fragment_strand:
             fragment_strands = supp_data["strand"]
@@ -1746,7 +1796,9 @@ class RegionFragmentArray(FragmentArray):
                 )
             if return_methyl:
                 num_cpgs = num_cpgs[::-1]
-                num_meth_cpgs = num_meth_cpgs[::-1]
+                num_converted_cpgs = num_converted_cpgs[::-1]
+                num_cytosines = num_cytosines[::-1]
+                num_converted_cytosines = num_converted_cytosines[::-1]
 
         if do_close:
             fragments_h5.close()
@@ -1759,7 +1811,9 @@ class RegionFragmentArray(FragmentArray):
             validate_data=True,
             fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
         )
 
         return rfa
@@ -1927,6 +1981,7 @@ def unpack_starts_and_stop_vals(starts, stops, counts):
 
 def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     assert len(ars) > 0
+    ars = list(ars)
     regions = list(set(getattr(ar, "region", None) for ar in ars))
 
     # only flip data if we're merging arrays across multiple regions
@@ -1962,7 +2017,9 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
         [ar.last_covered_base_weights for ar in ars]
     )
     num_cpgs = numpy.concatenate([ar.num_cpgs for ar in ars])
-    num_meth_cpgs = numpy.concatenate([ar.num_meth_cpgs for ar in ars])
+    num_converted_cpgs = numpy.concatenate([ar.num_converted_cpgs for ar in ars])
+    num_cytosines = numpy.concatenate([ar.num_cytosines for ar in ars])
+    num_converted_cytosines = numpy.concatenate([ar.num_converted_cytosines for ar in ars])
 
     if len(regions) == 1 and regions[0] is not None:
         region = regions.pop()
@@ -1976,7 +2033,9 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
             max_frag_len=ars[0].max_frag_len,
             region=region,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
         )
     else:
         return FragmentArray(
@@ -1989,5 +2048,7 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
             max_frag_len=ars[0].max_frag_len,
             length=ars[0].length,
             num_cpgs=num_cpgs,
-            num_meth_cpgs=num_meth_cpgs,
+            num_converted_cpgs=num_converted_cpgs,
+            num_cytosines=num_cytosines,
+            num_converted_cytosines=num_converted_cytosines,
         )
