@@ -165,6 +165,19 @@ class DataFrameBase(pandas.DataFrame):
 
         return f
 
+    def _repr_html_(self, *args, **kwargs):
+        return self.df._repr_html_(*args, **kwargs)
+
+    def to_string(self, *args, **kwargs):
+        """When formatting for pandas dfs columns are sometimes dropped and then the
+           constructor can raise an error if those were required columns. This just
+           calls to_string on the base dataframe since it doesn't matter for this type 
+           of printing"""
+        return self.df.to_string(*args, **kwargs)
+
+    def reorder_columns(self):
+        return self[self._required_columns + list(filter(lambda x: x not in set(self._required_columns), self.columns))]
+
     @classmethod
     def from_fname_s3_or_local(cls, fname, *args, **kwargs):
         warnings.warn("deprecated, use pd.read_table()", DeprecationWarning)
@@ -231,7 +244,10 @@ class RegionDataFrame(DataFrameBase):
     _optional_bed_columns = ["id", "score", "strand"]
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
     _additional_required_columns = []
-    _required_columns = _critical_bed_columns + _additional_required_columns
+
+    @property
+    def _required_columns(self):
+        return self._critical_bed_columns + self._additional_required_columns
 
     def get_fasta_path(self):
         if self.ref == 'hg38':
@@ -1904,6 +1920,15 @@ def _set_fragment_array_weights_from_weights_record(fragment_array, record, left
 
 class SampleAndRegionDataFrame(RegionDataFrame):
     _additional_required_columns = ["sample_id", "frag_h5"]
+
+    def reorder_columns(self):
+        # hacky way to make sure that fragmnet array is displayed at the start if it exists
+        req = self._required_columns
+        not_req = list(filter(lambda x: x not in set(self._required_columns), self.columns))
+        if 'fragment_array' in not_req:
+            not_req.remove('fragment_array')
+            req.append('fragment_array')
+        return self[req + not_req]
 
     @classmethod
     def init_from_rdf_and_sdf(cls, rdf, sdf):

@@ -1979,7 +1979,7 @@ def unpack_starts_and_stop_vals(starts, stops, counts):
     )
 
 
-def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
+def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_fragment_array=False):
     assert len(ars) > 0
     ars = list(ars)
     regions = list(set(getattr(ar, "region", None) for ar in ars))
@@ -2021,7 +2021,7 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True):
     num_cytosines = numpy.concatenate([ar.num_cytosines for ar in ars])
     num_converted_cytosines = numpy.concatenate([ar.num_converted_cytosines for ar in ars])
 
-    if len(regions) == 1 and regions[0] is not None:
+    if len(regions) == 1 and regions[0] is not None and not force_fragment_array:
         region = regions.pop()
         return RegionFragmentArray(
             starts,
