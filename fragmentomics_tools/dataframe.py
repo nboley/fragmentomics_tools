@@ -166,14 +166,14 @@ class DataFrameBase(pandas.DataFrame):
         return f
 
     def _repr_html_(self, *args, **kwargs):
-        return self.df._repr_html_(*args, **kwargs)
+        return pd.DataFrame._repr_html_(self, *args, **kwargs)
 
     def to_string(self, *args, **kwargs):
         """When formatting for pandas dfs columns are sometimes dropped and then the
            constructor can raise an error if those were required columns. This just
            calls to_string on the base dataframe since it doesn't matter for this type 
            of printing"""
-        return self.df.to_string(*args, **kwargs)
+        return pd.DataFrame.to_string(self, *args, **kwargs)
 
     def reorder_columns(self):
         return self[self._required_columns + list(filter(lambda x: x not in set(self._required_columns), self.columns))]
@@ -230,6 +230,90 @@ class DataFrameBase(pandas.DataFrame):
             f"Missing these columns in dataframe: {missing_key_cols}, "
             f"found {self.columns}."
         )
+
+    def _parallel_apply(self, fn, n_workers, verbose):
+        # do this in a fork context so that we don't need to serialize the data into the new process
+        ctx = multiprocessing.get_context("fork")
+
+        # set a shared counter to track the row index to process
+        counter = ctx.Value("i", 0)
+        recv_conn, send_conn = ctx.Pipe(duplex=False)
+        pipe_lock = multiprocessing.Lock()
+        ps = [
+            ctx.Process(
+                target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)
+            )
+            for _ in range(n_workers)
+        ]
+        for p in ps:
+            p.start()
+
+        # clear any cache -- works around a jupyter display bug
+        tqdm._instances.clear()
+        if verbose:
+            pbar = tqdm(total=self.shape[0])
+
+        def _cleanup():
+            # close the pipe
+            send_conn.close()
+            recv_conn.close()
+
+            # join all of the worker processes
+            for p in ps:
+                p.join()
+
+            if verbose:
+                pbar.close()
+
+        # store the returned row indices and records
+        # we track the indices so that we can re-sort into the original order and then
+        # join with the input dataframe index
+        indices = []
+        records = []
+        # keep processing new data until the returned records equals the inputs
+        while len(indices) < self.shape[0]:
+            if recv_conn.poll(0.1):
+                res = pickle.loads(recv_conn.recv_bytes())
+
+                # if a worker raised an exception kill any active process, cleanup, and then re-raise the exception
+                if isinstance(res, Exception):
+                    for p in ps:
+                        p.kill()
+                    _cleanup()
+                    raise res
+
+                i, rec = res
+                indices.append(i)
+                records.append(rec)
+                if verbose:
+                    pbar.update(1)
+
+        _cleanup()
+        return indices, records
+
+    def parallel_apply(self, fn, n_workers=None, verbose=True):
+        # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
+        if n_workers == 1:
+            indices = []
+            records = []
+            for idx in tqdm(range(self.shape[0]), disable=(not verbose)):
+                indices.append(idx)
+                records.append(fn(self.iloc[idx]))
+        else:
+            # if the number of workers isn't set then use all available cpus
+            if n_workers is None:
+                n_workers = multiprocessing.cpu_count()
+            indices, records = self._parallel_apply(fn, n_workers, verbose)
+
+        # concatanate all records into a dataframe
+        rv = pandas.DataFrame(records)
+        # add the numeric indices and sort to the original order
+        rv.index = indices
+        rv = rv.sort_index()
+        # re-attach the original index
+        rv.index = self.index
+
+        return rv
 
 
 class RegionDataFrame(DataFrameBase):
@@ -1649,90 +1733,6 @@ class RegionDataFrame(DataFrameBase):
             sub_rdfs.append(self.iloc[st:end, :])
 
         return sub_rdfs
-
-    def _parallel_apply(self, fn, n_workers, verbose):
-        # do this in a fork context so that we don't need to serialize the data into the new process
-        ctx = multiprocessing.get_context("fork")
-
-        # set a shared counter to track the row index to process
-        counter = ctx.Value("i", 0)
-        recv_conn, send_conn = ctx.Pipe(duplex=False)
-        pipe_lock = multiprocessing.Lock()
-        ps = [
-            ctx.Process(
-                target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)
-            )
-            for _ in range(n_workers)
-        ]
-        for p in ps:
-            p.start()
-
-        # clear any cache -- works around a jupyter display bug
-        tqdm._instances.clear()
-        if verbose:
-            pbar = tqdm(total=self.shape[0])
-
-        def _cleanup():
-            # close the pipe
-            send_conn.close()
-            recv_conn.close()
-
-            # join all of the worker processes
-            for p in ps:
-                p.join()
-
-            if verbose:
-                pbar.close()
-
-        # store the returned row indices and records
-        # we track the indices so that we can re-sort into the original order and then
-        # join with the input dataframe index
-        indices = []
-        records = []
-        # keep processing new data until the returned records equals the inputs
-        while len(indices) < self.shape[0]:
-            if recv_conn.poll(0.1):
-                res = pickle.loads(recv_conn.recv_bytes())
-
-                # if a worker raised an exception kill any active process, cleanup, and then re-raise the exception
-                if isinstance(res, Exception):
-                    for p in ps:
-                        p.kill()
-                    _cleanup()
-                    raise res
-
-                i, rec = res
-                indices.append(i)
-                records.append(rec)
-                if verbose:
-                    pbar.update(1)
-
-        _cleanup()
-        return indices, records
-
-    def parallel_apply(self, fn, n_workers=None, verbose=True):
-        # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
-        if n_workers == 1:
-            indices = []
-            records = []
-            for idx in tqdm(range(self.shape[0]), disable=(not verbose)):
-                indices.append(idx)
-                records.append(fn(self.iloc[idx]))
-        else:
-            # if the number of workers isn't set then use all available cpus
-            if n_workers is None:
-                n_workers = multiprocessing.cpu_count()
-            indices, records = self._parallel_apply(fn, n_workers, verbose)
-
-        # concatanate all records into a dataframe
-        rv = pandas.DataFrame(records)
-        # add the numeric indices and sort to the original order
-        rv.index = indices
-        rv = rv.sort_index()
-        # re-attach the original index
-        rv.index = self.index
-
-        return rv
 
     ###############################################################################################
     # #  These are methods that require a label column
