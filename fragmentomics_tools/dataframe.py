@@ -166,14 +166,14 @@ class DataFrameBase(pandas.DataFrame):
         return f
 
     def _repr_html_(self, *args, **kwargs):
-        return pd.DataFrame._repr_html_(self, *args, **kwargs)
+        return self.df._repr_html_(*args, **kwargs)
 
     def to_string(self, *args, **kwargs):
         """When formatting for pandas dfs columns are sometimes dropped and then the
            constructor can raise an error if those were required columns. This just
            calls to_string on the base dataframe since it doesn't matter for this type 
            of printing"""
-        return pd.DataFrame.to_string(self, *args, **kwargs)
+        return self.df.to_string(*args, **kwargs)
 
     def reorder_columns(self):
         return self[self._required_columns + list(filter(lambda x: x not in set(self._required_columns), self.columns))]
@@ -187,6 +187,11 @@ class DataFrameBase(pandas.DataFrame):
 
         data = pandas.read_table(fname)
         return cls(data, *args, **kwargs)
+
+    @property
+    def df(self):
+        """Cast to a normal pandas dataframe"""
+        return pd.DataFrame(self)
 
     def __init__(self, data, *args, **kwargs):
         # ensure that required_metadata is a subset of metadata
@@ -338,11 +343,6 @@ class RegionDataFrame(DataFrameBase):
             return "/scratch/karius/annotation/GRCh38.p12.genome.fa.gz"
         else:
             raise ValueError(f"No fasta associated with reference '{self.ref}'")
-
-    @property
-    def df(self):
-        """Cast to a normal pandas dataframe"""
-        return pd.DataFrame(self)
 
     @classmethod
     def from_fname_s3_or_local(cls, fname, *args, **kwargs):
@@ -2161,25 +2161,23 @@ class FlDist:
     def __init__(self, fl_df):
         self.fl_df = fl_df
 
-    def plot(self, figsize=(20, 8)):
+
+    def plot(self, figsize=(20, 8), legend=False, max_frag_len=None, include_reference=True):
         sns.set(rc={"figure.figsize": figsize})
 
         # add the reference
         fl_df = self.fl_df.copy()
-        ref_fl_dist = fl_df.mean(axis=1)
-        ref_fl_dist = ref_fl_dist / ref_fl_dist.sum()
-        fl_df.loc[:, "Reference"] = ref_fl_dist
+        if include_reference:
+            ref_fl_dist = fl_df.mean(axis=1)
+            ref_fl_dist = ref_fl_dist / ref_fl_dist.sum()
+            fl_df.loc[:, "Reference"] = ref_fl_dist
 
-        fl_df.plot(legend=False)
+        fl_df.loc[0:max_frag_len, :].plot(legend=legend)
 
 
 class SampleDataFrame(DataFrameBase):
     _metadata = ["_fl_dist"]
     _required_columns = ["sample_id", "frag_h5"]
-
-    @property
-    def df(self):
-        return pd.DataFrame(self)
 
     def __init__(self, data, *args, **kwargs):
         super().__init__(data, *args, **kwargs)
@@ -2192,6 +2190,9 @@ class SampleDataFrame(DataFrameBase):
         self._fl_dist = FlDist.init_from_sdf(self)
 
         return
+
+    def dropna(self, *args, **kwargs):
+        return type(self)(self.df.dropna(*args, **kwargs))
 
     @property
     def fl_dist(self):
