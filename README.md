@@ -29,5 +29,5 @@ pip install -e .
 git clone git@github.com:nboley/fragmentomics_tools.git
 cd fragmentomics_tools
 mamba install --verbose --override-channels -c pytorch -c conda-forge -c bioconda --file requirements.in
-python setup.py develop
+pip install -e .
 ```

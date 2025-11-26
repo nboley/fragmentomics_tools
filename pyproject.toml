@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "fragmentomics-tools"
 version = "1.0.0"
 # dependencies should be install via mamba
-dependencies = [],
+dependencies = []
 requires-python = ">=3.6"
 authors = [
   {name = "Nathan Boley", email = "npboley@gmail.com"},

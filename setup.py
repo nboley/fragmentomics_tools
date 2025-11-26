@@ -1,6 +1,6 @@
 import numpy as np
 from Cython.Build import cythonize
-from setuptools import setup, find_packages, Extension
+from setuptools import setup, Extension
 
 extensions = cythonize(
     [
@@ -10,10 +10,6 @@ extensions = cythonize(
 )
 
 setup(
-    name="fragmentomics_tools",
-    version="1.0",
-    packages=["fragmentomics_tools"],
-    # scripts=["bin/build-fragments-h5"],
     include_dirs=[np.get_include()],
     ext_modules=extensions,
 )
