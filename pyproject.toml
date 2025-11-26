@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools >= 61.0", "Cython", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fragmentomics-tools"
+version = "1.0.0"
+# dependencies should be install via mamba
+dependencies = [],
+requires-python = ">=3.6"
+authors = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+maintainers = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+description = "Tools and datastructures around analyzing fragmentomics data"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["fragmentomics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python"
+]
+
+[project.urls]
+Repository = "https://github.com/nboley/fragmentomic_tools"
