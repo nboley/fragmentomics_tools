@@ -21,3 +21,10 @@ DEFAULT_MIN_MAPQ = 0
 def get_data_path(p):
     assert not p.startswith("/")
     return os.path.join(DATA_DIR, p)
+
+
+def get_repo_data_path(rel_path):
+    repo_data_path = os.path.abspath(
+        os.path.join(BASE_DIR, "./repo_data/")
+    )
+    return os.path.abspath(os.path.join(repo_data_path, rel_path))

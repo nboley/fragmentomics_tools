@@ -8,24 +8,20 @@ from typing import Dict
 
 
 from fragmentomics_tools.constants import get_data_path
+from fragmentomics_tools.constants import get_repo_data_path
 
-
-REFERENCE_ANNOTATIONS = ["hg16", "hg17", "hg18", "hg19", "hg38"]
+REFERENCE_ANNOTATIONS = ["hg19", "hg38"]
 
 # mapping from reference annotation name to fasta file key
 REFERENCE_FASTA_PATH = {
-    "hg16": "reference/GRCh34/GRCh34.primary_assembly.genome.fa.gz",
-    "hg17": "reference/GRCh35/GRCh35.primary_assembly.genome.fa.gz",
-    "hg18": "reference/GRCh36/GRCh36.primary_assembly.genome.fa.gz",
     "hg19": "reference/GRCh37/GRCh37.primary_assembly.genome.fa.gz",
     "hg38": "reference/GRCh38/GRCh38.p12.genome.fa.gz",
 }
+
+
 REFERENCE_CHROM_SIZES_PATH = {
-    "hg16": "reference/GRCh34/chrom.sizes",
-    "hg17": "reference/GRCh35/chrom.sizes",
-    "hg18": "reference/GRCh36/chrom.sizes",
-    "hg19": "reference/GRCh37/chrom.sizes",
-    "hg38": "reference/GRCh38/chrom.sizes",
+    "hg19": get_repo_data_path("./reference/GRCh37/chrom.sizes"),
+    "hg38": get_repo_data_path("./reference/GRCh38/chrom.sizes"),
 }
 
 
@@ -35,9 +31,6 @@ def get_reference_path(ref_name):
 
 def get_canonical_reference_name(ref_name):
     grc_to_canonical = {
-        "GRCh34": "hg16",
-        "GRCh35": "hg17",
-        "GRCh36": "hg18",
         "GRCh37": "hg19",
         "GRCh38": "hg38",
     }
