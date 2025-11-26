@@ -310,13 +310,20 @@ class DataFrameBase(pandas.DataFrame):
                 n_workers = multiprocessing.cpu_count()
             indices, records = self._parallel_apply(fn, n_workers, verbose)
 
-        # concatanate all records into a dataframe
-        rv = pandas.DataFrame(records)
-        # add the numeric indices and sort to the original order
-        rv.index = indices
-        rv = rv.sort_index()
-        # re-attach the original index
-        rv.index = self.index
+        # if everything is a data frame
+        if all(isinstance(x, pd.DataFrame) for x in records):
+            # concatanate all records into a dataframe
+            for o, x in zip(indices, records):
+                assert 'original_index' not in x.columns
+                x['original_index'] = self.index[o]
+            rv = pd.concat([records[x] for x in np.argsort(indices)])
+        else:
+            rv = pandas.DataFrame(records)
+            # add the numeric indices and sort to the original order
+            rv.index = indices
+            rv = rv.sort_index()
+            # re-attach the original index
+            rv.index = self.index
 
         return rv
 
@@ -1395,7 +1402,7 @@ class RegionDataFrame(DataFrameBase):
             -left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes
         )
 
-    def truncate(
+    def truncate_regions(
         self,
         /,
         left_amt: int = 0,
@@ -2130,6 +2137,22 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         self['fragment_array'] = fas
         return
 
+    def set_fragment_array_gc_weights(self, normalizer):
+        def weight_fa(record):
+            fa = deepcopy(record.fragment_array)
+            fls = fa.fragment_lengths
+            inverse_weights = record.normalizer(fls, [50]*(len(fls)))
+            fa.weights = numpy.atleast_1d(1/inverse_weights)
+            return fa
+
+        fas = self.parallel_apply(
+            lambda record: _set_fragment_array_weights_from_weights_record(record.fragment_array, record, expansion),
+            n_workers=n_workers
+        ).iloc[:, 0].rename('fragment_array')
+        fas.index = self.index
+        self['fragment_array'] = fas
+        return
+
     def reset_fragment_array_weights(self):
         """Set the fragment array weights to zero.
 
@@ -2143,11 +2166,11 @@ class FlDist:
     def init_from_sdf(cls, sdf):
         max_frag_len = 512
         columns = {}
-        for frag_h5 in sdf.frag_h5:
-            cnts = frag_h5.fragment_length_counts[:max_frag_len]
+        for record in sdf.itertuples():
+            cnts = record.frag_h5.fragment_length_counts[:max_frag_len]
             # normalize to library depth
             cnts = cnts / cnts.sum()
-            columns[frag_h5.sample_id] = cnts
+            columns[record.sample_id] = cnts
 
         fl_df = pd.DataFrame(columns)
         fl_df = fl_df.set_index(fl_df.index + 1)
@@ -2172,7 +2195,7 @@ class FlDist:
             ref_fl_dist = ref_fl_dist / ref_fl_dist.sum()
             fl_df.loc[:, "Reference"] = ref_fl_dist
 
-        fl_df.loc[0:max_frag_len, :].plot(legend=legend)
+        return fl_df.loc[0:max_frag_len, :].plot(legend=legend)
 
 
 class SampleDataFrame(DataFrameBase):

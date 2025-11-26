@@ -584,6 +584,8 @@ class OverlaidTracks(GenomeTrack):
         for track in self.tracks_to_overlay:
             track.plot(ax)
             labels.append(track.name)
+            if track.color is None:
+                track.color = 'black'
             colors.append(track.color)
             ylims.append(track.ylim)
 
@@ -621,6 +623,12 @@ class OverlaidTracks(GenomeTrack):
             ax.legend([l for l in labels if l is not None and l != ''], labelcolor=colors, loc="upper right")
 
 
+def _interleave(a, b):
+    c = np.empty((a.size + b.size,), dtype=a.dtype)
+    c[0::2] = a
+    c[1::2] = b
+    return c
+
 @dataclass
 class VectorTrack(GenomeTrack):
     # plots a 1d numpy vector
@@ -645,15 +653,21 @@ class VectorTrack(GenomeTrack):
             )
         else:
             data = self.data
-        ax.plot(
+        ticks = _interleave(
             numpy.arange(self.region.start, self.region.stop),
-            data * self.scale,
+            numpy.arange(self.region.start+1, self.region.stop+1),
+        )
+        data = _interleave(data * self.scale, data * self.scale)
+        ax.plot(
+            ticks,
+            data,
             linewidth=self.linewidth,
             alpha=self.alpha,
             color=self.color,
             linestyle=self.linestyle,
         )
         ax.set_ylim(self.ymin, self.ymax)
+        ax.set_xlim(self.region.start, self.region.stop)
 
 
 @dataclass
@@ -1032,6 +1046,17 @@ class MotifTrack(GenomeTrack):
     """
 
     rel_width: float = 0.50
+
+    @classmethod
+    def from_seqs(seqs):
+        length = len(seqs[0])
+        if not all(length == len(seq) for seq in seqs):
+            raise ValueError("All sequences need to have the same length")
+        counts = numpy.zeros(())
+        for seq in seqs:
+            print(seq)
+            break
+        pass
 
     def _plot(self, ax):
         assert 0 < self.rel_width <= 1

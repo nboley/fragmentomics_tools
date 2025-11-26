@@ -520,8 +520,8 @@ class Region(DataClassMixin):
             )
 
         if self.ref != 'NA' and self.chrom != "NA" and self.chrom not in CONTIG_LENGTHS[self.ref]:
-            assert False, self.ref
-            raise ValueError(f"{self.chrom} not found in CONTIG_LENGTHS for {self.ref}")
+            pass
+            #raise ValueError(f"{self.chrom} not found in CONTIG_LENGTHS for {self.ref}")
 
         assert (
             self.data is None or "strand" not in self.data
@@ -542,7 +542,13 @@ class Region(DataClassMixin):
         # In these situations, we have a "NA" chromosome and coordinates that go from -x to x
         assert self.chrom == "NA" or self.start >= 0
 
-        if self.ref != 'NA' and self.chrom != "NA" and self.stop > CONTIG_LENGTHS[self.ref][self.chrom]:
+        if self.ref != 'NA' \
+           and self.chrom != "NA" \
+               and (
+                   self.ref in CONTIG_LENGTHS \
+                   and self.chrom in CONTIG_LENGTHS[self.ref] \
+                   and self.stop > CONTIG_LENGTHS[self.ref][self.chrom]
+               ):
             raise ValueError(
                 f"stop ({self.stop}) is greater than {self.chrom} length ({CONTIG_LENGTHS[self.ref][self.chrom]})"
             )
