@@ -125,7 +125,7 @@ def _get_ordered_contigs_and_lengths(ref):
     assert ref in REFERENCE_ANNOTATIONS
     contigs = []
     contig_lengths = OrderedDict()
-    with open(get_data_path(f"{ref}.chrom.sizes")) as fp:
+    with open(get_repo_data_path(f"{ref}.chrom.sizes")) as fp:
         for name, length in (line.split() for line in fp):
             contigs.append(name)
             contig_lengths[name] = int(length)
