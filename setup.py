@@ -12,4 +12,5 @@ extensions = cythonize(
 setup(
     include_dirs=[np.get_include()],
     ext_modules=extensions,
+    include_package_data=True,
 )

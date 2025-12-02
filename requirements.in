@@ -21,3 +21,4 @@ ucsc-bigwigtowig
 ucsc-liftover
 pytorch
 pytorch-lightning
+funcsigs
