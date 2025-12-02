@@ -1955,10 +1955,9 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         self,
         n_workers=None,
         verbose=1,
-        min_mapq: int = 0,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
+        generate_weights_callback = None,
         fragment_array_callback = None,
-        **kwargs,
     ):
         """ """
         assert self.index.is_unique
@@ -1969,10 +1968,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             region = Region(record.contig, record.start, record.stop, record.strand, ref=self.ref)
             _kwargs = dict(
                 region=region,
-                min_mapq=min_mapq,
                 max_frag_len=max_frag_len,
-                include_fragment_strand=True,
-                **kwargs,
+                generate_weights_callback=generate_weights_callback,
             )
             fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
             if fragment_array_callback is not None:

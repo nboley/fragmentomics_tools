@@ -262,10 +262,10 @@ class FragmentArray:
             num_converted_cytosines=num_converted_cytosines,
             is_flipped=is_flipped,
         )
-        if isinstance(starts_0, numpy.ndarray) and starts_0.dtype != numpy.int32:
-            raise TypeError("start array must by int32")
-        if isinstance(stops_0, numpy.ndarray) and stops_0.dtype != numpy.int32:
-            raise TypeError("stop array must by int32")
+        if isinstance(starts_0, numpy.ndarray) and starts_0.dtype not in (numpy.int32, numpy.int64):
+            raise TypeError("start array must be int32 or int64")
+        if isinstance(stops_0, numpy.ndarray) and stops_0.dtype not in (numpy.int32, numpy.int64):
+            raise TypeError("stop array must be int32 or int64")
 
         # cast starts/stops to array
         self.starts_0 = numpy.asarray(starts_0, dtype=numpy.int32)
@@ -1707,20 +1707,10 @@ class RegionFragmentArray(FragmentArray):
         cls,
         in_fragments_h5: Union[str, FragmentsH5],
         region: Region,
-        min_mapq: int = DEFAULT_MIN_MAPQ,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
-        include_fragment_strand: bool = False,
-        include_fragment_strand_if_available: bool = False,
-        flip_data_to_match_region_strand: bool = True,
-        background_model: Optional["SeqToEndpointsMultiResModel"] = None,
-        min_background_scaling_factor: float = DEFAULT_MIN_SCALING_FACTOR,
-        max_background_scaling_factor: float = DEFAULT_MAX_SCALING_FACTOR,
-        **kwargs,
+        generate_weights_callback = None,
     ) -> "RegionFragmentArray":
         """
-        :param max_background_scaling_factor: If background model is supplied, weights are inflated by at most this factor.
-        :param min_background_scaling_factor: If background model is supplied, weights are adjusted down by at most this factor.
-        :param background_model: If supplied, weights for each fragment and associated endpoint will be adjusted based on this background model.
         :param flip_data_to_match_region_strand: If True, the data is placed on the strand matching the region strand (if set).
             If False, strand is ignored in the region and the data is always on the default reference strand.
         :param include_fragment_strand: If true, include a vector of strands for each fragment.
@@ -1728,8 +1718,6 @@ class RegionFragmentArray(FragmentArray):
         :param region: region to query
         :param min_mapq: mapq filter
         :param max_frag_len: max frag len filter
-        :param **kwargs: Any other arguments you want to pass along to the beta cutsite bias correction function, if you
-            want to try out those experimental features.
         """
         if isinstance(in_fragments_h5, str):
             fragments_h5 = FragmentsH5(in_fragments_h5, cache_pointers=False)
@@ -1745,45 +1733,49 @@ class RegionFragmentArray(FragmentArray):
             )
 
         return_methyl = fragments_h5.has_methyl
-        if include_fragment_strand:
-            assert fragments_h5.has_strand
-        elif include_fragment_strand_if_available:
-            include_fragment_strand = fragments_h5.has_strand
+        include_fragment_strand = fragments_h5.has_strand
+        return_gc = (generate_weights_callback != None)
 
         starts, stops, supp_data = fragments_h5.fetch_array(
             region.chrom,
             region.start,
             region.stop,
             max_frag_len=max_frag_len,
-            return_mapqs=(min_mapq > 0),  # only get mapqs if we need them to filter
             return_strand=include_fragment_strand,
             return_methyl=return_methyl,
+            return_gc=return_gc,
         )
 
-        ### Find filtering masks ###
-        if min_mapq > 0:
-            mask = supp_data["mapq"].min(axis=1) >= min_mapq
+        if generate_weights_callback is not None:
+            weights = generate_weights_callback(starts, stops, supp_data)
         else:
-            mask = numpy.ones_like(starts, dtype=bool)
+            weights = None
 
         if return_methyl:
-            num_cpgs = supp_data["num_cpgs"][mask]
-            num_converted_cpgs = supp_data["num_converted_cpgs"][mask]
-            num_cytosines = supp_data["num_cytosines"][mask]
-            num_converted_cytosines = supp_data["num_converted_cytosines"][mask]
+            num_cpgs = supp_data["num_cpgs"]
+            num_converted_cpgs = supp_data["num_converted_cpgs"]
+            num_cytosines = supp_data["num_cytosines"]
+            num_converted_cytosines = supp_data["num_converted_cytosines"]
         else:
             num_cpgs, num_converted_cpgs, num_cytosines, num_converted_cytosines = None, None, None, None
 
         if include_fragment_strand:
             fragment_strands = supp_data["strand"]
-            fragment_strands = fragment_strands[mask]
         else:
             fragment_strands = None
 
-        starts_0 = (starts - region.start)[mask]
-        stops_0 = (stops - region.start)[mask]
+        if return_gc:
+            gc = supp_data['gc']
+        else:
+            gc = None
 
-        if flip_data_to_match_region_strand and region.is_minus_strand():
+        starts_0 = (starts - region.start)
+        stops_0 = (stops - region.start)
+
+        # if the region is on the minus strand then flip the data to be in the
+        # correct orientation. (if we *dont* want this to happen, then just pass
+        # '.' in as the region's strand)
+        if region.is_minus_strand():
             ## TODO -- move this into reverse strand
             # Store into temp variables so we can swap. One depends on other.
             _starts_0 = (region.length - stops_0)[::-1]
@@ -1799,6 +1791,8 @@ class RegionFragmentArray(FragmentArray):
                 num_converted_cpgs = num_converted_cpgs[::-1]
                 num_cytosines = num_cytosines[::-1]
                 num_converted_cytosines = num_converted_cytosines[::-1]
+            if return_gc:
+                gc = gc[::-1]
 
         if do_close:
             fragments_h5.close()
@@ -1814,6 +1808,7 @@ class RegionFragmentArray(FragmentArray):
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
+            weights=weights,
         )
 
         return rfa
