@@ -1,1 +1,2 @@
 recursive-include fragmentomics_tools/repo_data *
+include fragmentomics_tools/public_data_resources/sc_rnaseq.counts.hematopoetic.tsv.gz

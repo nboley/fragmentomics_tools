@@ -116,13 +116,16 @@ class HematopoieticGeneExpression(RegionDataFrame):
         indexed by gene_name, gene_id, contig, strand, start, stop.
 
         Args:
-            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv file.
-                Defaults to 'data/expression/sc_rnaseq.counts.hematopoetic.tsv'.
+            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv(.gz) file.
+                Defaults to the bundled copy in fragmentomics_tools.
             weights_preset: Which weight preset to use for cluster column naming.
                 Defaults to "blood_2024".
         """
         if counts_path is None:
-            counts_path = "data/expression/sc_rnaseq.counts.hematopoetic.tsv"
+            counts_path = os.path.join(
+                os.path.dirname(__file__),
+                "sc_rnaseq.counts.hematopoetic.tsv.gz",
+            )
         grpd_counts = pd.read_table(counts_path, index_col=0)
         cluster_names_and_weights = cls.cluster_names_and_weights(
             weights_preset=weights_preset
@@ -153,8 +156,8 @@ class HematopoieticGeneExpression(RegionDataFrame):
         """Load weighted gene expression as a HematopoieticGeneExpression RDF.
 
         Args:
-            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv file.
-                Defaults to 'data/expression/sc_rnaseq.counts.hematopoetic.tsv'.
+            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv(.gz) file.
+                Defaults to the bundled copy in fragmentomics_tools.
             weights_preset: Which weight preset to use. Defaults to "blood_2024".
         """
         tpms = cls.load_all(counts_path=counts_path, weights_preset=weights_preset)
