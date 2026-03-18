@@ -1,17 +1,15 @@
+from __future__ import annotations
+
 import math
 import itertools
 from collections import defaultdict
-from typing import Iterable, Tuple
+from typing import TYPE_CHECKING, Tuple
 
 import numpy as np
 import pandas as pd
 
-from fragmentomics_tools.dataframe import DataFrameBase
-from fragmentomics_tools.fragment_array import merge_fragment_arrays
-from fragmentomics_tools.fragment_array.fragment_array import (
-    _switch_plus_with_minus_and_minus_with_plus,
-    RegionFragmentArray,
-)
+if TYPE_CHECKING:
+    from fragmentomics_tools.dataframe import DataFrameBase
 
 offset = 2000
 
@@ -21,6 +19,10 @@ def cov_score(x):
 
 
 def calc_tss_cov_bias(fa, condition, fl_frac):
+    from fragmentomics_tools.fragment_array.fragment_array import (
+        _switch_plus_with_minus_and_minus_with_plus,
+        RegionFragmentArray,
+    )
     _fa = fa.subset_fragment_lengths(*fl_frac).drop_duplicate_fragments()
     if condition == 'EMSeqMod':
         _fa = make_converted_fa(_fa)
@@ -241,6 +243,7 @@ def make_gene_body_exp_vs_bias_df(
     labels = gene_body_srdf.label.unique().tolist()
 
     # Build all (label, fl_bnd, exp_bnd) combinations
+    from fragmentomics_tools.dataframe import DataFrameBase
     design = DataFrameBase(
         list(itertools.product(labels, fl_bnds, exp_bnds)),
         columns=["label", "fl_bnd", "exp_bnd"],
@@ -348,6 +351,7 @@ def make_tss_exp_vs_bias_df(
                     res[(label_key, fl_bnd)].append(np.nan)
                 continue
 
+            from fragmentomics_tools.fragment_array import merge_fragment_arrays
             fa = (
                 merge_fragment_arrays(sub_bin["fragment_array"])
                 .drop_duplicate_fragments()
