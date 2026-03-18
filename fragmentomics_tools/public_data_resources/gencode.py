@@ -2,15 +2,18 @@ import pandas as pd
 
 from fragmentomics_tools.dataframe import RegionDataFrame
 
+DEFAULT_GENCODE_V39_GFF3 = "/scratch/nboley/gencode/gencode.v39.basic.annotation.gff3.gz"
+
 
 def load_gencode_genes_rdf(ref="hg38"):
     assert ref == "hg38"
 
     # load the 5' and 3' UTR elements
     rdf = pd.read_table(
-        "/scratch/nboley/gencode/gencode.v39.basic.annotation.protein_coding.gff3",
+        "/efs/analytics/nathanboley/data_resources/gencode/gencode.v49.basic.annotation.gff3.gz",
         usecols=[0, 2, 3, 4, 6, 8],
         names=["contig", "element", "start", "stop", "strand", "meta"],
+        comment="#",
     ).query(
         "contig not in ['chrM', 'chrY'] and element in ['three_prime_UTR', 'five_prime_UTR']"
     )  # 'gene', 'transcript', 'exon',
@@ -121,3 +124,74 @@ def build_transcript_bed_from_gencode_gtf(input_fname, output_fname):
     # rm /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed
     # bgzip /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.sorted.bed
     # mv /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.sorted.bed.gz /scratch/karius/annotation/gencode/gencode.v45.basic.annotation.bed.gz
+
+
+def load_tss_rdf(gencode_path=None):
+    """Load transcription start sites from a GENCODE GFF3 annotation file.
+
+    Parses transcript records, extracts the TSS (strand-aware), resizes to 16bp
+    windows, and groups by unique genomic position, aggregating transcript IDs
+    and names.
+
+    Args:
+        gencode_path: Path to a GENCODE GFF3 file. Defaults to the GENCODE v39
+            basic annotation at DEFAULT_GENCODE_V39_GFF3.
+
+    Returns:
+        A RegionDataFrame with columns: contig, start, stop, strand, gene_id,
+        gene_name, gene_type, element, transcript_id (comma-separated),
+        transcript_name (comma-separated), n_transcripts.
+    """
+    if gencode_path is None:
+        gencode_path = DEFAULT_GENCODE_V39_GFF3
+    rdf = pd.read_table(
+            gencode_path,
+            usecols=[0, 2, 3, 4, 6, 8],
+            comment="#",
+            names=["contig", "element", "start", "stop", "strand", "meta"],
+    ).query("element == 'transcript'")
+    rdf["transcript_id"] = rdf.meta.str.extract(r";transcript_id=(ENST?\d+)\.\d+;")
+    rdf["transcript_name"] = rdf.meta.str.extract(r";transcript_name=(.+?);")
+    rdf["gene_id"] = rdf.meta.str.extract(r";gene_id=(ENSG?\d+)\.\d+;")
+    rdf["gene_name"] = rdf.meta.str.extract(r";gene_name=(.+?);")
+    rdf["gene_type"] = rdf.meta.str.extract(r";gene_type=(.+?);")
+    rdf = rdf.drop(columns=["meta"])
+    rdf = rdf.drop_duplicates()
+    rdf = RegionDataFrame(rdf, ref='hg38').reset_index(drop=True)
+    rdf = rdf.truncate_regions(right_amt=rdf.region_lengths-1, strand_aware=True).resize_regions(16).reset_index(drop=True)
+    rdf = RegionDataFrame(rdf.df.groupby(list(set(rdf.columns) - {'transcript_id', 'transcript_name'})).apply(
+        lambda x: pd.Series(dict(transcript_id=",".join(x.transcript_id), transcript_name=",".join(x.transcript_name), n_transcripts=x.shape[0]))
+        , include_groups=False
+    ).reset_index(), ref='hg38')
+    return rdf.reorder_columns()
+
+
+def load_exons_rdf(gencode_path=None):
+    """Load protein-coding exon regions from a GENCODE GFF3 annotation file.
+
+    Parses exon records and filters to protein_coding gene_type only.
+
+    Args:
+        gencode_path: Path to a GENCODE GFF3 file. Defaults to the GENCODE v39
+            basic annotation at DEFAULT_GENCODE_V39_GFF3.
+
+    Returns:
+        A RegionDataFrame with columns: contig, start, stop, strand, element,
+        gene_id, gene_name, gene_type.
+    """
+    if gencode_path is None:
+        gencode_path = DEFAULT_GENCODE_V39_GFF3
+    rdf = pd.read_table(
+            gencode_path,
+            usecols=[0, 2, 3, 4, 6, 8],
+            comment="#",
+            names=["contig", "element", "start", "stop", "strand", "meta"],
+    ).query("element == 'exon'")
+    rdf["gene_id"] = rdf.meta.str.extract(r";gene_id=(ENSG?\d+)\.\d+;")
+    rdf["gene_name"] = rdf.meta.str.extract(r";gene_name=(.+?);")
+    rdf["gene_type"] = rdf.meta.str.extract(r";gene_type=(.+?);")
+    rdf = rdf.drop(columns=["meta"])
+    rdf = rdf.query("gene_type == 'protein_coding'")
+    rdf = rdf.drop_duplicates()
+    rdf = RegionDataFrame(rdf, ref='hg38').reset_index(drop=True)
+    return rdf

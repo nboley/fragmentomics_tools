@@ -2230,6 +2230,32 @@ class SampleDataFrame(DataFrameBase):
         return self.iloc[keep_idxs].copy()
 
 
+def str_concat_columns(input_df, agg_column_names):
+    """Group a DataFrame and concatenate string columns within each group.
+
+    Groups ``input_df`` by all columns *except* those in ``agg_column_names``,
+    then joins the values of each aggregation column with commas. Also adds an
+    'n' column with the group size.
+
+    Args:
+        input_df: The input DataFrame.
+        agg_column_names: Column names whose values should be comma-concatenated
+            within each group.
+
+    Returns:
+        A DataFrame with the groupby columns, the concatenated aggregation
+        columns, and an 'n' column indicating group size.
+    """
+    def apply_fn(sub_df):
+        res = {key: ",".join(sub_df[key]) for key in agg_column_names}
+        assert 'n' not in input_df.columns
+        res['n'] = sub_df.shape[0]
+        return pd.Series(res)
+
+    groupby_columns = list(set(input_df.columns) - set(agg_column_names))
+    return input_df.groupby(groupby_columns).apply(apply_fn, include_groups=False).reset_index()
+
+
 def intersect_region_dataframes(region_dataframes, sort=False):
     """
     Finds the intersection of a list of RegionDataFrames

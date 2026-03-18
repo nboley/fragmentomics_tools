@@ -1,8 +1,47 @@
+import os
+
 import pandas as pd
 import numpy as np
 
 from fragmentomics_tools.dataframe import RegionDataFrame
 from fragmentomics_tools.public_data_resources.gencode import load_gencode_genes_rdf
+
+# Weight presets for HematopoieticGeneExpression.cluster_names_and_weights().
+# "blood_2024" represents the original blood cell-type composition assumptions
+# used in the fragmentomics analysis pipeline.
+_WEIGHTS_BLOOD_2024 = """
+Early_Erythroid_Cells 0.17
+Late_Erythroid_Cells 0.15
+Myeloid_Progenitor 0.1
+Lymphoid_Progenitor_1 0.08
+Granulocyte-Monocyte_Progenitor 0.16
+Neutrophil 0.21
+CD14+_Monocyte_Cells_1 0.05
+CD14+_Monocyte_Cells_2 0.04
+CD16+_Monocyte_Cells 0.04
+Lymphoid_Progenitor_2 0.08
+""".strip()
+
+# "strand_asymmetry" represents an alternative set of blood cell-type composition
+# assumptions used in the strand asymmetry analysis work, with lower erythroid
+# and neutrophil weights.
+_WEIGHTS_STRAND_ASYMMETRY = """
+Early_Erythroid_Cells 0.15
+Late_Erythroid_Cells 0.13
+Myeloid_Progenitor 0.1
+Lymphoid_Progenitor_1 0.08
+Granulocyte-Monocyte_Progenitor 0.16
+Neutrophil 0.17
+CD14+_Monocyte_Cells_1 0.05
+CD14+_Monocyte_Cells_2 0.04
+CD16+_Monocyte_Cells 0.04
+Lymphoid_Progenitor_2 0.08
+""".strip()
+
+_WEIGHTS_PRESETS = {
+    "blood_2024": _WEIGHTS_BLOOD_2024,
+    "strand_asymmetry": _WEIGHTS_STRAND_ASYMMETRY,
+}
 
 
 class HematopoieticGeneExpression(RegionDataFrame):
@@ -51,31 +90,43 @@ class HematopoieticGeneExpression(RegionDataFrame):
         return code_to_weight
 
     @staticmethod
-    def cluster_names_and_weights():
-        cluster_names_and_weights = """
-        Early_Erythroid_Cells 0.17
-        Late_Erythroid_Cells 0.15
-        Myeloid_Progenitor 0.1
-        Lymphoid_Progenitor_1 0.08
-        Granulocyte-Monocyte_Progenitor 0.16
-        Neutrophil 0.21
-        CD14+_Monocyte_Cells_1 0.05
-        CD14+_Monocyte_Cells_2 0.04
-        CD16+_Monocyte_Cells 0.04
-        Lymphoid_Progenitor_2 0.08
-        """.strip().split(
-            "\n"
-        )
+    def cluster_names_and_weights(weights_preset="blood_2024"):
+        """Return a dict mapping cluster names to their weights.
+
+        Args:
+            weights_preset: One of "blood_2024" (default, original weights) or
+                "strand_asymmetry" (alternative weights with lower erythroid and
+                neutrophil contributions).
+        """
+        if weights_preset not in _WEIGHTS_PRESETS:
+            raise ValueError(
+                f"Unknown weights_preset '{weights_preset}'. "
+                f"Must be one of: {list(_WEIGHTS_PRESETS.keys())}"
+            )
+        lines = _WEIGHTS_PRESETS[weights_preset].split("\n")
         return dict(
-            (x.split()[0], float(x.split()[1])) for x in cluster_names_and_weights
+            (x.split()[0], float(x.split()[1])) for x in lines
         )
 
     @classmethod
-    def load(cls):
-        grpd_counts = pd.read_table(
-            "data/expression/sc_rnaseq.counts.hematopoetic.tsv", index_col=0
+    def load_all(cls, counts_path=None, weights_preset="blood_2024"):
+        """Load all per-cluster TPM values joined to gencode gene coordinates.
+
+        Returns a DataFrame with one column per cluster (not yet weighted/summed),
+        indexed by gene_name, gene_id, contig, strand, start, stop.
+
+        Args:
+            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv file.
+                Defaults to 'data/expression/sc_rnaseq.counts.hematopoetic.tsv'.
+            weights_preset: Which weight preset to use for cluster column naming.
+                Defaults to "blood_2024".
+        """
+        if counts_path is None:
+            counts_path = "data/expression/sc_rnaseq.counts.hematopoetic.tsv"
+        grpd_counts = pd.read_table(counts_path, index_col=0)
+        cluster_names_and_weights = cls.cluster_names_and_weights(
+            weights_preset=weights_preset
         )
-        cluster_names_and_weights = cls.cluster_names_and_weights()
 
         tpms = grpd_counts / (grpd_counts.sum() / 1e6)
         tpms = tpms[["02", "03", "05", "06", "07", "08", "11", "12", "13", "15"]]
@@ -93,6 +144,22 @@ class HematopoieticGeneExpression(RegionDataFrame):
             .rename(columns={"index": "gene_name"})
             .set_index(["gene_name", "gene_id", "contig", "strand", "start", "stop"])
             .dropna()
+        )
+
+        return tpms
+
+    @classmethod
+    def load(cls, counts_path=None, weights_preset="blood_2024"):
+        """Load weighted gene expression as a HematopoieticGeneExpression RDF.
+
+        Args:
+            counts_path: Path to the sc_rnaseq.counts.hematopoetic.tsv file.
+                Defaults to 'data/expression/sc_rnaseq.counts.hematopoetic.tsv'.
+            weights_preset: Which weight preset to use. Defaults to "blood_2024".
+        """
+        tpms = cls.load_all(counts_path=counts_path, weights_preset=weights_preset)
+        cluster_names_and_weights = cls.cluster_names_and_weights(
+            weights_preset=weights_preset
         )
 
         # set expression by taking a weighted sum over the relevant sub-types
