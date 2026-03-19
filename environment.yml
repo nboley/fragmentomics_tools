@@ -1,0 +1,34 @@
+name: base
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python >=3.10,<3.13
+  - setuptools >=61
+  - numpy >=1.26
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - h5py
+  - pysam
+  - pybedtools
+  - pybigwig
+  - bx-python
+  - smart_open
+  - dacite
+  - intervaltree
+  - tqdm
+  - joblib
+  - numba
+  - requests
+  - pyliftover
+  - statsmodels
+  - sparse
+  - fragments-h5
+  - cython >=3.0
+  - c-compiler
+  - awscli
+  - s5cmd
+  - pip

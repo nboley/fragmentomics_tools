@@ -5,23 +5,54 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fragmentomics-tools"
 version = "1.0.0"
-# dependencies should be install via mamba
-dependencies = []
-requires-python = ">=3.6"
+requires-python = ">=3.10"
+description = "Tools and datastructures around analyzing fragmentomics data"
+readme = "README.md"
+license = "LicenseRef-Proprietary"
+keywords = ["fragmentomics"]
 authors = [
   {name = "Nathan Boley", email = "npboley@gmail.com"},
 ]
 maintainers = [
   {name = "Nathan Boley", email = "npboley@gmail.com"},
 ]
-description = "Tools and datastructures around analyzing fragmentomics data"
-readme = "README.md"
-license = {file = "LICENSE"}
-keywords = ["fragmentomics"]
 classifiers = [
   "Development Status :: 4 - Beta",
-  "Programming Language :: Python"
+  "Programming Language :: Python",
+]
+dependencies = [
+    "numpy>=1.26",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "seaborn",
+    "h5py",
+    "pysam",
+    "pybedtools",
+    "pyBigWig",
+    "bx-python",
+    "smart_open",
+    "dacite",
+    "intervaltree",
+    "tqdm",
+    "joblib",
+    "numba",
+    "requests",
+    "pyliftover",
+    "statsmodels",
+    "sparse",
+    "fragments-h5",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch",
+    "pytorch-lightning",
 ]
 
 [project.urls]
 Repository = "https://github.com/nboley/fragmentomic_tools"
+
+[tool.setuptools.packages.find]
+include = ["fragmentomics_tools", "fragmentomics_tools.*"]

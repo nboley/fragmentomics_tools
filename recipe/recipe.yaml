@@ -1,0 +1,60 @@
+schema_version: 1
+
+package:
+  name: fragmentomics-tools
+  version: "1.0.0"
+
+source:
+  path: ..
+
+build:
+  # No noarch — Cython extensions are platform-specific
+  script:
+    - rm -f fragmentomics_tools/sequence.c
+    - python setup.py build_ext --inplace
+    - python -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+  host:
+    - python >=3.10,<3.13
+    - pip
+    - setuptools >=61
+    - wheel
+    - cython >=3.0
+    - numpy >=1.26
+  run:
+    - python >=3.10,<3.13
+    - numpy >=1.26
+    - pandas
+    - scipy
+    - scikit-learn
+    - matplotlib
+    - seaborn
+    - h5py
+    - pysam
+    - pybedtools
+    - pybigwig
+    - bx-python
+    - smart_open
+    - dacite
+    - intervaltree
+    - tqdm
+    - joblib
+    - numba
+    - requests
+    - pyliftover
+    - statsmodels
+    - sparse
+    - fragments-h5
+
+tests:
+  - python:
+      imports:
+        - fragmentomics_tools
+
+about:
+  homepage: https://github.com/karius-ai/fragmentomics-tools
+  summary: Tools and datastructures for analyzing fragmentomics data
+  license: LicenseRef-Proprietary

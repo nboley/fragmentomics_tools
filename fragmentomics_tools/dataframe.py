@@ -40,7 +40,8 @@ import logging
 from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
-from fragmentomics_tools.motif import Pfm
+# Pfm import deferred to avoid top-level torch dependency (see motif.py)
+# from fragmentomics_tools.motif import Pfm
 from fragmentomics_tools.util.liftover import RegionLiftOver
 
 # from fbio.formats import BedReader, BigWigReader
@@ -1718,6 +1719,7 @@ class RegionDataFrame(DataFrameBase):
         )
         sequences = np.stack(sequences, axis=0)
         sequences = numpy.swapaxes(sequences, 1, 2)
+        from fragmentomics_tools.motif import Pfm
         pfm = Pfm(freqs=sequences)
         return pfm
 

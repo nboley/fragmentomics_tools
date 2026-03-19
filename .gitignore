@@ -156,6 +156,13 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Generated C files from Cython
+*.c
+
+# Conda / rattler-build artifacts
+output/
+work/
+
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
