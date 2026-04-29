@@ -54,5 +54,8 @@ gpu = [
 [project.urls]
 Repository = "https://github.com/nboley/fragmentomic_tools"
 
+[project.entry-points."claude_mcp.checkpoint_hooks"]
+fragmentomics_tools = "fragmentomics_tools.checkpoint_hooks:register_checkpoint_hooks"
+
 [tool.setuptools.packages.find]
 include = ["fragmentomics_tools", "fragmentomics_tools.*"]
