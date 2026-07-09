@@ -1738,7 +1738,7 @@ class RegionFragmentArray(FragmentArray):
         return_methyl = fragments_h5.has_methyl
         include_fragment_strand = fragments_h5.has_strand
         if return_gc is None:
-            return_gc = (generate_weights_callback is not None)
+            return_gc = fragments_h5.has_gc if hasattr(fragments_h5, 'has_gc') else (generate_weights_callback is not None)
 
         _fetch_kwargs = dict(
             max_frag_len=max_frag_len,
