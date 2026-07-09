@@ -639,6 +639,7 @@ class RegionDataFrame(DataFrameBase):
         default_jaspar: bool = False,
         shuffle_tf_seed: int = 314,
         quiet: bool = False,
+        ref_path: Optional[str] = None,
     ) -> "RegionDataFrame":
         """Add TF related columns and set start/stop to be the start/stop of the tf. Each region in the output will be
          `target_len` long.
@@ -690,12 +691,15 @@ class RegionDataFrame(DataFrameBase):
         if cuda:
             tf_conv = tf_conv.cuda()
 
+        if ref_path is None:
+            ref_path = self.get_fasta_path()
+
         with torch.no_grad():
             sds = SeqDataSet(
                 region_dataframe=self
                 if tf_search_width is None
                 else self.resize_regions(tf_search_width),
-                ref_path="/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz",
+                ref_path=ref_path,
             )
             sdl = torch.utils.data.DataLoader(
                 sds,
@@ -1960,6 +1964,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
         generate_weights_callback = None,
         fragment_array_callback = None,
+        fetch_array_kwargs: dict = None,
+        min_mapq: int = None,
     ):
         """ """
         assert self.index.is_unique
@@ -1972,6 +1978,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 region=region,
                 max_frag_len=max_frag_len,
                 generate_weights_callback=generate_weights_callback,
+                fetch_array_kwargs=fetch_array_kwargs,
+                min_mapq=min_mapq,
             )
             fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
             if fragment_array_callback is not None:
@@ -2137,20 +2145,32 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         return
 
     def set_fragment_array_gc_weights(self, normalizer):
-        def weight_fa(record):
-            fa = deepcopy(record.fragment_array)
+        """Set per-fragment weights using a GC/FL bias model.
+
+        Args:
+            normalizer: A model with a ``predict(length, gc)`` method (e.g.
+                ``karius_biomarker.flgc.GCFlDistModel``). GC is expected in
+                percent (0-100); fragment arrays store GC as fraction (0-1),
+                so conversion is handled here.
+
+        Requires that fragment arrays were loaded with ``return_gc=True``
+        so that ``fragment_array.gc`` is available.
+        """
+        def _apply_weights(record):
+            fa = record.fragment_array
+            if fa.gc is None:
+                raise ValueError(
+                    "Fragment array has no GC data. Reload with return_gc=True."
+                )
             fls = fa.fragment_lengths
-            inverse_weights = record.normalizer(fls, [50]*(len(fls)))
-            fa.weights = numpy.atleast_1d(1/inverse_weights)
+            gc_percent = fa.gc * 100.0
+            weights = numpy.atleast_1d(normalizer.predict(fls, gc_percent))
+            fa.weights = weights
             return fa
 
-        fas = self.parallel_apply(
-            lambda record: _set_fragment_array_weights_from_weights_record(record.fragment_array, record, expansion),
-            n_workers=n_workers
-        ).iloc[:, 0].rename('fragment_array')
+        fas = self.parallel_apply(_apply_weights).iloc[:, 0].rename('fragment_array')
         fas.index = self.index
         self['fragment_array'] = fas
-        return
 
     def reset_fragment_array_weights(self):
         """Set the fragment array weights to zero.
@@ -2166,9 +2186,15 @@ class FlDist:
         max_frag_len = 512
         columns = {}
         for record in sdf.itertuples():
-            cnts = record.frag_h5.fragment_length_counts[:max_frag_len]
+            cnts = record.frag_h5.fragment_length_counts
+            if len(cnts) < max_frag_len:
+                cnts = np.pad(cnts, (0, max_frag_len - len(cnts)))
+            else:
+                cnts = cnts[:max_frag_len]
             # normalize to library depth
-            cnts = cnts / cnts.sum()
+            total = cnts.sum()
+            if total > 0:
+                cnts = cnts / total
             columns[record.sample_id] = cnts
 
         fl_df = pd.DataFrame(columns)

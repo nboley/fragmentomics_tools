@@ -24,19 +24,6 @@ from ..region import Region
 from .fragment_matrix import RegionFragmentMatrix, FragmentMatrix
 from .fragment_matrix_math import reverse_sum_pool
 
-from fragmentomics_tools.plot.tracks import (
-    VectorTrack,
-    EmptyTrack,
-    VplotTrack,
-    MotifTrack,
-    Line,
-    VLine,
-    Tracks,
-    MidpointCoverageTrack,
-    CoverageTrack,
-)
-
-
 DEFAULT_MIN_SCALING_FACTOR: float = 1e-6
 DEFAULT_MAX_SCALING_FACTOR: float = 10.0
 
@@ -226,6 +213,7 @@ class FragmentArray:
         num_cytosines: Union[numpy.ndarray, List, None] = None,
         num_converted_cytosines: Union[numpy.ndarray, List, None] = None,
         is_flipped: bool = False,
+        gc: Union[numpy.ndarray, None] = None,
     ):
         """
         A FragmentArray is a collection of fragments stored in a spare-array-like coordinate format.  The
@@ -245,6 +233,7 @@ class FragmentArray:
         :param num_converted_cpgs: number of converted cpgs (e.g. from emseq)
         :param num_cytosines: number of cytosines in the entire fragment (not just the sequenced reads)
         :param num_comverted_cytosines: number of converted cytosines (e.g. from emseq). Overlaps are only counted once.
+        :param gc: per-fragment GC content as fraction (0.0-1.0). From FragmentsH5 fetch_array(return_gc=True).
         """
         # do not add validate_data yet.
         self.init_kwargs = dict(
@@ -261,6 +250,7 @@ class FragmentArray:
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             is_flipped=is_flipped,
+            gc=gc,
         )
         if isinstance(starts_0, numpy.ndarray) and starts_0.dtype not in (numpy.int32, numpy.int64):
             raise TypeError("start array must be int32 or int64")
@@ -285,6 +275,7 @@ class FragmentArray:
         self.num_cytosines = self._zeros_if_none(num_cytosines)
         self.num_converted_cytosines = self._zeros_if_none(num_converted_cytosines)
 
+        self.gc = gc
 
         self.length = length
         self.max_frag_len = max_frag_len
@@ -1131,6 +1122,15 @@ class FragmentArray:
 
         :param binding_site_data: a binding site data instance
         """
+        from fragmentomics_tools.plot.tracks import (
+            VectorTrack,
+            VplotTrack,
+            MotifTrack,
+            Tracks,
+            MidpointCoverageTrack,
+            CoverageTrack,
+        )
+
         region = self.plot_region
 
         vlines = []
@@ -1709,6 +1709,9 @@ class RegionFragmentArray(FragmentArray):
         region: Region,
         max_frag_len: int = DEFAULT_MAX_FRAG_LEN,
         generate_weights_callback = None,
+        fetch_array_kwargs: dict = None,
+        min_mapq: int = None,
+        return_gc: bool = None,
     ) -> "RegionFragmentArray":
         """
         :param flip_data_to_match_region_strand: If True, the data is placed on the strand matching the region strand (if set).
@@ -1734,17 +1737,43 @@ class RegionFragmentArray(FragmentArray):
 
         return_methyl = fragments_h5.has_methyl
         include_fragment_strand = fragments_h5.has_strand
-        return_gc = (generate_weights_callback != None)
+        if return_gc is None:
+            return_gc = (generate_weights_callback is not None)
 
-        starts, stops, supp_data = fragments_h5.fetch_array(
-            region.chrom,
-            region.start,
-            region.stop,
+        _fetch_kwargs = dict(
             max_frag_len=max_frag_len,
             return_strand=include_fragment_strand,
             return_methyl=return_methyl,
             return_gc=return_gc,
         )
+        if fetch_array_kwargs is not None:
+            _fetch_kwargs.update(fetch_array_kwargs)
+
+        # If min_mapq filtering requested, ensure we fetch MAPQ values
+        if min_mapq is not None:
+            _fetch_kwargs['return_mapqs'] = True
+
+        starts, stops, supp_data = fragments_h5.fetch_array(
+            region.chrom,
+            region.start,
+            region.stop,
+            **_fetch_kwargs,
+        )
+
+        # Filter by MAPQ if requested
+        if min_mapq is not None and 'mapq' in supp_data:
+            mapq_raw = supp_data['mapq']
+            # MAPQ may have 2 values per fragment (paired-end) — take min per pair
+            if mapq_raw.ndim == 2:
+                mapq_vals = mapq_raw.min(axis=1)
+            elif len(mapq_raw) == 2 * len(starts):
+                mapq_vals = numpy.minimum(mapq_raw[::2], mapq_raw[1::2])
+            else:
+                mapq_vals = mapq_raw.ravel()
+            mask = mapq_vals >= min_mapq
+            starts = starts[mask]
+            stops = stops[mask]
+            supp_data = {k: v[mask] for k, v in supp_data.items()}
 
         if generate_weights_callback is not None:
             weights = generate_weights_callback(starts, stops, supp_data)
@@ -1809,6 +1838,8 @@ class RegionFragmentArray(FragmentArray):
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             weights=weights,
+            is_flipped=region.is_minus_strand(),
+            gc=gc,
         )
 
         return rfa
