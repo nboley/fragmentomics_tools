@@ -26,9 +26,11 @@ dependencies:
   - pyliftover
   - statsmodels
   - sparse
-  - fragments-h5
   - cython >=3.0
   - c-compiler
   - awscli
   - s5cmd
   - pip
+  - pip:
+    - git+https://github.com/nboley/fragments_h5.git
+    - git+https://github.com/nboley/datamanifest.git

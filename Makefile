@@ -3,8 +3,8 @@
 
 PACKAGE_NAME := fragmentomics-tools
 VERSION := $(shell grep '^\s*version:' recipe/recipe.yaml | head -1 | sed -E 's/.*version:\s*"?([0-9.]+)"?.*/\1/')
-ECR_REGISTRY := 573640641260.dkr.ecr.us-east-1.amazonaws.com/omni
-IMAGE_NAME := $(PACKAGE_NAME)
+ECR_REGISTRY := 573640641260.dkr.ecr.us-east-1.amazonaws.com
+IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
 IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 

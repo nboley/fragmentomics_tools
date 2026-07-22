@@ -1728,7 +1728,7 @@ def pfm_to_logo(pfm):
 
 
 def get_redundant_core_pfms(calculate_logo: bool = False):
-    with open("/scratch/karius/DHS_sites/JASPAR2020_CORE_vertebrates_redundant_pfms_jaspar.txt") as handle:
+    with open("/efs/analytics/nathanboley/data_resources/motif_databases/JASPAR2024_CORE_vertebrates_redundant_pfms_jaspar.txt") as handle:
         rows = [r.rstrip("\n") for r in handle]
     pfms = []
     i = 0
@@ -1755,7 +1755,7 @@ def get_redundant_core_pfms(calculate_logo: bool = False):
 
 
 def get_all_human_hocomoco11_pfms(calculate_logo: bool = False):
-    with open("/scratch/karius/DHS_sites/HOCOMOCOv11_full_HUMAN_mono_jaspar_format.txt") as handle:
+    with open("/efs/analytics/nathanboley/data_resources/motif_databases/HOCOMOCOv11_full_HUMAN_mono_jaspar_format.txt") as handle:
         rows = [r.rstrip("\n") for r in handle]
     pfms = []
     i = 0
@@ -1797,10 +1797,20 @@ def get_all_human_pfms(calculate_logo: bool = False, hocomoco: bool = True):
     :return: List of pfm dictionaries. Keys are ['pfm_id', 'pfm_name', 'pfm'] and optionally ['logo'] if calculate_logo=True
     """
     manual_pfm_dict = {d["pfm_name"]: d for d in get_all_manual_override_pfms(calculate_logo=calculate_logo)}
-    if hocomoco:
-        pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo)
-    else:
-        pfms = get_redundant_core_pfms(calculate_logo=calculate_logo)
+    try:
+        if hocomoco:
+            pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo)
+        else:
+            pfms = get_redundant_core_pfms(calculate_logo=calculate_logo)
+    except FileNotFoundError:
+        import warnings
+        source = "HOCOMOCO" if hocomoco else "JASPAR CORE"
+        warnings.warn(
+            f"{source} PFM file not found. Using manual override PFMs only "
+            f"({len(manual_pfm_dict)} TFs).",
+            UserWarning,
+        )
+        return list(manual_pfm_dict.values())
     grouped_pfms = defaultdict(list)
     for pfmd in pfms:
         grouped_pfms[pfmd["pfm_name"]].append(pfmd)

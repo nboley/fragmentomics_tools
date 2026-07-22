@@ -1264,6 +1264,7 @@ class RegionFragmentArray(FragmentArray):
         num_cytosines: Union[numpy.ndarray, List, None] = None,
         num_converted_cytosines: Union[numpy.ndarray, List, None] = None,
         is_flipped: bool = False,
+        gc: Union[numpy.ndarray, None] = None,
     ):
         self.region = region
 
@@ -1281,6 +1282,7 @@ class RegionFragmentArray(FragmentArray):
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             is_flipped=is_flipped,
+            gc=gc,
         )
 
         # assert obj_type_name_matches_class_name_str(region, Region)

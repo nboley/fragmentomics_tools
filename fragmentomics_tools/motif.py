@@ -340,7 +340,9 @@ class TFConv1D(nn.Module):
                         n_pad_right = (tf_width - w) // 2
                         n_pad_left = n_pad_right + 1 if w % 2 == 0 else n_pad_right
                     motif_t = F.pad(motif_t, (n_pad_left, n_pad_right))
-                    motif_tr = F.pad(motif_tr, (n_pad_left, n_pad_right))
+                    # Derive RC from the padded forward kernel so padding
+                    # position is automatically correct for both strands
+                    motif_tr = motif_t.flip(dims=(-1, -2))
                 assert motif_t.shape[0] == 4, motif_t.shape
                 assert motif_t.shape[1] == tf_width, (motif_t.shape, w, tf_width)
                 motif_tensors.append(motif_t)

@@ -4,11 +4,8 @@
 #
 # Container for fragmentomics-tools with Cython extensions.
 #
-# Build:
-#   make docker-build
-# Or manually (requires JFrog credentials for fragments-h5):
-#   docker build --build-arg JFROG_CONDA_CHANNEL=https://USER:PASS@karius.jfrog.io/artifactory/api/conda/karius-conda \
-#     -t fragmentomics-tools:1.0.0 .
+# Build (no JFrog needed — fragments-h5 and datamanifest install from GitHub):
+#   docker build -t karius-fragmentomics-tools:latest .
 #
 # =============================================================================
 
@@ -20,11 +17,12 @@ LABEL description="Fragmentomics tools and datastructures"
 # Switch to root for system package installation
 USER root
 
-# Install system dependencies (build-essential needed for Cython compilation)
+# Install system dependencies (build-essential for Cython, git for pip GitHub installs)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        git \
         pigz \
         gzip \
         bzip2 \
@@ -38,18 +36,9 @@ USER $MAMBA_USER
 # Copy environment file
 COPY --chown=$MAMBA_USER:$MAMBA_USER environment.yml /tmp/environment.yml
 
-# JFrog conda channel (for internal packages like fragments-h5)
-# Pass via: --build-arg JFROG_CONDA_CHANNEL=https://USER:PASS@karius.jfrog.io/...
-ARG JFROG_CONDA_CHANNEL=""
-
-# Create the conda environment (add JFrog channel if provided)
-RUN if [ -n "$JFROG_CONDA_CHANNEL" ]; then \
-        micromamba install -y -n base -f /tmp/environment.yml -c "$JFROG_CONDA_CHANNEL" && \
-        micromamba clean --all --yes; \
-    else \
-        micromamba install -y -n base -f /tmp/environment.yml && \
-        micromamba clean --all --yes; \
-    fi
+# Create the conda environment (fragments-h5 and datamanifest install via pip from GitHub)
+RUN micromamba install -y -n base -f /tmp/environment.yml && \
+    micromamba clean --all --yes
 
 # Activate the environment by default
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
@@ -65,8 +54,10 @@ RUN cd /tmp/fragmentomics_tools && \
 
 # Verify installation
 RUN python --version && \
-    python -c "import fragmentomics_tools; print('fragmentomics-tools OK')"
+    python -c "import fragmentomics_tools; print('fragmentomics-tools OK')" && \
+    python -c "from fragments_h5 import FragmentsH5; print('fragments-h5 OK')" && \
+    python -c "from datamanifest import DataManifest; print('datamanifest OK')"
 
 WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/_entrypoint.sh"]
+ENTRYPOINT ["/bin/bash", "-c", "eval \"$(micromamba shell hook --shell bash)\" && micromamba activate base && exec \"$@\"", "--"]
 CMD ["/bin/bash"]
