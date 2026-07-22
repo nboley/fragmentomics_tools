@@ -58,6 +58,6 @@ RUN python --version && \
     python -c "from fragments_h5 import FragmentsH5; print('fragments-h5 OK')" && \
     python -c "from datamanifest import DataManifest; print('datamanifest OK')"
 
+ENV PATH="/opt/conda/bin:${PATH}"
 WORKDIR /work
-ENTRYPOINT ["/bin/bash", "-c", "eval \"$(micromamba shell hook --shell bash)\" && micromamba activate base && exec \"$@\"", "--"]
 CMD ["/bin/bash"]
