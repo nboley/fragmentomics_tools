@@ -61,7 +61,9 @@ RUN python --version && \
 ENV PATH="/opt/conda/bin:${PATH}"
 
 # Nextflow hardcodes /usr/local/bin/aws in its Batch command wrapper
+USER root
 RUN ln -sf /opt/conda/bin/aws /usr/local/bin/aws
+USER $MAMBA_USER
 
 WORKDIR /work
 CMD ["/bin/bash"]
