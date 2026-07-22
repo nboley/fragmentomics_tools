@@ -59,5 +59,9 @@ RUN python --version && \
     python -c "from datamanifest import DataManifest; print('datamanifest OK')"
 
 ENV PATH="/opt/conda/bin:${PATH}"
+
+# Nextflow hardcodes /usr/local/bin/aws in its Batch command wrapper
+RUN ln -sf /opt/conda/bin/aws /usr/local/bin/aws
+
 WORKDIR /work
 CMD ["/bin/bash"]
