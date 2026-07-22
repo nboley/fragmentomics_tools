@@ -66,4 +66,5 @@ RUN ln -sf /opt/conda/bin/aws /usr/local/bin/aws
 USER $MAMBA_USER
 
 WORKDIR /work
+ENTRYPOINT []
 CMD ["/bin/bash"]
