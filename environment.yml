@@ -26,6 +26,7 @@ dependencies:
   - pyliftover
   - statsmodels
   - sparse
+  - pytorch-cpu
   - cython >=3.0
   - c-compiler
   - awscli
