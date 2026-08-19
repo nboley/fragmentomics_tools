@@ -23,6 +23,7 @@ dependencies:
   - joblib
   - numba
   - requests
+  - pyyaml
   - pyliftover
   - statsmodels
   - sparse
