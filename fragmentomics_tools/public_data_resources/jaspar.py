@@ -1745,7 +1745,7 @@ def get_redundant_core_pfms(calculate_logo: bool = False, path: str = None):
         ) from exc
     pfms = []
     i = 0
-    while i < len(rows) - 5:
+    while i + 4 < len(rows):
         assert rows[i][0] == ">", rows[i]
         id_parts = rows[i].strip().split("\t")
         pfm_id = id_parts[0][1:].strip()
@@ -1781,7 +1781,7 @@ def get_all_human_hocomoco11_pfms(calculate_logo: bool = False, path: str = None
         ) from exc
     pfms = []
     i = 0
-    while i < len(rows) - 5:
+    while i + 4 < len(rows):
         assert rows[i][0] == ">", rows[i]
         id_parts = rows[i].strip().split("_")
         pfm_id = "_".join(id_parts[1:])
