@@ -11,9 +11,7 @@ import pytest
 from fragmentomics_tools.public_data_resources.jaspar import (
     BindingModel,
     MissingPFMError,
-    get_all_human_pfms,
     get_redundant_core_pfms,
-    get_all_human_hocomoco11_pfms,
 )
 from fragmentomics_tools.motif import get_pfms, TFConv1D
 

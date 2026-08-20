@@ -2,7 +2,6 @@
 
 Uses small fixture PFM files checked in under test/data/.
 """
-import os
 from pathlib import Path
 
 import numpy as np
@@ -11,11 +10,9 @@ import pytest
 from fragmentomics_tools.public_data_resources.jaspar import (
     DEFAULT_JASPAR_CORE_PATH,
     DEFAULT_HOCOMOCO_PATH,
-    MissingPFMError,
     get_redundant_core_pfms,
     get_all_human_hocomoco11_pfms,
     get_all_manual_override_pfms,
-    get_all_human_pfms,
     pfm_to_logo,
 )
 
@@ -87,7 +84,8 @@ class TestGetAllHumanHocomoco11Pfms:
     def test_pfm_ids(self):
         pfms = get_all_human_hocomoco11_pfms(path=HOCOMOCO_FIXTURE)
         ids = {p["pfm_id"] for p in pfms}
-        assert ids == {"HUMAN.H11MO.0.A", "HUMAN.H11MO.0.A", "HUMAN.H11MO.0.A"}
+        # All three fixture entries share the same ID suffix
+        assert ids == {"HUMAN.H11MO.0.A"}
 
     def test_pfm_shapes(self):
         pfms = get_all_human_hocomoco11_pfms(path=HOCOMOCO_FIXTURE)

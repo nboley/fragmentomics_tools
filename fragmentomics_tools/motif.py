@@ -113,8 +113,13 @@ def get_pfms(tfs, all_pfms=None, default_jaspar: bool = False) -> List[BindingMo
     }
     missing_tfs = set(tfs) - set(pfms.keys())
     if len(missing_tfs) > 0:
-        # logger.warning(f"Missing {','.join(missing_tfs)} in Hoco Moco so using jasper.")
-        fallback_all_pfms = list(get_all_human_pfms(calculate_logo=True, hocomoco=default_jaspar))
+        # Try the other database as fallback. In containers the fallback DB
+        # file may not exist — treat that as an empty fallback and let
+        # MissingPFMError report the unresolved TFs.
+        try:
+            fallback_all_pfms = list(get_all_human_pfms(calculate_logo=True, hocomoco=default_jaspar))
+        except FileNotFoundError:
+            fallback_all_pfms = []
         fallback_pfms = {
             h["pfm_name"]: BindingModel(h["pfm"], id=h["pfm_id"], name=h["pfm_name"])
             for h in fallback_all_pfms
