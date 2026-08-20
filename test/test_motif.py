@@ -41,7 +41,20 @@ class TestGetPfms:
         assert names == sorted(names)
 
     def test_missing_tf_raises(self):
+        """When a TF is absent from both primary and fallback, MissingPFMError is raised."""
         fixture_pfms = get_redundant_core_pfms(path=JASPAR_FIXTURE)
+        with pytest.raises(MissingPFMError, match="NONEXISTENT"):
+            get_pfms({"NONEXISTENT"}, all_pfms=fixture_pfms)
+
+    def test_missing_tf_raises_when_fallback_unavailable(self, monkeypatch):
+        """In containers the fallback DB file doesn't exist — get_pfms must
+        catch FileNotFoundError and raise MissingPFMError, not propagate
+        the FileNotFoundError."""
+        from fragmentomics_tools.public_data_resources import jaspar as jaspar_mod
+        fixture_pfms = get_redundant_core_pfms(path=JASPAR_FIXTURE)
+        # Make the fallback DB unreachable (simulates container)
+        monkeypatch.setattr(jaspar_mod, "DEFAULT_JASPAR_CORE_PATH", "/nonexistent/jaspar.txt")
+        monkeypatch.setattr(jaspar_mod, "DEFAULT_HOCOMOCO_PATH", "/nonexistent/hocomoco.txt")
         with pytest.raises(MissingPFMError, match="NONEXISTENT"):
             get_pfms({"NONEXISTENT"}, all_pfms=fixture_pfms)
 

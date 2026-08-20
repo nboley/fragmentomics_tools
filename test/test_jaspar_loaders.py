@@ -132,13 +132,48 @@ class TestPfmToLogo:
         assert logo[0, 0] > 1.5  # close to 2 bits
 
 
-class TestDefaultPathNotRequired:
-    """Verify that callers CAN pass a path, bypassing the default."""
+class TestOffByOneRegression:
+    """Regression tests for the parser off-by-one fix.
 
-    def test_jaspar_with_explicit_path(self):
-        pfms = get_redundant_core_pfms(path=JASPAR_FIXTURE)
-        assert len(pfms) == 3
+    The bug was `while i < len(rows) - 5` which skips the last motif when
+    the file has no trailing blank line (exactly N*5 lines). The fix is
+    `while i + 4 < len(rows)`.
+    """
 
-    def test_hocomoco_with_explicit_path(self):
-        pfms = get_all_human_hocomoco11_pfms(path=HOCOMOCO_FIXTURE)
-        assert len(pfms) == 3
+    def test_jaspar_no_trailing_newline(self, tmp_path):
+        """JASPAR file with exactly 10 lines (2 motifs, no trailing blank)."""
+        content = (
+            ">MA0002.1\tRUNX1\n"
+            "A  [    10     12      4 ]\n"
+            "C  [     2      2      7 ]\n"
+            "G  [     3      1      1 ]\n"
+            "T  [    11     11     14 ]\n"
+            ">MA0003.1\tTFAP2A\n"
+            "A  [     0      0      0 ]\n"
+            "C  [     0    185    185 ]\n"
+            "G  [   185      0      0 ]\n"
+            "T  [     0      0      0 ]\n"
+        )
+        f = tmp_path / "no_trailing.txt"
+        f.write_text(content)
+        pfms = get_redundant_core_pfms(path=str(f))
+        assert len(pfms) == 2, f"Expected 2 motifs, got {len(pfms)} (last motif dropped?)"
+
+    def test_hocomoco_no_trailing_newline(self, tmp_path):
+        """HOCOMOCO file with exactly 10 lines (2 motifs, no trailing blank)."""
+        content = (
+            ">CTCF_HUMAN.H11MO.0.A\n"
+            "87\t167\t281\n"
+            "291\t145\t49\n"
+            "76\t414\t449\n"
+            "459\t187\t134\n"
+            ">FOXA1_HUMAN.H11MO.0.A\n"
+            "8\t0\t0\n"
+            "2\t0\t28\n"
+            "4\t399\t4\n"
+            "232\t10\t8\n"
+        )
+        f = tmp_path / "no_trailing.txt"
+        f.write_text(content)
+        pfms = get_all_human_hocomoco11_pfms(path=str(f))
+        assert len(pfms) == 2, f"Expected 2 motifs, got {len(pfms)} (last motif dropped?)"
