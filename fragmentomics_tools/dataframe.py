@@ -640,6 +640,7 @@ class RegionDataFrame(DataFrameBase):
         shuffle_tf_seed: int = 314,
         quiet: bool = False,
         ref_path: Optional[str] = None,
+        pfms: Optional[List] = None,
     ) -> "RegionDataFrame":
         """Add TF related columns and set start/stop to be the start/stop of the tf. Each region in the output will be
          `target_len` long.
@@ -678,16 +679,27 @@ class RegionDataFrame(DataFrameBase):
         if not inplace:
             self = self.copy()
 
-        tf_conv = TFConv1D(
-            tf_width=target_len,
-            only_logo=True,
-            output_both_strands=True,
-            channels=4,
-            default_jaspar=default_jaspar,
-            tfs=set(target_tfs),
-            shuffle_motifs=shuffle_tf_motif,
-            shuffle_seed=shuffle_tf_seed,
-        ).eval()
+        if pfms is not None:
+            tf_conv = TFConv1D(
+                tf_width=target_len,
+                only_logo=True,
+                output_both_strands=True,
+                channels=4,
+                pfms=pfms,
+                shuffle_motifs=shuffle_tf_motif,
+                shuffle_seed=shuffle_tf_seed,
+            ).eval()
+        else:
+            tf_conv = TFConv1D(
+                tf_width=target_len,
+                only_logo=True,
+                output_both_strands=True,
+                channels=4,
+                default_jaspar=default_jaspar,
+                tfs=set(target_tfs),
+                shuffle_motifs=shuffle_tf_motif,
+                shuffle_seed=shuffle_tf_seed,
+            ).eval()
         if cuda:
             tf_conv = tf_conv.cuda()
 

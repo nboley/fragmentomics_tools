@@ -3,14 +3,17 @@ import pandas as pd
 from fragmentomics_tools.dataframe import RegionDataFrame
 
 DEFAULT_GENCODE_V39_GFF3 = "/scratch/nboley/gencode/gencode.v39.basic.annotation.gff3.gz"
+DEFAULT_GENCODE_V49_GFF3 = "/efs/analytics/nathanboley/data_resources/gencode/gencode.v49.basic.annotation.gff3.gz"
 
 
-def load_gencode_genes_rdf(ref="hg38"):
+def load_gencode_genes_rdf(ref="hg38", path=None):
     assert ref == "hg38"
+    if path is None:
+        path = DEFAULT_GENCODE_V49_GFF3
 
     # load the 5' and 3' UTR elements
     rdf = pd.read_table(
-        "/efs/analytics/nathanboley/data_resources/gencode/gencode.v49.basic.annotation.gff3.gz",
+        path,
         usecols=[0, 2, 3, 4, 6, 8],
         names=["contig", "element", "start", "stop", "strand", "meta"],
         comment="#",
