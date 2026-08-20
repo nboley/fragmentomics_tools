@@ -34,5 +34,5 @@ dependencies:
   - s5cmd
   - pip
   - pip:
-    - git+https://github.com/nboley/fragments_h5.git
-    - git+https://github.com/nboley/datamanifest.git
+    - git+https://github.com/nboley/fragments_h5.git@v2.10.1
+    - git+https://github.com/nboley/datamanifest.git@v1.2.0
