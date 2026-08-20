@@ -1811,18 +1811,25 @@ def get_all_manual_override_pfms(calculate_logo: bool = False):
     return result
 
 
-def get_all_human_pfms(calculate_logo: bool = False, hocomoco: bool = True):
+def get_all_human_pfms(calculate_logo: bool = False, hocomoco: bool = True, path: str = None):
     """
 
     :param calculate_logo: Calculate the logo as well
     :param hocomoco:
+    :param path: Explicit path to the underlying PFM database. Forwarded to the
+        leaf loader; None uses that loader's default. Callers resolving the
+        database from elsewhere (e.g. a DataManifest inside a container) MUST
+        come through here rather than calling the leaf loader directly and
+        passing the result as `all_pfms` -- doing so bypasses both the manual
+        override substitution and the dedup below, silently changing which PFM
+        is used for any TF that has an override or duplicate entries.
     :return: List of pfm dictionaries. Keys are ['pfm_id', 'pfm_name', 'pfm'] and optionally ['logo'] if calculate_logo=True
     """
     manual_pfm_dict = {d["pfm_name"]: d for d in get_all_manual_override_pfms(calculate_logo=calculate_logo)}
     if hocomoco:
-        pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo)
+        pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo, path=path)
     else:
-        pfms = get_redundant_core_pfms(calculate_logo=calculate_logo)
+        pfms = get_redundant_core_pfms(calculate_logo=calculate_logo, path=path)
     grouped_pfms = defaultdict(list)
     for pfmd in pfms:
         grouped_pfms[pfmd["pfm_name"]].append(pfmd)
