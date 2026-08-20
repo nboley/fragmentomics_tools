@@ -10,6 +10,10 @@ class MissingPFMError(Exception):
     pass
 
 
+DEFAULT_JASPAR_CORE_PATH = "/efs/analytics/nathanboley/data_resources/motif_databases/JASPAR2024_CORE_vertebrates_redundant_pfms_jaspar.txt"
+DEFAULT_HOCOMOCO_PATH = "/efs/analytics/nathanboley/data_resources/motif_databases/HOCOMOCOv11_full_HUMAN_mono_jaspar_format.txt"
+
+
 class BindingModel(np.ndarray):
     def __new__(cls, input_array, id, name):
         # Input array is an already formed ndarray instance
@@ -1727,12 +1731,21 @@ def pfm_to_logo(pfm):
     return motif_logo
 
 
-def get_redundant_core_pfms(calculate_logo: bool = False):
-    with open("/efs/analytics/nathanboley/data_resources/motif_databases/JASPAR2024_CORE_vertebrates_redundant_pfms_jaspar.txt") as handle:
-        rows = [r.rstrip("\n") for r in handle]
+def get_redundant_core_pfms(calculate_logo: bool = False, path: str = None):
+    if path is None:
+        path = DEFAULT_JASPAR_CORE_PATH
+    try:
+        with open(path) as handle:
+            rows = [r.rstrip("\n") for r in handle]
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"The JASPAR CORE 2024 vertebrates (redundant) PFM database is required but was "
+            f"not found at '{path}'. This is a host-specific absolute path and will not exist "
+            f"inside a container unless that directory is mounted. There is no fallback PFM set."
+        ) from exc
     pfms = []
     i = 0
-    while i < len(rows) - 5:
+    while i + 4 < len(rows):
         assert rows[i][0] == ">", rows[i]
         id_parts = rows[i].strip().split("\t")
         pfm_id = id_parts[0][1:].strip()
@@ -1754,12 +1767,21 @@ def get_redundant_core_pfms(calculate_logo: bool = False):
     return pfms
 
 
-def get_all_human_hocomoco11_pfms(calculate_logo: bool = False):
-    with open("/efs/analytics/nathanboley/data_resources/motif_databases/HOCOMOCOv11_full_HUMAN_mono_jaspar_format.txt") as handle:
-        rows = [r.rstrip("\n") for r in handle]
+def get_all_human_hocomoco11_pfms(calculate_logo: bool = False, path: str = None):
+    if path is None:
+        path = DEFAULT_HOCOMOCO_PATH
+    try:
+        with open(path) as handle:
+            rows = [r.rstrip("\n") for r in handle]
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"The HOCOMOCO v11 (full, human, mono) PFM database is required but was not found "
+            f"at '{path}'. This is a host-specific absolute path and will not exist inside a "
+            f"container unless that directory is mounted. There is no fallback PFM set."
+        ) from exc
     pfms = []
     i = 0
-    while i < len(rows) - 5:
+    while i + 4 < len(rows):
         assert rows[i][0] == ">", rows[i]
         id_parts = rows[i].strip().split("_")
         pfm_id = "_".join(id_parts[1:])
@@ -1797,20 +1819,10 @@ def get_all_human_pfms(calculate_logo: bool = False, hocomoco: bool = True):
     :return: List of pfm dictionaries. Keys are ['pfm_id', 'pfm_name', 'pfm'] and optionally ['logo'] if calculate_logo=True
     """
     manual_pfm_dict = {d["pfm_name"]: d for d in get_all_manual_override_pfms(calculate_logo=calculate_logo)}
-    try:
-        if hocomoco:
-            pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo)
-        else:
-            pfms = get_redundant_core_pfms(calculate_logo=calculate_logo)
-    except FileNotFoundError:
-        import warnings
-        source = "HOCOMOCO" if hocomoco else "JASPAR CORE"
-        warnings.warn(
-            f"{source} PFM file not found. Using manual override PFMs only "
-            f"({len(manual_pfm_dict)} TFs).",
-            UserWarning,
-        )
-        return list(manual_pfm_dict.values())
+    if hocomoco:
+        pfms = get_all_human_hocomoco11_pfms(calculate_logo=calculate_logo)
+    else:
+        pfms = get_redundant_core_pfms(calculate_logo=calculate_logo)
     grouped_pfms = defaultdict(list)
     for pfmd in pfms:
         grouped_pfms[pfmd["pfm_name"]].append(pfmd)

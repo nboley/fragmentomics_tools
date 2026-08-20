@@ -8,7 +8,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragmentomics_tools.public_data_resources.jaspar import BindingModel, get_all_human_pfms
+from fragmentomics_tools.public_data_resources.jaspar import (
+    BindingModel,
+    MissingPFMError,
+    get_all_human_pfms,
+)
 from sequence import one_hot_encode_sequences
 # logger = logging.getLogger(__name__)
 
@@ -92,13 +96,16 @@ class Pfm:
 
 
 def get_pfms(tfs, all_pfms=None, default_jaspar: bool = False) -> List[BindingModel]:
+    fallback_db = "HOCOMOCO" if default_jaspar else "JASPAR CORE"
     if all_pfms is None:
         # Note: the following command returns manually overrides on some TFs when we
         #  hand curate a different PFM for a particular TF name. This happens regardless
         #  of whether hocomoco is set to true or false.
         all_pfms = get_all_human_pfms(calculate_logo=True, hocomoco=not default_jaspar)
+        primary_source = ("JASPAR CORE" if default_jaspar else "HOCOMOCO") + " (+ manual overrides)"
     else:
-        all_pfms = all_pfms
+        primary_source = "the caller-supplied 'all_pfms'"
+    all_pfms = list(all_pfms)
     pfms = {
         h["pfm_name"]: BindingModel(h["pfm"], id=h["pfm_id"], name=h["pfm_name"])
         for h in all_pfms
@@ -106,14 +113,28 @@ def get_pfms(tfs, all_pfms=None, default_jaspar: bool = False) -> List[BindingMo
     }
     missing_tfs = set(tfs) - set(pfms.keys())
     if len(missing_tfs) > 0:
-        # logger.warning(f"Missing {','.join(missing_tfs)} in Hoco Moco so using jasper.")
+        # Try the other database as fallback. In containers the fallback DB
+        # file may not exist — treat that as an empty fallback and let
+        # MissingPFMError report the unresolved TFs.
+        try:
+            fallback_all_pfms = list(get_all_human_pfms(calculate_logo=True, hocomoco=default_jaspar))
+        except FileNotFoundError:
+            fallback_all_pfms = []
         fallback_pfms = {
             h["pfm_name"]: BindingModel(h["pfm"], id=h["pfm_id"], name=h["pfm_name"])
-            for h in get_all_human_pfms(calculate_logo=True, hocomoco=default_jaspar)
+            for h in fallback_all_pfms
             if h["pfm_name"] in missing_tfs
         }
         for k, v in fallback_pfms.items():
             pfms[k] = v
+        unresolved = set(tfs) - set(pfms.keys())
+        if len(unresolved) > 0:
+            raise MissingPFMError(
+                f"No PFM could be found for {len(unresolved)} of the {len(set(tfs))} requested "
+                f"TF(s): {sorted(unresolved)}. Searched {len(all_pfms)} PFMs from "
+                f"{primary_source} and {len(fallback_all_pfms)} PFMs from the {fallback_db} "
+                f"fallback."
+            )
     return list(v for _, v in sorted(pfms.items(), key=lambda kv: kv[0]))  # sorted by tf name
 
 
@@ -273,7 +294,11 @@ class TFConv1D(nn.Module):
             )
         else:
             raise ValueError("Either 'pfms' or 'tfs' must be set.")
-        assert len(self.pfms) > 0
+        if len(self.pfms) == 0:
+            raise ValueError(
+                f"TFConv1D requires at least one PFM, but resolved 0. "
+                f"Requested tfs={tfs!r}, pfms={pfms!r}."
+            )
         assert tf_width % 2 == 1, f"Only support odd tf lengths currently, got {tf_width}"
         self.tf_width = tf_width
         self.stride = stride
