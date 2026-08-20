@@ -2,7 +2,7 @@
 # fragmentomics-tools
 
 PACKAGE_NAME := fragmentomics-tools
-VERSION ?= $(shell grep '^version' pyproject.toml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+VERSION ?= $(shell grep '^version' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 ECR_REGISTRY := 573640641260.dkr.ecr.us-east-1.amazonaws.com
 IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
