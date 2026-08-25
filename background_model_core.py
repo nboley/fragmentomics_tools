@@ -1,0 +1,774 @@
+"""Core model for the cfDNA fragment-endpoint background ("bias") model, v2.
+
+Distilled from ``fragmentomics_tools/bias_correction/{model,layers,loss}.py``
+per BIAS_CORRECTION_REVIEW.md, then revised through design discussion
+(2026-08-25).  This file is the record of that discussion and its result.
+
+Design summary (what was decided, and why)
+==========================================
+
+**Purpose.** This is a *technical-bias* null, not a healthy-population null:
+it models how DNA sequence alone shapes fragment-endpoint profiles — and how
+much those profiles vary between samples — in regions with no active
+regulation.  Genetic variants and regulatory activity are deliberately
+EXCLUDED from the null: they are the residuals we want to detect.  Two
+consequences:
+
+- The model is trained on inactive regions only (definition of "inactive" is
+  a pending decision), and
+- all parameters are indexed by *sequence*, never by locus, so the null
+  generalizes to regions never seen in training.  Locus-indexed empirical
+  dispersion was considered and rejected: at active loci it would absorb the
+  biology into the null.
+
+**Scale / the role of N.**  The observed total
+``N[s,t,c] = sum of counts for sample s, tile t, track c`` (over unmasked
+positions) is the plug-in scale.  Sequence cannot predict depth, copy
+number, or tile-level accessibility, so the network never models absolute
+counts: N enters as a fixed offset (``log mu_i = log N + log p_i``, NB view)
+or equivalently as the multinomial total (conditioning view).  These are the
+same thing: for independent NBs the likelihood factorizes as
+``P(N) * P(x|N)`` where ``P(x|N)`` is Dirichlet-multinomial; conditioning
+just drops the nuisance factor exactly.  v1's NB failure was not the NB
+family — it was asking the network to supply this scale
+(``total_count=1000``, sigmoid-bounded means).
+
+**Variance.**  Between-sample profile variance is real (accessibility varies
+across people) and is predicted from sequence by a second head, amortized
+across the genome — identifiable because the same sequence function is fit
+across millions of positions and many samples (NOT one free parameter per
+position).  This requires **per-sample training targets**: merged counts
+contain a single realization and carry no between-sample variance
+information (v1's fatal flaw).
+
+**Result: one trunk, two heads, three switchable likelihoods** (the two
+overdispersed ones are near-equivalent by the factorization above — both are
+implemented so they can be tested empirically):
+
+1. ``multinomial`` — baseline, gamma -> infinity (no between-sample variance).
+2. ``dirichlet_multinomial`` — exact conditional likelihood; one
+   concentration gamma per (tile, track), pooled from the dispersion head.
+   gamma is a pseudo-count: "the sequence prediction is worth gamma
+   fragments of evidence"; Var[share of window w] = p_w(1-p_w)/(gamma+1).
+3. ``nb_offset`` — independent NB2 per position with observed-N offset,
+   per-window dispersion (default 256 bp) from the same head.  A
+   pseudo-likelihood (ignores the fixed-N constraint, which is physically
+   negligible: fragments do not meaningfully compete within a tile), but
+   allows dispersion to vary at sub-tile scale, unlike the exact DM whose
+   single gamma is tile-wide.  This scale difference is part of what the
+   empirical comparison should settle.
+
+**Evaluation plan.**  On held-out inactive regions x held-out samples:
+window-level tail p-values (``beta_binomial_window_pvalues`` /
+``nb_window_pvalues``) must be uniform (QQ) per track and per accessibility
+stratum.  Positive controls (CTCF sites, immune/epithelial marker genes —
+v1's test sets) should show strong deviations.  Conditioning on N makes the
+test blind to coverage-level and fragment-length-band-ratio signals by
+construction; those are separate statistics, out of scope here.
+
+Other retained decisions
+------------------------
+- One track-naming scheme: ``strand_{s}__fl_{lo}_{hi}__coverage_{type}``.
+- Standard Lightning checkpointing via ``save_hyperparameters()``.
+- Unpadded convolutions: the model consumes exactly
+  ``calc_input_region_size(L_out)`` bases to emit ``L_out`` positions.
+- Augmentation is first-class: tiles stored with margin; ``jitter_matrix``
+  crops shifted windows at load time; ``reverse_complement_track_permutation``
+  gives the channel permutation for RC augmentation.
+- Blacklist positions are masked out of the likelihood (excluded from both
+  N and the softmax support), not merely zeroed in the targets.
+
+Not in this file (next): dataset materialization / plumbing.  The store must
+carry per-sample counts, and low-N (sample, tile, track) terms should be
+excluded from training by a configurable minimum-count threshold.
+"""
+
+import re
+from typing import List, Optional, Tuple, Type, Union
+
+import lightning as L
+import numpy as np
+import scipy.sparse
+import torch
+from scipy.sparse import coo_matrix
+from scipy.stats import betabinom, nbinom
+
+from fragmentomics_tools.region import Region
+
+
+# --------------------------------------------------------------------------
+# Track naming
+# --------------------------------------------------------------------------
+
+STRANDS = ("+", "-")
+FL_BANDS = ((40, 65), (120, 175))  # short (TF footprint) / mononucleosomal
+COVERAGE_TYPES = ("first", "last", "midpoint")
+
+_TRACK_PAT = re.compile(
+    r"strand_([+-.])__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)"
+)
+
+
+def index_key_to_track_name(strand: str, fl_band: Tuple[int, int], coverage_type: str) -> str:
+    return f"strand_{strand}__fl_{fl_band[0]}_{fl_band[1]}__coverage_{coverage_type}"
+
+
+def track_name_to_index_key(track_name: str):
+    m = _TRACK_PAT.fullmatch(track_name)
+    if m is None:
+        raise ValueError(
+            f"track name '{track_name}' does not match '{_TRACK_PAT.pattern}'"
+        )
+    strand, lo, hi, cov = m.groups()
+    return strand, (int(lo), int(hi)), cov
+
+
+DEFAULT_OUTPUT_TRACKS: List[str] = [
+    index_key_to_track_name(s, fl, c)
+    for s in STRANDS
+    for fl in FL_BANDS
+    for c in COVERAGE_TYPES
+]
+
+
+def reverse_complement_track_permutation(output_tracks: List[str]) -> List[int]:
+    """Index permutation mapping each track to its reverse-complement partner.
+
+    Under reverse complement, genomic coordinates reverse: + and - strands
+    swap, and the first/last covered base swap (midpoint maps to itself; the
+    fragment-length band is unchanged).  Usage on a target/logit array of
+    shape (..., n_tracks, L):  ``y_rc = y[..., perm, ::-1]``.
+    """
+    swap_strand = {"+": "-", "-": "+", ".": "."}
+    swap_cov = {"first": "last", "last": "first", "midpoint": "midpoint"}
+    perm = []
+    for t in output_tracks:
+        s, fl, c = track_name_to_index_key(t)
+        partner = index_key_to_track_name(swap_strand[s], fl, swap_cov[c])
+        try:
+            perm.append(output_tracks.index(partner))
+        except ValueError:
+            raise ValueError(
+                f"track '{t}' has no reverse-complement partner '{partner}' in "
+                "output_tracks; RC augmentation requires a strand/coverage-"
+                "symmetric track set"
+            ) from None
+    return perm
+
+
+# --------------------------------------------------------------------------
+# Jitter (window-shift augmentation and residual cropping)
+# --------------------------------------------------------------------------
+
+
+def calculate_start_and_stop_from_jitter(
+    input_length: int,
+    output_length: int,
+    jitter_value: int,
+    strand: Optional[str] = None,
+):
+    """Slice coordinates for an ``output_length`` window shifted ``jitter_value``
+    bp from the (strand-aware) center of an ``input_length`` array.
+
+    Only defined for input/output lengths of the same parity.  With
+    ``jitter_value=0`` this is a plain center crop.
+    """
+    if input_length < output_length + abs(jitter_value):
+        raise ValueError(
+            f"input array (len {input_length}) is not wide enough for an output "
+            f"of length {output_length} with jitter_value {jitter_value}"
+        )
+    resize_start = Region.get_resize_start(
+        start=0, current_size=input_length, new_size=output_length, strand=strand
+    )
+    jitter_start = resize_start + jitter_value
+    return jitter_start, jitter_start + output_length
+
+
+def jitter_matrix(
+    input_arr,
+    jitter_value: int,
+    output_length: int,
+    strand: Optional[str] = None,
+):
+    """Crop a jittered window from the last axis of a dense or sparse array.
+
+    This is the load-time augmentation primitive: tiles are stored with a
+    margin, and the loader draws ``jitter_value`` (0 for val/test) and crops.
+    Accepts numpy arrays, torch tensors, and scipy COO sparse matrices.
+    """
+    input_length = input_arr.shape[-1]
+    if round(jitter_value) != jitter_value:
+        raise ValueError(f"jitter_value must be a whole number, got {jitter_value}")
+
+    new_start, new_stop = calculate_start_and_stop_from_jitter(
+        input_length=input_length,
+        output_length=output_length,
+        jitter_value=jitter_value,
+        strand=strand,
+    )
+    assert new_stop - new_start == output_length
+    assert 0 <= new_start and new_stop <= input_length
+
+    if isinstance(input_arr, (np.ndarray, torch.Tensor)):
+        return input_arr[..., new_start:new_stop]
+    elif scipy.sparse.issparse(input_arr):
+        indices = np.where(
+            (input_arr.col >= new_start) & (input_arr.col < new_stop)
+        )[0]
+        return coo_matrix(
+            (
+                input_arr.data[indices],
+                (input_arr.row[indices], input_arr.col[indices] - new_start),
+            ),
+            shape=(input_arr.shape[0], output_length),
+            dtype=input_arr.dtype,
+        )
+    else:
+        raise TypeError(f"input_arr type {type(input_arr)} is invalid")
+
+
+# --------------------------------------------------------------------------
+# Layers
+# --------------------------------------------------------------------------
+
+
+class SpatialDropout(torch.nn.Module):
+    """Drop whole channels (keras SpatialDropout1D, pytorch channel order)."""
+
+    def __init__(self, p: float = 0.2):
+        super().__init__()
+        # Dropout1d on (B, C, L) zeroes whole channels.  (Dropout2d on the
+        # (B, L, C)-permuted input treated L as the channel dim under
+        # torch >= 1.12's 3D semantics, i.e. dropped positions, not channels.)
+        self.dropout = torch.nn.Dropout1d(p)
+
+    def forward(self, x):
+        if not self.training:
+            return x
+        return self.dropout(x)
+
+
+class ResNetDilatedBlock(torch.nn.Module):
+    """Dilated residual conv block (channels in == channels out).
+
+    Config used by all v1 trained checkpoints: ``activation=LeakyReLU,
+    activation_post_sum=True, skip_batchnorm=True,
+    preact_residual_normalization=False, padding=0`` — these are the defaults
+    ``BackgroundModel`` passes.  The other configurations are retained for
+    experimentation (e.g., normalization for deeper stacks).
+
+    :param input_channels: conv in == out channel count.
+    :param profile_kernel_size: kernel size; must be odd unless the dilation
+        rate is even, so the receptive-field trim is symmetric.
+    :param dilation_rate: conv dilation.
+    :param activation: activation module class.
+    :param activation_post_sum: apply activation after the residual add
+        (standard pytorch ResNet) rather than before it.
+    :param skip_batchnorm: if True, no BatchNorm after the conv.  Note that
+        batch statistics across genomic tiles leak inter-region information
+        into a model that should be a pure function of local sequence; prefer
+        skipping BN (or using GroupNorm) unless depth demands it.
+    :param preact_residual_normalization: pre-activation BN+activation before
+        the conv, to limit variance accumulation in deep networks.  See
+        https://iclr-blog-track.github.io/2022/03/25/unnormalized-resnets/#moment-control
+    :param padding: "same" preserves length; 0 (unpadded) trims the receptive
+        field and center-crops the residual to match (via ``jitter_matrix``
+        with ``jitter_value=0``).
+    """
+
+    def __init__(
+        self,
+        input_channels: int = 64,
+        profile_kernel_size: int = 20,
+        dilation_rate: int = 1,
+        activation: Type[torch.nn.Module] = torch.nn.ReLU,
+        activation_post_sum: bool = False,
+        skip_batchnorm: bool = False,
+        preact_residual_normalization: bool = False,
+        padding: Union[str, int] = "same",
+    ):
+        super().__init__()
+        assert profile_kernel_size % 2 == 1 or dilation_rate % 2 == 0, (
+            f"kernel size must be odd unless dilation is even "
+            f"(got kernel {profile_kernel_size}, dilation {dilation_rate})"
+        )
+        self.conv1 = torch.nn.Conv1d(
+            in_channels=input_channels,
+            out_channels=input_channels,
+            stride=1,
+            kernel_size=profile_kernel_size,
+            padding=(dilation_rate * (profile_kernel_size - 1)) // 2
+            if padding == "same"
+            else padding,
+            dilation=dilation_rate,
+        )
+        self.activation_post_sum = activation_post_sum
+        self.skip_batchnorm = skip_batchnorm
+        self.bn = None if skip_batchnorm else torch.nn.BatchNorm1d(input_channels)
+        self.preact_residual_normalization = preact_residual_normalization
+        self.bn_preact = (
+            torch.nn.BatchNorm1d(input_channels)
+            if preact_residual_normalization
+            else None
+        )
+        self.activation = activation()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.preact_residual_normalization:
+            x = self.activation(self.bn_preact(x))
+        out = self.conv1(x)
+        if not self.skip_batchnorm:
+            out = self.bn(out)
+        if out.shape[-1] < x.shape[-1]:
+            # unpadded conv shrank the output: center-crop the residual
+            x = jitter_matrix(x, jitter_value=0, output_length=out.shape[-1])
+        if self.activation_post_sum:
+            return self.activation(out + x)
+        return self.activation(out) + x
+
+
+# --------------------------------------------------------------------------
+# Losses
+#
+# All three share the same masked-softmax shape convention:
+#   shape_logits, target: (B, C, L);  mask: (B, L) or (B, 1, L) bool
+# Masked positions are excluded from the softmax support and from N; targets
+# must be zero there.  All losses normalize the NLL by N so tiles of
+# different depth contribute comparably.
+# --------------------------------------------------------------------------
+
+
+def _prepare_mask(mask: Optional[torch.Tensor], target: torch.Tensor):
+    if mask is None:
+        return None
+    if mask.dim() == 2:
+        mask = mask[:, None, :]
+    assert not target.masked_select(~mask).any(), (
+        "targets must be zero at masked positions"
+    )
+    return mask
+
+
+def masked_mean_pool(
+    x: torch.Tensor, mask: Optional[torch.Tensor], out_size: int
+) -> torch.Tensor:
+    """Mean-pool (B, C, L) -> (B, C, out_size), counting only valid positions.
+
+    mask: (B, 1, L) bool or None.  Windows that are fully masked get the
+    pool of zero contributions (their likelihood terms are masked anyway).
+    """
+    B, C, L = x.shape
+    assert L % out_size == 0, f"L={L} not divisible by out_size={out_size}"
+    k = L // out_size
+    if mask is None:
+        return x.reshape(B, C, out_size, k).mean(dim=-1)
+    m = mask.to(x.dtype)
+    num = (x * m).reshape(B, C, out_size, k).sum(dim=-1)
+    den = m.reshape(B, 1, out_size, k).sum(dim=-1)
+    return num / den.clamp(min=1.0)
+
+
+class MaskedMultinomialNLLLoss(torch.nn.Module):
+    """Baseline (gamma -> infinity): per-track multinomial NLL over positions.
+
+    The combinatorial term log(N! / prod x_i!) is constant w.r.t. parameters
+    and omitted; gradients are identical to the full NLL.
+    """
+
+    def forward(
+        self,
+        shape_logits: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        mask = _prepare_mask(mask, target)
+        if mask is not None:
+            shape_logits = shape_logits.masked_fill(~mask, float("-inf"))
+        logp = torch.log_softmax(shape_logits, dim=-1)
+        if mask is not None:
+            logp = logp.masked_fill(~mask, 0.0)  # avoid 0 * -inf -> nan
+        totals = target.sum(dim=-1).clamp(min=1.0)
+        nll = -(target * logp).sum(dim=-1) / totals
+        return nll.mean()
+
+
+class MaskedDirichletMultinomialNLLLoss(torch.nn.Module):
+    """Exact conditional likelihood: x | N ~ DirMult(N, gamma * p) per track.
+
+    log_concentration: (B, C) — one log(gamma) per (tile, track).  With
+    alpha_i = gamma * p_i and sum_valid(p_i) = 1:
+
+        log P(x|N) = lgamma(gamma) - lgamma(N + gamma)
+                     + sum_valid [ lgamma(x_i + alpha_i) - lgamma(alpha_i) ]
+
+    (dropping the x-only combinatorial constant).  Zero-count positions
+    contribute exactly 0 to the sum, so the loss is naturally sparse.
+    Masked positions use a safe alpha=1 inside lgamma (their terms are
+    exactly 0 and carry no gradient) to avoid nan/inf gradient leaks from
+    lgamma near 0.
+    """
+
+    def forward(
+        self,
+        shape_logits: torch.Tensor,
+        log_concentration: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        mask = _prepare_mask(mask, target)
+        if mask is not None:
+            shape_logits = shape_logits.masked_fill(~mask, float("-inf"))
+        logp = torch.log_softmax(shape_logits, dim=-1)  # (B, C, L)
+
+        gamma = log_concentration.exp()  # (B, C)
+        log_alpha = logp + log_concentration[..., None]
+        if mask is not None:
+            # safe value at masked positions: x=0, alpha=1 -> term == 0, and
+            # masked_fill cuts the gradient path (avoids digamma(0) * 0 = nan)
+            log_alpha = log_alpha.masked_fill(~mask, 0.0)
+        alpha = log_alpha.exp()
+
+        N = target.sum(dim=-1)  # (B, C)
+        pos_terms = torch.lgamma(target + alpha) - torch.lgamma(alpha)
+        if mask is not None:
+            pos_terms = pos_terms.masked_fill(~mask, 0.0)
+        ll = torch.lgamma(gamma) - torch.lgamma(N + gamma) + pos_terms.sum(dim=-1)
+        nll = -ll / N.clamp(min=1.0)
+        return nll.mean()
+
+
+class MaskedNegativeBinomialOffsetNLLLoss(torch.nn.Module):
+    """Pseudo-likelihood: independent NB2 per position with observed-N offset.
+
+    mu_i = N * p_i (N observed, p from the masked softmax — the offset view:
+    log mu_i = log N + log p_i with the log N coefficient fixed at 1).
+    Dispersion r is per window: log_dispersion (B, C, W) broadcast to L
+    (requires L % W == 0).  Var_i = mu_i + mu_i^2 / r_i.
+
+    torch's NegativeBinomial convention: mean = total_count * exp(logits),
+    so logits = log mu - log r with total_count = r.
+    """
+
+    def forward(
+        self,
+        shape_logits: torch.Tensor,
+        log_dispersion: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, C, L = shape_logits.shape
+        W = log_dispersion.shape[-1]
+        assert L % W == 0, f"L={L} not divisible by n dispersion windows W={W}"
+
+        mask = _prepare_mask(mask, target)
+        if mask is not None:
+            shape_logits = shape_logits.masked_fill(~mask, float("-inf"))
+        logp = torch.log_softmax(shape_logits, dim=-1)
+
+        N = target.sum(dim=-1)  # (B, C)
+        log_mu = torch.log(N.clamp(min=1.0))[..., None] + logp  # -inf at masked
+        log_r = log_dispersion.repeat_interleave(L // W, dim=-1)
+        nb_logits = log_mu - log_r
+        if mask is not None:
+            # safe finite value at masked positions; terms are zeroed below
+            nb_logits = nb_logits.masked_fill(~mask, 0.0)
+
+        dist = torch.distributions.NegativeBinomial(
+            total_count=log_r.exp(), logits=nb_logits, validate_args=False
+        )
+        nll = -dist.log_prob(target)
+        if mask is not None:
+            nll = nll.masked_fill(~mask, 0.0)
+        return (nll.sum(dim=-1) / N.clamp(min=1.0)).mean()
+
+
+# --------------------------------------------------------------------------
+# Model
+# --------------------------------------------------------------------------
+
+LOSSES = ("multinomial", "dirichlet_multinomial", "nb_offset")
+
+
+class BackgroundModel(L.LightningModule):
+    """Sequence -> per-position profile logits (+ per-window dispersion).
+
+    Input:  one-hot sequence (B, 4, L_in)
+    Output: shape logits (B, n_tracks, L_out), and (unless
+            loss == "multinomial") a dispersion output pooled per loss type;
+            L_in == calc_input_region_size(L_out).
+
+    Batch convention (per-sample training): each batch element is one
+    (sample, tile) pair — ``(x, y, mask)`` with x the one-hot sequence
+    (shared across samples of the same tile), y that SAMPLE'S counts
+    (B, C, L_out), and mask the valid-position mask (B, L_out).  Merged
+    counts must not be used as targets: they carry no between-sample
+    variance information.
+    """
+
+    def __init__(
+        self,
+        output_tracks: Optional[List[str]] = None,
+        n_kernels: int = 512,
+        kernel_size: int = 32,
+        num_residual_layers: int = 2,
+        dropout: float = 0.15,
+        learning_rate: float = 1e-4,
+        loss: str = "dirichlet_multinomial",
+        dispersion_window_size: int = 256,
+        log_dispersion_init: float = 7.0,
+        block_kwargs: Optional[dict] = None,
+    ):
+        """
+        :param loss: one of ``multinomial`` (baseline, no dispersion head),
+            ``dirichlet_multinomial`` (exact; tile-level gamma), ``nb_offset``
+            (pseudo-likelihood; window-level dispersion).
+        :param dispersion_window_size: window (bp) for nb_offset dispersion;
+            must divide the training tile size.  Ignored by other losses.
+        :param log_dispersion_init: constant added to the dispersion head
+            output, setting the initial scale (gamma ~ e^7 ~ 1100, i.e.
+            near-multinomial at init, so training starts from the baseline
+            and learns overdispersion where the data demand it).
+        :param block_kwargs: overrides for ``ResNetDilatedBlock`` config
+            (activation, activation_post_sum, skip_batchnorm,
+            preact_residual_normalization).  ``padding`` may not be
+            overridden: ``calc_input_region_size`` assumes unpadded blocks.
+        """
+        super().__init__()
+        if loss not in LOSSES:
+            raise ValueError(f"loss must be one of {LOSSES} (got '{loss}')")
+        if output_tracks is None:
+            output_tracks = list(DEFAULT_OUTPUT_TRACKS)
+        for t in output_tracks:
+            track_name_to_index_key(t)  # validate names early
+        self.save_hyperparameters()
+        self.output_tracks = output_tracks
+
+        resolved_block_kwargs = dict(
+            activation=torch.nn.LeakyReLU,
+            activation_post_sum=True,
+            skip_batchnorm=True,
+            preact_residual_normalization=False,
+        )
+        resolved_block_kwargs.update(block_kwargs or {})
+        assert resolved_block_kwargs.get("padding", 0) == 0, (
+            "block padding is fixed at 0: calc_input_region_size assumes "
+            "unpadded blocks"
+        )
+        resolved_block_kwargs["padding"] = 0
+
+        self.trunk = torch.nn.Sequential(
+            torch.nn.Conv1d(4, n_kernels, kernel_size, padding=0),
+            torch.nn.LeakyReLU(),
+            SpatialDropout(dropout),
+            *[
+                ResNetDilatedBlock(
+                    input_channels=n_kernels,
+                    profile_kernel_size=kernel_size,
+                    dilation_rate=2**i,
+                    **resolved_block_kwargs,
+                )
+                for i in range(1, num_residual_layers + 1)
+            ],
+        )
+        n_tracks = len(output_tracks)
+        self.shape_head = torch.nn.Conv1d(n_kernels, n_tracks, kernel_size, padding=0)
+        # dispersion head only exists for overdispersed losses (avoids unused
+        # parameters under DDP for the multinomial baseline)
+        self.dispersion_head = (
+            None
+            if loss == "multinomial"
+            else torch.nn.Conv1d(n_kernels, n_tracks, kernel_size, padding=0)
+        )
+
+        if loss == "multinomial":
+            self.loss_fn = MaskedMultinomialNLLLoss()
+        elif loss == "dirichlet_multinomial":
+            self.loss_fn = MaskedDirichletMultinomialNLLLoss()
+        else:
+            self.loss_fn = MaskedNegativeBinomialOffsetNLLLoss()
+
+    # -- geometry ----------------------------------------------------------
+
+    def calc_input_region_size(self, output_region_size: int) -> int:
+        """Sequence length required to emit `output_region_size` positions.
+
+        Initial conv and each head conv trim (k-1); residual block i trims
+        (k-1) * 2**i.  Verified against a forward pass in the test suite.
+        """
+        k = self.hparams.kernel_size
+        return (
+            output_region_size
+            + 2 * (k - 1)
+            + sum((k - 1) * 2**i for i in range(1, self.hparams.num_residual_layers + 1))
+        )
+
+    # -- lightning ---------------------------------------------------------
+
+    def forward(self, x):
+        h = self.trunk(x)
+        shape_logits = self.shape_head(h)
+        if self.dispersion_head is None:
+            return shape_logits, None
+        return shape_logits, self.dispersion_head(h)
+
+    def _pooled_log_dispersion(self, dispersion_bp, mask):
+        """Pool the bp-resolution dispersion output per the configured loss."""
+        L = dispersion_bp.shape[-1]
+        if self.hparams.loss == "dirichlet_multinomial":
+            out_size = 1
+        else:  # nb_offset
+            w = self.hparams.dispersion_window_size
+            assert L % w == 0, (
+                f"tile size {L} not divisible by dispersion_window_size {w}"
+            )
+            out_size = L // w
+        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
+        pooled = pooled + self.hparams.log_dispersion_init
+        if self.hparams.loss == "dirichlet_multinomial":
+            pooled = pooled.squeeze(-1)  # (B, C)
+        return pooled
+
+    def _step(self, batch, log_name):
+        x, y, mask = batch
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+        if self.hparams.loss == "multinomial":
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._step(batch, "train_loss")
+
+    def validation_step(self, batch, batch_idx):
+        return self._step(batch, "val_loss")
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+
+    # -- inference ---------------------------------------------------------
+
+    @torch.no_grad()
+    def predict_profile(self, one_hot_seq: np.ndarray, mask: Optional[np.ndarray] = None):
+        """(4, L_in) one-hot -> dict with the null parameters for one tile.
+
+        Returns:
+            probs: (n_tracks, L_out) per-position probabilities (each track
+                sums to 1 over valid positions) — the profile *shape*.
+                Multiply by an observed N for expected counts.
+            log_dispersion: (n_tracks,) log gamma  [dirichlet_multinomial],
+                (n_tracks, W) log r per window     [nb_offset],
+                or None                            [multinomial].
+
+        mask: optional (L_out,) bool of valid positions.
+        """
+        self.eval()
+        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
+        shape_logits, dispersion_bp = self(x[None])
+        mask3 = None
+        if mask is not None:
+            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+            mask3 = mask3[None, None, :]
+            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
+        log_dispersion = None
+        if dispersion_bp is not None:
+            log_dispersion = (
+                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
+            )
+        return {"probs": probs, "log_dispersion": log_dispersion}
+
+
+# --------------------------------------------------------------------------
+# Deviation testing / calibration diagnostics (post-hoc, numpy/scipy)
+#
+# The acceptance gate for both overdispersed variants: on held-out INACTIVE
+# regions x held-out samples, these window p-values must be QQ-uniform per
+# track (and per accessibility stratum).  On positive controls (CTCF sites,
+# marker genes) they should deviate strongly.
+# --------------------------------------------------------------------------
+
+
+def _window_sums(arr: np.ndarray, window_size: int) -> np.ndarray:
+    L = arr.shape[-1]
+    assert L % window_size == 0
+    return arr.reshape(*arr.shape[:-1], L // window_size, window_size).sum(axis=-1)
+
+
+def beta_binomial_window_pvalues(
+    counts: np.ndarray,
+    probs: np.ndarray,
+    gamma: float,
+    window_size: int,
+    mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Upper-tail P(Y >= y_w) per window under the DM null (exact aggregation).
+
+    counts, probs: (L,) for one track; gamma: scalar concentration for the
+    tile; mask: optional (L,) bool.  Window sums of a DM are beta-binomial:
+    y_w ~ BB(N, gamma * q_w, gamma * (1 - q_w)) with q_w the window's
+    predicted mass (renormalized over valid positions).
+    """
+    counts = np.asarray(counts, dtype=float)
+    probs = np.asarray(probs, dtype=float)
+    if mask is not None:
+        counts = np.where(mask, counts, 0.0)
+        probs = np.where(mask, probs, 0.0)
+        probs = probs / probs.sum()
+    n = int(counts.sum())
+    y = _window_sums(counts, window_size)
+    q = np.clip(_window_sums(probs, window_size), 1e-12, 1 - 1e-12)
+    a = gamma * q
+    b = gamma * (1.0 - q)
+    return betabinom.sf(y - 1, n, a, b)
+
+
+def nb_window_pvalues(
+    counts: np.ndarray,
+    probs: np.ndarray,
+    r_windows: np.ndarray,
+    dispersion_window_size: int,
+    test_window_size: Optional[int] = None,
+    mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Upper-tail P(Y >= y_w) per window under the NB-offset null.
+
+    r_windows: (W,) per-window dispersion (natural scale) at
+    ``dispersion_window_size``.  If the test window differs, window variances
+    are combined by moment matching (sum of independent NBs is not NB;
+    Var_w = sum(mu_i + mu_i^2 / r_i) -> effective r = mu_w^2/(Var_w - mu_w)).
+    """
+    if test_window_size is None:
+        test_window_size = dispersion_window_size
+    counts = np.asarray(counts, dtype=float)
+    probs = np.asarray(probs, dtype=float)
+    if mask is not None:
+        counts = np.where(mask, counts, 0.0)
+        probs = np.where(mask, probs, 0.0)
+        probs = probs / probs.sum()
+    n = counts.sum()
+    mu = n * probs  # (L,)
+    r_bp = np.repeat(r_windows, dispersion_window_size)  # (L,)
+    var_bp = mu + mu**2 / r_bp
+
+    y = _window_sums(counts, test_window_size)
+    mu_w = np.clip(_window_sums(mu, test_window_size), 1e-12, None)
+    var_w = _window_sums(var_bp, test_window_size)
+    excess = np.clip(var_w - mu_w, 1e-12, None)
+    r_eff = mu_w**2 / excess
+    p_nb = r_eff / (r_eff + mu_w)
+    return nbinom.sf(y - 1, r_eff, p_nb)
+
+
+def qq_uniformity(pvalues: np.ndarray):
+    """Sorted observed p-values vs uniform quantiles, for QQ plotting.
+
+    Returns (expected, observed); calibrated nulls lie on the diagonal.
+    """
+    p = np.sort(np.asarray(pvalues).ravel())
+    expected = (np.arange(1, len(p) + 1) - 0.5) / len(p)
+    return expected, p
