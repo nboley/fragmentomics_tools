@@ -245,6 +245,32 @@ class TestTrackIndex:
         assert min(TRACK_INDEX.values()) == 0
         assert max(TRACK_INDEX.values()) == C - 1
 
+    def test_track_order_matches_core_canonical(self):
+        """Cross-file invariant: the track constants are deliberately
+        TRIPLICATED (background_model_core.py, config.py, preprocess.py — see
+        design doc Reconciliation notes). A silent order mismatch between
+        preprocess's TRACK_INDEX and the model's DEFAULT_OUTPUT_TRACKS would
+        corrupt every stored count, so lock all three to core's canonical
+        order here."""
+        core = pytest.importorskip("background_model_core")
+        from background_model import config as bg_config
+        from background_model import preprocess as bg_preprocess
+
+        # config.py constants == core constants (order included)
+        assert bg_config._STRANDS == core.STRANDS
+        assert bg_config._FL_BANDS_DEFAULT == core.FL_BANDS
+        assert bg_config._COVERAGE_TYPES == core.COVERAGE_TYPES
+
+        # preprocess.py TRACK_INDEX maps each key to the exact position of
+        # its track name in core's DEFAULT_OUTPUT_TRACKS
+        assert len(TRACK_INDEX) == len(core.DEFAULT_OUTPUT_TRACKS)
+        for (strand, fl_band, cov), idx in TRACK_INDEX.items():
+            name = core.index_key_to_track_name(strand, fl_band, cov)
+            assert core.DEFAULT_OUTPUT_TRACKS[idx] == name, (
+                f"track order drift: {name} at TRACK_INDEX {idx} but "
+                f"core position {core.DEFAULT_OUTPUT_TRACKS.index(name)}"
+            )
+
 
 class TestDepthFilter:
     def test_low_depth_downgrade(self, tmp_dir):
