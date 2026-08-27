@@ -50,11 +50,12 @@ def _fai_md5(fasta_path: str) -> str:
     """Hash the .fai index as a proxy for the FASTA content identity."""
     fai = fasta_path + ".fai"
     if not os.path.exists(fai):
-        fai = fasta_path.replace(".fa.gz", ".fa.fai")
-        if not os.path.exists(fai):
+        alt_fai = fasta_path.replace(".fa.gz", ".fa.fai")
+        if not os.path.exists(alt_fai):
             raise FileNotFoundError(
-                f"Cannot find .fai for {fasta_path}; tried {fasta_path}.fai"
+                f"Cannot find .fai for {fasta_path}; tried {fai} and {alt_fai}"
             )
+        fai = alt_fai
     return _file_md5(fai)
 
 

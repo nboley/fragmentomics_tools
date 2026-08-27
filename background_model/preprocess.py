@@ -52,6 +52,21 @@ for _s in STRANDS:
             _idx += 1
 
 
+# ── Contig geometry ──────────────────────────────────────────────────────
+
+def _contig_length(ref: str, contig: str):
+    """Return the contig length for `ref`, or None if unavailable.
+
+    Used to clamp margined regions/masks at contig ends so positions past the
+    contig boundary contribute zero counts and are masked invalid.
+    """
+    try:
+        from fragmentomics_tools.contig import CONTIG_LENGTHS
+        return CONTIG_LENGTHS[ref][contig]
+    except (KeyError, TypeError, ImportError):
+        return None
+
+
 # ── Tiling ───────────────────────────────────────────────────────────────
 
 def build_tiles(region_beds: dict, tile_size: int, jitter: int, rf_budget: int, ref: str):
@@ -147,10 +162,26 @@ def _worker_inner(library, h5_path, tiles, config, shard_dir, ref):
         # Margined region for counts: tile ± JITTER (= L_TARGET extent)
         # CRITICAL: strand='.' ALWAYS (condition #1 — no strand flip)
         margin = config.jitter
+        # The L_TARGET-relative count frame is anchored at `count_start` (tile
+        # start minus the jitter margin), which can fall before the contig start
+        # (or the region can run past the contig end).  Clamp the fetched region
+        # to [0, contig_len) so Region(start>=0) holds, then shift shard coords by
+        # `left_pad` so they stay L_TARGET-relative with the tile centered.  This
+        # mirrors the Phase B sequence padding convention below.  Positions
+        # outside the contig simply carry no fragments (zero counts).
+        count_start = tile["start"] - margin
+        count_stop = tile["stop"] + margin
+        clamped_start = max(0, count_start)
+        clamped_stop = count_stop
+        contig_len = _contig_length(ref, tile["contig"])
+        if contig_len is not None:
+            clamped_stop = min(clamped_stop, contig_len)
+        left_pad = clamped_start - count_start  # = max(0, -count_start)
+
         margined_region = Region(
             chrom=tile["contig"],
-            start=tile["start"] - margin,
-            stop=tile["stop"] + margin,
+            start=clamped_start,
+            stop=clamped_stop,
             strand=".",
         )
 
@@ -191,7 +222,9 @@ def _worker_inner(library, h5_path, tiles, config, shard_dir, ref):
             strand, fl_band, cov_type = key
             track_idx = TRACK_INDEX[(strand, fl_band, cov_type)]
             if len(vec.coords) > 0:
-                tile_pos.append(vec.coords.astype(np.uint16))
+                # Shift region-relative coords into the L_TARGET frame (accounts
+                # for left-clamping at the contig start).
+                tile_pos.append((vec.coords + left_pad).astype(np.uint16))
                 tile_track.append(np.full(len(vec.coords), track_idx, dtype=np.uint8))
                 tile_data.append(vec.data.astype(np.uint16))
 
@@ -483,15 +516,27 @@ def run_phase_b(
 
     for t_idx, tile in enumerate(tiles):
         mask = np.ones(l_target, dtype=bool)
+        count_start = tile["start"] - mask_margin  # L_TARGET frame origin (genomic)
+
+        # Positions outside the contig are invalid (they carry zero counts).
+        left_invalid = max(0, -count_start)
+        if left_invalid > 0:
+            mask[:left_invalid] = False
+        contig_len = _contig_length(ref, tile["contig"])
+        if contig_len is not None:
+            right_valid = contig_len - count_start  # first out-of-contig position
+            if right_valid < l_target:
+                mask[max(0, right_valid):] = False
+
         if blacklist_rdf is not None:
             bl_regions = _get_overlapping_blacklist_regions(
                 blacklist_rdf, tile["contig"],
-                tile["start"] - mask_margin, tile["stop"] + mask_margin,
+                count_start, tile["stop"] + mask_margin,
             )
             for bl_reg in bl_regions:
                 # Convert to local coordinates
-                local_start = max(0, bl_reg.start - (tile["start"] - mask_margin))
-                local_stop = min(l_target, bl_reg.stop - (tile["start"] - mask_margin))
+                local_start = max(0, bl_reg.start - count_start)
+                local_stop = min(l_target, bl_reg.stop - count_start)
                 if local_start < local_stop:
                     mask[local_start:local_stop] = False
         root["tiles/mask"][t_idx] = mask
@@ -528,15 +573,15 @@ def run_phase_b(
         shard_data = shard["data"]
         tile_offsets = shard["tile_offsets"]  # (tile_idx, nnz_start, nnz_end)
 
+        # Index tile offsets by tile index for O(1) lookup (avoids O(T^2) scan)
+        offsets_by_tile = {
+            int(row[0]): (int(row[1]), int(row[2])) for row in tile_offsets
+        }
+
         for t_idx in range(T):
             u = s_idx * T + t_idx
             # Find this tile's data in the shard
-            nnz_start = nnz_end = 0
-            for row in tile_offsets:
-                if int(row[0]) == t_idx:
-                    nnz_start = int(row[1])
-                    nnz_end = int(row[2])
-                    break
+            nnz_start, nnz_end = offsets_by_tile.get(t_idx, (0, 0))
 
             n_entries = nnz_end - nnz_start
             indptr[u + 1] = indptr[u] + n_entries

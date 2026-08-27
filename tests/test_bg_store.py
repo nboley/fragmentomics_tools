@@ -187,6 +187,32 @@ class TestSplitVersion:
         assert root.attrs["applied_min_total_fragments"] == cfg.min_total_fragments
 
 
+class TestCSRResize:
+    def test_resize_counts_arrays(self, store_fixture):
+        """The defensive CSR resize path (overwrite=True) must work across
+        zarr 2/3 and yield writable arrays of the new shape."""
+        from background_model.store import _create_array
+
+        root = store_fixture["root"]
+        counts = root["counts"]
+        # Original nnz was 50 (from the fixture)
+        assert root["counts/pos"].shape == (50,)
+
+        new_nnz = 7
+        _create_array(counts, "pos", shape=(new_nnz,), dtype="uint16", chunks=(1 << 20,), overwrite=True)
+        _create_array(counts, "track", shape=(new_nnz,), dtype="uint8", chunks=(1 << 20,), overwrite=True)
+        _create_array(counts, "data", shape=(new_nnz,), dtype="uint16", chunks=(1 << 20,), overwrite=True)
+
+        assert root["counts/pos"].shape == (new_nnz,)
+        assert root["counts/track"].shape == (new_nnz,)
+        assert root["counts/data"].shape == (new_nnz,)
+
+        # arrays are writable at the new shape
+        vals = np.arange(new_nnz, dtype=np.uint16)
+        root["counts/pos"][:] = vals
+        np.testing.assert_array_equal(np.asarray(root["counts/pos"][:]), vals)
+
+
 class TestOpenStore:
     def test_open_with_matching_config(self, store_fixture):
         root = open_store(store_fixture["store_path"], store_fixture["config"])

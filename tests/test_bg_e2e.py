@@ -7,25 +7,31 @@ and mock/skip where real h5 fixtures are unavailable.
 import json
 import os
 import shutil
+import sys
 import tempfile
-from unittest.mock import MagicMock, patch
+import types
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from background_model.config import C, L_TARGET, TILE, PlumbingConfig
+from background_model.config import C, TILE, PlumbingConfig
 from background_model.preprocess import (
     TRACK_INDEX,
+    _contig_length,
+    _worker_process_sample,
     assign_region_splits,
     build_tiles,
     draw_samples,
+    run_phase_a,
+    run_phase_b,
 )
 from background_model.store import (
     compute_N_for_tile,
-    create_store,
+    csr_slice,
     densify_counts,
-    increment_split_version,
+    open_store,
 )
 
 
@@ -240,54 +246,6 @@ class TestTrackIndex:
         assert max(TRACK_INDEX.values()) == C - 1
 
 
-class TestCSRDensifyRoundtrip:
-    def test_roundtrip_with_known_data(self):
-        """Sparsify → densify must reproduce the original."""
-        rng = np.random.default_rng(99)
-        y = np.zeros((C, L_TARGET), dtype=np.float32)
-        # Place known counts
-        for _ in range(200):
-            c = rng.integers(0, C)
-            p = rng.integers(0, L_TARGET)
-            y[c, p] += rng.integers(1, 10)
-
-        # Extract sparse triples
-        nz = np.nonzero(y)
-        track = nz[0].astype(np.uint8)
-        pos = nz[1].astype(np.uint16)
-        data = y[nz].astype(np.uint16)
-
-        y2 = densify_counts(pos, track, data, C, L_TARGET)
-        np.testing.assert_array_equal(y, y2)
-
-
-class TestSplitVersion:
-    def test_increment_on_phase_b(self, tmp_dir):
-        """split_version must increment on every Phase B write (condition #2)."""
-        # Simulate two Phase B runs
-        cfg = _make_config_files(tmp_dir)
-        store_path = os.path.join(tmp_dir, "test_sv.zarr")
-        root = create_store(store_path, cfg, n_tiles=2, n_samples=2, nnz=10)
-
-        assert root.attrs["split_version"] == 0
-        v1 = increment_split_version(root)
-        assert v1 == 1
-        v2 = increment_split_version(root)
-        assert v2 == 2
-
-    def test_applied_params_in_attrs(self, tmp_dir):
-        """Phase B must record applied region_fracs/min_total_fragments in attrs (condition #2)."""
-        from background_model.store import record_phase_b_params
-
-        cfg = _make_config_files(tmp_dir)
-        store_path = os.path.join(tmp_dir, "test_attrs.zarr")
-        root = create_store(store_path, cfg, n_tiles=2, n_samples=2, nnz=10)
-
-        record_phase_b_params(root, cfg)
-        assert root.attrs["applied_region_fracs"] == list(cfg.region_fracs)
-        assert root.attrs["applied_min_total_fragments"] == cfg.min_total_fragments
-
-
 class TestDepthFilter:
     def test_low_depth_downgrade(self, tmp_dir):
         """Samples below min_total_fragments get role=2 (dropped_low_depth)."""
@@ -343,3 +301,368 @@ class TestSampleSheetBuilder:
         assert set(sheet["endo_category"]) == {"Asymptomatic", "Remission"}
         assert "library" in sheet.columns
         assert "h5_path" in sheet.columns
+
+
+# ── Synthetic Phase A → Phase B integration (bypasses fragments_h5) ───────
+
+SMALL_TILE = 256  # keep L_TARGET / L_SEQ small for fast synthetic stores
+
+
+class _FakeFragmentsH5:
+    """Stand-in for fragments_h5.FragmentsH5 used to drive Phase A synthetically."""
+
+    TOTAL_FRAGMENTS = 25_000_000  # above default min_total_fragments (20M)
+
+    def __init__(self, h5_path, cache_pointers=False):
+        self.h5_path = h5_path
+        self.fragment_length_counts = np.array([self.TOTAL_FRAGMENTS], dtype=np.int64)
+
+    def close(self):
+        pass
+
+
+def _synthetic_fragments(h5, region, max_frag_len):
+    """Deterministic synthetic fragments for (h5, region).
+
+    Length 150 → falls in fl_band (120, 175) only. Deterministic via an md5
+    seed so the Phase A worker and the test's independent recount agree.
+    """
+    import hashlib
+
+    key = f"{h5.h5_path}:{int(region.start)}".encode()
+    seed = int(hashlib.md5(key).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
+    length = int(region.length)
+    n = 4
+    hi = max(1, length - 160)
+    starts = rng.integers(0, hi, size=n).astype(np.int64)
+    stops = (starts + 150).astype(np.int64)
+    strands = rng.choice(np.array(["+", "-"]), size=n)
+    return starts, stops, strands
+
+
+def _make_fake_from_h5(frag_fn):
+    def _fake(h5, region, min_mapq=None, max_frag_len=None):
+        from fragmentomics_tools.fragment_array.fragment_array import (
+            RegionFragmentArray,
+        )
+
+        starts, stops, strands = frag_fn(h5, region, max_frag_len)
+        return RegionFragmentArray(
+            starts_0=starts,
+            stops_0=stops,
+            region=region,
+            max_frag_len=max_frag_len or 175,
+            fragment_strands=strands,
+            validate_data=False,
+        )
+
+    return _fake
+
+
+def _patch_phase_a(monkeypatch, frag_fn):
+    """Monkeypatch fragments_h5 + from_fragments_h5 so Phase A runs synthetically."""
+    from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
+
+    fake_mod = types.ModuleType("fragments_h5")
+    fake_mod.FragmentsH5 = _FakeFragmentsH5
+    monkeypatch.setitem(sys.modules, "fragments_h5", fake_mod)
+    monkeypatch.setattr(
+        RegionFragmentArray,
+        "from_fragments_h5",
+        staticmethod(_make_fake_from_h5(frag_fn)),
+    )
+    return RegionFragmentArray
+
+
+def _make_synth_config(
+    tmp_dir,
+    *,
+    contig="chr1",
+    n_samples=2,
+    n_train=1,
+    n_heldout=1,
+    region=(3072, 3072 + 2 * SMALL_TILE),
+    blacklist=None,
+):
+    """Build a small synthetic PlumbingConfig with a real (indexed) FASTA."""
+    import pysam
+
+    sheet_path = os.path.join(tmp_dir, "sheet.tsv")
+    rows = [
+        {
+            "library": f"LIB-{i:03d}",
+            "h5_path": f"/synthetic/LIB-{i:03d}.h5",
+            "seqrun": f"SR-{i:03d}",
+            "endo_category": "Asymptomatic",
+        }
+        for i in range(n_samples)
+    ]
+    pd.DataFrame(rows).to_csv(sheet_path, sep="\t", index=False)
+
+    bed = os.path.join(tmp_dir, "train.bed")
+    with open(bed, "w") as f:
+        f.write(f"{contig}\t{region[0]}\t{region[1]}\n")
+
+    # FASTA must cover the sequence extent (tile ± (jitter + rf_budget)).
+    seq_stop = region[1] + 4096
+    fasta = os.path.join(tmp_dir, "genome.fa")
+    with open(fasta, "w") as f:
+        f.write(f">{contig}\n" + ("ACGT" * ((seq_stop // 4) + 1)) + "\n")
+    pysam.faidx(fasta)
+
+    blk = ""
+    if blacklist is not None:
+        blk = os.path.join(tmp_dir, "blacklist.bed")
+        with open(blk, "w") as f:
+            for bc, bs, bp in blacklist:
+                f.write(f"{bc}\t{bs}\t{bp}\n")
+
+    return PlumbingConfig(
+        sample_sheet=sheet_path,
+        region_beds={"train_pool": bed},
+        blacklist_bed=blk,
+        fasta=fasta,
+        tile_size=SMALL_TILE,
+        n_train_samples=n_train,
+        n_heldout_samples=n_heldout,
+    )
+
+
+def _write_empty_shards(shard_dir, drawn, tiles):
+    """Write Phase A shards with no counts (used to exercise Phase B alone)."""
+    os.makedirs(shard_dir, exist_ok=True)
+    tile_offsets = np.array([[i, 0, 0] for i in range(len(tiles))], dtype=np.int64)
+    for lib in drawn["library"]:
+        np.savez(
+            os.path.join(shard_dir, f"{lib}.npz"),
+            pos=np.empty(0, np.uint16),
+            track=np.empty(0, np.uint8),
+            data=np.empty(0, np.uint16),
+            tile_offsets=tile_offsets,
+            total_fragments=np.array(25_000_000, np.uint64),
+        )
+
+
+def _expected_dense(RegionFragmentArray, cfg, h5_path, tile, ref="hg38"):
+    """Independently recount one (sample, tile) into an (C, L_TARGET) array."""
+    from fragmentomics_tools.region import Region
+
+    margin = cfg.jitter
+    count_start = tile["start"] - margin
+    clamped_start = max(0, count_start)
+    clamped_stop = tile["stop"] + margin
+    cl = _contig_length(ref, tile["contig"])
+    if cl is not None:
+        clamped_stop = min(clamped_stop, cl)
+    left_pad = clamped_start - count_start
+
+    region = Region(
+        chrom=tile["contig"], start=clamped_start, stop=clamped_stop, strand="."
+    )
+    h5 = _FakeFragmentsH5(h5_path)
+    rfa = RegionFragmentArray.from_fragments_h5(
+        h5, region, min_mapq=cfg.min_mapq, max_frag_len=cfg.max_frag_len
+    )
+    if cfg.dedup:
+        rfa = rfa.drop_duplicate_fragments()
+    sparse = rfa.build_coverage_counts(
+        fl_bands=list(cfg.fl_bands), split_strand=True, return_sparse=True
+    )
+
+    l_target = cfg.l_target
+    dense = np.zeros((C, l_target), dtype=np.float32)
+    for key, vec in sparse.items():
+        ti = TRACK_INDEX[key]
+        if len(vec.coords) > 0:
+            np.add.at(
+                dense,
+                (ti, np.asarray(vec.coords) + left_pad),
+                np.asarray(vec.data, dtype=np.float32),
+            )
+    return dense, left_pad
+
+
+class TestNegativeStartTile:
+    def test_worker_handles_contig_start(self, tmp_dir, monkeypatch):
+        """A tile at contig position 0 must not crash Phase A; counts land at
+        L_TARGET-relative positions and out-of-contig positions are masked."""
+        cfg = _make_synth_config(tmp_dir, region=(0, 2 * SMALL_TILE))
+
+        def frag_fn(h5, region, max_frag_len):
+            # single '+' fragment: region-relative [50, 200), length 150
+            return (
+                np.array([50], np.int64),
+                np.array([200], np.int64),
+                np.array(["+"]),
+            )
+
+        _patch_phase_a(monkeypatch, frag_fn)
+
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+
+        # Tile 0 starts at contig 0 → count_start = -jitter (would crash pre-fix)
+        run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+
+        left_pad = cfg.jitter
+        lib0 = drawn["library"].iloc[0]
+        shard = np.load(os.path.join(shard_dir, f"{lib0}.npz"))
+        off = {int(r[0]): (int(r[1]), int(r[2])) for r in shard["tile_offsets"]}
+        lo, hi = off[0]
+        pos0 = shard["pos"][lo:hi]
+        track0 = shard["track"][lo:hi]
+
+        first_t = TRACK_INDEX[("+", (120, 175), "first")]
+        last_t = TRACK_INDEX[("+", (120, 175), "last")]
+        mid_t = TRACK_INDEX[("+", (120, 175), "midpoint")]
+
+        # first covered base 50, last 199, midpoint 125 → +left_pad in L_TARGET frame
+        assert list(pos0[track0 == first_t]) == [50 + left_pad]
+        assert list(pos0[track0 == last_t]) == [199 + left_pad]
+        assert list(pos0[track0 == mid_t]) == [125 + left_pad]
+        # nothing lands in the out-of-contig left margin
+        assert (pos0 >= left_pad).all()
+
+        # Phase B mask: out-of-contig positions invalid, rest valid (no blacklist)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+        root = open_store(os.path.join(out, cfg.store_name()))
+        mask0 = np.asarray(root["tiles/mask"][0])
+        assert not mask0[:left_pad].any()
+        assert mask0[left_pad:].all()
+
+
+class TestPhaseAtoBIntegration:
+    def test_two_samples_two_tiles(self, tmp_dir, monkeypatch):
+        cfg = _make_synth_config(
+            tmp_dir, n_samples=2, n_train=1, n_heldout=1,
+            region=(3072, 3072 + 2 * SMALL_TILE),
+        )
+        RFA = _patch_phase_a(monkeypatch, _synthetic_fragments)
+
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        S, T = len(drawn), len(tiles)
+        assert (S, T) == (2, 2)
+
+        shard_dir = os.path.join(tmp_dir, "shards")
+        run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        store_path = run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+
+        root = open_store(store_path)
+        l_target = cfg.l_target
+        libraries = list(drawn["library"])
+        for s_idx, lib in enumerate(libraries):
+            h5_path = drawn["h5_path"].iloc[s_idx]
+            for t_idx, tile in enumerate(tiles):
+                dense, _ = _expected_dense(RFA, cfg, h5_path, tile)
+                pos, track, data = csr_slice(root, s_idx, t_idx, T)
+                got = densify_counts(pos, track, data, C, l_target)
+                np.testing.assert_array_equal(
+                    got, dense, err_msg=f"CSR mismatch sample={lib} tile={t_idx}"
+                )
+                mask = np.asarray(root["tiles/mask"][t_idx])
+                exp_N = compute_N_for_tile(dense, mask, cfg.tile_size, l_target)
+                np.testing.assert_array_equal(
+                    np.asarray(root["totals/N"][s_idx, t_idx]), exp_N
+                )
+
+        # split arrays present and valid
+        splits = np.asarray(root["tiles/split"])
+        assert splits.shape == (T,)
+        assert set(np.unique(splits)).issubset({0, 1, 2, 3})
+
+        # split_version bumped exactly once
+        assert root.attrs["split_version"] == 1
+
+        # attrs recorded
+        assert root.attrs["config_hash"] == cfg.config_hash()
+        assert root.attrs["applied_region_fracs"] == list(cfg.region_fracs)
+        assert root.attrs["applied_min_total_fragments"] == cfg.min_total_fragments
+
+
+class TestBlacklistMaskConstruction:
+    def test_mask_false_at_blacklist(self, tmp_dir):
+        P = 3072
+        region = (P, P + 2 * SMALL_TILE)
+        # Blacklist fully inside tile 0's frame and clear of tile 1's margin
+        # (tile 1's L_TARGET frame starts at genomic P + SMALL_TILE - jitter).
+        bstart, bstop = P + 50, P + 80
+        cfg = _make_synth_config(
+            tmp_dir, region=region, blacklist=[("chr1", bstart, bstop)]
+        )
+
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+        _write_empty_shards(shard_dir, drawn, tiles)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+
+        root = open_store(os.path.join(out, cfg.store_name()))
+        l_target = cfg.l_target
+        count_start = tiles[0]["start"] - cfg.jitter
+        local_start = bstart - count_start
+        local_stop = bstop - count_start
+
+        mask0 = np.asarray(root["tiles/mask"][0])
+        expected = np.ones(l_target, dtype=bool)
+        expected[local_start:local_stop] = False
+        np.testing.assert_array_equal(mask0, expected)
+
+        # tile 1 does not overlap the blacklist → fully valid
+        assert np.asarray(root["tiles/mask"][1]).all()
+
+
+class TestResumeSemantics:
+    def test_done_marker_skips_worker(self, tmp_dir, monkeypatch):
+        import background_model.preprocess as ppmod
+
+        cfg = _make_synth_config(tmp_dir)
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+        os.makedirs(shard_dir)
+
+        row = drawn.to_dict("records")[0]
+        lib = row["library"]
+        Path(os.path.join(shard_dir, f"{lib}.done")).touch()
+
+        def _boom(*a, **k):
+            raise AssertionError("_worker_inner must be skipped when .done exists")
+
+        monkeypatch.setattr(ppmod, "_worker_inner", _boom)
+        result = _worker_process_sample(row, tiles, cfg, shard_dir, "hg38")
+        assert result == (lib, True)
+
+    def test_error_file_refuses(self, tmp_dir):
+        cfg = _make_synth_config(tmp_dir)
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+        os.makedirs(shard_dir)
+        Path(os.path.join(shard_dir, "LIB-XXX.error")).touch()
+
+        with pytest.raises(RuntimeError, match="error file"):
+            run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)

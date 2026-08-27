@@ -18,8 +18,15 @@ from background_model.config import PlumbingConfig, C, L_SEQ, L_TARGET, TILE
 _ZARR_MAJOR = int(zarr.__version__.split(".")[0])
 
 
-def _create_array(group, name, **kwargs):
-    """Create an array in a zarr group, compatible with zarr 2.x and 3.x."""
+def _create_array(group, name, overwrite=False, **kwargs):
+    """Create an array in a zarr group, compatible with zarr 2.x and 3.x.
+
+    `overwrite` is handled uniformly by deleting any existing member first,
+    since zarr 3's ``create_array`` and zarr 2's ``create_dataset`` differ in
+    their native support for the ``overwrite`` keyword.
+    """
+    if overwrite and name in group:
+        del group[name]
     if _ZARR_MAJOR >= 3:
         return group.create_array(name, **kwargs)
     else:
