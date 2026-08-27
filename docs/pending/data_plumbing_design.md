@@ -430,3 +430,39 @@ All 11 round-1 findings verified as FIXED. No critical, high, or medium issues r
 1. Crop-alignment off-by-one (mitigated by §7 property test — must be written BEFORE Dataset)
 2. Preprocess throughput far worse than estimated (mitigated by 1-sample measurement gate)
 3. Phase B re-run silently invalidating prior training artifacts (mitigated by documentation contract; consider versioning later)
+
+## Reconciliation notes (post slice-1 implementation, 2026-08-27)
+
+- Track constants (STRANDS, FL_BANDS, COVERAGE_TYPES, C=12) are DUPLICATED in
+  background_model/config.py rather than imported from background_model_core.py,
+  to keep the plumbing package free of torch/lightning imports. INVARIANT: the
+  two definitions must match exactly (order included); locked by
+  test_track_index_covers_all_tracks. Reviewed and accepted (impl review r1,
+  divergence #1).
+- Region normalizes strand="." to None; the no-flip invariant holds via
+  is_minus_strand()==False (accepted, divergence #2).
+- store.py carries a zarr 2/3 compatibility wrapper (accepted, divergence #3).
+
+## Reconciliation notes (post slice-2 implementation, 2026-08-27)
+
+- APPROVED ALGORITHMIC CHANGE — symmetric blacklist mask expansion (user-approved
+  2026-08-27). Phase B's position mask (`/tiles/mask`) now marks invalid every
+  position within `cfg.blacklist_expansion` bp (default 120) of any blacklist
+  region — the SAME expansion Phase A already applies to fragment masking via
+  `mask_overlapping_fragments(expansion=...)`. Rationale: fragments near a
+  blacklist region are dropped in Phase A, so the corresponding positions carry
+  artificially depleted counts; excluding them from the mask removes them from
+  both the likelihood support and the per-track total N, keeping the two phases
+  consistent. Locked by `test_bg_e2e.py::TestBlacklistMaskConstruction::
+  test_mask_symmetric_expansion`. Prior (unexpanded) mask expectations were
+  updated accordingly; no other test expectations changed.
+- Golden fixture (§7): built ONCE from real fragments_h5 test data via the
+  production CLI `python -m fragments_h5.main <bam> <out.h5> --fasta <fasta>`
+  (`build-fragments-h5` console script is not on PATH in `biomarker_env`). Two
+  committed h5s under `tests/data/`: `golden.small.chr6.frag.h5` (from
+  `small.chr6.bam`, default PE build) and `golden.test_duplicates.frag.h5` (from
+  `test_duplicates.bam`, built with `--include-duplicates` so the coordinate-
+  identical pair enters the h5 and exercises read-time `drop_duplicate_fragments`).
+  The golden test's reference recount is a self-contained pysam/numpy
+  reimplementation (no `fragment_array` import) of the build + read + dedup +
+  coverage path. Reproduced by `tests/data/make_golden_fixture.sh`.

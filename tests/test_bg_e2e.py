@@ -618,16 +618,28 @@ class TestPhaseAtoBIntegration:
         assert root.attrs["applied_min_total_fragments"] == cfg.min_total_fragments
 
 
+def _expected_blacklist_mask(l_target, count_start, bstart, bstop, expansion):
+    """Independent expected mask: invalid within `expansion` bp of [bstart, bstop)."""
+    expected = np.ones(l_target, dtype=bool)
+    local_start = max(0, bstart - expansion - count_start)
+    local_stop = min(l_target, bstop + expansion - count_start)
+    if local_start < local_stop:
+        expected[local_start:local_stop] = False
+    return expected
+
+
 class TestBlacklistMaskConstruction:
-    def test_mask_false_at_blacklist(self, tmp_dir):
+    def test_mask_symmetric_expansion(self, tmp_dir):
+        """Scope B (approved 2026-08-27): the position mask marks invalid every
+        position within cfg.blacklist_expansion bp of a blacklist region — the
+        SAME expansion Phase A applies to fragment masking."""
         P = 3072
         region = (P, P + 2 * SMALL_TILE)
-        # Blacklist fully inside tile 0's frame and clear of tile 1's margin
-        # (tile 1's L_TARGET frame starts at genomic P + SMALL_TILE - jitter).
         bstart, bstop = P + 50, P + 80
         cfg = _make_synth_config(
             tmp_dir, region=region, blacklist=[("chr1", bstart, bstop)]
         )
+        assert cfg.blacklist_expansion == 120  # default under test
 
         sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
         drawn = draw_samples(sheet, cfg)
@@ -642,17 +654,26 @@ class TestBlacklistMaskConstruction:
 
         root = open_store(os.path.join(out, cfg.store_name()))
         l_target = cfg.l_target
-        count_start = tiles[0]["start"] - cfg.jitter
-        local_start = bstart - count_start
-        local_stop = bstop - count_start
+        exp = cfg.blacklist_expansion
 
-        mask0 = np.asarray(root["tiles/mask"][0])
-        expected = np.ones(l_target, dtype=bool)
-        expected[local_start:local_stop] = False
-        np.testing.assert_array_equal(mask0, expected)
+        # Tile 0: expanded blacklist lands mid-frame.
+        count_start0 = tiles[0]["start"] - cfg.jitter
+        expected0 = _expected_blacklist_mask(
+            l_target, count_start0, bstart, bstop, exp
+        )
+        np.testing.assert_array_equal(np.asarray(root["tiles/mask"][0]), expected0)
+        # sanity: expansion widens the invalid zone beyond the core region
+        core_lo = bstart - count_start0
+        assert not expected0[core_lo - 1], "expansion must invalidate bp before the core region"
 
-        # tile 1 does not overlap the blacklist → fully valid
-        assert np.asarray(root["tiles/mask"][1]).all()
+        # Tile 1: the EXPANDED zone reaches into tile 1's frame even though the
+        # core blacklist region does not (this is the behavior change).
+        count_start1 = tiles[1]["start"] - cfg.jitter
+        expected1 = _expected_blacklist_mask(
+            l_target, count_start1, bstart, bstop, exp
+        )
+        np.testing.assert_array_equal(np.asarray(root["tiles/mask"][1]), expected1)
+        assert not expected1.all(), "expanded blacklist must reach tile 1's frame"
 
 
 class TestResumeSemantics:

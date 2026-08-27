@@ -507,6 +507,12 @@ def run_phase_b(
     # ── Write blacklist mask ─────────────────────────────────────────────
     l_target = config.l_target
     mask_margin = config.jitter
+    # SYMMETRIC blacklist expansion (approved 2026-08-27): the position mask
+    # marks invalid EVERY position within blacklist_expansion bp of any
+    # blacklist region — the SAME expansion Phase A applies to fragment masking
+    # (mask_overlapping_fragments(expansion=...)).  This excludes fragment-
+    # dropped zones from both the likelihood support and N.
+    expansion = config.blacklist_expansion
 
     if config.blacklist_bed:
         from fragmentomics_tools.dataframe import RegionDataFrame
@@ -529,14 +535,18 @@ def run_phase_b(
                 mask[max(0, right_valid):] = False
 
         if blacklist_rdf is not None:
+            # Widen the overlap query by `expansion` so a blacklist region just
+            # outside the L_TARGET frame whose expanded zone reaches into it is
+            # still caught.
             bl_regions = _get_overlapping_blacklist_regions(
                 blacklist_rdf, tile["contig"],
-                count_start, tile["stop"] + mask_margin,
+                count_start - expansion, tile["stop"] + mask_margin + expansion,
             )
             for bl_reg in bl_regions:
-                # Convert to local coordinates
-                local_start = max(0, bl_reg.start - count_start)
-                local_stop = min(l_target, bl_reg.stop - count_start)
+                # Expand each blacklist region by `expansion` bp on both sides,
+                # then convert to local (L_TARGET-frame) coordinates.
+                local_start = max(0, bl_reg.start - expansion - count_start)
+                local_stop = min(l_target, bl_reg.stop + expansion - count_start)
                 if local_start < local_stop:
                     mask[local_start:local_stop] = False
         root["tiles/mask"][t_idx] = mask

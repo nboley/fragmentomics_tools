@@ -1,6 +1,10 @@
 # data directory
 data/
 
+# ...but DO track the committed golden test fixtures (small real BAM/FASTA + built h5)
+!tests/data/
+!tests/data/**
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
