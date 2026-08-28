@@ -483,19 +483,23 @@ class TestTilingContract:
 
     def test_shifted_anchor_changes_weight_window_relative_limitation(self):
         # Negative Limitation lock (design §5.2): weights are window-relative,
-        # NOT position-intrinsic.  The SAME local fragment array, but a region
-        # anchored 256 bp elsewhere, sits over a DIFFERENT sequence window ⇒ a
-        # DIFFERENT weight.  A non-uniform (seeded random) model makes the
-        # difference real, so a future "position-intrinsic" refactor fails here.
+        # NOT position-intrinsic.  The SAME GENOMIC fragment
+        # [_START+100, _START+150) under a region anchored half a tile
+        # earlier (local coords shifted to compensate) lands on a different
+        # window grid ⇒ a DIFFERENT weight.  A position-intrinsic
+        # implementation would give the identical genomic fragment the
+        # identical weight — this test must fail such a refactor.  A
+        # non-uniform (seeded random) model makes the difference real.
         m = _random_model(seed=17)
         fasta = _fasta()
         kw = dict(clamp=WeightClampConfig.identity(), drop_uncorrectable=False,
                   contig_len=_CONTIG_LEN, tile_size=_TILE)
         rfa_a = _rfa([100], [150], ["+"],
                      region=_region(start=_START, stop=_STOP))
-        shifted = _START + 256
-        rfa_b = _rfa([100], [150], ["+"],
-                     region=_region(start=shifted, stop=shifted + 2 * _TILE))
+        shift = _TILE // 2
+        rfa_b = _rfa([100 + shift], [150 + shift], ["+"],
+                     region=_region(start=_START - shift,
+                                    stop=_START - shift + 2 * _TILE))
         wa = apply_fragment_weights(rfa_a, m, fasta, **kw).first_covered_base_weights
         wb = apply_fragment_weights(rfa_b, m, fasta, **kw).first_covered_base_weights
         assert wa[0] > 0 and wb[0] > 0            # both corrected (nonzero)
