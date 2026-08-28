@@ -173,20 +173,28 @@ def apply_fragment_weights(
     masked-endpoint policy are preserved (design §5.2).
     """
     region = rfa.region
-    # Coordinate-frame precondition (invariant §0.3): both halves required —
-    # a '+' region can still be is_flipped via the explicit reverse op.
+    # Coordinate-frame precondition (invariant §0.3): split into TWO asserts so
+    # each failure names ONLY its own violated half — a '+' region can still be
+    # reversed via the explicit reverse op, so both halves are independently
+    # required.
     # NOTE: Region normalizes a strandless '.' to None (region.py DataClassMixin,
     # strand_is_set treats None and '.' identically), so the strandless value
     # observed here is None; accept both None and '.' plus '+'.
-    assert region.strand in {None, ".", "+"} and not rfa.is_flipped, (
-        "apply_fragment_weights requires a strandless ('.'/None) or unflipped '+' "
-        "region: correction queries the forward genomic frame, in which "
+    assert region.strand in {None, ".", "+"}, (
+        "apply_fragment_weights requires a strandless ('.'/None) or '+' region: "
+        "correction queries the forward genomic frame, in which "
         "gpos = region.start + endpoint_coord and track = fragment_strands[f] "
-        "are valid.  A minus-strand / is_flipped rfa reverses the local frame "
-        "and swaps strands (fragment_array.py:1809-1819, :706-719).  Strand "
-        "orientation is a consumer-layer operation, never a per-rfa flip "
-        "(see correction_outputs_design.md §0.3 / §5.2).  Got "
-        f"region.strand={region.strand!r}, is_flipped={rfa.is_flipped}."
+        "are valid.  A minus-strand region reverses the local frame and swaps "
+        "strands (fragment_array.py:1809-1819).  Strand orientation is a "
+        "consumer-layer operation (correction_outputs_design.md §0.3 / §5.2).  "
+        f"Got region.strand={region.strand!r}."
+    )
+    assert not rfa.is_flipped, (
+        "apply_fragment_weights requires an unflipped rfa: even a '+' region can "
+        "be reversed via the explicit reverse op (fragment_array.py:706-719), "
+        "which flips the local frame and swaps strands.  Correction operates in "
+        "the forward genomic frame only (correction_outputs_design.md §0.3 / "
+        f"§5.2).  Got is_flipped={rfa.is_flipped}."
     )
     if rfa.fragment_strands is None:
         raise ValueError(

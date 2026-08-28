@@ -146,6 +146,72 @@ class TestEquivalenceToDataset:
                 m_inf, center, err_msg=f"mask mismatch tile={t}"
             )
 
+    def test_onehot_byte_exact_at_contig_edge(self, tmp_dir):
+        # Byte-exact equivalence at an N-PADDED edge: a synthetic SHORT contig
+        # ends only `margin - 3` bp past the tile stop, so the right model-input
+        # margin overruns the contig and N-pads INSIDE the crop.
+        # build_window_onehot must reproduce that padded edge byte-for-byte
+        # against the val-mode Dataset x (design §3.1 / §4 contig-edge).
+        from background_model.config import JITTER, RF_BUDGET
+
+        model = _small_model()
+        geom = WindowGeometry.from_model(model, _TILE)
+        margin = geom.margin
+        assert margin >= 4                       # need room to overrun by 3 bp
+        seq_margin = JITTER + RF_BUDGET
+        tstart = seq_margin + 500                 # clear of left seq-margin (no left pad)
+        tstop = tstart + _TILE
+        contig_len = tstop + (margin - 3)         # right margin overruns by 3 bp
+
+        rng = np.random.default_rng(0)
+        seq = "".join(rng.choice(list("ACGT"), size=contig_len))
+        fa = os.path.join(tmp_dir, "short.fa")
+        with open(fa, "w") as f:
+            f.write(">chr6\n")
+            for i in range(0, len(seq), 60):
+                f.write(seq[i:i + 60] + "\n")
+        pysam.faidx(fa)
+
+        # store over the synthetic short fasta (golden h5 supplies samples;
+        # chr6 at this small coordinate carries no fragments, admitted via min_N=0).
+        sheet = os.path.join(tmp_dir, "sheet.tsv")
+        with open(sheet, "w") as f:
+            f.write("library\th5_path\tseqrun\tendo_category\n")
+            for i in range(2):
+                f.write(f"LIB-{i:03d}\t{_H5}\tSR-{i}\tAsymptomatic\n")
+        bed = os.path.join(tmp_dir, "edge.bed")
+        with open(bed, "w") as f:
+            f.write(f"{_CONTIG}\t{tstart}\t{tstop}\n")
+        cfg = PlumbingConfig(
+            sample_sheet=sheet, region_beds={"train_pool": bed}, fasta=fa,
+            tile_size=_TILE, n_train_samples=1, n_heldout_samples=1,
+            min_total_fragments=0, min_N=0,
+        )
+        out = os.path.join(tmp_dir, "out_edge")
+        os.makedirs(out)
+        store_path = run_preprocess(cfg, out, ref="hg38", n_workers=1)
+
+        ds = BackgroundTileDataset(
+            store_path, model_input_size=geom.model_input_size, split="train",
+            sample_role="train", min_N=0, train_mode=False,
+        )
+        assert len(ds) >= 1
+        root = open_store(store_path)
+        starts = np.asarray(root["tiles/start"])
+        stops = np.asarray(root["tiles/stop"])
+        contigs = [str(c) for c in np.asarray(root["tiles/contig"])]
+        _, t = ds.index[0]
+        x_ds = ds[0][0].numpy()
+        x_inf = build_window_onehot(
+            pysam.FastaFile(fa), contigs[t], int(starts[t]), int(stops[t]), geom,
+        )
+        np.testing.assert_array_equal(
+            x_inf, x_ds, err_msg="onehot mismatch at N-padded contig edge"
+        )
+        # the edge is genuinely N-padded: 'N' one-hots as [.25]*4, proving the
+        # padded path (not a fully-in-contig tile) is what was compared.
+        np.testing.assert_allclose(x_inf[:, -1], 0.25)
+
     def test_mask_byte_exact_with_blacklist(self, tmp_dir):
         # blacklist landing inside tile 0's window drives the expansion path.
         bstart, bstop = _REGION[0] + 100, _REGION[0] + 140

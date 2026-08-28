@@ -101,6 +101,41 @@ def _bl_rdf(intervals):
         os.unlink(path)
 
 
+# ── emitted-slice-N lock (design §4 / §5.1 reconciliation) ────────────────
+
+class TestEmittedSliceN:
+    def test_subgrid_final_window_N_over_emitted_slice_only(self):
+        # A sub-grid stop trims the final window to 100 emitted columns.  The
+        # reconciled semantics (revision-log r1): N for that window sums ONLY the
+        # emitted columns the caller supplied — full-window N is UNREALIZABLE
+        # (observed_counts spans only [start, stop)).  Locking this makes a future
+        # "sum a full TILE window" fix fail loudly.  contig_len=stop puts the
+        # contig edge at `stop`, so the emitted slice IS the window's valid
+        # support and the flatness identity sum(expected)==N holds over it.
+        m = _uniform_model()
+        stop = _START + _TILE + 100          # final window emits only 100 cols
+        L = _TILE + 100
+        rng = np.random.default_rng(3)
+        obs = rng.integers(1, 6, size=(12, L)).astype(np.float64)
+        ep = expected_profile(
+            m, _fasta(), _CONTIG, _START, stop, obs,
+            contig_len=stop, tile_size=_TILE,
+        )
+        assert ep.N.shape == (2, 12)
+        # N[1] sums ONLY the emitted 100 columns [_TILE, _TILE+100) — a full
+        # window (256 cols) is unrealizable: obs has no data past `stop`.
+        emitted = obs[:, _TILE:_TILE + 100]
+        np.testing.assert_allclose(ep.N[1], emitted.sum(axis=1))
+        assert emitted.shape[1] == 100 and emitted.shape[1] < _TILE
+        # flatness over the window's valid emitted columns == N[1].
+        win1_cols = np.arange(_TILE, _TILE + 100)
+        valid1 = win1_cols[ep.mask[win1_cols]]
+        assert valid1.size == 100          # contig edge at stop ⇒ all emitted valid
+        np.testing.assert_allclose(
+            ep.expected[:, valid1].sum(axis=1), ep.N[1], atol=1e-6
+        )
+
+
 # ── T4: uniform ⇒ weights 1, expected N/L_valid, NaN at masked ────────────
 
 class TestUniformAnalytic:
@@ -236,8 +271,24 @@ class TestS1Lock:
                 contig_len=_CONTIG_LEN, tile_size=_TILE,
             )
 
+    def test_minus_strand_unflipped_refused_strand_half(self):
+        # Isolated STRAND half: a '-' region with is_flipped=False must trip the
+        # strand assert (message names the strand requirement, NOT is_flipped),
+        # locking the split from the is_flipped half below.
+        m = _uniform_model()
+        rfa = _rfa([100], [150], ["+"],
+                   region=_region(strand="-"), is_flipped=False)
+        with pytest.raises(AssertionError, match="strandless"):
+            apply_fragment_weights(
+                rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
+                contig_len=_CONTIG_LEN, tile_size=_TILE,
+            )
+
     def test_plus_region_but_is_flipped_refused(self):
         # dual assert: a '+' region can still be is_flipped via the reverse op.
+        # Isolated IS_FLIPPED half: strand assert passes ('+'), so the SECOND
+        # (is_flipped) assert must fire — its message names is_flipped, NOT
+        # strandless.
         m = _uniform_model()
         rfa = _rfa([100], [150], ["+"],
                    region=_region(strand="+"), is_flipped=True)
@@ -408,10 +459,13 @@ class TestClamp:
             )
 
 
-# ── T11: tiling contract (two callers, identical weights) ─────────────────
+# ── T11: tiling contract — determinism + window-relative Limitation ───────
 
 class TestTilingContract:
-    def test_two_callers_identical(self):
+    def test_repeated_calls_are_bit_identical_determinism(self):
+        # Determinism half of the tiling contract (design §5.2): the SAME
+        # (region, fragments, model) at the same anchor/tile_size ⇒ bit-identical
+        # weights across independent calls.
         m = _random_model(seed=13)
         fasta = _fasta()
         rfa = _rfa([100, 300], [150, 430], ["+", "-"])
@@ -426,6 +480,26 @@ class TestTilingContract:
             a.last_covered_base_weights, b.last_covered_base_weights
         )
         np.testing.assert_array_equal(a.weights, b.weights)
+
+    def test_shifted_anchor_changes_weight_window_relative_limitation(self):
+        # Negative Limitation lock (design §5.2): weights are window-relative,
+        # NOT position-intrinsic.  The SAME local fragment array, but a region
+        # anchored 256 bp elsewhere, sits over a DIFFERENT sequence window ⇒ a
+        # DIFFERENT weight.  A non-uniform (seeded random) model makes the
+        # difference real, so a future "position-intrinsic" refactor fails here.
+        m = _random_model(seed=17)
+        fasta = _fasta()
+        kw = dict(clamp=WeightClampConfig.identity(), drop_uncorrectable=False,
+                  contig_len=_CONTIG_LEN, tile_size=_TILE)
+        rfa_a = _rfa([100], [150], ["+"],
+                     region=_region(start=_START, stop=_STOP))
+        shifted = _START + 256
+        rfa_b = _rfa([100], [150], ["+"],
+                     region=_region(start=shifted, stop=shifted + 2 * _TILE))
+        wa = apply_fragment_weights(rfa_a, m, fasta, **kw).first_covered_base_weights
+        wb = apply_fragment_weights(rfa_b, m, fasta, **kw).first_covered_base_weights
+        assert wa[0] > 0 and wb[0] > 0            # both corrected (nonzero)
+        assert not np.allclose(wa, wb)            # window-relative ⇒ differ
 
 
 # ── failure modes (design §7) ─────────────────────────────────────────────
@@ -465,6 +539,26 @@ class TestFailureModes:
         # no blacklist → all positions valid → expected == 0 (finite), no NaN.
         assert np.all(ep.expected == 0.0)
         assert not np.any(np.isnan(ep.expected))
+
+    def test_six_track_model_trips_12_track_precondition(self):
+        # A valid 6-track subset of DEFAULT_OUTPUT_TRACKS builds a legal model,
+        # but apply_fragment_weights gathers probs by the 12-entry TRACK_INDEX;
+        # the up-front precondition (correction.py:200) must refuse it before any
+        # (wrong-track) gather.
+        from background_model_core import DEFAULT_OUTPUT_TRACKS
+
+        torch.manual_seed(0)
+        m = BackgroundModel(
+            output_tracks=list(DEFAULT_OUTPUT_TRACKS[:6]),
+            n_kernels=8, kernel_size=4, num_residual_layers=1, loss="multinomial",
+        )
+        assert len(m.output_tracks) == 6
+        rfa = _rfa([100], [150], ["+"])
+        with pytest.raises(AssertionError, match="12-track"):
+            apply_fragment_weights(
+                rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
+                contig_len=_CONTIG_LEN, tile_size=_TILE,
+            )
 
     def test_contig_edge_region_runs_and_masks_right(self):
         # Force a right edge inside the region via a small contig_len; positions

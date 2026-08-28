@@ -70,16 +70,13 @@ def build_window_onehot(
     win_start: int,
     win_stop: int,
     geom: WindowGeometry,
-    *,
-    contig_len: Optional[int] = None,
 ) -> np.ndarray:
     """One-hot ``(4, model_input_size)`` for window ``[win_start, win_stop)``.
 
     Fetches ``fasta[win_start - margin : win_stop + margin]``, N-pads at contig
     edges, ``.upper()`` → bytes → ``one_hot_encode_sequences([...])[0].T``.
     BYTE-IDENTICAL to the val-mode Dataset ``x`` for the same tile (design §3.1;
-    T1).  ``contig_len`` is accepted for signature symmetry with
-    ``build_window_mask`` but is NOT used: ``pysam.FastaFile.fetch`` already
+    T1).  No ``contig_len`` argument is needed: ``pysam.FastaFile.fetch`` already
     clamps the right edge to the contig end, exactly as the Phase B store build
     does (``preprocess.py:489``), so the N-padding is identical on both paths.
     """
@@ -208,7 +205,7 @@ def _predict_window(
         probs = np.zeros((n_tracks, geom.tile_size), dtype=np.float64)
         return probs, mask, 0
     onehot = build_window_onehot(
-        fasta, contig, win_start, win_stop, geom, contig_len=contig_len,
+        fasta, contig, win_start, win_stop, geom,
     )
     out = model.predict_profile(onehot, mask=mask)
     probs = np.asarray(out["probs"])

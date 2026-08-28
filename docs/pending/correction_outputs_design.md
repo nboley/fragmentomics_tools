@@ -1050,3 +1050,28 @@ the companion Scope B commit.
   `TRACK_INDEX`.
 
 Suite after Scope A: **186 passed / 0 skipped** (was 184).
+
+### Test-audit fix round — final (tests + two surgical code touches)
+
+Closes the audit's coverage/discrimination gaps. Two code touches, the rest tests.
+
+- **`build_window_onehot` — dead `contig_len` removed.** The parameter (§3.1
+  signature above still shows it) was accepted "for signature symmetry" with
+  `build_window_mask` and never used — `pysam.FastaFile.fetch` clamps the right
+  edge on its own. Dropped from the signature and the sole caller
+  (`inference.py` `_predict_window`); no other caller passed it.
+- **Frame-precondition assert SPLIT into two** (`correction.py`). The single
+  `strand ∈ {None,'.','+'} AND not is_flipped` assert became two asserts with
+  DISCRIMINATING messages (one names only the strand requirement, one only
+  `is_flipped`), so a refusal failure names its own violated half. Isolated
+  strand-half test added (`'-'` region, `is_flipped=False` ⇒ strand message);
+  existing refusal tests' `match=` strings now each match only their own half.
+- **Tests added:** emitted-slice-`N` lock on a trimmed final window (§4/§5.1 —
+  N sums ONLY the emitted columns; a full-window "fix" is unrealizable);
+  contig-edge byte-exact one-hot equivalence at an N-padded edge (synthetic
+  short contig); 12-track precondition trip (valid 6-track model refused); and
+  the window-relative Limitation lock (§5.2 — same fragment under a 256-bp
+  shifted anchor ⇒ different weight, non-uniform model). `test_two_callers_
+  identical` renamed to name the determinism half explicitly.
+
+Suite after this round: **191 passed / 0 skipped** (was 186; +5).
