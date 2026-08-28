@@ -466,3 +466,32 @@ All 11 round-1 findings verified as FIXED. No critical, high, or medium issues r
   The golden test's reference recount is a self-contained pysam/numpy
   reimplementation (no `fragment_array` import) of the build + read + dedup +
   coverage path. Reproduced by `tests/data/make_golden_fixture.sh`.
+
+## Reconciliation notes (post slice-2 fix round, 2026-08-27)
+
+- MASKED-TARGET CONTRACT (user-confirmed 2026-08-27; impl review r1 High,
+  fixed in 79a6106, re-review r2 grade A). Three-part contract:
+  1. The MASK defines the sample space (softmax support) — passed to the
+     model unchanged.
+  2. TARGETS must be ZERO at masked positions — enforced by the Dataset
+     (`y = y * mask` in `_transform`, applied after jitter crop + RC flip).
+     Rationale: all three losses compute N = target.sum internally; stray
+     counts at masked positions corrupt N (multinomial normalization, DM
+     concentration term, NB offset) — "observed but nowhere".
+  3. The frozen model's `_prepare_mask` assert stays as a TRIPWIRE
+     distinguishing excluded-by-design from leaked-by-accident (it caught
+     this very defect).
+  THE STORE KEEPS RAW UNZEROED COUNTS (lossless): blacklist-SPANNING
+  fragments survive Phase A's `mask_overlapping_fragments` (drops only
+  fully-contained fragments) and deposit endpoints — typically midpoints —
+  on masked positions. ANY future consumer reading `/counts/*` directly
+  (e.g., Phase 2 correction outputs) MUST apply the mask itself; zeroing is
+  a model-boundary policy, not a store property.
+- Property tests compare seq↔y base identity at VALID positions only, plus
+  an explicit all-zeros assertion at masked positions; mask-crop equality is
+  still asserted at ALL positions (re-review r2 verified this adaptation
+  does not weaken the crop-alignment guarantee).
+- Real-blacklist E2E (`TestBlacklistSpanningFragmentModelE2E`) runs
+  preprocess -> Dataset -> `_step` on all three losses with a store-level
+  runtime assertion that a raw masked-position count exists; revert-proof:
+  without Dataset zeroing it dies at the core:347 tripwire.
