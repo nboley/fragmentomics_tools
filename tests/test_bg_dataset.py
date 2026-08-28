@@ -169,16 +169,19 @@ class TestCropAlignment:
         assert y.shape == (C, _TILE)
         assert m.shape == (_TILE,)
 
-        # base identity recovered from the one-hot at position (k + margin_x)
-        # must equal the count-encoded base at target position k.
-        base_from_x = np.argmax(x[:, _MARGIN_X:_MARGIN_X + _TILE], axis=0) + 1
-        np.testing.assert_array_equal(
-            y[0].astype(int), base_from_x,
-            err_msg=f"sequence/target misaligned at j={j}",
-        )
         # mask crop shares the same center (resize_start = JITTER = 8)
         expected_mask = mask_full[_JIT + j: _JIT + j + _TILE]
         np.testing.assert_array_equal(m, expected_mask)
+        # targets are ZEROED at masked positions (Dataset-boundary policy that
+        # satisfies the frozen model's _prepare_mask precondition).
+        assert not y[:, ~m].any(), "targets must be zero at masked positions"
+        # base identity recovered from the one-hot at position (k + margin_x)
+        # must equal the count-encoded base at target position k (valid only).
+        base_from_x = np.argmax(x[:, _MARGIN_X:_MARGIN_X + _TILE], axis=0) + 1
+        np.testing.assert_array_equal(
+            y[0][m].astype(int), base_from_x[m],
+            err_msg=f"sequence/target misaligned at j={j}",
+        )
 
     @pytest.mark.parametrize("j", [-8, 0, 5, 8])
     def test_rc_involution(self, tmp_dir, j):
@@ -213,9 +216,10 @@ class TestCropAlignment:
         inv[ds.rc_perm] = np.arange(len(ds.rc_perm))
         y_track0_reversed = y[inv][0]  # == complement-encoded base at pos k
         base_from_x = np.argmax(x[:, _MARGIN_X:_MARGIN_X + _TILE], axis=0) + 1
-        # complement code: A(1)<->T(4), C(2)<->G(3) i.e. code -> 5 - code
+        # complement code: A(1)<->T(4), C(2)<->G(3) i.e. code -> 5 - code.
+        # Compare at valid positions only (targets are zeroed where masked).
         np.testing.assert_array_equal(
-            y_track0_reversed.astype(int), 5 - base_from_x,
+            y_track0_reversed[m].astype(int), (5 - base_from_x)[m],
         )
 
 

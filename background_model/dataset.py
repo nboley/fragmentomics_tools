@@ -21,6 +21,7 @@ anywhere in this module.
 """
 
 import os
+from typing import Optional
 
 import numpy as np
 import torch
@@ -68,6 +69,17 @@ _COMPLEMENT_LUT = _build_complement_lut()
 
 
 class BackgroundTileDataset(Dataset):
+    """torch Dataset over a preprocessed zarr store.
+
+    Reproducibility of the augmentation stream: ``seed`` fixes index/split
+    selection deterministically (the (sample, tile) index is built in
+    ``__init__`` independent of any RNG). The per-item jitter/RC augmentation
+    stream, however, is keyed on ``[seed, worker_pid]`` and lazily seeded per
+    worker PID in ``_get_root`` — so it is NOT reproducible across runs (the
+    PID set differs run to run). Determinism holds only within ``train_mode``
+    off, where jitter=0 and RC is disabled.
+    """
+
     def __init__(
         self,
         store_path: str,
@@ -77,8 +89,8 @@ class BackgroundTileDataset(Dataset):
         min_N: int = 50,
         train_mode: bool = True,
         rc_prob: float = 0.5,
-        jitter: int = None,
-        seed: int = None,
+        jitter: Optional[int] = None,
+        seed: Optional[int] = None,
     ):
         if split not in _SPLIT_CODES:
             raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)} (got {split!r})")
@@ -198,6 +210,16 @@ class BackgroundTileDataset(Dataset):
             x_tokens = _COMPLEMENT_LUT[x_tokens][::-1]
             y = y[self.rc_perm][:, ::-1]
             m = m[::-1]
+
+        # Zero targets at masked positions (model-boundary policy). Applied
+        # AFTER the jitter crop + RC flip so y and m share the same frame; the
+        # mask itself is unchanged. The frozen BackgroundModel._prepare_mask
+        # asserts targets are zero wherever the mask is invalid — a blacklist-
+        # SPANNING fragment survives mask_overlapping_fragments and can deposit
+        # an endpoint inside the expanded masked zone, so stray counts would
+        # otherwise corrupt N = target.sum in every loss. The zarr store keeps
+        # RAW unzeroed counts; zeroing is a Dataset-boundary policy only.
+        y = y * m
 
         x_tokens = np.ascontiguousarray(x_tokens, dtype=np.uint8)
         # encoder returns (N, L, 4); [0].T -> (4, L).  Input must be bytes.

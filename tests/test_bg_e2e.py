@@ -410,6 +410,7 @@ def _make_synth_config(
     n_heldout=1,
     region=(3072, 3072 + 2 * SMALL_TILE),
     blacklist=None,
+    blacklist_expansion=None,
 ):
     """Build a small synthetic PlumbingConfig with a real (indexed) FASTA."""
     import pysam
@@ -444,6 +445,9 @@ def _make_synth_config(
             for bc, bs, bp in blacklist:
                 f.write(f"{bc}\t{bs}\t{bp}\n")
 
+    extra = {}
+    if blacklist_expansion is not None:
+        extra["blacklist_expansion"] = blacklist_expansion
     return PlumbingConfig(
         sample_sheet=sheet_path,
         region_beds={"train_pool": bed},
@@ -452,6 +456,7 @@ def _make_synth_config(
         tile_size=SMALL_TILE,
         n_train_samples=n_train,
         n_heldout_samples=n_heldout,
+        **extra,
     )
 
 
@@ -713,3 +718,111 @@ class TestResumeSemantics:
 
         with pytest.raises(RuntimeError, match="error file"):
             run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+
+
+class TestBlacklistSpanningFragmentModelE2E:
+    """Real preprocess (Phase A synthetic-count / Phase B real) -> Dataset ->
+    BackgroundModel._step on all three losses, with a blacklist positioned so a
+    blacklist-SPANNING fragment survives Phase A's mask_overlapping_fragments
+    (which drops only FULLY-CONTAINED fragments, fragment_array.py:1402) and
+    deposits its midpoint endpoint inside the Phase-B-masked expanded zone.
+
+    Without the Dataset's mask-zeroing (dataset.py `y *= m`), that stray count at
+    a masked position violates the frozen model's precondition (targets zero at
+    masked positions, background_model_core._prepare_mask) and crashes the step
+    with an AssertionError. This test therefore fails without fix 1 (verified by
+    temporary revert) and passes with it.
+    """
+
+    @pytest.mark.parametrize(
+        "loss", ["multinomial", "dirichlet_multinomial", "nb_offset"]
+    )
+    def test_spanning_fragment_masked_endpoint_step_finite(
+        self, tmp_dir, monkeypatch, loss
+    ):
+        pytest.importorskip("torch")
+        pytest.importorskip("background_model_core")
+        import torch
+        from background_model_core import BackgroundModel, _prepare_mask
+
+        from background_model.dataset import BackgroundTileDataset
+
+        # ── geometry (SMALL_TILE=256, jitter=128 -> L_TARGET=512) ──────────
+        # Single tile [3072, 3328); L_TARGET frame origin count_start = 2944.
+        # Small blacklist_expansion=8 keeps the masked zone narrow so the tile
+        # still has valid positions carrying counts (real code paths otherwise).
+        # Local (L_TARGET-frame) coords == region-relative counts (left_pad=0):
+        #   blacklist genomic [3144,3148) -> local [200,204); +/-8 -> masked
+        #   [192,212). The '+' spanning fragment [120,270) has first=120,
+        #   last=269 (valid) and midpoint=195 (INSIDE the masked zone) yet is not
+        #   fully contained in [192,212) (start 120 < 192) so Phase A keeps it.
+        P = 3072
+        cfg = _make_synth_config(
+            tmp_dir,
+            n_samples=2,
+            n_train=1,
+            n_heldout=1,
+            region=(P, P + SMALL_TILE),          # single tile
+            blacklist=[("chr1", 3144, 3148)],
+            blacklist_expansion=8,
+        )
+        assert cfg.blacklist_expansion == 8
+
+        def frag_fn(h5, region, max_frag_len):
+            # region-relative (== L_TARGET-frame) fragments, all length 150 ->
+            # fl_band (120,175), strand '+'. First is the blacklist-spanning one.
+            starts = np.array([120, 220, 228, 236], dtype=np.int64)
+            stops = starts + 150
+            strands = np.array(["+", "+", "+", "+"])
+            return starts, stops, strands
+
+        _patch_phase_a(monkeypatch, frag_fn)
+
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        assert len(tiles) == 1
+        shard_dir = os.path.join(tmp_dir, "shards")
+        run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        store_path = run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+
+        # Sanity: the RAW store keeps the (unzeroed) midpoint count at a masked
+        # position — i.e. the precondition-violating count really is present, so
+        # the Dataset (not the store) is what must zero it.
+        root = open_store(store_path)
+        mask0 = np.asarray(root["tiles/mask"][0])
+        assert not mask0[195], "expected local position 195 to be masked"
+        dense0 = densify_counts(
+            *csr_slice(root, 0, 0, 1), C, cfg.l_target
+        )
+        mid_t = TRACK_INDEX[("+", (120, 175), "midpoint")]
+        assert dense0[mid_t, 195] == 1, "raw store must retain the masked-pos count"
+
+        # ── Dataset -> model _step on the chosen loss (CPU, deterministic) ──
+        model = BackgroundModel(
+            n_kernels=8, kernel_size=4, num_residual_layers=1, loss=loss,
+            dispersion_window_size=SMALL_TILE,
+        )
+        mis = model.calc_input_region_size(cfg.tile_size)  # even, << L_SEQ
+        ds = BackgroundTileDataset(
+            store_path, model_input_size=mis, split="train",
+            sample_role="train", min_N=0, train_mode=False,
+        )
+        assert len(ds) == 1
+        loader = torch.utils.data.DataLoader(ds, batch_size=1, num_workers=0)
+        x, y, mask = next(iter(loader))
+
+        # With fix 1 the Dataset has zeroed y at masked positions, so
+        # _prepare_mask's assertion holds; without it, this raises AssertionError.
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = model(x)
+        if loss == "multinomial":
+            l = model.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = model._pooled_log_dispersion(dispersion_bp, mask3)
+            l = model.loss_fn(shape_logits, log_disp, y, mask3)
+        assert torch.isfinite(l), f"{loss} loss not finite"
