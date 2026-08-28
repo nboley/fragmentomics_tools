@@ -107,6 +107,14 @@ def _pysam_recount(
         else:
             strand = None
         mq1 = r.mapping_quality
+        # MQ-tag fallback: the production read-time min_mapq filter compares
+        # min(mapq1, mate_mapq) where the mate mapq is read from the MQ tag. This
+        # recount mirrors that by reading MQ off the BAM. If a read lacks the MQ
+        # tag we fall back to mapq1 alone, which would DIVERGE from production
+        # for pairs whose mate mapq is the smaller of the two. This is safe here
+        # only because the committed golden fixtures were verified to carry MQ
+        # tags on their proper pairs (see tests/data/README.md); do not point
+        # this test at a BAM without MQ tags without revisiting this fallback.
         mq2 = r.get_tag("MQ") if r.has_tag("MQ") else None
         frags.append((fs, fe, strand, mq1, mq2))
     bam.close()
@@ -195,6 +203,11 @@ class TestGoldenCounts:
                 FIXTURE_BAM, contig, start, stop, FL_BANDS, MIN_MAPQ, dedup=True
             )
             assert n_kept > 0, f"no band fragments in {contig}:{start}-{stop}"
+            # Explicit track-set completeness: both sides must carry the full
+            # canonical set (2 strands * 2 fl_bands * 3 cov_types = 12 tracks),
+            # so a missing/extra track cannot slip past the per-track loop below.
+            assert set(got.keys()) == set(ref.keys())
+            assert len(ref) == 12
             for key in ref:
                 np.testing.assert_array_equal(
                     got[key], ref[key],

@@ -178,6 +178,50 @@ class TestConfigHash:
         cfg2 = _make_config(tmp_files, n_train_samples=30)
         assert cfg1.config_hash() != cfg2.config_hash()
 
+    def test_hash_includes_blacklist_content(self, tmp_files):
+        """Blacklist BED CONTENT change must change the hash (content-addressed,
+        not path-addressed)."""
+        bl2 = os.path.join(tmp_files["dir"], "blacklist2.bed")
+        with open(bl2, "w") as f:
+            f.write("chr1\t9000\t9500\n")  # differs from fixture blacklist
+        cfg1 = _make_config(tmp_files)
+        cfg2 = _make_config(tmp_files, blacklist_bed=bl2)
+        assert cfg1.config_hash() != cfg2.config_hash()
+
+    def test_hash_includes_region_bed_content(self, tmp_files):
+        """Region BED CONTENT change must change the hash."""
+        bed2 = os.path.join(tmp_files["dir"], "train2.bed")
+        with open(bed2, "w") as f:
+            f.write("chr1\t0\t200000\n")  # differs from fixture train.bed span
+        cfg1 = _make_config(tmp_files)
+        cfg2 = _make_config(tmp_files, region_beds={"train_pool": bed2})
+        assert cfg1.config_hash() != cfg2.config_hash()
+
+    def test_hash_includes_fasta_fai_content(self, tmp_files):
+        """FASTA .fai CONTENT change must change the hash (the .fai is hashed as
+        a proxy for FASTA content identity)."""
+        fa2 = os.path.join(tmp_files["dir"], "test2.fa")
+        with open(fa2, "w") as f:
+            f.write(">chr1\nACGTACGT\n")
+        with open(fa2 + ".fai", "w") as f:
+            f.write("chr1\t8\t6\t8\t9\n")  # differs from fixture .fai
+        cfg1 = _make_config(tmp_files)
+        cfg2 = _make_config(tmp_files, fasta=fa2)
+        assert cfg1.config_hash() != cfg2.config_hash()
+
+    def test_hash_includes_blacklist_expansion(self, tmp_files):
+        """blacklist_expansion value change must change the hash (it affects the
+        counts Phase A produces)."""
+        cfg1 = _make_config(tmp_files, blacklist_expansion=120)
+        cfg2 = _make_config(tmp_files, blacklist_expansion=60)
+        assert cfg1.config_hash() != cfg2.config_hash()
+
+    def test_hash_includes_dedup(self, tmp_files):
+        """dedup flag change must change the hash (it affects the counts)."""
+        cfg1 = _make_config(tmp_files, dedup=True)
+        cfg2 = _make_config(tmp_files, dedup=False)
+        assert cfg1.config_hash() != cfg2.config_hash()
+
 
 class TestConfigSerialization:
     def test_roundtrip(self, tmp_files):

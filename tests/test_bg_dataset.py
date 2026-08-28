@@ -152,6 +152,47 @@ class TestIndex:
         assert len(_make_ds(sp, split="val", sample_role="train")) == 0
         assert len(_make_ds(sp, split="train", sample_role="heldout")) == 0
 
+    def test_dropped_low_depth_sample_excluded(self, tmp_dir):
+        """A role=2 (dropped_low_depth) sample's (sample, tile) pairs must be
+        absent from the Dataset index for BOTH sample_role='train' and
+        sample_role='heldout' — the depth-filtered sample is never trainable nor
+        evaluatable, regardless of tile split or N."""
+        sp = os.path.join(tmp_dir, "s.zarr")
+        cfg = PlumbingConfig(
+            sample_sheet="", tile_size=_TILE, jitter=_JIT, rf_budget=_RF
+        )
+        S, T = 3, 1
+        root = create_store(sp, cfg, n_tiles=T, n_samples=S, nnz=0)
+        root["counts/indptr"][:] = np.zeros(S * T + 1, dtype=np.int64)
+        root["tiles/split"][:] = np.array([0], dtype=np.uint8)     # train tile
+        root["tiles/contig"][:] = np.array(["chr1"])
+        root["tiles/start"][:] = np.array([1000], dtype=np.int64)
+        root["tiles/stop"][:] = np.array([1000 + _TILE], dtype=np.int64)
+        root["tiles/strand"][:] = np.array(["."])
+        root["tiles/region_id"][:] = np.array(["chr1:1000-1256"])
+        # roles: 0=train, 1=heldout, 2=dropped_low_depth
+        root["samples/role"][:] = np.array([0, 1, 2], dtype=np.uint8)
+        root["samples/library"][:] = np.array(["LIB0", "LIB1", "LIB2"])
+        root["samples/seqrun"][:] = np.array(["SR0", "SR1", "SR2"])
+        root["samples/endo_category"][:] = np.array(["Asymptomatic"] * 3)
+        root["samples/h5_path"][:] = np.array(["/a", "/b", "/c"])
+        root["samples/total_fragments"][:] = np.array([1, 1, 1], dtype=np.uint64)
+        # N high so the min_N filter would admit the dropped sample if role
+        # exclusion were broken.
+        root["totals/N"][:] = np.full((S, T, C), 100, dtype=np.uint32)
+
+        DROPPED = 2
+        ds_train = _make_ds(sp, split="train", sample_role="train")
+        ds_heldout = _make_ds(sp, split="train", sample_role="heldout")
+
+        assert all(s != DROPPED for s, _ in ds_train.index)
+        assert all(s != DROPPED for s, _ in ds_heldout.index)
+        assert (DROPPED, 0) not in ds_train.index
+        assert (DROPPED, 0) not in ds_heldout.index
+        # sanity: the eligible samples ARE present in their respective queries
+        assert ds_train.index == [(0, 0)]
+        assert ds_heldout.index == [(1, 0)]
+
 
 # ── the crop-alignment property test (design risk #1) ────────────────────
 

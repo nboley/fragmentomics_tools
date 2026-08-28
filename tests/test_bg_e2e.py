@@ -273,27 +273,60 @@ class TestTrackIndex:
 
 
 class TestDepthFilter:
-    def test_low_depth_downgrade(self, tmp_dir):
-        """Samples below min_total_fragments get role=2 (dropped_low_depth)."""
-        cfg = _make_config_files(tmp_dir, n_samples=20)
+    def test_low_depth_downgrade_through_phase_b(self, tmp_dir, monkeypatch):
+        """Real Phase A -> Phase B: a sample whose total_fragments falls below
+        min_total_fragments is downgraded to role=2 by PRODUCTION code (the
+        depth filter in preprocess.run_phase_b), other roles are untouched, S is
+        unchanged (no replacement/backfill), and applied_min_total_fragments is
+        recorded in store attrs.
+
+        The old version of this test reimplemented the filter loop locally and
+        asserted against that copy; it has been replaced so the assertions read
+        only what run_phase_b actually wrote to the store.  Helpers from the
+        synthetic A->B harness (defined below) are reused.
+        """
+        cfg = _make_synth_config(tmp_dir, n_samples=2, n_train=1, n_heldout=1)
         sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
         drawn = draw_samples(sheet, cfg)
-
-        # Simulate: first sample has low depth
-        total_fragments_map = {}
-        for lib in drawn["library"]:
-            total_fragments_map[lib] = 30_000_000  # above threshold
+        S = len(drawn)
+        assert S == 2
+        # role 0 (train) is at index 0, role 1 (heldout) at index 1.
+        assert drawn["role"].iloc[0] == 0 and drawn["role"].iloc[1] == 1
         low_lib = drawn["library"].iloc[0]
-        total_fragments_map[low_lib] = 1_000_000  # below threshold
+        low_h5 = drawn["h5_path"].iloc[0]
+        low_depth = cfg.min_total_fragments // 20  # well below threshold, > 0
 
-        # Apply depth filter (same logic as Phase B)
-        roles = np.array(list(drawn["role"]), dtype=np.uint8)
-        for i, lib in enumerate(drawn["library"]):
-            if total_fragments_map[lib] < cfg.min_total_fragments:
-                roles[i] = 2
+        # Drive Phase A with a per-h5 depth map so the train sample reads back a
+        # sub-threshold fragment_length_counts sum; the heldout sample stays at
+        # the default (above-threshold) depth.
+        _patch_phase_a_depths(monkeypatch, _synthetic_fragments, {low_h5: low_depth})
 
-        assert roles[0] == 2  # first sample dropped
-        assert (roles == 2).sum() == 1  # only one dropped
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+        run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        store_path = run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+
+        root = open_store(store_path)
+        roles = np.asarray(root["samples/role"])
+        libs = [str(x) for x in np.asarray(root["samples/library"])]
+        tot = np.asarray(root["samples/total_fragments"])
+
+        # low-depth train sample downgraded; heldout untouched.
+        assert roles[0] == 2, "low-depth sample must be downgraded to role=2"
+        assert roles[1] == 1, "other roles must be unchanged"
+        assert (roles == 2).sum() == 1
+        # S unchanged: no replacement/backfill introduced a new sample.
+        assert len(libs) == S == 2
+        assert set(libs) == set(drawn["library"])
+        assert libs[0] == low_lib
+        # raw depth recorded (the low sample is downgraded, not replaced).
+        assert int(tot[0]) == low_depth
+        # applied threshold recorded in attrs.
+        assert root.attrs["applied_min_total_fragments"] == cfg.min_total_fragments
 
 
 class TestSampleSheetBuilder:
@@ -327,6 +360,52 @@ class TestSampleSheetBuilder:
         assert set(sheet["endo_category"]) == {"Asymptomatic", "Remission"}
         assert "library" in sheet.columns
         assert "h5_path" in sheet.columns
+
+    def test_column_set_active_dropped_join_by_library(self, tmp_dir):
+        """Exact emitted column set is {library, h5_path, seqrun, endo_category};
+        'Active' (non-quiescent) rows are dropped; and the clinical endo join is
+        BY LIBRARY (not positional) — proven with mismatched row order and an
+        extra clinical-only library."""
+        from background_model.sample_sheet import build_sample_sheet
+
+        manifest_path = os.path.join(tmp_dir, "manifest.tsv")
+        manifest_df = pd.DataFrame({
+            "key": ["k1", "k2", "k3"],
+            "path": ["/data/LIB-001.h5", "/data/LIB-002.h5", "/data/LIB-003.h5"],
+            "notes": [
+                json.dumps({"library": "LIB-001", "seqrun": "SR-1"}),
+                json.dumps({"library": "LIB-002", "seqrun": "SR-2"}),
+                json.dumps({"library": "LIB-003", "seqrun": "SR-3"}),
+            ],
+        })
+        manifest_df.to_csv(manifest_path, sep="\t", index=False)
+
+        clinical_path = os.path.join(tmp_dir, "clinical.csv")
+        # Different row order + an extra library absent from the manifest, so a
+        # positional (rather than by-library) join would attach the wrong endo.
+        clinical_df = pd.DataFrame({
+            "library": ["LIB-003", "LIB-999", "LIB-001", "LIB-002"],
+            "ENDO_CATEGORY": ["Remission", "Remission", "Asymptomatic", "Active"],
+        })
+        clinical_df.to_csv(clinical_path, index=False)
+
+        sheet = build_sample_sheet(manifest_path, clinical_path)
+
+        # exact emitted column set
+        assert set(sheet.columns) == {
+            "library", "h5_path", "seqrun", "endo_category"
+        }
+        # 'Active' row (LIB-002) dropped; clinical-only LIB-999 absent (inner join)
+        assert set(sheet["library"]) == {"LIB-001", "LIB-003"}
+        assert "LIB-002" not in set(sheet["library"])
+        assert "LIB-999" not in set(sheet["library"])
+        # join is BY LIBRARY: each library keeps its own endo + manifest fields
+        by_lib = sheet.set_index("library")
+        assert by_lib.loc["LIB-001", "endo_category"] == "Asymptomatic"
+        assert by_lib.loc["LIB-001", "h5_path"] == "/data/LIB-001.h5"
+        assert by_lib.loc["LIB-001", "seqrun"] == "SR-1"
+        assert by_lib.loc["LIB-003", "endo_category"] == "Remission"
+        assert by_lib.loc["LIB-003", "h5_path"] == "/data/LIB-003.h5"
 
 
 # ── Synthetic Phase A → Phase B integration (bypasses fragments_h5) ───────
@@ -392,6 +471,32 @@ def _patch_phase_a(monkeypatch, frag_fn):
 
     fake_mod = types.ModuleType("fragments_h5")
     fake_mod.FragmentsH5 = _FakeFragmentsH5
+    monkeypatch.setitem(sys.modules, "fragments_h5", fake_mod)
+    monkeypatch.setattr(
+        RegionFragmentArray,
+        "from_fragments_h5",
+        staticmethod(_make_fake_from_h5(frag_fn)),
+    )
+    return RegionFragmentArray
+
+
+def _patch_phase_a_depths(monkeypatch, frag_fn, depth_map):
+    """Like _patch_phase_a but the fake FragmentsH5 reports a per-h5_path total
+    fragment count (from `depth_map`, default 25M) so the Phase-B depth filter
+    can be exercised through production code."""
+    from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
+
+    class _DepthFakeFragmentsH5:
+        def __init__(self, h5_path, cache_pointers=False):
+            self.h5_path = h5_path
+            depth = int(depth_map.get(h5_path, _FakeFragmentsH5.TOTAL_FRAGMENTS))
+            self.fragment_length_counts = np.array([depth], dtype=np.int64)
+
+        def close(self):
+            pass
+
+    fake_mod = types.ModuleType("fragments_h5")
+    fake_mod.FragmentsH5 = _DepthFakeFragmentsH5
     monkeypatch.setitem(sys.modules, "fragments_h5", fake_mod)
     monkeypatch.setattr(
         RegionFragmentArray,
@@ -718,6 +823,43 @@ class TestResumeSemantics:
 
         with pytest.raises(RuntimeError, match="error file"):
             run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+
+
+class TestWorkerErrorHandling:
+    def test_exception_writes_error_file_and_surfaces(self, tmp_dir, monkeypatch):
+        """When per-tile counting raises, the Phase A worker
+        (_worker_process_sample) catches it, writes shards/<library>.error
+        containing the exception message followed by the formatted traceback,
+        and returns (library, False); run_phase_a then surfaces the failure by
+        raising RuntimeError('Phase A failed for: ...').  This asserts the ACTUAL
+        error-handling contract in preprocess.py, not a guess.
+        """
+        cfg = _make_synth_config(tmp_dir, n_samples=2, n_train=1, n_heldout=1)
+
+        def _boom_frag(h5, region, max_frag_len):
+            raise RuntimeError("synthetic count failure XYZ")
+
+        _patch_phase_a(monkeypatch, _boom_frag)
+
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+
+        with pytest.raises(RuntimeError, match="Phase A failed"):
+            run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+
+        lib0 = drawn["library"].iloc[0]
+        err_path = os.path.join(shard_dir, f"{lib0}.error")
+        assert os.path.exists(err_path), "worker must write <library>.error on exception"
+        text = Path(err_path).read_text()
+        # message line then traceback (worker writes f"{e}\n{traceback}")
+        assert "synthetic count failure XYZ" in text
+        assert "Traceback (most recent call last)" in text
+        # a failed sample must NOT be marked done.
+        assert not os.path.exists(os.path.join(shard_dir, f"{lib0}.done"))
 
 
 class TestBlacklistSpanningFragmentModelE2E:

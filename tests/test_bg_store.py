@@ -107,24 +107,61 @@ class TestStoreCreation:
 
 
 class TestCSRRoundtrip:
-    def test_densify_sparsify_roundtrip(self):
-        """densify(triples) must reproduce the original dense array."""
+    def test_densify_accumulates_triples(self):
+        """densify_counts is densify-ONLY: it scatter-adds (pos, track, data)
+        triples into a dense array. With duplicate (track, pos) entries it must
+        ACCUMULATE (np.add.at semantics), matching a manual construction. This is
+        not a roundtrip (the sparse side is the input); see the dedicated
+        roundtrip test below for densify(sparsify(dense)) == dense.
+        """
         rng = np.random.default_rng(42)
-        # Create a known dense array
-        y = np.zeros((C, L_TARGET), dtype=np.float32)
         n_entries = 500
         tracks = rng.integers(0, C, size=n_entries).astype(np.uint8)
         positions = rng.integers(0, L_TARGET, size=n_entries).astype(np.uint16)
         values = rng.integers(1, 100, size=n_entries).astype(np.uint16)
 
-        # Build dense from triples
+        # Build dense from triples (duplicates present -> accumulation exercised)
         y_dense = densify_counts(positions, tracks, values, C, L_TARGET)
 
-        # Verify it matches manual construction
+        # Verify it matches manual accumulation
         y_expected = np.zeros((C, L_TARGET), dtype=np.float32)
         for p, t, v in zip(positions, tracks, values):
             y_expected[t, p] += v
         np.testing.assert_array_equal(y_dense, y_expected)
+
+    def test_dense_to_csr_to_dense_roundtrip(self):
+        """True roundtrip: build CSR triples from a dense array the way Phase A
+        does (per nonzero (track, pos) emit one uint16 triple, lexsort by
+        (track, pos)), densify back, and require exact equality with the
+        original dense array.
+        """
+        rng = np.random.default_rng(7)
+        # Sparse-ish dense array with distinct (track, pos) nonzeros.
+        dense = np.zeros((C, L_TARGET), dtype=np.float32)
+        n = 400
+        tracks = rng.integers(0, C, size=n)
+        positions = rng.integers(0, L_TARGET, size=n)
+        values = rng.integers(1, 500, size=n)
+        # Deduplicate (track, pos) so each cell has a single defined value
+        # (a genuine dense array, not an accumulation of collisions).
+        seen = {}
+        for t, p, v in zip(tracks, positions, values):
+            seen[(int(t), int(p))] = int(v)
+        for (t, p), v in seen.items():
+            dense[t, p] = v
+
+        # Build CSR triples from the dense array (mirrors preprocess: uint16
+        # pos/data, uint8 track, lexsort by (track, pos)).
+        nz_tracks, nz_pos = np.nonzero(dense)
+        nz_data = dense[nz_tracks, nz_pos]
+        pos = nz_pos.astype(np.uint16)
+        track = nz_tracks.astype(np.uint8)
+        data = nz_data.astype(np.uint16)
+        order = np.lexsort((pos, track))
+        pos, track, data = pos[order], track[order], data[order]
+
+        got = densify_counts(pos, track, data, C, L_TARGET)
+        np.testing.assert_array_equal(got, dense)
 
     def test_empty_triples(self):
         pos = np.empty(0, dtype=np.uint16)
