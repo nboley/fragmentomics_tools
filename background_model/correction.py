@@ -37,7 +37,7 @@ from background_model.inference import (
     WindowGeometry,
     _iter_window_predictions,
 )
-from background_model.preprocess import TRACK_INDEX
+from background_model.preprocess import FL_BANDS, TRACK_INDEX
 
 
 @dataclass(frozen=True)
@@ -153,7 +153,7 @@ def _normalize_strands(fragment_strands) -> np.ndarray:
 
 def apply_fragment_weights(
     rfa, model, fasta, *,
-    fl_bands=((40, 65), (120, 175)),
+    fl_bands=FL_BANDS,
     blacklist_rdf=None, blacklist_expansion: int = 120,
     contig_len: Optional[int] = None, tile_size: int = TILE,
     clamp: WeightClampConfig,               # REQUIRED — no default (design §5.2)
@@ -194,6 +194,15 @@ def apply_fragment_weights(
             "are strand-specific (design §7)."
         )
 
+    # 12-track precondition: probs is gathered by TRACK_INDEX[(strand, band,
+    # cov)] (design's 12-track strand×band×coverage constraint).  A model with
+    # fewer output tracks would silently index a wrong / out-of-range track.
+    assert len(model.output_tracks) == len(TRACK_INDEX), (
+        f"apply_fragment_weights requires the full {len(TRACK_INDEX)}-track "
+        f"model (design §7 strand×band×coverage constraint; probs is gathered "
+        f"by TRACK_INDEX); got {len(model.output_tracks)} output tracks."
+    )
+
     geom = WindowGeometry.from_model(model, tile_size)
     contig = region.chrom
     start = int(region.start)
@@ -218,6 +227,13 @@ def apply_fragment_weights(
     for b, (lo, hi) in enumerate(bands):
         band_idx[(lengths >= lo) & (lengths < hi)] = b
 
+    # strand gate (same guard-before-gather class as the F11 band guard, on the
+    # strand axis): only '+'/'-' fragments map to a real track.  A fragment with
+    # any other strand keeps trk == -1, which would silently gather probs_w[-1]
+    # (the last track).  Gate it OUT of eligibility so it gets weight 0 on every
+    # coverage type instead.
+    strand_ok = (strands == "+") | (strands == "-")
+
     cov_specs = [
         ("first", np.asarray(rfa.first_covered_bases_0), "first_covered_base_weights"),
         ("last", np.asarray(rfa.last_covered_bases_0), "last_covered_base_weights"),
@@ -239,7 +255,7 @@ def apply_fragment_weights(
                 if sel_sb.any():
                     trk_arr[sel_sb] = TRACK_INDEX[(s, band, cov)]
 
-        elig = in_grid & (band_idx >= 0)
+        elig = in_grid & (band_idx >= 0) & strand_ok
         w_out = np.zeros(n, dtype=np.float64)
         valid = np.zeros(n, dtype=bool)
 

@@ -36,6 +36,7 @@ from fragmentomics_tools.region import Region
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.path.join(_HERE, "data")
 _FASTA = os.path.join(_DATA, "GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
+_GOLDEN_H5 = os.path.join(_DATA, "golden.small.chr6.frag.h5")
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(_FASTA), reason=f"golden fasta missing ({_FASTA})"
@@ -256,6 +257,60 @@ class TestS1Lock:
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
         np.testing.assert_allclose(new.first_covered_base_weights, [1.0], atol=1e-6)
+
+    def test_non_plus_minus_strand_fragment_zeroed(self):
+        # Strand gate (correction.py `elig`): a fragment whose strand is neither
+        # '+' nor '-' maps to no track (trk stays -1).  Without the gate it is
+        # still in-band/in-grid/unmasked, so it would silently gather
+        # probs_w[-1] (the LAST track).  It must instead get weight 0 on every
+        # coverage type, and a neighbouring valid fragment must be untouched.
+        m = _uniform_model()
+        # frag 0: valid +len50 band0 @100 (weight 1 under uniform).
+        # frag 1: bad strand '.', but otherwise in-band/on-grid/unmasked @300.
+        rfa = RegionFragmentArray(
+            starts_0=np.array([100, 300], dtype=np.int64),
+            stops_0=np.array([150, 350], dtype=np.int64),
+            region=_region(),
+            max_frag_len=511,
+            fragment_strands=np.array(["+", "."]),
+            validate_data=False,
+        )
+        new = apply_fragment_weights(
+            rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
+            drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
+        )
+        # bad-strand fragment: zero on all three coverage types.
+        assert new.first_covered_base_weights[1] == 0.0
+        assert new.last_covered_base_weights[1] == 0.0
+        assert new.weights[1] == 0.0
+        # valid neighbour untouched.
+        np.testing.assert_allclose(new.first_covered_base_weights[0], 1.0, atol=1e-6)
+        np.testing.assert_allclose(new.last_covered_base_weights[0], 1.0, atol=1e-6)
+        np.testing.assert_allclose(new.weights[0], 1.0, atol=1e-6)
+
+    @pytest.mark.skipif(
+        not os.path.exists(_GOLDEN_H5), reason=f"golden h5 missing ({_GOLDEN_H5})"
+    )
+    def test_minus_strand_region_via_from_fragments_h5_refused(self):
+        # Exercise is_flipped via the REAL path (not a constructor kwarg): a
+        # '-'-strand region drives from_fragments_h5 to set is_flipped =
+        # region.is_minus_strand() (fragment_array.py:1843).  The applier must
+        # refuse it up front.
+        from fragments_h5 import FragmentsH5
+
+        h5 = FragmentsH5(_GOLDEN_H5, cache_pointers=False)
+        region = Region(chrom="chr6", start=84_150_000, stop=84_152_000, strand="-")
+        rfa = RegionFragmentArray.from_fragments_h5(
+            h5, region, min_mapq=10, max_frag_len=175
+        )
+        h5.close()
+        assert rfa.is_flipped  # set by the real path, not a constructor kwarg
+        m = _uniform_model()
+        with pytest.raises(AssertionError):
+            apply_fragment_weights(
+                rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
+                contig_len=_CONTIG_LEN, tile_size=_TILE,
+            )
 
 
 # ── T7: single-track reciprocal parity (numeric core) ─────────────────────
