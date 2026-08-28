@@ -60,8 +60,14 @@ Correctness contracts carried from the model design:
    always valid. Strand-ORIENTATION of the flagship CTCF pileup is a
    CONSUMER-layer operation — flip the *aggregated per-position profiles* for
    `−`-strand motifs — never a per-rfa flip. The applier ENFORCES this (§5.2):
-   it asserts `region.strand in {'.', '+'}` AND `not rfa.is_flipped`, raising a
-   message that points to this section.
+   it asserts `region.strand in {None, '.', '+'}` AND `not rfa.is_flipped`,
+   raising a message that points to this section. (`Region` normalizes a
+   strandless `'.'` to `None` — `region.py:538-539`, `strand_is_set` treats
+   `None` and `'.'` identically — so the value the applier actually observes on
+   a `strand='.'` query is `None`. Accepting `{None, '.', '+'}` is what keeps
+   every happy-path strandless call from raising; a literal-`'.'`-only assert
+   was wrong and broke every happy-path call, found during implementation and
+   fixed in 0cc5f18. The `is_flipped` half is unchanged.)
 
 ---
 
@@ -431,14 +437,22 @@ sequence, `:523-552` for mask):
   `TILE` output length (the model has no shorter mode); `predict_region_profiles`
   emits only the `[start, stop)` slice via `window_bounds` `local_lo:local_hi`.
   The trailing model positions beyond `stop` are computed but discarded. `N` for
-  that window is still the FULL window's observed sum over valid positions
-  (§5.1) — the shape is a within-window multinomial regardless of trimming.
-  Consequence: the flatness identity `sum_{valid} expected == N_w` (T9) holds
-  over the FULL window, so when the trim discards valid positions beyond `stop`
-  that carried counts, `sum` over just the *emitted* slice is `< N_w`. This is
-  correct (the window's shape is defined over its whole support); consumers
-  aggregating trimmed slices must not assume the emitted slice sums to its own
-  observed total.
+  that window is the observed sum over the window's valid **EMITTED/TRIMMED**
+  positions — `N_w[c] = sum_j observed[c, j]·mask[j]` over `j` in the window's
+  emitted slice (§5.1). Full-window `N` is **unrealizable through this
+  interface**: `expected_profile` receives `observed_counts` of shape
+  `(C, stop − start)`, so there is no data past `stop` to sum. The window's
+  probs still form a full-`TILE` multinomial, but `N` can only be the plug-in
+  scale over the positions the caller actually supplied. Consequently the
+  flatness identity `sum_{valid} expected == N_w` (T9) holds over the EMITTED
+  slice, NOT the full window.
+  **HARD REQUIREMENT (Phase-3+ consumers).** Any consumer that aggregates
+  expected counts across positions/windows (e.g. the CTCF pileup) MUST use
+  SINGLE, UNTRIMMED, GRID-ALIGNED windows — i.e. evaluate over a region whose
+  `stop − start` is a multiple of `tile_size` and that does not straddle a seam.
+  A trimmed final window's expected slice does NOT sum to its own observed total
+  and would misread the scale of any obs/expected or pileup aggregation. This is
+  a locked precondition on the aggregation layer, not an option.
 
 `contig_len` is passed through from the caller (or looked up via
 `fragmentomics_tools.contig.CONTIG_LENGTHS[ref][contig]`, the same source
@@ -459,6 +473,11 @@ Definitions per window `w` (valid position set `V_w`, `L_valid = |V_w|`):
   counts, masked** (the store contract: consumers of raw counts must mask). N is
   per **(sample, window, track)**, exactly the training-time N definition
   (`compute_N_for_tile`) but over the inference window instead of a store tile.
+  For a TRIMMED final window `V_w` is the window's **EMITTED** valid positions
+  (the `observed_counts` array spans only `[start, stop)`, so full-window `N` is
+  unrealizable through this interface — §4). Grid-aligned windows are untrimmed,
+  so aggregation consumers that follow the §4 HARD REQUIREMENT never see a
+  trimmed `N`.
 - `expected[c, j] = N_w[c] · probs[c, j]` for `j∈V_w`.
 
 **Masked positions in the output vector: NaN** (`masked_fill=np.nan`, the
@@ -476,7 +495,11 @@ own observed vector request `0.0` instead.
 
 Within a window, `sum_{j∈V_w} expected[c,j] = N_w[c] = sum_{j∈V_w}
 observed[c,j]`, so the corrected residual `observed/expected` averages to 1 over
-each window's support — the flatness property the CTCF pileup checks.
+each window's support — the flatness property the CTCF pileup checks. This
+identity holds over the EMITTED slice `V_w` (a trimmed final window's emitted
+positions do not sum to a full-`TILE` total); the §4 HARD REQUIREMENT — single,
+untrimmed, grid-aligned windows for any expected-count aggregation — is what
+guarantees the pileup's `V_w` equals the full window support.
 
 ### 5.2 Per-fragment weights — interface (a)
 
@@ -530,8 +553,12 @@ where `strand_f = rfa.fragment_strands[f]` and `band_f` is the unique band
 :790), or **none**.
 
 **Coordinate-frame precondition (invariant §0.3).** Before anything else the
-applier asserts `rfa.region.strand in {'.', '+'}` AND `not rfa.is_flipped`,
-raising otherwise with a message pointing to §0.3 / this section. This makes the
+applier asserts `rfa.region.strand in {None, '.', '+'}` AND `not rfa.is_flipped`,
+raising otherwise with a message pointing to §0.3 / this section. (`Region`
+normalizes `'.'` → `None` at `region.py:538-539`, so a `strand='.'` query is
+observed here as `None`; accepting `{None, '.', '+'}` is what keeps the
+strandless happy path from raising — a literal-`'.'`-only assert was wrong,
+found during implementation and fixed in 0cc5f18.) This makes the
 minus-strand `is_flipped` frame unreachable: `from_fragments_h5` flips
 `starts_0/stops_0` into a reversed region-local frame and SWAPS `fragment_strands`
 (+↔−) for a `−`-strand region (`fragment_array.py:1809-1819`, `:1843`), under
@@ -546,7 +573,7 @@ intervals), hence exactly one track per coverage-type. The applier never builds
 an OR/AND boolean mask; instead it computes, vectorized over fragments:
 
 ```
-assert rfa.region.strand in {'.','+'} and not rfa.is_flipped   # invariant §0.3
+assert rfa.region.strand in {None,'.','+'} and not rfa.is_flipped  # invariant §0.3 (Region: '.'→None)
 band_idx[f]  = unique b with bands[b].lo <= len_f < bands[b].hi, else -1
                # explicit per-band half-open test — NOT bare searchsorted, which
                # would map an inter-band GAP length onto a neighbouring band
@@ -668,9 +695,14 @@ below runs on an untrained or forced model. Suite baseline before this work:
 **Golden comparison vs v1 (only where v1 was correct)**
 
 - **T7 (single-track reciprocal parity).** v1's OR/AND selection bug collapses
-  when there is one track. With `output_tracks=[one track]`, assert our
-  per-endpoint weight equals the reference reciprocal `1/(probs·L_valid)`
-  computed inline from a fixed `probs` (no v1 import). This is a value check on
+  when the strand/band selection is unambiguous. NOTE (implementation, 0cc5f18):
+  this is NOT a literal single-`output_track` model — the applier gathers `probs`
+  by `TRACK_INDEX[(strand, band, cov)]`, which spans the full 12
+  `strand×band×coverage` tracks, so a 1-track model would `IndexError`. It is
+  instead realized with the full **12-track** model driven by fragments that are
+  all `'+'` / band-0, which pins the gather to one unambiguous track per
+  coverage type. Assert our per-endpoint weight equals the reference reciprocal
+  `1/(probs·L_valid)` computed inline from a fixed `probs` (no v1 import). This is a value check on
   the numeric core — the `mean/pred = 1/(L_valid·probs)` formula that v1's *dead*
   `_from_pred_record` already applied CORRECTLY (:1902; L3/§5.2) — in the one
   regime where the strand/band selection is unambiguous. It documents that the
@@ -987,3 +1019,34 @@ the deferred clamping semantics are preserved (required arg + `identity()` opt-i
 no covert resolution). Only an Info-level pseudocode nit (F11) remains — an
 implementation-note, not a design gap. Cleared for implementation, with T1/T6/T4
 first as the doc already prescribes and F11 folded into the applier port.
+
+### Implementation review r1 — grade A− @ `0cc5f18`
+
+Review of the shipped `inference.py` + `correction.py` (the 12-track applier +
+`expected_profile`) against this design. Gate cleared. Four findings; all fixed
+in the Scope A commit `d24ac43` (code + tests) and reconciled into this doc in
+the companion Scope B commit.
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| 1 | Med | `correction.py` `elig` omitted the strand gate: an in-band/in-grid/unmasked fragment whose strand ∉ `{+,-}` kept `trk = -1` and silently gathered `probs_w[-1]` (the LAST track) — the F11 guard-before-gather class, on the strand axis. | `elig` now ANDs `strand_ok = (strand ∈ {+,-})`, so such a fragment gets weight 0 on every coverage type; neighbours unaffected. Negative test added (directly-built rfa, strand `'.'`). |
+| 2 | Low | `fl_bands` default duplicated the literal `((40,65),(120,175))`. | Default now derives from `preprocess.FL_BANDS` (single source; a divergence fails loud). |
+| 3 | Low | No explicit precondition that the model carries all 12 tracks; a smaller model would `IndexError` deep in the gather. | `assert len(model.output_tracks) == len(TRACK_INDEX)` up front, pointing at the 12-track constraint. |
+| 4 | Low | The minus-strand refusal tests set `is_flipped` via the constructor kwarg, not the real `from_fragments_h5`/`reverse_strand` path. | Added a refusal test that builds the rfa via `from_fragments_h5` over a `−`-strand region (`is_flipped=region.is_minus_strand()`, `fragment_array.py:1843`) and asserts the applier refuses it. |
+
+**Design divergences reconciled here (verdicts final):**
+- **§0.3 + §5.2 frame precondition** corrected to `region.strand in {None, '.',
+  '+'}` — `Region` normalizes `'.'` → `None` (`region.py:538-539`), so the
+  literal-`'.'`-only assert was wrong and broke every happy-path call (fixed in
+  `0cc5f18`). The `is_flipped` half is unchanged.
+- **§4 + §5.1 expected-profile `N`** computes over the EMITTED/TRIMMED slice, not
+  the full window — full-window `N` is unrealizable through the interface
+  (`observed_counts` spans only `[start, stop)`). The flatness identity holds
+  over the emitted slice. Added a HARD REQUIREMENT: Phase-3+ consumers
+  aggregating expected counts (e.g. CTCF pileup) MUST use single, untrimmed,
+  grid-aligned windows.
+- **§6 T7** is realized with a full 12-track model (all-`'+'`/band-0 fragments,
+  unambiguous selection); a literal single-track model is incompatible with
+  `TRACK_INDEX`.
+
+Suite after Scope A: **186 passed / 0 skipped** (was 184).
