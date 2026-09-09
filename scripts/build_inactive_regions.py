@@ -20,6 +20,12 @@ Positive controls (separate BEDs, NEVER training):
   (a) CTCF binding sites (v1 build_ctcf_binding_sites classified set, resized to 1024)
   (b) immune/epithelial marker genes (markers.immune_vs_epithelial.tsv, v1 filters)
 
+Config option EXCLUDE_N_GAPS (default False) adds a 6th exclusion -- assembly
+N-runs >= 1 kb derived directly from hg38.fa.  It does NOT alter the locked
+default (training_tiles.bed stays the 5-exclusion set, md5 regression anchor);
+the builder ALSO emits the 6-exclusion variant training_tiles.nogap.bed so the
+two can be compared empirically in the training bake-off.
+
 Deterministic, re-runnable.  Writes the BEDs (into gitignored data/region_sets/)
 and the QC report docs/qc/region_set_qc.md.
 
@@ -92,6 +98,16 @@ POSCTRL_PAD = 500              # safety pad when unioning pos-controls into excl
 EXPRESSION_THRESHOLD = 0.1     # blood-expressed gene cutoff (v1 "expression >= 0.1")
 DHS_BLOOD_COMPONENTS = {"Lymphoid", "Myeloid / erythroid"}
 STORE_BLACKLIST_EXPANSION = 120  # PlumbingConfig.blacklist_expansion default
+
+# --- N-gap exclusion (CONFIG OPTION; default locked-OFF) --------------------
+# EXCLUDE_N_GAPS is a config knob, NOT a change to the locked default region set.
+# It selects which of the two always-emitted variants is the "selected" region
+# set for downstream training; the locked default (training_tiles.bed, 5
+# exclusions, md5 regression anchor) and the 6-exclusion variant
+# (training_tiles.nogap.bed) are BOTH built regardless so the choice can be
+# tested empirically in the training bake-off.
+EXCLUDE_N_GAPS = False
+N_GAP_MIN_LEN = 1_000         # minimum assembly N-run length to exclude (bp)
 
 # HematopoieticGeneExpression cluster weights (verbatim from
 # biomarker-projects fragmentomics.data.HematopoieticGeneExpression).  The 10
@@ -242,6 +258,25 @@ def build_blacklist() -> pybedtools.BedTool:
     df = pd.read_csv(BLACKLIST, sep="\t", header=None,
                      names=["chrom", "start", "end", "label"])
     return bt_from_df(df[["chrom", "start", "end"]]).merge()
+
+
+def build_n_gaps(sizes: dict) -> pybedtools.BedTool:
+    """Assembly N-runs >= N_GAP_MIN_LEN bp on main contigs, from the reference FASTA.
+
+    Deterministic: fetches each contig sequence whole (max chr1 ~248 MB, fits in
+    memory) and regexes contiguous [Nn] runs, keeping those >= N_GAP_MIN_LEN.
+    Whole-contig fetch avoids chunk-boundary run stitching."""
+    fa = pysam.FastaFile(FASTA)
+    n_re = re.compile(r"[Nn]+")
+    rows = []
+    for c in MAIN_CONTIGS:
+        seq = fa.fetch(c)
+        for m in n_re.finditer(seq):
+            if m.end() - m.start() >= N_GAP_MIN_LEN:
+                rows.append((c, m.start(), m.end()))
+    fa.close()
+    df = pd.DataFrame(rows, columns=["chrom", "start", "end"])
+    return bt_from_df(df).merge()
 
 
 # ============================================================================
@@ -526,6 +561,21 @@ def main():
     bg_tiles = sample_nonoverlapping_tiles(bg_placeable, SEED, len(train_tiles))
     bg_bt = tiles_to_bt(bg_tiles)
 
+    print("[7c/9] N-gap exclusion + nogap variant tiles ...")
+    # 6th exclusion (CONFIG OPTION EXCLUDE_N_GAPS); built regardless for the
+    # bake-off.  Does NOT touch the locked default train_tiles above.
+    ngap_bt = build_n_gaps(sizes)
+    ngap_bp = bp(ngap_bt.intersect(genome_bt).sort(g=GENOME_FILE).merge())
+    write_bed(ngap_bt, os.path.join(OUT_DIR, "exclusion_6_ngap_1kb.bed"))
+    union_nogap = union_bt.cat(ngap_bt, postmerge=True).sort(g=GENOME_FILE).merge()
+    remainder_nogap = genome_bt.subtract(union_nogap).sort(g=GENOME_FILE).merge()
+    placeable_nogap = remainder_nogap.intersect(
+        margin_windows(sizes)).sort(g=GENOME_FILE).merge()
+    nogap_tiles = sample_nonoverlapping_tiles(placeable_nogap, SEED, N_TILES)
+    nogap_bt = tiles_to_bt(nogap_tiles)
+    write_bed(nogap_bt.cut([0, 1, 2]).saveas(),
+              os.path.join(OUT_DIR, "training_tiles.nogap.bed"))
+
     # ------------------------------------------------------------------ sanity
     print("[8/9] sanity checks ...")
     for name, bt in filters:
@@ -539,6 +589,14 @@ def main():
     merged_tiles = train_bt.cut([0, 1, 2]).sort(g=GENOME_FILE).merge()
     assert bp(merged_tiles) == len(train_tiles) * TILE, \
         "training tiles overlap each other"
+
+    # nogap variant: zero overlap with the N-gap exclusion AND all 5 base filters
+    nogap_bt3 = nogap_bt.cut([0, 1, 2])
+    assert nogap_bt3.intersect(ngap_bt, u=True).count() == 0, \
+        "nogap variant tiles overlap N-gap exclusion"
+    for name, bt in filters:
+        n_ov = nogap_bt3.intersect(bt, u=True).count()
+        assert n_ov == 0, f"nogap tiles overlap exclusion {name}: {n_ov}"
 
     # ------------------------------------------------------------ QC: repeats
     print("[9/9] repeat / GC / N QC ...")
@@ -563,6 +621,12 @@ def main():
 
     train_gcn = gc_n_per_tile(train_tiles)
     bg_gcn = gc_n_per_tile(bg_tiles)
+    nogap_gcn = gc_n_per_tile(nogap_tiles)
+
+    # nogap-vs-default tile overlap
+    shared_exact = len(set(train_tiles) & set(nogap_tiles))
+    shared_overlap = train_bt.cut([0, 1, 2]).intersect(
+        nogap_bt.cut([0, 1, 2]), u=True).count()
 
     # chromosome coverage
     chrom_counts = pd.Series([c for c, _, _ in train_tiles]).value_counts()
@@ -570,6 +634,7 @@ def main():
     # md5s of emitted BEDs
     emitted = {
         "training_tiles.bed": os.path.join(OUT_DIR, "training_tiles.bed"),
+        "training_tiles.nogap.bed": os.path.join(OUT_DIR, "training_tiles.nogap.bed"),
         "positive_control_ctcf.bed": os.path.join(OUT_DIR, "positive_control_ctcf.bed"),
         "positive_control_markers.bed": os.path.join(OUT_DIR, "positive_control_markers.bed"),
     }
@@ -584,6 +649,8 @@ def main():
         train_rep=train_rep, bg_rep=bg_rep, train_sl=train_sl, bg_sl=bg_sl,
         train_comp=train_comp, bg_comp=bg_comp, train_bl=train_bl,
         train_gcn=train_gcn, bg_gcn=bg_gcn, chrom_counts=chrom_counts,
+        nogap_tiles=nogap_tiles, nogap_gcn=nogap_gcn, ngap_bp=ngap_bp,
+        shared_exact=shared_exact, shared_overlap=shared_overlap,
         md5s=md5s, counts=counts,
         n_expressed=int((expr >= EXPRESSION_THRESHOLD).sum()),
         n_ctcf_pc=ctcf_pc.count(), n_marker_pc=marker_pc.count(),
@@ -642,6 +709,15 @@ def write_report(**k):
     train_ngap = int((train_gcn["n_frac"] > 0.5).sum())
     train_nany = int((train_gcn["n_frac"] > 0.01).sum())
     bg_ngap = int((bg_gcn["n_frac"] > 0.5).sum())
+
+    nogap_gcn = k["nogap_gcn"]
+    n_nogap = len(k["nogap_tiles"])
+    nogap_ngap = int((nogap_gcn["n_frac"] > 0.5).sum())
+    nogap_nany = int((nogap_gcn["n_frac"] > 0.01).sum())
+    nogap_md5 = k["md5s"]["training_tiles.nogap.bed"]
+    nogap_count = k["counts"]["training_tiles.nogap.bed"]
+    default_md5 = k["md5s"]["training_tiles.bed"]
+    selected = "training_tiles.nogap.bed" if EXCLUDE_N_GAPS else "training_tiles.bed"
 
     report = f"""# Inactive Training Region-Set QC Report
 
@@ -760,10 +836,47 @@ neither changes the locked region definition here:
 1. Downstream self-correction: the plumbing `min_N` filter (default 50 per
    sample/tile/track) drops tiles with too few fragments, and all-N tiles carry
    essentially no fragments -> they are excluded at Dataset build time anyway.
-2. Recommended (needs owner approval, per the "algorithmic changes" rule): add an
-   assembly-gap / N-run BED (or a hardmask) as a 6th exclusion so preprocess does
-   not waste compute on empty tiles.  Left OUT of this build because the region
-   definition was locked to exactly the five sets above.
+2. Config option (this build): the `EXCLUDE_N_GAPS` knob adds an assembly-gap /
+   N-run BED as a 6th exclusion so preprocess does not waste compute on empty
+   tiles.  It defaults OFF, so the locked 5-exclusion default is unchanged; the
+   6-exclusion variant is emitted alongside as `training_tiles.nogap.bed` for the
+   training bake-off (see "N-gap variant" below).
+
+## N-gap variant (`training_tiles.nogap.bed`)
+
+Config knob **`EXCLUDE_N_GAPS`** (default `False`) toggles assembly N-gap
+exclusion.  It is a config OPTION, NOT a change to the locked default:
+`training_tiles.bed` is always the 5-exclusion set (md5 regression anchor).  This
+variant adds a **6th exclusion** -- assembly N-runs >= {N_GAP_MIN_LEN:,} bp on
+main contigs, derived directly from `hg38.fa`
+({k['ngap_bp']:,} bp, {_fmt_pct(k['ngap_bp']/total)} of genome) -- and re-samples
+with the identical seed protocol (`default_rng({SEED})`, {n_nogap} tiles).
+
+Selected region set for downstream training (per `EXCLUDE_N_GAPS`={EXCLUDE_N_GAPS}):
+`{selected}`.
+
+| metric | default (`training_tiles.bed`) | nogap (`training_tiles.nogap.bed`) |
+|---|---|---|
+| tiles | {n_train} | {nogap_count} |
+| md5 | `{default_md5}` | `{nogap_md5}` |
+| N frac mean | {train_gcn['n_frac'].mean():.6f} | {nogap_gcn['n_frac'].mean():.6f} |
+| N frac max | {train_gcn['n_frac'].max():.6f} | {nogap_gcn['n_frac'].max():.6f} |
+| tiles > 50% N | {train_ngap} ({train_ngap/n_train*100:.2f}%) | {nogap_ngap} ({nogap_ngap/n_nogap*100:.2f}%) |
+| tiles > 1% N | {train_nany} ({train_nany/n_train*100:.2f}%) | {nogap_nany} ({nogap_nany/n_nogap*100:.2f}%) |
+
+Adding the N-gap exclusion collapses the tile N-fraction to ~0 (max
+{nogap_gcn['n_frac'].max():.6f}), removing the {train_ngap} effectively-empty
+tiles the locked default admits.
+
+**Overlap with default:** {k['shared_exact']} of {n_nogap} nogap tiles are
+byte-identical to a default tile ({k['shared_exact']/n_nogap*100:.2f}%);
+{k['shared_overlap']} default tiles overlap any nogap tile.  (Removing N-gaps
+shifts the free-space partition, so the weighted sequential sampler diverges after
+the first changed interval -- most tiles differ.)
+
+The empirical choice between the two variants (whether masking empty tiles
+up-front changes the fitted background) will be made in the training bake-off,
+not here.
 
 ## Chromosome coverage (training tiles)
 
