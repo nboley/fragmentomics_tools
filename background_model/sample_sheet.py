@@ -23,9 +23,24 @@ import pandas as pd
 DEFAULT_QUIESCENT_CATEGORIES = {"Asymptomatic", "Remission"}
 
 
+def library_from_key(key: str) -> str:
+    """Derive the library name from a DataManifest key.
+
+    Real IBD manifest keys look like ``NC-<seqrun>/<lib>.hg38.fragments.h5``;
+    the library is the file basename with the fragments-h5 suffix stripped.
+    """
+    basename = str(key).rsplit("/", 1)[-1]
+    suffix = ".hg38.fragments.h5"
+    if basename.endswith(suffix):
+        return basename[: -len(suffix)]
+    return basename.split(".", 1)[0]
+
+
 def parse_manifest(manifest_path: str) -> pd.DataFrame:
     """Parse a DataManifest TSV, extracting library/seqrun/h5_path from the notes JSON."""
-    df = pd.read_csv(manifest_path, sep="\t")
+    # DataManifest v3 files carry '#'-prefixed metadata header lines above the
+    # real column header; comment='#' skips them (harmless for plain TSVs).
+    df = pd.read_csv(manifest_path, sep="\t", comment="#")
 
     records = []
     for _, row in df.iterrows():
@@ -38,7 +53,10 @@ def parse_manifest(manifest_path: str) -> pd.DataFrame:
         else:
             notes_dict = {}
 
-        library = notes_dict.get("library", row.get("library", row.get("key", "")))
+        # Real manifest notes carry no 'library'; derive it from the key basename.
+        library = notes_dict.get("library") or row.get("library") or library_from_key(
+            row.get("key", "")
+        )
         seqrun = notes_dict.get("seqrun", "")
         h5_path = row.get("path", row.get("key", ""))
 
@@ -69,7 +87,10 @@ def build_sample_sheet(
     # Normalize column names: look for ENDO_CATEGORY or endo_category
     col_map = {c.lower(): c for c in clinical_df.columns}
     endo_col = col_map.get("endo_category", col_map.get("endocategory"))
-    lib_col = col_map.get("library", col_map.get("sample_id", col_map.get("sampleid")))
+    lib_col = col_map.get(
+        "library",
+        col_map.get("library_name", col_map.get("sample_id", col_map.get("sampleid"))),
+    )
 
     if endo_col is None:
         raise ValueError(
