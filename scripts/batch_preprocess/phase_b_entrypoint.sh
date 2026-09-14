@@ -13,6 +13,9 @@ REF="${REF:-hg38}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
 command -v aws >/dev/null 2>&1 || pip install --quiet awscli
+# Pilot c882e52a failed with ModuleNotFoundError: zarr — image omni/biomarker:0.2.2
+# lacks zarr. Pin 2.18.3 (matches biomarker_env; zarr_format=2 output).
+pip install --quiet 'zarr==2.18.3'
 
 WORKDIR="${WORKDIR:-/tmp/bgwork}"
 INPUTS="$WORKDIR/inputs"
