@@ -19,7 +19,12 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 command -v aws >/dev/null 2>&1 || pip install --quiet awscli
 # Pilot c882e52a failed with ModuleNotFoundError: zarr — image omni/biomarker:0.2.2
 # lacks zarr. Pin 2.18.3 (matches biomarker_env; zarr_format=2 output).
-pip install --quiet 'zarr==2.18.3'
+# Pilot e07f4253 then failed at import: zarr 2.18.3's zarr/util.py imports the
+# PUBLIC names cbuffer_sizes/cbuffer_metainfo from numcodecs.blosc, but the
+# container ships numcodecs >=0.16 which privatized them (_cbuffer_sizes) ->
+# ImportError. Pin numcodecs==0.13.1 too (reproduces biomarker_env's tested
+# combo: zarr 2.18.3 + numcodecs 0.13.1 + numpy 2.x).
+pip install --quiet 'zarr==2.18.3' 'numcodecs==0.13.1'
 
 WORKDIR="${WORKDIR:-/tmp/bgwork}"
 INPUTS="$WORKDIR/inputs"
