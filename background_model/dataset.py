@@ -180,6 +180,9 @@ class BackgroundTileDataset(Dataset):
         self._root = None
         self._root_pid = None
         self._rng = None
+        # cached per-PID array handles + resident indptr (see _get_root)
+        self._arrays = None
+        self._indptr = None
 
     # ── worker-safe lazy handle ──────────────────────────────────────────
 
@@ -190,6 +193,17 @@ class BackgroundTileDataset(Dataset):
             self._root_pid = pid
             base = 0x9E3779B9 if self._seed is None else int(self._seed)
             self._rng = np.random.default_rng([base, pid])
+            # Cache the array handles once per process. Each root["..."]
+            # lookup re-instantiates a zarr Array and re-reads its .zarray
+            # metadata; measured on EFS that was ~6 metadata opens per
+            # __getitem__ and 61% of per-item cost. indptr is ~2 MB, so it
+            # is read fully resident and lo/hi become pure numpy.
+            self._arrays = {
+                k: self._root[k]
+                for k in ("counts/pos", "counts/track", "counts/data",
+                          "tiles/mask", "tiles/seq")
+            }
+            self._indptr = np.asarray(self._root["counts/indptr"][:])
         return self._root
 
     def __len__(self) -> int:
@@ -230,17 +244,17 @@ class BackgroundTileDataset(Dataset):
         return x, y, m
 
     def __getitem__(self, i: int):
-        root = self._get_root()
+        self._get_root()
+        arrays = self._arrays
         s, t = self.index[i]
         u = s * self.n_tiles + t
 
-        indptr = root["counts/indptr"]
-        lo = int(indptr[u])
-        hi = int(indptr[u + 1])
+        lo = int(self._indptr[u])
+        hi = int(self._indptr[u + 1])
         if hi > lo:
-            pos = np.asarray(root["counts/pos"][lo:hi])
-            track = np.asarray(root["counts/track"][lo:hi])
-            data = np.asarray(root["counts/data"][lo:hi])
+            pos = np.asarray(arrays["counts/pos"][lo:hi])
+            track = np.asarray(arrays["counts/track"][lo:hi])
+            data = np.asarray(arrays["counts/data"][lo:hi])
         else:
             pos = np.empty(0, np.uint16)
             track = np.empty(0, np.uint8)
@@ -249,8 +263,8 @@ class BackgroundTileDataset(Dataset):
         y_full = np.zeros((self.n_tracks, self.l_target), dtype=np.float32)
         if len(pos):
             np.add.at(y_full, (track, pos), data.astype(np.float32))
-        mask_full = np.asarray(root["tiles/mask"][t]).astype(bool)
-        seq_full = np.asarray(root["tiles/seq"][t]).astype(np.uint8)
+        mask_full = np.asarray(arrays["tiles/mask"][t]).astype(bool)
+        seq_full = np.asarray(arrays["tiles/seq"][t]).astype(np.uint8)
 
         if self.train_mode:
             j = int(self._rng.integers(-self.jitter, self.jitter + 1))
