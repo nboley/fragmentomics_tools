@@ -32,12 +32,34 @@ import numpy
 
 @numba.njit
 def _todense(coords, values, length):
+    # The output dtype follows `values`, NOT the coordinate dtype -- this is what
+    # keeps fractional data (e.g. bias-correction weights) from being truncated.
+    # See the SparseIntVector docstring below.
     rv = numpy.zeros(length, dtype=values.dtype)
     for x, v in zip(coords, values):
         rv[x] += v
     return rv
 
 class SparseIntVector():
+    """Sparse 1-D vector stored as (coords, data) pairs over a fixed `length`.
+
+    .. note:: The name is a misnomer kept for backwards compatibility: only
+        **coords** are integers (they are positions, so they are cast to int).
+        **data is stored with whatever dtype it was passed** and is never cast,
+        and :func:`_todense` allocates its output as ``values.dtype``. Float
+        data therefore survives the full
+        ``build_coverage_counts -> todense()`` round trip.
+
+        This matters: the bias-correction path assigns *fractional* per-fragment
+        weights (``1 / (probs * L_valid)``), and weighted ("corrected") coverage
+        pileups are built through exactly this class. If `data` were ever coerced
+        to int, every weight < 1 would silently floor to 0 and corrected pileups
+        would be quietly wrong rather than loudly broken. Verified empirically:
+        coords ``[0, 2, 2, 5]`` with data ``[0.25, 0.5, 0.25, 1.75]`` densifies to
+        float64 ``[0.25, 0, 0.75, 0, 0, 1.75]`` -- note duplicate coords sum
+        exactly (0.5 + 0.25 = 0.75) rather than overwriting.
+    """
+
     def __init__(self, coords, data, length, check=True):
         self.coords = numpy.array(coords).astype(int)
         if check and len(self.coords) > 0 and self.coords.min() < 0:
