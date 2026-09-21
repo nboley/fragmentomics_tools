@@ -228,6 +228,33 @@ class GCBias2D:
         bot = v10 * (1 - tg) + v11 * tg
         return top * (1 - tl) + bot * tl
 
+    def build_lookup_table(self, max_len=500) -> np.ndarray:
+        """Precompute a dense (max_len+1, 101) lookup table indexed by integer length and GC%.
+
+        Uses the same bilinear interpolation and HOLD-at-edges policy as __call__.
+        Returns the table; also stores it as self._lookup_table for use by lookup().
+        """
+        lengths = np.arange(max_len + 1, dtype=np.float64)   # (max_len+1,)
+        gc_pcts = np.arange(101, dtype=np.float64)            # (101,)
+        # Evaluate __call__ on the full (length, gc) grid via broadcasting
+        # __call__ handles clipping and bilinear interpolation correctly.
+        # Shape: lengths[:, None] broadcasts with gc_pcts[None, :]
+        table = self(lengths[:, None], gc_pcts[None, :])       # (max_len+1, 101)
+        self._lookup_table = table
+        self._lookup_max_len = max_len
+        return table
+
+    def lookup(self, length, gc_pct):
+        """Fast table lookup: length is int (or int array), gc_pct is float (or array).
+
+        Rounds gc_pct to nearest integer in [0, 100], clips length to [0, max_len],
+        and returns table[length, gc_pct_int].
+        """
+        table = self._lookup_table
+        gc_int = np.clip(np.rint(gc_pct).astype(np.intp), 0, 100)
+        li = np.clip(length, 0, self._lookup_max_len)
+        return table[li, gc_int]
+
 
 # ── region set + per-region precompute ────────────────────────────────────
 
@@ -329,7 +356,7 @@ def per_region_real_counts(h5_path: str, regions: list, min_mapq: int = 10):
 # ── the sampler ───────────────────────────────────────────────────────────
 
 def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
-                    region_len, rng):
+                    region_len, rng, gc_lookup_table=None):
     """Direct-sample fragments for one sample across all regions.
 
     Precomputes the unnormalized weight for every valid (position, length)
@@ -341,6 +368,10 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
                        * gc_bias(L, gc(p, p+L)) * len_p[L]
 
     Strand is assigned 50/50 independently.
+
+    If ``gc_lookup_table`` is provided (a (max_len+1, 101) array from
+    GCBias2D.build_lookup_table), it is used instead of gcbias() for a
+    large speedup.
     """
     all_ridx, all_start, all_stop, all_strand = [], [], [], []
     for ridx, (pre, target) in enumerate(zip(region_pre, target_counts)):
@@ -358,6 +389,8 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
         flat_q = []
         flat_w = []
         for li, L in enumerate(len_vals):
+            if len_p[li] < 1e-8:
+                continue
             L = int(L)
             max_p = region_len - L   # p + L <= region_len
             if max_p < 0:
@@ -368,7 +401,12 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
                 continue
             q_ok = p_ok + L
             gc_pct = 100.0 * (cum_gc[q_ok] - cum_gc[p_ok]) / L
-            w = lw_all[p_ok] * rw_all[q_ok] * gcbias(L, gc_pct) * len_p[li]
+            if gc_lookup_table is not None:
+                gc_int = np.clip(np.rint(gc_pct).astype(np.intp), 0, 100)
+                gc_w = gc_lookup_table[L, gc_int]
+            else:
+                gc_w = gcbias(L, gc_pct)
+            w = lw_all[p_ok] * rw_all[q_ok] * gc_w * len_p[li]
             flat_p.append(p_ok)
             flat_q.append(q_ok)
             flat_w.append(w)
@@ -442,6 +480,11 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
     region_pre = [precompute_region(r, region_len) for r in regions]
     print(f"[sim] precomputed region arrays ({time.time()-t0:.1f}s)", flush=True)
 
+    # Precompute GC bias lookup table (shared across samples -- independent of w6 jitter)
+    gc_lut = gcbias.build_lookup_table(max_len=MAX_LEN)
+    print(f"[sim] built GC bias lookup table {gc_lut.shape} ({time.time()-t0:.1f}s)",
+          flush=True)
+
     # regime-B per-sample jitter of w6 (recorded as ground truth)
     if regime == "B":
         jitter_rng = np.random.default_rng(seed + 1)
@@ -461,7 +504,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         srng = np.random.default_rng(int(per_sample_seeds[s]))
         ridx, start, stop, strand = simulate_sample(
             region_pre, target_counts[s], w6_s, gcbias, len_vals, len_p,
-            region_len, srng
+            region_len, srng, gc_lookup_table=gc_lut
         )
         np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
                  region_idx=ridx, start=start, stop=stop, strand=strand)
