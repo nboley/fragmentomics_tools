@@ -330,54 +330,65 @@ def per_region_real_counts(h5_path: str, regions: list, min_mapq: int = 10):
 
 def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
                     region_len, rng):
-    """Rejection-sample fragments for one sample across all regions.
+    """Direct-sample fragments for one sample across all regions.
 
-    Acceptance prob = w6(left) * w6(right) * gc_bias(length, gc) / normaliser,
-    normaliser = max(w6)**2 * gcbias.max_bias so the max achievable weight is 1.
-    Strand is assigned 50/50 independently (the acceptance product is symmetric
-    in the two ends, so strand carries no bias -- see the module docstring's
-    strand-symmetry note).
+    Precomputes the unnormalized weight for every valid (position, length)
+    combination and samples from the resulting categorical distribution in a
+    single ``rng.choice`` call per region.  Produces the same joint distribution
+    as the previous rejection sampler::
+
+        weight[p, L] = w6(fwd_cut[p]) * w6(rc_cut[p+L])
+                       * gc_bias(L, gc(p, p+L)) * len_p[L]
+
+    Strand is assigned 50/50 independently.
     """
-    norm = (w6.max() ** 2) * gcbias.max_bias
     all_ridx, all_start, all_stop, all_strand = [], [], [], []
     for ridx, (pre, target) in enumerate(zip(region_pre, target_counts)):
         if target <= 0:
             continue
         fwd_cut = pre["fwd_cut"]; rc_cut = pre["rc_cut"]
         valid = pre["valid"]; cum_gc = pre["cum_gc"]
-        starts_acc = []
-        stops_acc = []
-        n_have = 0
-        # oversample per batch; grow batch if acceptance is low
-        batch = max(256, int(target * 2))
-        while n_have < target:
-            p = rng.integers(0, region_len, size=batch)          # region-local start
-            length = rng.choice(len_vals, size=batch, p=len_p)
-            q = p + length                                        # region-local stop
-            fit = q <= region_len
-            if not fit.any():
+
+        # Precompute w6 weights at every cut position
+        lw_all = w6[fwd_cut]   # (region_len+1,)
+        rw_all = w6[rc_cut]    # (region_len+1,)
+
+        # Build flat arrays of valid (start, stop) pairs and their weights
+        flat_p = []
+        flat_q = []
+        flat_w = []
+        for li, L in enumerate(len_vals):
+            L = int(L)
+            max_p = region_len - L   # p + L <= region_len
+            if max_p < 0:
                 continue
-            p_f = p[fit]; q_f = q[fit]; len_f = length[fit]
-            ok = valid[p_f] & valid[q_f]
-            if not ok.any():
+            ok = valid[:max_p + 1] & valid[L:L + max_p + 1]
+            p_ok = np.nonzero(ok)[0]
+            if len(p_ok) == 0:
                 continue
-            p_f = p_f[ok]; q_f = q_f[ok]; len_f = len_f[ok]
-            lw = w6[fwd_cut[p_f]]                 # left cut, forward hexamer
-            rw = w6[rc_cut[q_f]]                  # right/far cut, reverse-complement
-            gc_pct = 100.0 * (cum_gc[q_f] - cum_gc[p_f]) / len_f
-            gb = gcbias(len_f, gc_pct)
-            prob = (lw * rw * gb) / norm
-            acc = rng.random(size=len(prob)) < prob
-            if acc.any():
-                starts_acc.append(p_f[acc])
-                stops_acc.append(q_f[acc])
-                n_have += int(acc.sum())
-        s = np.concatenate(starts_acc)[:target]
-        e = np.concatenate(stops_acc)[:target]
+            q_ok = p_ok + L
+            gc_pct = 100.0 * (cum_gc[q_ok] - cum_gc[p_ok]) / L
+            w = lw_all[p_ok] * rw_all[q_ok] * gcbias(L, gc_pct) * len_p[li]
+            flat_p.append(p_ok)
+            flat_q.append(q_ok)
+            flat_w.append(w)
+
+        if not flat_w:
+            continue
+
+        all_p_arr = np.concatenate(flat_p)
+        all_q_arr = np.concatenate(flat_q)
+        all_w_arr = np.concatenate(flat_w)
+
+        probs = all_w_arr / all_w_arr.sum()
+        idx = rng.choice(len(probs), size=target, p=probs, replace=True)
+
+        s = all_p_arr[idx].astype(np.int32)
+        e = all_q_arr[idx].astype(np.int32)
         strand = np.where(rng.random(size=target) < 0.5, "+", "-")
         all_ridx.append(np.full(target, ridx, dtype=np.int32))
-        all_start.append(s.astype(np.int32))
-        all_stop.append(e.astype(np.int32))
+        all_start.append(s)
+        all_stop.append(e)
         all_strand.append(strand)
     return (np.concatenate(all_ridx), np.concatenate(all_start),
             np.concatenate(all_stop), np.concatenate(all_strand).astype("U1"))
