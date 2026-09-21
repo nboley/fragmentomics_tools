@@ -35,8 +35,9 @@ Generative procedure, per region, propose-and-reject (plan sec 3):
   4. accept w.p.  w6(left) * w6(right) * gc_bias(length, gc), normalised so the
      max achievable acceptance weight is 1 (per-sample normaliser, because
      regime-B jitter can push a w6 entry above 1).
-  5. per-region target counts sampled from the empirical per-tile count
-     distribution of the same real h5.
+  5. per-(sample, region) target counts sampled independently from the
+     empirical per-tile count distribution of either the production zarr store
+     (--real-store, recommended) or the heldout h5.
 
 Regimes (plan sec 4):
   A  every sample shares one bias table.
@@ -385,7 +386,7 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
 # ── driver ────────────────────────────────────────────────────────────────
 
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
-        heldout_h5, region_len=REGION_LEN):
+        heldout_h5, region_len=REGION_LEN, real_store=None):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
@@ -403,9 +404,27 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
 
     len_vals, len_p = empirical_length_pmf(heldout_h5)
     real_counts = per_region_real_counts(heldout_h5, regions)
-    # sample per-region target counts from the empirical per-tile distribution
-    target_counts = rng.choice(real_counts, size=n_regions, replace=True)
-    print(f"[sim] real per-tile counts median={np.median(real_counts):.0f} "
+
+    # Build the pool of per-tile fragment counts to sample from.
+    # --real-store: use the production store's empirical N distribution
+    #   (totals/N has shape (samples, tiles, tracks); sum tracks, flatten).
+    # Otherwise: fall back to the heldout-h5 per-region counts.
+    if real_store is not None:
+        import zarr
+        store = zarr.open(real_store, mode="r")
+        N = np.asarray(store["totals/N"])       # (samples, tiles, tracks)
+        count_pool = N.sum(axis=2).ravel()       # total frags per (sample, tile)
+        count_pool = count_pool[count_pool > 0]  # drop empty tiles
+        print(f"[sim] real-store N pool: {len(count_pool)} entries, "
+              f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
+              flush=True)
+    else:
+        count_pool = real_counts
+
+    # Each (sample, region) gets an independently sampled target count.
+    target_counts = rng.choice(count_pool, size=(n_samples, n_regions),
+                               replace=True)
+    print(f"[sim] real per-tile counts median={np.median(count_pool):.0f} "
           f"targets total={int(target_counts.sum()):,} ({time.time()-t0:.1f}s)",
           flush=True)
 
@@ -430,7 +449,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         w6_s = w6 * np.exp(log_jitter[s])
         srng = np.random.default_rng(int(per_sample_seeds[s]))
         ridx, start, stop, strand = simulate_sample(
-            region_pre, target_counts, w6_s, gcbias, len_vals, len_p,
+            region_pre, target_counts[s], w6_s, gcbias, len_vals, len_p,
             region_len, srng
         )
         np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
@@ -733,6 +752,10 @@ def main(argv=None):
     ap.add_argument("--n-regions", type=int, default=N_REGIONS)
     ap.add_argument("--out-root", default=OUT_ROOT)
     ap.add_argument("--heldout-h5", default=DEFAULT_HELDOUT_H5)
+    ap.add_argument("--real-store", default=None,
+                    help="path to production zarr store; sample target counts "
+                         "from its totals/N distribution instead of the "
+                         "heldout h5 (recommended: bg_store_b67d7c95.zarr)")
     ap.add_argument("--validate", action="store_true",
                     help="run the four validation gates after simulating")
     ap.add_argument("--validate-only", metavar="DIR",
@@ -745,7 +768,8 @@ def main(argv=None):
         return
 
     out_dir = run(args.regime, args.n_samples, args.seed, args.w6_dynamic_range,
-                  args.n_regions, args.out_root, args.heldout_h5)
+                  args.n_regions, args.out_root, args.heldout_h5,
+                  real_store=args.real_store)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))
