@@ -279,6 +279,24 @@ class FragmentArray:
         if isinstance(stops_0, numpy.ndarray) and stops_0.dtype not in (numpy.int32, numpy.int64):
             raise TypeError("stop array must be int32 or int64")
 
+        # Track which optional fields were originally None (default-allocated).
+        # _subset_or_mask uses this to pass None instead of slicing default arrays.
+        self._default_fields = set()
+        if weights is None:
+            self._default_fields.add('weights')
+        if first_covered_base_weights is None:
+            self._default_fields.add('first_covered_base_weights')
+        if last_covered_base_weights is None:
+            self._default_fields.add('last_covered_base_weights')
+        if num_cpgs is None:
+            self._default_fields.add('num_cpgs')
+        if num_converted_cpgs is None:
+            self._default_fields.add('num_converted_cpgs')
+        if num_cytosines is None:
+            self._default_fields.add('num_cytosines')
+        if num_converted_cytosines is None:
+            self._default_fields.add('num_converted_cytosines')
+
         # cast starts/stops to array
         self.starts_0 = numpy.asarray(starts_0, dtype=numpy.int32)
         self.stops_0 = numpy.asarray(stops_0, dtype=numpy.int32)
@@ -811,7 +829,7 @@ class FragmentArray:
         if max_frag_len is not None:
             mask &= self.fragment_lengths < max_frag_len
 
-        return self.mask(mask)
+        return self.mask(mask, validate_data=False)
 
     def _get_covered_base_array(self, positions_attr, weights_attr, return_sparse):
         def _empty():
@@ -899,12 +917,33 @@ class FragmentArray:
 
         return coverage_array
 
+    # Cache for MultiIndex objects keyed by (split_strand, fl_bands_tuple)
+    _coverage_index_cache = {}
+
+    @staticmethod
+    def _get_coverage_index(strands, fl_bands):
+        """Return a cached MultiIndex for the given strand/fl_band combination."""
+        cache_key = (tuple(strands), tuple(fl_bands))
+        idx = FragmentArray._coverage_index_cache.get(cache_key)
+        if idx is None:
+            keys = []
+            for strand in strands:
+                for fl in fl_bands:
+                    keys.append((strand, fl, "first"))
+                    keys.append((strand, fl, "last"))
+                    keys.append((strand, fl, "midpoint"))
+            idx = pandas.MultiIndex.from_tuples(keys, names=['strand', 'fl_band', 'position'])
+            FragmentArray._coverage_index_cache[cache_key] = idx
+        return idx
+
     def build_coverage_counts(self, fl_bands=None, split_strand=True, return_sparse=False):
         if fl_bands is None:
             fl_bands = [(0, self.max_frag_len)]
 
-        res = {}
         strands = ["+", "-"] if split_strand else ['.']
+        cached_index = self._get_coverage_index(strands, fl_bands)
+
+        values = []
         for strand in strands:
             if strand != '.':
                 sub_rfa = self.subset_by_fragment_strand(strand)
@@ -912,21 +951,11 @@ class FragmentArray:
                 sub_rfa = self
             for fl in fl_bands:
                 sub_sub_rfa = sub_rfa.subset_fragment_lengths(*fl)
-                key = (strand, fl, "first")
-                assert key not in res
-                res[key] = sub_sub_rfa.get_first_covered_base_array(return_sparse=return_sparse)
+                values.append(sub_sub_rfa.get_first_covered_base_array(return_sparse=return_sparse))
+                values.append(sub_sub_rfa.get_last_covered_base_array(return_sparse=return_sparse))
+                values.append(sub_sub_rfa.get_midpoint_coverage_array(return_sparse=return_sparse))
 
-                key = (strand, fl, "last")
-                assert key not in res
-                res[key] = sub_sub_rfa.get_last_covered_base_array(return_sparse=return_sparse)
-
-                key = (strand, fl, "midpoint")
-                assert key not in res
-                res[key] = sub_sub_rfa.get_midpoint_coverage_array(return_sparse=return_sparse)
-
-        res = pandas.Series(res)
-        res.index = res.index.set_names(['strand', 'fl_band', 'position'])
-        return res.rename("coverage")
+        return pandas.Series(values, index=cached_index, name="coverage")
 
     def to_fragment_matrix(self):
         warnings.warn("deprecated, use .fragment_matrix", DeprecationWarning)
@@ -956,17 +985,22 @@ class FragmentArray:
         else:
             fragment_strands = None
 
+        # For fields that were default-allocated (ones/zeros from None), pass
+        # None to _replace instead of slicing — avoids allocating arrays that
+        # will just be re-created as default in __init__.
+        df = getattr(self, '_default_fields', set())
+
         return self._replace(
             starts_0=self.starts_0[mask],
             stops_0=self.stops_0[mask],
-            weights=self.weights[mask],
-            first_covered_base_weights=self.first_covered_base_weights[mask],
-            last_covered_base_weights=self.last_covered_base_weights[mask],
+            weights=None if 'weights' in df else self.weights[mask],
+            first_covered_base_weights=None if 'first_covered_base_weights' in df else self.first_covered_base_weights[mask],
+            last_covered_base_weights=None if 'last_covered_base_weights' in df else self.last_covered_base_weights[mask],
             fragment_strands=fragment_strands,
-            num_cpgs=self.num_cpgs[mask],
-            num_converted_cpgs=self.num_converted_cpgs[mask],
-            num_cytosines=self.num_cytosines[mask],
-            num_converted_cytosines=self.num_converted_cytosines[mask],
+            num_cpgs=None if 'num_cpgs' in df else self.num_cpgs[mask],
+            num_converted_cpgs=None if 'num_converted_cpgs' in df else self.num_converted_cpgs[mask],
+            num_cytosines=None if 'num_cytosines' in df else self.num_cytosines[mask],
+            num_converted_cytosines=None if 'num_converted_cytosines' in df else self.num_converted_cytosines[mask],
             validate_data=validate_data,
         )
 
@@ -1000,7 +1034,7 @@ class FragmentArray:
                 strand = strand.encode()
 
         mask = self.fragment_strands == strand
-        return self.subset(mask)
+        return self.subset(mask, validate_data=False)
 
     def drop_duplicate_fragments(self):
         _, indices = np.unique(
