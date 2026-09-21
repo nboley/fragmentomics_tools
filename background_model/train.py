@@ -45,7 +45,7 @@ from lightning.pytorch.loggers import CSVLogger
 from lightning.pytorch.utilities import grad_norm
 from torch.utils.data import DataLoader
 
-from background_model.config import TILE
+from background_model.config import TILE, PlumbingConfig
 from background_model.dataset import BackgroundTileDataset
 from background_model_core import LOSSES, BackgroundModel, _prepare_mask
 
@@ -166,15 +166,27 @@ class TrainConfig:
     runs_root: str
     resume_from: str | None
     n_kernels: int = 512
+    num_residual_layers: int = 2
+    precision: str = "32"
+    min_N: int = 50
 
 
-def build_model(loss: str, lr: float, n_kernels: int = 512) -> InstrumentedBackgroundModel:
-    return InstrumentedBackgroundModel(loss=loss, learning_rate=lr, n_kernels=n_kernels)
+def build_model(loss: str, lr: float, n_kernels: int = 512,
+                num_residual_layers: int = 2) -> InstrumentedBackgroundModel:
+    return InstrumentedBackgroundModel(
+        loss=loss, learning_rate=lr, n_kernels=n_kernels,
+        num_residual_layers=num_residual_layers,
+    )
 
 
 def build_datasets(store: str, model: BackgroundModel, min_N: int = 50, seed: int = 1337):
     """train (jitter+RC ON) and val (center, no RC) datasets on the real store."""
-    model_input_size = model.calc_input_region_size(TILE)
+    # Read tile_size from the store's own config so the harness works with any
+    # tile size (production 16384 or simulation 2048).
+    import zarr as _zarr
+    _root = _zarr.open_group(store, mode="r")
+    _tile_size = PlumbingConfig.from_json(_root.attrs["config_json"]).tile_size
+    model_input_size = model.calc_input_region_size(_tile_size)
     train_ds = BackgroundTileDataset(
         store_path=store,
         model_input_size=model_input_size,
@@ -233,6 +245,8 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "store": cfg.store,
         "loss": cfg.loss,
         "n_kernels": cfg.n_kernels,
+        "num_residual_layers": cfg.num_residual_layers,
+        "precision": cfg.precision,
         "max_epochs": cfg.max_epochs,
         "batch_size": cfg.batch_size,
         "lr": cfg.lr,
@@ -266,6 +280,7 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
     trainer = L.Trainer(
         accelerator="auto",
         devices="auto",
+        precision=cfg.precision,
         max_epochs=cfg.max_epochs,
         gradient_clip_val=1.0,
         deterministic=True,
@@ -283,8 +298,8 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
 def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
-    model = build_model(cfg.loss, cfg.lr, cfg.n_kernels)
-    train_ds, val_ds = build_datasets(cfg.store, model, seed=cfg.seed)
+    model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers)
+    train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
         train_ds, val_ds, cfg.batch_size, cfg.num_workers
@@ -321,9 +336,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="limit_train_batches/limit_val_batches (int count or float frac) for smokes",
     )
     p.add_argument("--n-kernels", type=int, default=512, help="trunk width (smokes use small)")
+    p.add_argument("--num-residual-layers", type=int, default=2, help="number of residual blocks")
+    p.add_argument("--precision", default="32",
+                   choices=["32", "16-mixed", "bf16-mixed"],
+                   help="training precision (bf16-mixed for ~2x speedup on A10G)")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--patience", type=int, default=5)
+    p.add_argument("--min-N", type=int, default=50,
+                   help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
     p.add_argument("--runs-root", default=DEFAULT_RUNS_ROOT)
     p.add_argument("--resume-from", default=None)
@@ -348,6 +369,9 @@ def cfg_from_args(args) -> TrainConfig:
         runs_root=args.runs_root,
         resume_from=args.resume_from,
         n_kernels=args.n_kernels,
+        num_residual_layers=args.num_residual_layers,
+        precision=args.precision,
+        min_N=args.min_N,
     )
 
 
