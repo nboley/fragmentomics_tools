@@ -128,13 +128,23 @@ class TestInitContract:
 
     def test_lazy_handle_not_opened_in_init(self, tmp_dir):
         """Worker safety: no zarr handle is created in __init__ (would be shared
-        across a fork)."""
+        across a fork).  With preload=True (default), the fast path never opens
+        a zarr handle at all; with preload=False, the handle is opened lazily
+        on first __getitem__."""
         sp = os.path.join(tmp_dir, "s.zarr")
         _build_synthetic_store(sp)
-        ds = _make_ds(sp)
+        # preload=True: _root stays None even after __getitem__
+        ds = _make_ds(sp, preload=True)
         assert ds._root is None and ds._root_pid is None
+        assert ds._preloaded is True
         _ = ds[0]
-        assert ds._root is not None and ds._root_pid == os.getpid()
+        assert ds._root is None  # fast path skips _get_root
+        # preload=False: _root is set lazily on __getitem__
+        ds2 = _make_ds(sp, preload=False)
+        assert ds2._root is None and ds2._root_pid is None
+        assert ds2._preloaded is False
+        _ = ds2[0]
+        assert ds2._root is not None and ds2._root_pid == os.getpid()
 
 
 class TestIndex:

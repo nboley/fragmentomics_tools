@@ -91,6 +91,7 @@ class BackgroundTileDataset(Dataset):
         rc_prob: float = 0.5,
         jitter: Optional[int] = None,
         seed: Optional[int] = None,
+        preload: bool = True,
     ):
         if split not in _SPLIT_CODES:
             raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)} (got {split!r})")
@@ -184,6 +185,28 @@ class BackgroundTileDataset(Dataset):
         self._arrays = None
         self._indptr = None
 
+        # ── optional in-memory preload (eliminates NFS I/O in workers) ────
+        self._preloaded = False
+        if preload:
+            self._preload(root)
+
+    # ── in-memory preload ───────────────────────────────────────────────
+
+    def _preload(self, root):
+        """Read all arrays into resident numpy arrays.
+
+        With fork-based DataLoader workers (Linux default), these arrays
+        are inherited copy-on-write — zero extra memory since __getitem__
+        only reads them.
+        """
+        self._mem_pos = np.asarray(root["counts/pos"][:])
+        self._mem_track = np.asarray(root["counts/track"][:])
+        self._mem_data = np.asarray(root["counts/data"][:])
+        self._mem_mask = np.asarray(root["tiles/mask"][:])
+        self._mem_seq = np.asarray(root["tiles/seq"][:])
+        self._indptr = np.asarray(root["counts/indptr"][:])
+        self._preloaded = True
+
     # ── worker-safe lazy handle ──────────────────────────────────────────
 
     def _get_root(self):
@@ -244,29 +267,48 @@ class BackgroundTileDataset(Dataset):
         return x, y, m
 
     def __getitem__(self, i: int):
-        self._get_root()
-        arrays = self._arrays
         s, t = self.index[i]
         u = s * self.n_tiles + t
 
-        lo = int(self._indptr[u])
-        hi = int(self._indptr[u + 1])
-        if hi > lo:
-            pos = np.asarray(arrays["counts/pos"][lo:hi])
-            track = np.asarray(arrays["counts/track"][lo:hi])
-            data = np.asarray(arrays["counts/data"][lo:hi])
+        if self._preloaded:
+            # Fast path: numpy array slicing, no I/O
+            lo = int(self._indptr[u])
+            hi = int(self._indptr[u + 1])
+            if hi > lo:
+                pos = self._mem_pos[lo:hi]
+                track = self._mem_track[lo:hi]
+                data = self._mem_data[lo:hi]
+            else:
+                pos = np.empty(0, np.uint16)
+                track = np.empty(0, np.uint8)
+                data = np.empty(0, np.uint16)
+            mask_full = self._mem_mask[t]
+            seq_full = self._mem_seq[t]
         else:
-            pos = np.empty(0, np.uint16)
-            track = np.empty(0, np.uint8)
-            data = np.empty(0, np.uint16)
+            # NFS zarr path (fallback when preload=False)
+            self._get_root()
+            arrays = self._arrays
+            lo = int(self._indptr[u])
+            hi = int(self._indptr[u + 1])
+            if hi > lo:
+                pos = np.asarray(arrays["counts/pos"][lo:hi])
+                track = np.asarray(arrays["counts/track"][lo:hi])
+                data = np.asarray(arrays["counts/data"][lo:hi])
+            else:
+                pos = np.empty(0, np.uint16)
+                track = np.empty(0, np.uint8)
+                data = np.empty(0, np.uint16)
+            mask_full = np.asarray(arrays["tiles/mask"][t]).astype(bool)
+            seq_full = np.asarray(arrays["tiles/seq"][t]).astype(np.uint8)
 
         y_full = np.zeros((self.n_tracks, self.l_target), dtype=np.float32)
         if len(pos):
             np.add.at(y_full, (track, pos), data.astype(np.float32))
-        mask_full = np.asarray(arrays["tiles/mask"][t]).astype(bool)
-        seq_full = np.asarray(arrays["tiles/seq"][t]).astype(np.uint8)
 
         if self.train_mode:
+            if self._rng is None:
+                base = 0x9E3779B9 if self._seed is None else int(self._seed)
+                self._rng = np.random.default_rng([base, os.getpid()])
             j = int(self._rng.integers(-self.jitter, self.jitter + 1))
             do_rc = bool(self._rng.random() < self.rc_prob)
         else:
