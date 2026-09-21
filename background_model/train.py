@@ -168,15 +168,17 @@ class TrainConfig:
     resume_from: str | None
     n_kernels: int = 512
     num_residual_layers: int = 2
+    dropout: float = 0.15
     precision: str = "32"
     min_N: int = 50
 
 
 def build_model(loss: str, lr: float, n_kernels: int = 512,
-                num_residual_layers: int = 2) -> InstrumentedBackgroundModel:
+                num_residual_layers: int = 2,
+                dropout: float = 0.15) -> InstrumentedBackgroundModel:
     return InstrumentedBackgroundModel(
         loss=loss, learning_rate=lr, n_kernels=n_kernels,
-        num_residual_layers=num_residual_layers,
+        num_residual_layers=num_residual_layers, dropout=dropout,
     )
 
 
@@ -247,6 +249,7 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "loss": cfg.loss,
         "n_kernels": cfg.n_kernels,
         "num_residual_layers": cfg.num_residual_layers,
+        "dropout": cfg.dropout,
         "precision": cfg.precision,
         "max_epochs": cfg.max_epochs,
         "batch_size": cfg.batch_size,
@@ -300,7 +303,8 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
 def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
-    model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers)
+    model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers,
+                        cfg.dropout)
     train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
@@ -339,6 +343,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--n-kernels", type=int, default=512, help="trunk width (smokes use small)")
     p.add_argument("--num-residual-layers", type=int, default=2, help="number of residual blocks")
+    p.add_argument("--dropout", type=float, default=0.15, help="spatial dropout rate (0 to disable)")
     p.add_argument("--precision", default="32",
                    choices=["32", "16-mixed", "bf16-mixed"],
                    help="training precision (bf16-mixed for ~2x speedup on A10G)")
@@ -374,6 +379,7 @@ def cfg_from_args(args) -> TrainConfig:
         num_residual_layers=args.num_residual_layers,
         precision=args.precision,
         min_N=args.min_N,
+        dropout=args.dropout,
     )
 
 
