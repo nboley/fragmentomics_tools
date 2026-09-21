@@ -77,6 +77,7 @@ Run: PYTHONPATH=. .../python scripts/sim_fragments.py --regime A --validate
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
@@ -228,18 +229,31 @@ class GCBias2D:
         bot = v10 * (1 - tg) + v11 * tg
         return top * (1 - tl) + bot * tl
 
-    def build_lookup_table(self, max_len=500) -> np.ndarray:
-        """Precompute a dense (max_len+1, 101) lookup table indexed by integer length and GC%.
+    # Padding added to the lookup table so that np.rint().astype(intp)
+    # can be used directly without np.clip (which has high per-call overhead).
+    # GC% is always 100*(int_count/L) with int_count in [0,L], so rint is in
+    # [0, 100].  The 2-column pad on each side guards against FP edge cases.
+    _GC_PAD = 2
 
-        Uses the same bilinear interpolation and HOLD-at-edges policy as __call__.
-        Returns the table; also stores it as self._lookup_table for use by lookup().
+    def build_lookup_table(self, max_len=500) -> np.ndarray:
+        """Precompute a dense (max_len+1, 101+2*pad) lookup table.
+
+        The table is padded by ``_GC_PAD`` columns on each side so that
+        ``gc_int = rint(gc_pct).astype(intp) + _GC_PAD`` always lands in
+        bounds without any clipping.  Column ``pad+k`` holds the bias for
+        GC% = k; columns [0, pad) replicate GC%=0 and columns [pad+101, ...)
+        replicate GC%=100.
         """
-        lengths = np.arange(max_len + 1, dtype=np.float64)   # (max_len+1,)
-        gc_pcts = np.arange(101, dtype=np.float64)            # (101,)
-        # Evaluate __call__ on the full (length, gc) grid via broadcasting
-        # __call__ handles clipping and bilinear interpolation correctly.
-        # Shape: lengths[:, None] broadcasts with gc_pcts[None, :]
-        table = self(lengths[:, None], gc_pcts[None, :])       # (max_len+1, 101)
+        pad = self._GC_PAD
+        lengths = np.arange(max_len + 1, dtype=np.float64)
+        gc_pcts = np.arange(101, dtype=np.float64)
+        core = self(lengths[:, None], gc_pcts[None, :])  # (max_len+1, 101)
+        # Pad: left columns replicate GC%=0, right columns replicate GC%=100
+        table = np.empty((max_len + 1, 101 + 2 * pad), dtype=np.float64)
+        table[:, pad:pad + 101] = core
+        for i in range(pad):
+            table[:, i] = core[:, 0]
+            table[:, pad + 101 + i] = core[:, -1]
         self._lookup_table = table
         self._lookup_max_len = max_len
         return table
@@ -247,11 +261,11 @@ class GCBias2D:
     def lookup(self, length, gc_pct):
         """Fast table lookup: length is int (or int array), gc_pct is float (or array).
 
-        Rounds gc_pct to nearest integer in [0, 100], clips length to [0, max_len],
-        and returns table[length, gc_pct_int].
+        Rounds gc_pct to nearest integer, offsets by ``_GC_PAD``, and indexes
+        directly into the padded table (no clipping needed).
         """
         table = self._lookup_table
-        gc_int = np.clip(np.rint(gc_pct).astype(np.intp), 0, 100)
+        gc_int = np.rint(gc_pct).astype(np.intp) + self._GC_PAD
         li = np.clip(length, 0, self._lookup_max_len)
         return table[li, gc_int]
 
@@ -402,7 +416,7 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
             q_ok = p_ok + L
             gc_pct = 100.0 * (cum_gc[q_ok] - cum_gc[p_ok]) / L
             if gc_lookup_table is not None:
-                gc_int = np.clip(np.rint(gc_pct).astype(np.intp), 0, 100)
+                gc_int = np.rint(gc_pct).astype(np.intp) + GCBias2D._GC_PAD
                 gc_w = gc_lookup_table[L, gc_int]
             else:
                 gc_w = gcbias(L, gc_pct)
@@ -418,8 +432,10 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
         all_q_arr = np.concatenate(flat_q)
         all_w_arr = np.concatenate(flat_w)
 
-        probs = all_w_arr / all_w_arr.sum()
-        idx = rng.choice(len(probs), size=target, p=probs, replace=True)
+        cumsum = np.cumsum(all_w_arr)
+        cumsum /= cumsum[-1]
+        u = rng.random(size=target)
+        idx = np.searchsorted(cumsum, u)
 
         s = all_p_arr[idx].astype(np.int32)
         e = all_q_arr[idx].astype(np.int32)
@@ -432,10 +448,21 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
             np.concatenate(all_stop), np.concatenate(all_strand).astype("U1"))
 
 
+def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
+                         gcbias, len_vals, len_p, region_len,
+                         sample_seed, gc_lookup_table):
+    """Top-level helper for ProcessPoolExecutor (must be picklable)."""
+    w6_s = w6 * np.exp(log_jitter_s)
+    srng = np.random.default_rng(int(sample_seed))
+    return simulate_sample(region_pre, target_counts_s, w6_s, gcbias,
+                           len_vals, len_p, region_len, srng,
+                           gc_lookup_table=gc_lookup_table)
+
+
 # ── driver ────────────────────────────────────────────────────────────────
 
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
-        heldout_h5, region_len=REGION_LEN, real_store=None):
+        heldout_h5, region_len=REGION_LEN, real_store=None, workers=1):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
@@ -499,18 +526,38 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
 
     per_sample_seeds = rng.integers(0, 2 ** 31 - 1, size=n_samples)
     total_frags = 0
-    for s in range(n_samples):
-        w6_s = w6 * np.exp(log_jitter[s])
-        srng = np.random.default_rng(int(per_sample_seeds[s]))
-        ridx, start, stop, strand = simulate_sample(
-            region_pre, target_counts[s], w6_s, gcbias, len_vals, len_p,
-            region_len, srng, gc_lookup_table=gc_lut
-        )
-        np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
-                 region_idx=ridx, start=start, stop=stop, strand=strand)
-        total_frags += len(ridx)
-        print(f"[sim]   sample {s:03d}: {len(ridx):,} fragments "
-              f"({time.time()-t0:.1f}s)", flush=True)
+
+    if workers <= 1:
+        # Sequential path (unchanged behaviour)
+        for s in range(n_samples):
+            ridx, start, stop, strand = _simulate_one_sample(
+                region_pre, target_counts[s], w6, log_jitter[s],
+                gcbias, len_vals, len_p, region_len,
+                per_sample_seeds[s], gc_lut)
+            np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
+                     region_idx=ridx, start=start, stop=stop, strand=strand)
+            total_frags += len(ridx)
+            print(f"[sim]   sample {s:03d}: {len(ridx):,} fragments "
+                  f"({time.time()-t0:.1f}s)", flush=True)
+    else:
+        # Parallel path -- samples are fully independent
+        futures = {}
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+            for s in range(n_samples):
+                fut = pool.submit(
+                    _simulate_one_sample,
+                    region_pre, target_counts[s], w6, log_jitter[s],
+                    gcbias, len_vals, len_p, region_len,
+                    per_sample_seeds[s], gc_lut)
+                futures[fut] = s
+            for fut in concurrent.futures.as_completed(futures):
+                s = futures[fut]
+                ridx, start, stop, strand = fut.result()
+                np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
+                         region_idx=ridx, start=start, stop=stop, strand=strand)
+                total_frags += len(ridx)
+                print(f"[sim]   sample {s:03d}: {len(ridx):,} fragments "
+                      f"({time.time()-t0:.1f}s)", flush=True)
 
     # region table (shared)
     np.savez(os.path.join(out_dir, "region_table.npz"),
@@ -810,6 +857,9 @@ def main(argv=None):
                     help="path to production zarr store; sample target counts "
                          "from its totals/N distribution instead of the "
                          "heldout h5 (recommended: bg_store_b67d7c95.zarr)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="number of parallel workers for sample simulation "
+                         "(default 1 = sequential)")
     ap.add_argument("--validate", action="store_true",
                     help="run the four validation gates after simulating")
     ap.add_argument("--validate-only", metavar="DIR",
@@ -823,7 +873,7 @@ def main(argv=None):
 
     out_dir = run(args.regime, args.n_samples, args.seed, args.w6_dynamic_range,
                   args.n_regions, args.out_root, args.heldout_h5,
-                  real_store=args.real_store)
+                  real_store=args.real_store, workers=args.workers)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))
