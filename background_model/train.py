@@ -38,6 +38,7 @@ import lightning as L
 import torch
 from lightning.pytorch.callbacks import (
     Callback,
+    DeviceStatsMonitor,
     EarlyStopping,
     ModelCheckpoint,
 )
@@ -286,7 +287,8 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
         deterministic=True,
         default_root_dir=run_dir,
         logger=csv_logger,
-        callbacks=[ckpt, early, ThroughputCallback(cfg.batch_size)],
+        callbacks=[ckpt, early, ThroughputCallback(cfg.batch_size),
+                   DeviceStatsMonitor(cpu_stats=False)],
         limit_train_batches=limit if limit is not None else 1.0,
         limit_val_batches=limit if limit is not None else 1.0,
         log_every_n_steps=1,
