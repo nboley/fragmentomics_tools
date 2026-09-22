@@ -31,26 +31,9 @@ def test_no_fragments():
     assert fa.n_frags == 0
 
 
-@pytest.fixture(scope="module")
-def bam_path():
-    return os.path.join(DATA_DIR, "./small.chr6.bam")
-
-
-@pytest.fixture(scope="module")
-def fasta_file_path():
-    return os.path.join(DATA_DIR, "./GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
-
-
-@pytest.fixture(scope="module")
-def small_h5_path(bam_path, fasta_file_path):
-    with tempfile.TemporaryDirectory() as dirname:
-        ofname = os.path.join(dirname, os.path.basename(bam_path) + ".frag.h5")
-        # NOTE: the old signature took (bam, ofname, sample_id, reference,
-        # fasta_file=...). The current API has no sample_id/reference
-        # parameters, and `fasta_file` is now `fasta_filename` — so the old
-        # positionals silently bound to fasta_filename/allowed_contigs.
-        build_fragments_h5(bam_path, ofname, fasta_filename=fasta_file_path)
-        yield ofname
+# bam_path, fasta_file_path and small_h5_path now live in conftest.py so the
+# h5 is built once per session and shared with test_fragment_matrix.py, rather
+# than rebuilt per module (the build scans the full chr6 reference, ~25s).
 
 
 regions = [

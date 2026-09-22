@@ -21,8 +21,6 @@ from fragmentomics_tools.formats import (
     RegionRecord,
     BedReader,
     TabixBedWriter,
-    FragmentBedReader,
-    FragmentBedWriter,
     bed_record_from_line,
     Bed6Record,
     GappedPeakRecord,
@@ -39,7 +37,6 @@ from fragmentomics_tools.formats import (
     Bed3Record,
     BedIntervalTreeReader,
 )
-from fragmentomics_tools.fragment import Fragment
 from fragmentomics_tools.region import Region
 
 
@@ -57,7 +54,6 @@ BED_RECS = [
     Bed6Record("chr2", 100, 200, ".", 1.0, "+"),
 ]
 BED4_RECS = [Bed4Record(rec.chrom, rec.start, rec.stop, "asdf") for rec in BED_RECS]
-FRAG_RECS = [Fragment(rec.chrom, rec.start, rec.stop, 0, 1, 0.5) for rec in BED_RECS]
 WIGGLE_RECS = [
     WigRecord(rec.chrom, rec.start, rec.stop, i + 0.5) for i, rec in enumerate(BED_RECS)
 ]
@@ -65,7 +61,6 @@ WIGGLE_RECS = [
 READER_CLASSES = [
     BedReader,
     TabixBedReader,
-    FragmentBedReader,
     BigWigReader,
     BigBedReader,
     BedIntervalTreeReader,
@@ -123,9 +118,7 @@ def get_generic_reader_writer_params(indexed_reader_writers_only=False):
             continue
 
         for extension in writer_class.extensions:
-            if writer_class is FragmentBedWriter:
-                records = FRAG_RECS
-            elif writer_class is BigWigWriter:
+            if writer_class is BigWigWriter:
                 records = WIGGLE_RECS
             elif writer_class is BigBedWriter:
                 records = BED4_RECS
@@ -280,15 +273,6 @@ def test_cached_slicing(
 
     assert mtime1 == mtime2, "mtime should not have changed"
     assert mtime1 == mtime3, "mtime3 should not have changed"
-
-
-def test_fragment_bed_mapq_only_reader():
-    with FragmentBedReader(get_test_path("frags_mapq_only.bed.gz")) as fbr:
-        frags = list(fbr)
-        assert frags[0].mapq1 == 27
-        assert frags[0].mapq2 is None
-        assert frags[0].mapq12_min == 27
-        assert frags[1].mapq1 == 0
 
 
 def test_bed_record():

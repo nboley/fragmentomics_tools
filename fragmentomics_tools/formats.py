@@ -194,7 +194,7 @@ def _bash(
 
 def _get_subclasses_of(cls, include_self=False):
     subclasses = set(cls.__subclasses__()).union(
-        s for c in cls.__subclasses__() for s in get_subclasses_of(c)
+        s for c in cls.__subclasses__() for s in _get_subclasses_of(c)
     )
     return subclasses.union({cls}) if include_self else subclasses
 
@@ -1136,28 +1136,6 @@ class TabixBedReader(IndexedRegionReader, BedReader):
             return False
 
 
-class FragmentBedReader(TabixBedReader):
-    extensions = ["bed.gz"]
-
-    def get_default_record_class(self):
-        return Fragment
-
-
-class MethylFragmentBedReader(TabixBedReader):
-    extensions = ["methyl.bed.gz"]
-
-    def get_default_record_class(self):
-        return Fragment
-
-    def record_from_parts(self, parts):
-        return self.record_class.from_bed12_parts(parts)
-
-
-class FragmentBigBedReader(BigBedReader):
-    def get_default_record_class(self):
-        return Fragment
-
-
 class NarrowPeakValueError(ValueError):
     pass
 
@@ -1393,13 +1371,6 @@ class TabixBedWriter(BedWriter):
     def close(self):
         super().close()
         pysam.tabix_index(self.out_file, preset="bed", force=True)
-
-
-class FragmentBedWriter(TabixBedWriter):
-    extensions = ["bed.gz"]
-
-    def write_record(self, record: Fragment):
-        self._writer.write((record.to_line() + "\n").encode())
 
 
 class BigWigWriter(RegionWriter):
