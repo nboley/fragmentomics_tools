@@ -449,20 +449,25 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
 
 
 def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
-                         gcbias, len_vals, len_p, region_len,
+                         gcbias, len_vals, len_p_s, region_len,
                          sample_seed, gc_lookup_table):
-    """Top-level helper for ProcessPoolExecutor (must be picklable)."""
+    """Top-level helper for ProcessPoolExecutor (must be picklable).
+
+    ``len_p_s`` is the per-sample fragment-length pmf (may differ across
+    samples when --fl-dist-npz is used).
+    """
     w6_s = w6 * np.exp(log_jitter_s)
     srng = np.random.default_rng(int(sample_seed))
     return simulate_sample(region_pre, target_counts_s, w6_s, gcbias,
-                           len_vals, len_p, region_len, srng,
+                           len_vals, len_p_s, region_len, srng,
                            gc_lookup_table=gc_lookup_table)
 
 
 # ── driver ────────────────────────────────────────────────────────────────
 
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
-        heldout_h5, region_len=REGION_LEN, real_store=None, workers=1):
+        heldout_h5, region_len=REGION_LEN, real_store=None, workers=1,
+        fl_dist_npz=None):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
@@ -478,7 +483,29 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
           f"(favoured/disfavoured p95/p5 = "
           f"{np.percentile(w6,95)/np.percentile(w6,5):.2f}x)", flush=True)
 
-    len_vals, len_p = empirical_length_pmf(heldout_h5)
+    if fl_dist_npz is not None:
+        # Per-sample fragment-length distributions from real data
+        fl_data = np.load(fl_dist_npz)
+        fl_counts_all = fl_data["counts"]  # (n_real_samples, n_lengths)
+        fl_lengths = fl_data["fragment_length"]  # (n_lengths,)
+        # Sample n_samples indices from the available real samples
+        fl_rng = np.random.default_rng(seed + 42)
+        fl_idx = fl_rng.choice(len(fl_counts_all), size=n_samples, replace=False)
+        # Build per-sample pmfs over [1, MAX_LEN]
+        len_vals = np.arange(1, MAX_LEN + 1)
+        len_p_per_sample = np.zeros((n_samples, MAX_LEN), dtype=np.float64)
+        for si, idx in enumerate(fl_idx):
+            raw = fl_counts_all[idx].astype(np.float64)
+            # Map fl_lengths into our [1, MAX_LEN] array
+            for li, fl in enumerate(fl_lengths):
+                if 1 <= fl <= MAX_LEN:
+                    len_p_per_sample[si, fl - 1] = raw[li]
+            len_p_per_sample[si] /= len_p_per_sample[si].sum()
+        print(f"[sim] per-sample FL distributions from {fl_dist_npz} "
+              f"(sampled {n_samples} of {len(fl_counts_all)})", flush=True)
+    else:
+        len_vals, len_p_shared = empirical_length_pmf(heldout_h5)
+        len_p_per_sample = np.tile(len_p_shared, (n_samples, 1))
     real_counts = per_region_real_counts(heldout_h5, regions)
 
     # Build the pool of per-tile fragment counts to sample from.
@@ -532,7 +559,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         for s in range(n_samples):
             ridx, start, stop, strand = _simulate_one_sample(
                 region_pre, target_counts[s], w6, log_jitter[s],
-                gcbias, len_vals, len_p, region_len,
+                gcbias, len_vals, len_p_per_sample[s], region_len,
                 per_sample_seeds[s], gc_lut)
             np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
                      region_idx=ridx, start=start, stop=stop, strand=strand)
@@ -547,7 +574,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
                 fut = pool.submit(
                     _simulate_one_sample,
                     region_pre, target_counts[s], w6, log_jitter[s],
-                    gcbias, len_vals, len_p, region_len,
+                    gcbias, len_vals, len_p_per_sample[s], region_len,
                     per_sample_seeds[s], gc_lut)
                 futures[fut] = s
             for fut in concurrent.futures.as_completed(futures):
@@ -569,7 +596,8 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
     # ground truth
     np.savez(os.path.join(out_dir, "ground_truth.npz"),
              w6=w6, log_jitter=log_jitter, target_counts=target_counts,
-             real_counts=real_counts, len_vals=len_vals, len_p=len_p,
+             real_counts=real_counts, len_vals=len_vals,
+             len_p_per_sample=len_p_per_sample,
              bias_grid=gcbias.grid, bias_lengths=gcbias.lengths,
              bias_gc_percents=gcbias.gc_percents, rc_perm=RC_PERM)
     gt_json = dict(
@@ -581,6 +609,8 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         max_len=MAX_LEN, jitter_sd=(JITTER_SD if regime == "B" else 0.0),
         heldout_h5=heldout_h5, fasta=FASTA, gc_bias_json=GC_BIAS_JSON,
         training_tiles=TRAINING_TILES,
+        per_sample_fl=fl_dist_npz is not None,
+        fl_dist_npz=fl_dist_npz or "",
         surface_for_simulation="bias_grid_2d_row_centred",
         extrapolation_policy=gcbias.extrapolation_policy,
         acceptance_normaliser=float((w6.max() ** 2) * gcbias.max_bias),
@@ -861,6 +891,11 @@ def main(argv=None):
                     help="path to production zarr store; sample target counts "
                          "from its totals/N distribution instead of the "
                          "heldout h5 (recommended: bg_store_b67d7c95.zarr)")
+    ap.add_argument("--fl-dist-npz", default=None,
+                    help="path to NPZ with per-sample fragment-length "
+                         "distributions (keys: counts, fragment_length). "
+                         "n_samples are sampled without replacement from "
+                         "the available rows.")
     ap.add_argument("--workers", type=int, default=1,
                     help="number of parallel workers for sample simulation "
                          "(default 1 = sequential)")
@@ -878,7 +913,8 @@ def main(argv=None):
     out_dir = run(args.regime, args.n_samples, args.seed, args.w6_dynamic_range,
                   args.n_regions, args.out_root, args.heldout_h5,
                   region_len=args.region_len,
-                  real_store=args.real_store, workers=args.workers)
+                  real_store=args.real_store, workers=args.workers,
+                  fl_dist_npz=args.fl_dist_npz)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))
