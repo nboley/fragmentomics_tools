@@ -27,6 +27,7 @@ from joblib import delayed, Parallel
 
 import multiprocessing
 import pickle
+from concurrent.futures import ProcessPoolExecutor
 import traceback
 
 # from tqdm.contrib.concurrent import process_map
@@ -69,24 +70,24 @@ DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
 
 
-def _apply_fn(df, fn, counter, send_conn, send_conn_lock):
-    rv = []
-    while True:
-        with counter.get_lock():
-            idx = counter.value
-            counter.value += 1
-        if idx >= df.shape[0]:
-            return
+# State handed to forked workers. This is deliberately a module global rather
+# than an argument: with the "fork" start method the children inherit it
+# copy-on-write, so the DataFrame is never serialized and `fn` may be a lambda
+# or other unpicklable callable. Passing either through the executor's task
+# queue would pickle it per call, which both regresses performance on large
+# frames and breaks lambdas.
+#
+# Consequence: only one parallel_apply may be in flight per process. That was
+# already true of the previous implementation (a single shared counter and
+# pipe); it is now written down.
+_PARALLEL_APPLY_STATE = {}
 
-        try:
-            res = fn(df.iloc[idx])
-        except Exception as inst:
-            # traceback.print_exception(inst)
-            msg = pickle.dumps(inst)
-        else:
-            msg = pickle.dumps((idx, res))
-        with send_conn_lock:
-            send_conn.send_bytes(msg)
+
+def _apply_fn(idx):
+    """Apply the pending callable to one row. Runs in a forked worker."""
+    df = _PARALLEL_APPLY_STATE["df"]
+    fn = _PARALLEL_APPLY_STATE["fn"]
+    return idx, fn(df.iloc[idx])
 
 
 def get_indices_of_balanced_labels(labels, random_state=None):
@@ -236,63 +237,39 @@ class DataFrameBase(pandas.DataFrame):
         )
 
     def _parallel_apply(self, fn, n_workers, verbose):
-        # do this in a fork context so that we don't need to serialize the data into the new process
+        # Use a fork context so the frame is inherited copy-on-write rather
+        # than serialized into each worker. Only the row index is sent through
+        # the task queue; `self` and `fn` reach the children via the module
+        # global set below, which fork duplicates for free.
+        #
+        # This previously hand-rolled a shared counter, a pipe, a lock and a
+        # polling loop. That loop waited for exactly shape[0] results with no
+        # liveness check, so a worker dying (OOM kill, segfault, an
+        # unpicklable result or exception) hung the parent forever -- verified
+        # by execution before this change. ProcessPoolExecutor supervises its
+        # workers and raises BrokenProcessPool instead.
         ctx = multiprocessing.get_context("fork")
-
-        # set a shared counter to track the row index to process
-        counter = ctx.Value("i", 0)
-        recv_conn, send_conn = ctx.Pipe(duplex=False)
-        pipe_lock = multiprocessing.Lock()
-        ps = [
-            ctx.Process(
-                target=_apply_fn, args=(self, fn, counter, send_conn, pipe_lock)
-            )
-            for _ in range(n_workers)
-        ]
-        for p in ps:
-            p.start()
 
         # clear any cache -- works around a jupyter display bug
         tqdm._instances.clear()
-        if verbose:
-            pbar = tqdm(total=self.shape[0])
 
-        def _cleanup():
-            # close the pipe
-            send_conn.close()
-            recv_conn.close()
+        _PARALLEL_APPLY_STATE["df"] = self
+        _PARALLEL_APPLY_STATE["fn"] = fn
+        try:
+            indices = []
+            records = []
+            with ProcessPoolExecutor(
+                max_workers=n_workers, mp_context=ctx
+            ) as executor:
+                results = executor.map(_apply_fn, range(self.shape[0]))
+                for idx, record in tqdm(
+                    results, total=self.shape[0], disable=(not verbose)
+                ):
+                    indices.append(idx)
+                    records.append(record)
+        finally:
+            _PARALLEL_APPLY_STATE.clear()
 
-            # join all of the worker processes
-            for p in ps:
-                p.join()
-
-            if verbose:
-                pbar.close()
-
-        # store the returned row indices and records
-        # we track the indices so that we can re-sort into the original order and then
-        # join with the input dataframe index
-        indices = []
-        records = []
-        # keep processing new data until the returned records equals the inputs
-        while len(indices) < self.shape[0]:
-            if recv_conn.poll(0.1):
-                res = pickle.loads(recv_conn.recv_bytes())
-
-                # if a worker raised an exception kill any active process, cleanup, and then re-raise the exception
-                if isinstance(res, Exception):
-                    for p in ps:
-                        p.kill()
-                    _cleanup()
-                    raise res
-
-                i, rec = res
-                indices.append(i)
-                records.append(rec)
-                if verbose:
-                    pbar.update(1)
-
-        _cleanup()
         return indices, records
 
     def parallel_apply(self, fn, n_workers=None, verbose=True):
@@ -309,12 +286,31 @@ class DataFrameBase(pandas.DataFrame):
                 n_workers = multiprocessing.cpu_count()
             indices, records = self._parallel_apply(fn, n_workers, verbose)
 
+        # An empty input yields no records, and `all(...)` is vacuously true on
+        # an empty list, which sent this down the concat branch and died in
+        # pd.concat([]) with "No objects to concatenate".
+        if len(records) == 0:
+            return pandas.DataFrame(index=self.index[:0])
+
         # if everything is a data frame
         if all(isinstance(x, pd.DataFrame) for x in records):
             # concatanate all records into a dataframe
-            for o, x in zip(indices, records):
-                assert 'original_index' not in x.columns
-                x['original_index'] = self.index[o]
+            index_col = "original_index"
+            if any(index_col in x.columns for x in records):
+                # previously a bare `assert`, which both crashed the caller and
+                # vanishes under `python -O`
+                raise ValueError(
+                    f"records returned by fn must not contain a "
+                    f"'{index_col}' column; it is added here to restore the "
+                    f"original row order"
+                )
+            # assign() rather than mutating: these frames belong to the caller's
+            # fn, and adding a column to them in place was visible to anyone
+            # holding a reference.
+            records = [
+                x.assign(**{index_col: self.index[o]})
+                for o, x in zip(indices, records)
+            ]
             rv = pd.concat([records[x] for x in np.argsort(indices)])
         else:
             rv = pandas.DataFrame(records)
