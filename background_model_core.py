@@ -580,6 +580,8 @@ class BackgroundModel(L.LightningModule):
         log_dispersion_init: float = 7.0,
         max_dispersion_ratio: Optional[float] = 2.0,
         clamp_margin: float = 1.0,
+        freeze_dispersion: bool = False,
+        dispersion_lr_scale: float = 1.0,
         block_kwargs: Optional[dict] = None,
     ):
         """
@@ -597,6 +599,13 @@ class BackgroundModel(L.LightningModule):
             variance.  None disables clamping.  Default 2.0.
         :param clamp_margin: nats of headroom over which the gradient
             tapers from full to zero near the dispersion floor.
+        :param freeze_dispersion: if True, dispersion head parameters are
+            frozen (requires_grad=False).  The NB/DM loss still runs with
+            dispersion at its init value (~multinomial).  Use for
+            pre-training shape before fine-tuning dispersion.
+        :param dispersion_lr_scale: relative learning rate for the
+            dispersion head (0.1 = 10x slower than trunk/shape).  Only
+            used when freeze_dispersion is False.
         :param block_kwargs: overrides for ``ResNetDilatedBlock`` config
             (activation, activation_post_sum, skip_batchnorm,
             preact_residual_normalization).  ``padding`` may not be
@@ -659,6 +668,10 @@ class BackgroundModel(L.LightningModule):
                 clamp_margin=clamp_margin,
             )
 
+        if freeze_dispersion and self.dispersion_head is not None:
+            for p in self.dispersion_head.parameters():
+                p.requires_grad = False
+
     # -- geometry ----------------------------------------------------------
 
     def calc_input_region_size(self, output_region_size: int) -> int:
@@ -719,7 +732,23 @@ class BackgroundModel(L.LightningModule):
         return self._step(batch, "val_loss")
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
+        lr = self.hparams.learning_rate
+        scale = self.hparams.dispersion_lr_scale
+        if (
+            self.dispersion_head is not None
+            and not self.hparams.freeze_dispersion
+            and scale != 1.0
+        ):
+            disp_ids = {id(p) for p in self.dispersion_head.parameters()}
+            main_params = [p for p in self.parameters() if id(p) not in disp_ids]
+            disp_params = list(self.dispersion_head.parameters())
+            return torch.optim.Adam([
+                {"params": main_params, "lr": lr},
+                {"params": disp_params, "lr": lr * scale},
+            ])
+        return torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.parameters()), lr=lr
+        )
 
     # -- inference ---------------------------------------------------------
 

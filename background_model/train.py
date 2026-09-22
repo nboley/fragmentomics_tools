@@ -191,14 +191,20 @@ class TrainConfig:
     precision: str = "32"
     min_N: int = 50
     auto_lr: bool = False
+    freeze_dispersion: bool = False
+    dispersion_lr_scale: float = 1.0
 
 
 def build_model(loss: str, lr: float, n_kernels: int = 512,
                 num_residual_layers: int = 2,
-                dropout: float = 0.15) -> InstrumentedBackgroundModel:
+                dropout: float = 0.15,
+                freeze_dispersion: bool = False,
+                dispersion_lr_scale: float = 1.0) -> InstrumentedBackgroundModel:
     return InstrumentedBackgroundModel(
         loss=loss, learning_rate=lr, n_kernels=n_kernels,
         num_residual_layers=num_residual_layers, dropout=dropout,
+        freeze_dispersion=freeze_dispersion,
+        dispersion_lr_scale=dispersion_lr_scale,
     )
 
 
@@ -271,6 +277,8 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "num_residual_layers": cfg.num_residual_layers,
         "dropout": cfg.dropout,
         "auto_lr": cfg.auto_lr,
+        "freeze_dispersion": cfg.freeze_dispersion,
+        "dispersion_lr_scale": cfg.dispersion_lr_scale,
         "precision": cfg.precision,
         "max_epochs": cfg.max_epochs,
         "batch_size": cfg.batch_size,
@@ -325,7 +333,7 @@ def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
     model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers,
-                        cfg.dropout)
+                        cfg.dropout, cfg.freeze_dispersion, cfg.dispersion_lr_scale)
     train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
@@ -390,6 +398,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--resume-from", default=None)
     p.add_argument("--auto-lr", action="store_true",
                    help="run Lightning LR finder before training")
+    p.add_argument("--freeze-dispersion", action="store_true",
+                   help="freeze dispersion head (NB/DM runs at init, ~multinomial)")
+    p.add_argument("--dispersion-lr-scale", type=float, default=1.0,
+                   help="relative LR for dispersion head (e.g. 0.1 = 10x slower)")
     return p
 
 
@@ -416,6 +428,8 @@ def cfg_from_args(args) -> TrainConfig:
         min_N=args.min_N,
         dropout=args.dropout,
         auto_lr=args.auto_lr,
+        freeze_dispersion=args.freeze_dispersion,
+        dispersion_lr_scale=args.dispersion_lr_scale,
     )
 
 
