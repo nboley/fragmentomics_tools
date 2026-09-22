@@ -851,6 +851,10 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=1337)
     ap.add_argument("--w6-dynamic-range", type=float, default=4.0)
     ap.add_argument("--n-regions", type=int, default=N_REGIONS)
+    ap.add_argument("--region-len", type=int, default=REGION_LEN,
+                    help="region length in bp (default %(default)d).  For jitter "
+                         "support set to tile_size + 2*jitter (e.g. 2304 for "
+                         "tile=2048, jitter=128).")
     ap.add_argument("--out-root", default=OUT_ROOT)
     ap.add_argument("--heldout-h5", default=DEFAULT_HELDOUT_H5)
     ap.add_argument("--real-store", default=None,
@@ -873,6 +877,7 @@ def main(argv=None):
 
     out_dir = run(args.regime, args.n_samples, args.seed, args.w6_dynamic_range,
                   args.n_regions, args.out_root, args.heldout_h5,
+                  region_len=args.region_len,
                   real_store=args.real_store, workers=args.workers)
     if args.validate:
         res = validate(out_dir)

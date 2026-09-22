@@ -5,10 +5,16 @@ Reads sim_fragments.py output (.npz files) and constructs a zarr store
 compatible with BackgroundTileDataset, using the real fragment_array library
 to build coverage counts (plan §6 step 5: "using the existing preprocess path").
 
-Geometry: TILE=2048, JITTER=0 (no augmentation needed for simulation),
-RF_BUDGET=2048 (architecture-dependent receptive field).
+Geometry: TILE=2048, JITTER=128 (positional augmentation during training),
+RF_BUDGET=2048 (architecture-dependent receptive field).  With jitter > 0 the
+simulator must generate fragments over a wider region (tile_size + 2*jitter)
+so the Dataset can apply random positional offsets.
 
 Usage:
+    # 1) generate sim data with wide enough regions for jitter=128:
+    PYTHONPATH=. python scripts/sim_fragments.py --regime B --region-len 2304
+
+    # 2) build the store (--jitter defaults to 128):
     PYTHONPATH=. python scripts/sim_build_store.py \
         --sim-dir /efs/.../simulation/B \
         --out /efs/.../simulation/stores/sim_store_B.zarr
@@ -32,10 +38,7 @@ import zarr
 
 # ── geometry for the simulation store ─────────────────────────────────────
 SIM_TILE = 2_048
-SIM_JITTER = 0
 SIM_RF_BUDGET = 2_048
-SIM_L_TARGET = SIM_TILE + 2 * SIM_JITTER           # 2048
-SIM_L_SEQ = SIM_TILE + 2 * (SIM_JITTER + SIM_RF_BUDGET)  # 6144
 
 FASTA = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
 
@@ -106,10 +109,12 @@ def fetch_sequence(fa, contig, gstart, gstop, l_seq, region_len):
     return np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
 
 
-def build_sparse_counts_for_sample_tile(sample_data, tile_idx, region_len):
+def build_sparse_counts_for_sample_tile(sample_data, tile_idx, region_len,
+                                        l_target, jitter, tile_size):
     """Build sparse coverage counts for one (sample, tile) using the library.
 
     Returns (pos_arr, track_arr, data_arr) as flat arrays, plus N (C,).
+    N is computed over the center tile [jitter, jitter+tile_size).
     """
     from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
     from fragmentomics_tools.region import Region
@@ -143,8 +148,7 @@ def build_sparse_counts_for_sample_tile(sample_data, tile_idx, region_len):
         strand, fl_band, cov_type = key
         track_idx = TRACK_INDEX[(strand, fl_band, cov_type)]
         if len(vec.coords) > 0:
-            # Clip to L_TARGET range (with JITTER=0, L_TARGET == region_len)
-            valid = vec.coords < SIM_L_TARGET
+            valid = vec.coords < l_target
             if valid.any():
                 all_pos.append(vec.coords[valid].astype(np.uint16))
                 all_track.append(np.full(int(valid.sum()), track_idx, dtype=np.uint8))
@@ -159,39 +163,54 @@ def build_sparse_counts_for_sample_tile(sample_data, tile_idx, region_len):
         track = np.empty(0, np.uint8)
         data = np.empty(0, np.uint16)
 
-    # Compute N: per-track totals over the center tile (all positions valid)
-    y_dense = np.zeros((N_TRACKS, SIM_L_TARGET), dtype=np.float32)
+    # Compute N: per-track totals over the CENTER TILE only
+    y_dense = np.zeros((N_TRACKS, l_target), dtype=np.float32)
     if len(pos) > 0:
         np.add.at(y_dense, (track, pos), data.astype(np.float32))
-    # With JITTER=0, center tile == full tile, mask == all True
-    N = y_dense.sum(axis=1).astype(np.uint32)
+    center = y_dense[:, jitter:jitter + tile_size]
+    N = center.sum(axis=1).astype(np.uint32)
 
     return pos, track, data, N
 
 
-def _process_sample(sample_data, n_tiles, region_len):
+def _process_sample(sample_data, n_tiles, region_len, l_target, jitter, tile_size):
     """Process all tiles for one sample. Top-level function for multiprocessing."""
     sparse_list = []
     N_arr = np.zeros((n_tiles, N_TRACKS), dtype=np.uint32)
     for t_idx in range(n_tiles):
         pos, track, data, N = build_sparse_counts_for_sample_tile(
-            sample_data, t_idx, region_len
+            sample_data, t_idx, region_len, l_target, jitter, tile_size
         )
         sparse_list.append((pos, track, data))
         N_arr[t_idx] = N
     return sparse_list, N_arr
 
 
-def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
+def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
+                jitter=128):
     """Build a zarr store from simulation output."""
     t0 = time.time()
     regions, region_len, samples = load_sim_output(sim_dir)
     n_tiles = len(regions)
     n_samples = len(samples)
-    assert region_len == SIM_TILE, (region_len, SIM_TILE)
+
+    tile_size = SIM_TILE
+    rf_budget = SIM_RF_BUDGET
+    l_target = tile_size + 2 * jitter
+    l_seq = tile_size + 2 * (jitter + rf_budget)
+
+    expected_region_len = tile_size + 2 * jitter
+    if region_len != expected_region_len:
+        raise ValueError(
+            f"Simulation region_len={region_len} but jitter={jitter} requires "
+            f"region_len={expected_region_len} (tile_size + 2*jitter = "
+            f"{tile_size} + 2*{jitter}).  Re-run sim_fragments.py with "
+            f"--region-len {expected_region_len}."
+        )
 
     print(f"[store] {n_tiles} tiles, {n_samples} samples, "
-          f"region_len={region_len}, workers={workers}", flush=True)
+          f"region_len={region_len}, jitter={jitter}, "
+          f"l_target={l_target}, l_seq={l_seq}, workers={workers}", flush=True)
 
     # ── Assign splits (regions) and roles (samples) ──────────────────────
     rng = np.random.default_rng(seed)
@@ -212,9 +231,9 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
         region_beds={},
         blacklist_bed="",
         fasta="",
-        tile_size=SIM_TILE,
-        jitter=SIM_JITTER,
-        rf_budget=SIM_RF_BUDGET,
+        tile_size=tile_size,
+        jitter=jitter,
+        rf_budget=rf_budget,
         fl_bands=FL_BANDS,
         seed=seed,
         n_train_samples=n_train_samples,
@@ -231,7 +250,8 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for s_idx, sample in enumerate(samples):
-                fut = pool.submit(_process_sample, sample, n_tiles, region_len)
+                fut = pool.submit(_process_sample, sample, n_tiles, region_len,
+                                  l_target, jitter, tile_size)
                 futures[fut] = s_idx
             for fut in concurrent.futures.as_completed(futures):
                 s_idx = futures[fut]
@@ -249,7 +269,7 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
         for s_idx, sample in enumerate(samples):
             for t_idx in range(n_tiles):
                 pos, track, data, N = build_sparse_counts_for_sample_tile(
-                    sample, t_idx, region_len
+                    sample, t_idx, region_len, l_target, jitter, tile_size
                 )
                 all_sparse.append((pos, track, data))
                 all_N[s_idx, t_idx] = N
@@ -295,10 +315,10 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
     _ca(tiles_grp, "strand", shape=(T,), dtype="<U1", chunks=(T,))
     _ca(tiles_grp, "region_id", shape=(T,), dtype="<U64", chunks=(T,))
     _ca(tiles_grp, "split", shape=(T,), dtype="uint8", chunks=(T,))
-    _ca(tiles_grp, "seq", shape=(T, SIM_L_SEQ), dtype="uint8",
-        chunks=(min(64, T), SIM_L_SEQ))
-    _ca(tiles_grp, "mask", shape=(T, SIM_L_TARGET), dtype="bool",
-        chunks=(min(64, T), SIM_L_TARGET))
+    _ca(tiles_grp, "seq", shape=(T, l_seq), dtype="uint8",
+        chunks=(min(64, T), l_seq))
+    _ca(tiles_grp, "mask", shape=(T, l_target), dtype="bool",
+        chunks=(min(64, T), l_target))
 
     # /samples/
     samples_grp = root.create_group("samples")
@@ -335,13 +355,13 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1):
     region_ids = np.array(
         [f"{r['contig']}:{r['gstart']}-{r['gstop']}" for r in regions], dtype="<U64"
     )
-    seq_bulk = np.zeros((T, SIM_L_SEQ), dtype=np.uint8)
+    seq_bulk = np.zeros((T, l_seq), dtype=np.uint8)
     for t_idx, r in enumerate(regions):
         seq_bulk[t_idx] = fetch_sequence(
-            fa, r["contig"], r["gstart"], r["gstop"], SIM_L_SEQ, region_len
+            fa, r["contig"], r["gstart"], r["gstop"], l_seq, region_len
         )
     fa.close()
-    mask_bulk = np.ones((T, SIM_L_TARGET), dtype=bool)
+    mask_bulk = np.ones((T, l_target), dtype=bool)
 
     # Single bulk writes (one I/O per array, not per tile)
     tiles_grp["contig"][:] = contigs
@@ -412,11 +432,14 @@ def main():
     ap.add_argument("--n-train-samples", type=int, default=16,
                     help="Number of train samples (rest are heldout)")
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--jitter", type=int, default=128,
+                    help="Positional jitter margin (default 128, matching real store). "
+                         "Requires sim data with region_len = tile_size + 2*jitter.")
     ap.add_argument("--workers", type=int, default=1,
                     help="Number of parallel workers (default 1, sequential)")
     args = ap.parse_args()
     build_store(args.sim_dir, args.out, args.n_train_samples, args.seed,
-                workers=args.workers)
+                workers=args.workers, jitter=args.jitter)
 
 
 if __name__ == "__main__":
