@@ -8,8 +8,11 @@ from pytest import mark, raises
 # TODO -- move this into config
 
 
+TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
 def get_test_path(*args):
-    return os.path.join("/home/nboley/src/fragmentomics_tools/test/data", *args)
+    return os.path.join(TEST_DATA_DIR, *args)
 
 
 DEFAULT_CACHE_DIR = get_test_path("./")

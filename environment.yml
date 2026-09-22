@@ -19,16 +19,23 @@ dependencies:
   - pysam
   - pybedtools
   - pybigwig
-  # External binaries the library and test suite shell out to.
-  # pybedtools pulls `bedtools`, but these were previously undeclared:
-  #   htslib           -> bgzip, tabix   (TabixBedReader/Writer)
-  #   ucsc-bedtobigbed -> bedToBigBed    (BigBedWriter)
-  #   ucsc-bigbedinfo  -> bigBedInfo     (BigBedReader)
-  # Their absence accounted for 29 test failures.
+  # External binaries the library and test suite shell out to. pybedtools
+  # supplies `bedtools`; everything below was previously undeclared.
+  # The full set is the result of grepping the library for invoked commands:
+  #   htslib                -> bgzip, tabix       (TabixBedReader/Writer)
+  #   ucsc-bedtobigbed      -> bedToBigBed        (BigBedWriter)
+  #   ucsc-bigbedinfo       -> bigBedInfo         (BigBedReader)
+  #   ucsc-bigbedtobed      -> bigBedToBed        (BigBedReader slicing)
+  #   ucsc-bigwigtowig      -> bigWigToWig        (BigWigReader slicing)
+  #   ucsc-bedgraphtobigwig -> bedGraphToBigWig   (BigWigWriter)
+  # Their absence accounted for 33 test failures.
   - htslib
   - samtools
   - ucsc-bedtobigbed
   - ucsc-bigbedinfo
+  - ucsc-bigbedtobed
+  - ucsc-bigwigtowig
+  - ucsc-bedgraphtobigwig
   - bx-python
   - smart_open
   - dacite
