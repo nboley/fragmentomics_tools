@@ -80,7 +80,7 @@ The detach_h5 code is small (40 lines) and reads correctly, but it is **unverifi
 
 | ID | Severity | Location | Finding | Evidence | Recommendation |
 |----|----------|----------|---------|----------|----------------|
-| B1 | **Critical** | 216-217 | **Required-column validation is ineffective.** Operations such as `rename()` call `_constructor` with the *original* data, so validation passes on the original columns; pandas then mutates columns *after* `__init__` returns. Result: an instance whose required column is absent. | REPRODUCED — `df.rename(columns={'x':'y'})` yields a subclass instance lacking required column `x`. | Validation in `__init__` cannot enforce this invariant. Either drop the feature (it provides false confidence) or validate in a `__finalize__` override, accepting per-operation overhead. |
+| B1 | ~~Critical~~ **Low** | 216-217 | **DOWNGRADED after measurement — the original finding was overstated.** Required-column validation is *not* ineffective. It fires correctly for the constructor, `drop(columns=)`, `loc`/`iloc` column selection, `filter`, `reindex`, and plain `[[...]]` selection. It is bypassed only by operations that relabel columns while reusing the BlockManager, or that mutate in place. Measured across 30 operations: **8 leak, 22 are caught.** Leaks: `rename` (3 forms), `add_prefix`, `add_suffix`, `pop`, `del`, `set_index`. | **MEASURED by execution** (see §10). | **No action.** Every leak requires deliberately relabelling or deleting a required column and then continuing to use the object, which is not a plausible accident. Closing it costs 6 method overrides plus a point-of-use backstop, and the enumeration can never be proven complete. |
 | B2 | **Critical** | 280-296 | **`parallel_apply` hangs forever if a worker dies before sending.** The main loop waits until `len(indices) == shape[0]`, with no `is_alive()` check and no timeout. A segfault/OOM/unpicklable result leaves the parent blocked indefinitely. | REPRODUCED — worker raising before `send_bytes()` hangs the parent; confirmed via timeout harness. | Poll `any(p.is_alive() ...)` in the loop; raise if all workers are dead with results incomplete. Add an overall timeout. |
 | B3 | **Critical** | 87-89 | **Unpicklable result or exception kills the worker silently.** `pickle.dumps(inst)` / `pickle.dumps((idx, res))` sit outside any try/except, so a lambda return value or a lock-bearing exception kills the worker with no message — triggering the B2 hang. | REPRODUCED — `fn` returning a closure crashes the worker; parent hangs. | Wrap the `pickle.dumps` calls; on failure send a sanitized, serializable error carrying `repr()` of the original. |
 | B4 | High | 315-320 | **Crash on empty DataFrame.** `all(...)` is vacuously `True` for an empty `records` list, so `pd.concat([])` raises `ValueError: No objects to concatenate`. | REPRODUCED. | Early-return an appropriately-shaped empty frame when `self.shape[0] == 0`. |
@@ -411,3 +411,72 @@ Superseding §7, now that the ground truth is known:
 4. **Synthetic fixture plan for `test_dataframe.py`** (§9.4) — unblocks the last 26 tests, with the coverage caveat above.
 5. **Fix the always-raising methods** (§6.1).
 6. **Route the four scientific-behaviour findings to the domain owner** (R5, S5, S4, R12).
+
+---
+
+# 10. B1 Re-examined by Measurement
+
+B1 was the review's headline architectural finding: "required-column
+validation is ineffective." Once the suite was runnable it could be measured
+rather than reasoned about, and **the finding was overstated.**
+
+## What actually happens
+
+Validation lives at the end of `DataFrameBase.__init__`, after an early return
+on the BlockManager fast path. Tested across 30 DataFrame operations:
+
+**Caught (22)** — constructor with a missing column, `drop(columns=)` (both
+forms), `filter` (items/regex/like), `reindex(columns=)`, `select_dtypes`,
+`loc[:, [...]]`, `iloc[:, 1:]`, `[[...]]` selection, `T`, `groupby().sum()`,
+`melt`, `insert`, `assign`, `copy`, `head`, `sort_values`, `reset_index`,
+`squeeze`, `nlargest`, `stack`.
+
+**Leaks (8)** — in three mechanisms:
+
+| Mechanism | Operations |
+|---|---|
+| Relabel, reusing the BlockManager | `rename(columns=)`, `rename(axis=1)`, `rename(inplace=True)`, `add_prefix`, `add_suffix` |
+| In-place removal | `pop('contig')`, `del df['contig']` |
+| Column moved to the index | `set_index('contig')` |
+
+So the invariant holds for every operation that *creates new data*, and leaks
+only where labels are rewritten in place or a column is removed by mutation.
+
+## Why no single hook closes it
+
+`__finalize__` fires for 5 of the 8 (`rename` copy-forms, `add_prefix`,
+`add_suffix`, `set_index` — as method `'copy'`/`'rename'`). It does **not**
+fire for `rename(inplace=True)`, `pop`, or `del`, because those construct no
+object. That is structural: no construction-time or finalization-time hook can
+observe an in-place mutation.
+
+A prototype using six overrides (`rename`, `pop`, `__delitem__`, `set_index`,
+`add_prefix`, `add_suffix`), each validating *before* delegating, blocked all
+8 leaks with no false positives on legitimate operations (`rename` of a
+non-required column, `pop('extra')`, `set_index('extra')`, `copy`, `head`,
+`assign`, `sort_values`). Checking before delegating also matters for
+`inplace=True`: validating afterwards would raise while leaving the object
+already mutated.
+
+## Decision: no action
+
+Deliberate. Every leak requires renaming or deleting a required column and
+then continuing to use the object. That is not a plausible accident, and it is
+not where this codebase's actual failures have come from — those were orphaned
+imports, a deleted git tag, lost fixtures, and stale test expectations.
+
+Against that, closing it costs six overrides that must track the pandas API,
+and the enumeration cannot be shown complete: this analysis tested 30 of
+~200 DataFrame methods, and two of the eight leaks (`set_index`, `del`) were
+found only after widening an earlier 9-operation sweep. Claiming the hole is
+closed would recreate exactly the false guarantee B1 complained about, one
+level up.
+
+## Note on the original finding
+
+The Critical rating came from a reviewing agent that reported the behaviour as
+"REPRODUCED". It could not have been — `pybedtools` was absent at the time and
+the module would not import (§1). The described mechanism was roughly right;
+the severity and the scope were not. It is recorded here as Low rather than
+deleted, because the gap is real and a future reader deserves the measurements
+rather than a second opinion.
