@@ -955,10 +955,15 @@ class RegionDataFrame(DataFrameBase):
 
     def merge_regions(self, **kwargs):
         bedtool = pybedtools.BedTool.from_dataframe(self).sort()
-        return type(self)(
-            bedtool.merge(**kwargs).to_dataframe(names=list(self.columns)),
-            ref=self.ref,
-        )
+        # bedtools merge emits BED3 (chrom/start/end) unless column aggregation
+        # is requested via -c/-o, so the output column set is decided by
+        # bedtools, not by self.columns. Passing `names=list(self.columns)`
+        # here silently produced an all-NaN column for every field beyond the
+        # first three -- merging a frame with strand/name/score returned those
+        # three columns entirely NaN rather than dropping them.
+        merged_df = bedtool.merge(**kwargs).to_dataframe()
+        merged_df.columns = ["contig", "start", "stop"] + list(merged_df.columns[3:])
+        return type(self)(merged_df, ref=self.ref)
 
     def intersect_with_rdf(self, other, sorted=False, rsuff="other"):
         """
@@ -1160,15 +1165,34 @@ class RegionDataFrame(DataFrameBase):
         tmp = self.intersect_with_rdf(other_rdf)
         return self.loc[self.index.difference(tmp.index), :]
 
-    def attach_blacklist_regions(self, bed_fname):
-        tmp = self.intersect_with_rdf(RegionDataFrame.from_bed(bed_fname, ref=self.ref))
+    def attach_blacklist_regions(self, bed_fname, rsuff="other"):
+        tmp = self.intersect_with_rdf(
+            RegionDataFrame.from_bed(bed_fname, ref=self.ref), rsuff=rsuff
+        )
         if len(tmp) == 0:
             self["blacklist_regions"] = ""
             return self
 
+        # NOTE: iter_regions() reads the contig/start/stop columns, which on
+        # the intersection result belong to *self*, not to the blacklist. Using
+        # it here attached each query region to itself instead of the
+        # overlapping blacklist interval -- silently, with no error. The
+        # blacklist coordinates live in the `_{rsuff}`-suffixed columns that
+        # intersect_with_rdf produces.
+        def _blacklist_regions_for(group):
+            return [
+                Region(
+                    row[f"contig_{rsuff}"],
+                    row[f"start_{rsuff}"],
+                    row[f"stop_{rsuff}"],
+                    ref=self.ref,
+                )
+                for _, row in group.iterrows()
+            ]
+
         blacklist_regions = (
             tmp.groupby(tmp.index.names)
-            .apply(lambda x: list(x.iter_regions()))
+            .apply(_blacklist_regions_for)
             .rename("blacklist_regions")
         )
         return self.join(blacklist_regions).fillna("")
