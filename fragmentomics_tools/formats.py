@@ -1045,7 +1045,12 @@ class BigBedReader(BedReader, IndexedRegionReader):
     @staticmethod
     def read_first_line(in_file):
         # TODO -- if we just care about the parts we can use bigBedInfo
-        cmd = f"bigBedToBed -maxItems=1 {in_file} /dev/stdout"
+        # `-maxItems` is not a valid bigBedToBed option (UCSC tools v482), so
+        # it made every call here exit 255. Bound the work with `head -n 1`
+        # instead: it closes the pipe after one record, so bigBedToBed stops
+        # early rather than decoding the whole file. The pipeline's exit
+        # status is head's, so check=True still behaves.
+        cmd = f"bigBedToBed {in_file} /dev/stdout | head -n 1"
         res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, check=True)
         rv = io.StringIO(res.stdout.decode()).readline()
         if rv == "":

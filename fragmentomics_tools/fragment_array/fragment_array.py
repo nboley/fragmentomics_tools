@@ -1484,8 +1484,10 @@ class RegionFragmentArray(FragmentArray):
                 if k == "region":
                     r: Region = val
                     r_str = str(r)
-                    data = np.chararray((len(r_str),))
-                    data[:] = list(r_str)
+                    # np.chararray was removed in numpy 2.0. Its default dtype
+                    # was 'S1', so this is the exact equivalent — verified to
+                    # produce a byte-identical .tobytes() for load() to decode.
+                    data = np.array(list(r_str), dtype="S1")
                 elif k == "max_frag_len":
                     data = np.array(val, dtype=int)
                 else:
