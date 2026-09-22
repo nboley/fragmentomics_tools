@@ -51,9 +51,7 @@ from fragmentomics_tools.util.liftover import RegionLiftOver
 # from fbio.util import aws_utils
 # from fbio.util.iter_utils import windowed_range
 # from fbio.util.misc_utils import progress_bar
-# from ravel.data_manifest import load_data_manifest, DataManifest
 # from ravel.util.ml_utils import get_indices_of_balanced_labels
-# from ravel.util.pandas_utils import dataframe_region_mask
 
 
 logger = logging.getLogger(__name__)
@@ -582,28 +580,6 @@ class RegionDataFrame(DataFrameBase):
             n_tss[i] = len(tss_intervals[row["contig"]][row["start"] : row["stop"]])
         self.loc[:, "num_tss_overlaps"] = n_tss
         return self
-
-    @property
-    def ref_path(self) -> str:
-        assert False
-        with DataManifest() as dm:
-            ref_path = dm.sync_and_get(REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref]).path
-            _ = dm.sync_and_get(
-                REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".fai"
-            ).path
-            _ = dm.sync_and_get(
-                REFERENCE_FASTA_DATA_MANIFEST_KEY[self.ref] + ".gzi"
-            ).path
-        assert os.path.exists(ref_path)
-        assert os.path.exists(ref_path + ".fai")
-        assert os.path.exists(ref_path + ".gzi")
-        # check that we can actually open the fasta file
-        with pysam.FastaFile(
-            filename=ref_path, filepath_index_compressed=ref_path + ".fai"
-        ) as _:
-            pass
-
-        return ref_path
 
     def center_on_summit(self):
         """Center regions on summit, resize the regions, and then drop the summit column."""
@@ -1216,13 +1192,6 @@ class RegionDataFrame(DataFrameBase):
             .rename("blacklist_regions")
         )
         return self.join(blacklist_regions).fillna("")
-
-    def region_mask(self, region):
-        """
-        Returns a mask of this dataframe of all regions which intersect region
-        :param region: the region to intersect
-        """
-        return dataframe_region_mask(self, region)
 
     @property
     def bed_df(self):
