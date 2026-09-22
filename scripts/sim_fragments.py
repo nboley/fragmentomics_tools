@@ -655,7 +655,12 @@ def validate(out_dir):
     w6 = gt["w6"]
     rc_perm = gt["rc_perm"]
     gcbias = GCBias2D(gt["bias_lengths"], gt["bias_gc_percents"], gt["bias_grid"])
-    len_vals = gt["len_vals"]; len_p = gt["len_p"]
+    len_vals = gt["len_vals"]
+    if "len_p" in gt:
+        len_p = gt["len_p"]
+    else:
+        # Per-sample FL distributions: use mean for validation plots
+        len_p = gt["len_p_per_sample"].mean(axis=0)
 
     regions, region_len, R, S, E, ST = _load_all_fragments(out_dir)
     region_pre = [precompute_region(r, region_len) for r in regions]
