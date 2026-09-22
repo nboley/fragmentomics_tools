@@ -83,7 +83,26 @@ class InstrumentedBackgroundModel(BackgroundModel):
         self.log(log_name, loss, prog_bar=True, sync_dist=True)
         self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
         self._log_dispersion_trajectory(log_name, log_disp)
+        self._log_multinomial_nll(log_name, shape_logits, y, mask3)
         return loss
+
+    @torch.no_grad()
+    def _log_multinomial_nll(self, log_name, shape_logits, y, mask3):
+        """Log multinomial NLL for all models (comparable to oracle=7.5745).
+
+        For multinomial loss this equals val_loss. For other losses it provides
+        a cross-family comparison metric on the same scale.
+        """
+        stage = log_name.split("_")[0]
+        sl = shape_logits.detach()
+        if mask3 is not None:
+            sl = sl.masked_fill(~mask3, float("-inf"))
+        logp = torch.log_softmax(sl, dim=-1)
+        if mask3 is not None:
+            logp = logp.masked_fill(~mask3, 0.0)
+        totals = y.detach().sum(dim=-1).clamp(min=1.0)
+        nll = -(y.detach() * logp).sum(dim=-1) / totals
+        self.log(f"{stage}_multinomial_nll", nll.mean(), sync_dist=True)
 
     @torch.no_grad()
     def _log_per_track(self, log_name, shape_logits, log_disp, y, mask3):
