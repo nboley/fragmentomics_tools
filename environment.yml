@@ -1,4 +1,8 @@
-name: base
+# NOTE: no `name:` field on purpose.
+# The Dockerfile installs with an explicit `micromamba install -n base -f environment.yml`,
+# so the target env is chosen there. Omitting `name:` means a local
+# `conda env create -f environment.yml` errors asking for -n/-p rather than
+# silently installing into the caller's base environment.
 channels:
   - conda-forge
   - bioconda
@@ -15,6 +19,16 @@ dependencies:
   - pysam
   - pybedtools
   - pybigwig
+  # External binaries the library and test suite shell out to.
+  # pybedtools pulls `bedtools`, but these were previously undeclared:
+  #   htslib           -> bgzip, tabix   (TabixBedReader/Writer)
+  #   ucsc-bedtobigbed -> bedToBigBed    (BigBedWriter)
+  #   ucsc-bigbedinfo  -> bigBedInfo     (BigBedReader)
+  # Their absence accounted for 29 test failures.
+  - htslib
+  - samtools
+  - ucsc-bedtobigbed
+  - ucsc-bigbedinfo
   - bx-python
   - smart_open
   - dacite
@@ -32,7 +46,12 @@ dependencies:
   - c-compiler
   - awscli
   - s5cmd
+  - pytest
   - pip
   - pip:
-    - git+https://github.com/nboley/fragments_h5.git@v2.10.1
+    # Repinned from v2.10.1, which no longer exists on the remote (the tag was
+    # deleted; `git ls-remote --tags` shows v2.9.1 -> v2.11.0 with no v2.10.x).
+    # That dead pin made this file — and `docker build` — fail outright.
+    # v2.13.3 verified: tag dereferences to f6a936b, whose pyproject declares 2.13.3.
+    - git+https://github.com/nboley/fragments_h5.git@v2.13.3
     - git+https://github.com/nboley/datamanifest.git@v1.2.0
