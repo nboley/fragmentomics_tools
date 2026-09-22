@@ -171,6 +171,7 @@ class TrainConfig:
     dropout: float = 0.15
     precision: str = "32"
     min_N: int = 50
+    auto_lr: bool = False
 
 
 def build_model(loss: str, lr: float, n_kernels: int = 512,
@@ -250,6 +251,7 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "n_kernels": cfg.n_kernels,
         "num_residual_layers": cfg.num_residual_layers,
         "dropout": cfg.dropout,
+        "auto_lr": cfg.auto_lr,
         "precision": cfg.precision,
         "max_epochs": cfg.max_epochs,
         "batch_size": cfg.batch_size,
@@ -311,6 +313,18 @@ def run_training(cfg: TrainConfig):
         train_ds, val_ds, cfg.batch_size, cfg.num_workers
     )
     trainer = build_trainer(cfg, run_dir)
+    if cfg.auto_lr:
+        tuner = L.pytorch.tuner.Tuner(trainer)
+        lr_result = tuner.lr_find(model, train_loader, val_loader)
+        suggested = lr_result.suggestion()
+        print(f"[auto-lr] suggested LR: {suggested:.6e}", flush=True)
+        model.hparams.learning_rate = suggested
+        model.learning_rate = suggested
+        # Update meta with the discovered LR
+        meta["lr"] = suggested
+        meta["auto_lr_suggestion"] = suggested
+        with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
     trainer.fit(
         model, train_loader, val_loader, ckpt_path=cfg.resume_from
     )
@@ -355,6 +369,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--store", default=DEFAULT_STORE)
     p.add_argument("--runs-root", default=DEFAULT_RUNS_ROOT)
     p.add_argument("--resume-from", default=None)
+    p.add_argument("--auto-lr", action="store_true",
+                   help="run Lightning LR finder before training")
     return p
 
 
@@ -380,6 +396,7 @@ def cfg_from_args(args) -> TrainConfig:
         precision=args.precision,
         min_N=args.min_N,
         dropout=args.dropout,
+        auto_lr=args.auto_lr,
     )
 
 
