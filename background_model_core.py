@@ -329,6 +329,43 @@ class ResNetDilatedBlock(torch.nn.Module):
 
 
 # --------------------------------------------------------------------------
+# K-mer index computation (used by BackgroundModelKEN)
+# --------------------------------------------------------------------------
+
+
+def rc_kmer_permutation(k: int) -> np.ndarray:
+    """Fixed permutation mapping each k-mer index to its RC partner.
+
+    Complement in 2-bit code is (3 - code) (A0<->T3, C1<->G2); RC also
+    reverses base order.  Involution: perm[perm[i]] == i.
+    """
+    n = 4 ** k
+    idx = np.arange(n, dtype=np.int64)
+    codes = np.zeros((n, k), dtype=np.int64)
+    rem = idx.copy()
+    for j in range(k):
+        codes[:, k - 1 - j] = rem % 4
+        rem //= 4
+    rc_codes = (3 - codes)[:, ::-1]
+    powers = 4 ** np.arange(k - 1, -1, -1)
+    return (rc_codes * powers).sum(axis=1)
+
+
+def one_hot_to_kmer_indices(one_hot: torch.Tensor, k: int,
+                            powers: torch.Tensor) -> torch.Tensor:
+    """Convert one-hot DNA (B, 4, L) to integer k-mer indices (B, L-k+1).
+
+    Each position i in the output gets the k-mer centered on it (after
+    the dataset's center-crop ensures the correct input offset). The
+    k-mer is encoded as a base-4 big-endian integer, matching the
+    simulation's hexamer_indices encoding.
+    """
+    base_idx = one_hot.argmax(dim=1)
+    patches = base_idx.unfold(dimension=1, size=k, step=1)
+    return (patches * powers).sum(dim=-1)
+
+
+# --------------------------------------------------------------------------
 # Losses
 #
 # All three share the same masked-softmax shape convention:
@@ -766,6 +803,226 @@ class BackgroundModel(L.LightningModule):
 
         mask: optional (L_out,) bool of valid positions.
         """
+        self.eval()
+        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
+        shape_logits, dispersion_bp = self(x[None])
+        mask3 = None
+        if mask is not None:
+            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+            mask3 = mask3[None, None, :]
+            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
+        log_dispersion = None
+        if dispersion_bp is not None:
+            log_dispersion = (
+                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
+            )
+        return {"probs": probs, "log_dispersion": log_dispersion}
+
+
+class BackgroundModelKEN(L.LightningModule):
+    """K-mer Embedding Network for cfDNA fragment-endpoint background modeling.
+
+    Replaces the CNN trunk with an explicit k-mer lookup table
+    (nn.Embedding) followed by optional context Conv1d layers.
+    Same loss functions, masking, and predict_profile interface as
+    BackgroundModel.
+
+    The model predicts joint endpoint profiles: the observed count at each
+    position reflects hexamer bias at BOTH fragment ends (left cut forward,
+    right cut RC), convolved with the fragment-length distribution. The
+    embedding table learns the effective per-hexamer contribution to this
+    joint profile, not raw individual cut-site weights.
+
+    RC weight tying: each k-mer and its reverse-complement share the same
+    embedding row (2,080 canonical entries for k=6 instead of 4,096).
+    """
+
+    def __init__(
+        self,
+        output_tracks: Optional[List[str]] = None,
+        k: int = 6,
+        d_embed: int = 64,
+        d_context: int = 128,
+        n_context_layers: int = 2,
+        context_kernel_size: int = 15,
+        dropout: float = 0.15,
+        learning_rate: float = 1e-3,
+        loss: str = "multinomial",
+        dispersion_window_size: int = 256,
+        log_dispersion_init: float = 7.0,
+        max_dispersion_ratio: Optional[float] = 2.0,
+        clamp_margin: float = 1.0,
+        freeze_dispersion: bool = False,
+        dispersion_lr_scale: float = 1.0,
+        weight_decay: float = 0.0,
+    ):
+        super().__init__()
+        if loss not in LOSSES:
+            raise ValueError(f"loss must be one of {LOSSES} (got '{loss}')")
+        if output_tracks is None:
+            output_tracks = list(DEFAULT_OUTPUT_TRACKS)
+        for t in output_tracks:
+            track_name_to_index_key(t)
+        self.save_hyperparameters()
+        self.output_tracks = output_tracks
+
+        n_tracks = len(output_tracks)
+        vocab_size = 4 ** k
+
+        # Stage 1: k-mer index computation (fixed)
+        self.register_buffer(
+            "_powers",
+            4 ** torch.arange(k - 1, -1, -1, dtype=torch.long),
+        )
+
+        # RC weight tying: map each k-mer to its canonical representative
+        rc_perm = rc_kmer_permutation(k)
+        canonical = np.minimum(np.arange(vocab_size, dtype=np.int64), rc_perm)
+        _, to_canonical = np.unique(canonical, return_inverse=True)
+        self.register_buffer(
+            "_to_canonical",
+            torch.from_numpy(to_canonical.astype(np.int64)),
+        )
+        n_canonical = int(to_canonical.max()) + 1  # 2080 for k=6
+
+        # Stage 2: embedding table (canonical entries only)
+        self.embed = torch.nn.Embedding(n_canonical, d_embed)
+        self.embed_dropout = SpatialDropout(dropout)
+
+        # Stage 3: context CNN (unpadded)
+        layers = []
+        in_ch = d_embed
+        for _ in range(n_context_layers):
+            layers.append(
+                torch.nn.Conv1d(in_ch, d_context, context_kernel_size,
+                                padding=0)
+            )
+            layers.append(torch.nn.GELU())
+            in_ch = d_context
+        self.context = torch.nn.Sequential(*layers) if layers else torch.nn.Identity()
+        trunk_out_ch = d_context if n_context_layers > 0 else d_embed
+
+        # Stage 4: shape head
+        self.shape_head = torch.nn.Conv1d(trunk_out_ch, n_tracks, 1)
+
+        # Stage 5: dispersion head (only for overdispersed losses)
+        self.dispersion_head = (
+            None if loss == "multinomial"
+            else torch.nn.Conv1d(trunk_out_ch, n_tracks, 1)
+        )
+
+        # Loss
+        if loss == "multinomial":
+            self.loss_fn = MaskedMultinomialNLLLoss()
+        elif loss == "dirichlet_multinomial":
+            self.loss_fn = MaskedDirichletMultinomialNLLLoss()
+        else:
+            self.loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
+                max_dispersion_ratio=max_dispersion_ratio,
+                clamp_margin=clamp_margin,
+            )
+
+        if freeze_dispersion and self.dispersion_head is not None:
+            for p in self.dispersion_head.parameters():
+                p.requires_grad = False
+
+        # Even-k trimming flag: when k is even, calc_input_region_size
+        # rounds up to even, producing one extra unfold position.
+        self._trim = (k - 1) % 2  # 1 when k is even, 0 when k is odd
+
+    def calc_input_region_size(self, output_region_size: int) -> int:
+        """Input length for the given output length.
+
+        The k-mer unfold needs (k-1) extra bases. Each unpadded context
+        layer trims (context_kernel_size - 1) positions. For even k the
+        raw total may be odd, violating the dataset's even-parity
+        requirement -- round up.
+        """
+        k = self.hparams.k
+        n_ctx = self.hparams.n_context_layers
+        k_ctx = self.hparams.context_kernel_size
+        raw = output_region_size + (k - 1) + n_ctx * (k_ctx - 1)
+        return raw + (raw % 2)
+
+    def forward(self, x):
+        # x: (B, 4, L_in) one-hot
+        kmer_idx = one_hot_to_kmer_indices(x, self.hparams.k, self._powers)
+        canonical_idx = self._to_canonical[kmer_idx]
+        h = self.embed(canonical_idx)             # (B, L_unfold, d_embed)
+        h = h.transpose(1, 2)                     # (B, d_embed, L_unfold)
+        h = self.embed_dropout(h)
+        h = self.context(h)                       # (B, d_context, L_out')
+
+        # Trim the extra position from even-parity rounding (even k only)
+        if self._trim:
+            h = h[..., :-1]
+
+        shape_logits = self.shape_head(h)
+        if self.dispersion_head is None:
+            return shape_logits, None
+        return shape_logits, self.dispersion_head(h)
+
+    def _pooled_log_dispersion(self, dispersion_bp, mask):
+        L = dispersion_bp.shape[-1]
+        if self.hparams.loss == "dirichlet_multinomial":
+            out_size = 1
+        else:
+            w = self.hparams.dispersion_window_size
+            assert L % w == 0
+            out_size = L // w
+        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
+        pooled = pooled + self.hparams.log_dispersion_init
+        if self.hparams.loss == "dirichlet_multinomial":
+            pooled = pooled.squeeze(-1)
+        return pooled
+
+    def _step(self, batch, log_name):
+        x, y, mask = batch
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+        if self.hparams.loss == "multinomial":
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._step(batch, "train_loss")
+
+    def validation_step(self, batch, batch_idx):
+        return self._step(batch, "val_loss")
+
+    def configure_optimizers(self):
+        lr = self.hparams.learning_rate
+        wd = self.hparams.weight_decay
+        scale = self.hparams.dispersion_lr_scale
+
+        # Apply weight decay only to the embedding table
+        embed_params = list(self.embed.parameters())
+        embed_ids = {id(p) for p in embed_params}
+
+        if self.dispersion_head is not None and not self.hparams.freeze_dispersion and scale != 1.0:
+            disp_ids = {id(p) for p in self.dispersion_head.parameters()}
+            main_params = [p for p in self.parameters()
+                          if id(p) not in embed_ids and id(p) not in disp_ids]
+            return torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+                {"params": list(self.dispersion_head.parameters()),
+                 "lr": lr * scale, "weight_decay": 0.0},
+            ])
+        main_params = [p for p in self.parameters() if id(p) not in embed_ids]
+        return torch.optim.Adam([
+            {"params": embed_params, "lr": lr, "weight_decay": wd},
+            {"params": main_params, "lr": lr, "weight_decay": 0.0},
+        ])
+
+    @torch.no_grad()
+    def predict_profile(self, one_hot_seq: np.ndarray,
+                        mask: Optional[np.ndarray] = None):
         self.eval()
         x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
         shape_logits, dispersion_bp = self(x[None])
