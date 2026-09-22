@@ -2,7 +2,11 @@
 
 **File reviewed:** `fragmentomics_tools/dataframe.py`
 **Date:** 2026-09-22
-**Method:** Five Opus reviewers (one region each, plus an independent second pass over the interval range), with direct verification of every Critical and High finding.
+**Method:** Five Opus reviewers (one region each, plus an independent second pass over the interval range), with direct verification of every Critical and High finding. **Sections 9-11 were added after the suite was made runnable**, and correct several of the static findings by measurement.
+
+> **STATUS: much of this review has been acted on.** §1-§8 record the review *as originally written*, before anything could be executed. Do not read those tables as the current state of the code — see **§11 for the resolution ledger**, which maps every finding to what happened to it.
+>
+> Headline: suite went from **not importable** to **2 failed / 219 passed**. **17 defects fixed** (8 from this review, 9 found only by execution), 2 methods deleted as dead, 1 Critical downgraded after measurement, and 382 lines of dead code removed.
 
 ### Branch context (read this first)
 
@@ -33,11 +37,17 @@ pandas.DataFrame
         └── SampleDataFrame
 ```
 
-Three themes dominate the findings:
+Three themes dominated the findings as written. Two survived contact with
+execution; one did not.
 
-1. **The central invariant of the design — required columns — is not actually enforced.** Validation runs at a point in the pandas lifecycle where it cannot see the final columns. Every subclass inherits this false guarantee.
-2. **Two methods are non-functional and would fail on first call**, indicating they have never been exercised. This is a direct consequence of theme 3.
-3. **The test suite for this module cannot run in any environment on this machine.** That is the root cause that allowed 1 and 2 to persist, and it also invalidated a test claim made during the v1.4.0 release.
+1. ~~**The central invariant of the design — required columns — is not actually enforced.**~~ **OVERSTATED — see §10.** Measured across 30 operations, 22 are caught and 8 leak, all requiring a deliberate rename or in-place deletion of a required column. Downgraded Critical -> Low, closed as no-action.
+2. **Methods that are non-functional and fail on first call.** CONFIRMED and worse than stated: ten of them, not two. Seven repaired, two deleted as dead (§11).
+3. **The test suite cannot run in any environment on this machine.** CONFIRMED, and it was the root cause of the rest. **Now resolved** — §9 records the four `environment.yml` defects that had to be fixed first, and the suite now runs at 2 failed / 219 passed.
+
+A fourth theme emerged only once the code could be executed, and is arguably
+the most important result here:
+
+4. **Static review systematically missed a whole class of defect.** Nine defects were found by running the code that five Opus reviewers reading the same files did not find — a CLI flag that does not exist in the installed tool, a numpy API removed in 2.0, a `NameError` in a helper, a test whose outcome depended on execution order, and a `fragments_h5` API drift. None are visible by reading; all are obvious on execution. See §11.2.
 
 ---
 
@@ -480,3 +490,108 @@ the module would not import (§1). The described mechanism was roughly right;
 the severity and the scope were not. It is recorded here as Low rather than
 deleted, because the gap is real and a future reader deserves the measurements
 rather than a second opinion.
+
+---
+
+# 11. Resolution Ledger
+
+What actually happened to every finding. **This section supersedes the status
+implied by the tables in §2-§8.**
+
+## 11.1 Findings from the static review
+
+| ID | Finding | Outcome | Commit |
+|---|---|---|---|
+| B1 | Required-column validation ineffective | **DOWNGRADED** Critical -> Low after measurement; closed no-action (§10) | `c3c7aeb` |
+| B2-B5 | `parallel_apply` hangs / crashes | **OPEN** — untested multiprocessing, unrecoverable hangs | — |
+| B6-B9 | mutation of caller frames, dead `rv`, mutable class defaults, no coverage | **OPEN** (low) | — |
+| R1 | `split_on_column` queried literal `"column_name"` | **FIXED** + regression test | `062a7b8` |
+| R2 | `drop_unlabeled_records` undefined, on a default path | **OPEN** — needs implementing; tests define its contract | — |
+| R3 | empty-intersection coverage returns wrong-shaped array | **OPEN** | — |
+| R4, R8, R10, R14 | resize/binning boundary conditions | **OPEN** | — |
+| R5 | fragment mask uses OR where AND intended | **OPEN — domain owner** | — |
+| R6, R7 | dead `label_column` param, `inplace` not honoured | **OPEN** | — |
+| R11-R13 | warning always logged, strict thresholds, no `random_state` | **OPEN** (low) | — |
+| I1 | `get_overlapping_base_counts` — `TypeError` on every call | **FIXED**, verified numerically | `062a7b8` |
+| I2 | `merge_regions` NaN-fills every column past the third | **FIXED** + regression test | `b7c4758` |
+| I3 | `attach_blacklist_regions` returns the query region, not the blacklist | **FIXED** + regression test | `b7c4758` |
+| I4 | return type varies with result size | **OPEN** | — |
+| I5, I6 | unstranded regions rejected; `from_bed` crashes on empty file | **OPEN** | — |
+| I7 | `drop_overlapping_regions` hardcodes `assert ref == "hg38"` | **OPEN** | — |
+| I8 | `ref_path` body begins `assert False` | **DELETED** — dead, and its DataManifest bucket no longer exists | `52024b6` |
+| I9 | docstring documents a parameter the signature lacks | **FIXED** with I1 | `062a7b8` |
+| I10, I11 | `__eq__` returns scalar; `center_on_summit` off-by-one | **OPEN** | — |
+| I12 | test references undefined `blacklist_path` | **OPEN** — in `test_dataframe.py`, which still cannot collect | — |
+| I13 | `attach_num_tss_overlaps` calls undefined `get_tss_intervals` | **OPEN** — orphaned `ravel` reference | — |
+| I14 | `center_regions_on_tf_motif` calls undefined `verify_motif_scores`, default `True` | **FIXED** — default flipped to False, `True` now raises `NotImplementedError`. **24 real consumers all pass `False`** | `062a7b8` |
+| I15 | `region_mask` calls unimported `dataframe_region_mask` | **DELETED** — dead, orphaned `ravel` reference | `52024b6` |
+| I16-I23 | `overlaps_rdf` KeyError, `__and__` downcast, `lift_over` empty/-1, `concat([])`, mutation semantics, dead `has_header`, descending `unique_regions` sort | **OPEN** | — |
+| S1 | `SRDF.expand_regions` returns `None` | **FIXED** | `062a7b8` |
+| S2 | bare `assert False` on a live SRDF resize path | **FIXED** | `062a7b8` |
+| S3 | `SampleDataFrame.__init__` inspects only `iloc[0]` | **OPEN** — `main` only (the v1.4.0 code) | — |
+| S3b | worktree branch still calls `FlDist.init_from_sdf` unconditionally | **OPEN** | — |
+| S4, S5 | duplicate `sample_id`s silently dropped; median named `mean_fragment_counts` | **OPEN — domain owner** | — |
+| S6-S9 | opaque `KeyError`, per-group assert, empty-list `IndexError`, no h5 close path | **OPEN** (low) | — |
+| S10 | `_detach_h5_inplace` duck-typing is sound | **INFO** — no action needed | — |
+
+**Tally:** 8 fixed, 2 deleted, 1 downgraded, 1 info, 17 rows still open. Note
+that several open rows cover multiple IDs (`B2-B5`, `I16-I23`, `R4/R8/R10/R14`),
+so the open *finding* count is higher than the open *row* count.
+
+## 11.2 Defects found only by execution
+
+None of these appear in §2-§8. Five Opus reviewers read these files and found
+none of them, because each requires running the code.
+
+| ID | Defect | Impact | Commit |
+|---|---|---|---|
+| L1 | `formats.py` passed `-maxItems=1` to `bigBedToBed`, which has no such option (UCSC v482). Exit 255 on every call. | 9 tests | `5f7aabe` |
+| L2 | `fragment_array.py` used `np.chararray`, **removed in numpy 2.0**, while `pyproject.toml` declares `numpy>=1.26` — so the package was broken against the numpy it claims to support. | 2 tests | `5f7aabe` |
+| L3 | `_get_subclasses_of` recursed into `get_subclasses_of` (no underscore), defined nowhere. `get_readers_which_support_path()` raised `NameError` on any input. | latent | `5f5c30f` |
+| L4 | `test_downsample` had **no random seed** and used the global numpy RNG, so its result depended on which tests ran before it. Passed in a full run, failed when run selectively. | flaky test | `5f5c30f` |
+| L5 | `environment.yml` unbuildable: dead `fragments_h5@v2.10.1` pin (tag deleted from the remote), 7 undeclared binaries, no `pytest`, `name: base`. Also broke `docker build`. | whole suite | `d52172c`, `a731fc3` |
+| L6 | `test_formats.py` hardcoded `/home/nboley/...` — a different user's home directory. | 13 tests | `a731fc3` |
+| L7 | `test_fragment_array.py` called `build_fragments_h5(..., fasta_file=)` and `from_fragments_h5(..., include_fragment_strand=)`; neither parameter exists. | 4 errors | `2bf5018` |
+| L8 | Two fragment expectations were stale — they asserted the absence of a fragment that is present in the BAM (mapq 60, proper pair, not duplicate) *and* in the h5. The tests were asserting an old library bug. | 2 tests | `f672a7c` |
+| L9 | `test_jitter` asserted exact equality against a hand-computed dense slice — not an invariant, it held only when no fragment straddled the boundary. | 1 test | `5f5c30f` |
+
+## 11.3 Dead code removed
+
+| What | Why | Commit |
+|---|---|---|
+| `RegionFragmentArray.from_frag_bed` + `FragmentBedReader`, `MethylFragmentBedReader`, `FragmentBigBedReader`, `FragmentBedWriter` | Zero callers in the library, the tests, or any of the four dependent repos; also unreachable via `get_default_reader_class`, which is a hardcoded chain naming six other classes. Their 16 tests were **ported** to `from_fragments_h5`, not deleted. | `5f5c30f` |
+| `ref_path`, `region_mask` | Both dead, both broken; orphaned `ravel` references | `52024b6` |
+| Two commented-out `ravel` imports | Last consumers removed | `52024b6` |
+
+**382 lines deleted, no behaviour change.**
+
+## 11.4 Current state
+
+```
+pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 219 passed
+```
+
+The 2 failures are missing data only: `test_slice_encode_big_wig` (encode
+bigwig) and `test_get_one_hot_encoded_sequence` (the in-package GRCh38
+reference). `test_dataframe.py` (26 tests) still cannot collect — its primary
+fixture is unrecoverable (§9.3), and its assertions pin values derived from
+that exact file (§9.4).
+
+Highest-value remaining work, in order:
+
+1. **`parallel_apply`** (B2-B5) — unrecoverable hangs, zero test coverage. The largest untouched risk.
+2. **The four domain-owner findings** — R5 (OR vs AND fragment mask), S5 (median named mean), S4 (duplicate sample_ids), R12 (threshold strictness). These alter scientific output and were deliberately not changed.
+3. **`drop_unlabeled_records`** (R2) — undefined but on a default path, with tests that already define its contract.
+4. **The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer was.
+
+## 11.5 What this exercise demonstrated
+
+The review's own §8 note argued that acknowledged uncertainty beat unverifiable
+confidence among the reviewing agents. Execution made that concrete:
+
+- **Two static Criticals were wrong.** B1 was overstated (measured: 22 of 30 operations *are* caught). The B1 agent reported it "REPRODUCED" when the module could not even be imported.
+- **Nine real defects were invisible to static review**, including one where the package was broken against its own declared numpy range.
+- **The single highest-value fix was not a code change at all** — four undeclared conda packages took the suite from 63 failures to 34, with no code and no fixtures touched.
+- **One "library regression" was the opposite.** The fragment-count failures looked like 2.13.3 breaking inclusion; the fragment turned out to be present in the BAM *and* the h5, clean by every criterion, and absent only from a hardcoded array. The tests were asserting a bug that had since been fixed.
+
+The general lesson, and the reason §1 outranked everything: **a codebase with no feedback loop accumulates defects that no amount of reading will find.**
