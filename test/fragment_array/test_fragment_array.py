@@ -45,9 +45,11 @@ def fasta_file_path():
 def small_h5_path(bam_path, fasta_file_path):
     with tempfile.TemporaryDirectory() as dirname:
         ofname = os.path.join(dirname, os.path.basename(bam_path) + ".frag.h5")
-        build_fragments_h5(
-            bam_path, ofname, "test_sample", "hg38", fasta_file=fasta_file_path
-        )
+        # NOTE: the old signature took (bam, ofname, sample_id, reference,
+        # fasta_file=...). The current API has no sample_id/reference
+        # parameters, and `fasta_file` is now `fasta_filename` — so the old
+        # positionals silently bound to fasta_filename/allowed_contigs.
+        build_fragments_h5(bam_path, ofname, fasta_filename=fasta_file_path)
         yield ofname
 
 
@@ -665,7 +667,8 @@ def test_save_load_region_fragment_array(rfa: RegionFragmentArray, tmpdir):
 
 def test_from_fragments_h5(small_h5_path):
     region = Region("chr6", 99118615, 99121634).resize(2048)
-    rfa = RegionFragmentArray.from_fragments_h5(
-        small_h5_path, region, include_fragment_strand=True
-    )
+    # `include_fragment_strand` is no longer a parameter — from_fragments_h5
+    # now derives it internally as `fragments_h5.has_strand`. The fixture h5 is
+    # built with read_strand=True, so strand is still included here.
+    rfa = RegionFragmentArray.from_fragments_h5(small_h5_path, region)
     assert rfa.n_frags == 9
