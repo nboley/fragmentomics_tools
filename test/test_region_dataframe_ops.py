@@ -89,6 +89,66 @@ class TestMergeRegions:
         assert not merged[merged.columns[3]].isna().all()
 
 
+class TestGetOverlappingBaseCounts:
+    """This method raised TypeError on every call before the fix.
+
+    It passes wao=True through intersect_with_bed to intersect_with_rdf, whose
+    signature did not accept **intersect_kwargs even though its docstring
+    documented them.
+    """
+
+    @pytest.fixture
+    def anno_bed(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "anno.bed")
+            with open(path, "w") as fh:
+                fh.write("chr1\t150\t180\n")  # 30bp inside chr1:100-200
+                fh.write("chr1\t190\t260\n")  # 10bp inside chr1:100-200
+                fh.write("chr2\t500\t600\n")  # covers chr2:500-600 entirely
+            yield path
+
+    def test_counts_are_correct(self, anno_bed):
+        rdf = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr1", "chr2"],
+                    "start": [100, 700, 500],
+                    "stop": [200, 800, 600],
+                }
+            ),
+            ref="hg38",
+        )
+        res = rdf.get_overlapping_base_counts(anno_bed)
+
+        # chr1:100-200 overlaps 30bp + 10bp; chr1:700-800 overlaps nothing;
+        # chr2:500-600 is fully covered.
+        assert list(res["counts"]) == [40, 0, 100]
+        # the longest single overlapping interval per region
+        assert list(res["max_counts"]) == [30, 0, 100]
+
+
+class TestSplitOnColumn:
+    def test_splits_on_the_named_column(self):
+        # Regression: the query string was the literal "column_name in @values",
+        # so it looked for a column actually called "column_name" and ignored
+        # the parameter entirely. The method could never have worked.
+        rdf = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr2", "chr3"],
+                    "start": [100, 200, 300],
+                    "stop": [150, 250, 350],
+                    "group": ["a", "b", "c"],
+                }
+            ),
+            ref="hg38",
+        )
+        g1, g2 = rdf.split_on_column("group", [["a"], ["b", "c"]])
+
+        assert sorted(g1["group"]) == ["a"]
+        assert sorted(g2["group"]) == ["b", "c"]
+
+
 class TestAttachBlacklistRegions:
     def test_attaches_blacklist_coordinates_not_query_coordinates(
         self, blacklist_bed

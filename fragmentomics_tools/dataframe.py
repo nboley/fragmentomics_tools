@@ -632,7 +632,7 @@ class RegionDataFrame(DataFrameBase):
         num_workers: int = 16,
         batch_size: int = 30,
         cuda: bool = False,
-        verify_motif_scores: bool = True,
+        verify_motif_scores: bool = False,
         inplace: bool = False,
         unique_regions: bool = False,
         shuffle_tf_motif: bool = False,
@@ -755,15 +755,20 @@ class RegionDataFrame(DataFrameBase):
             self["strand"] = "+"
             self.loc[self.tf_on_rev_strand, "strand"] = "-"
         if verify_motif_scores:
-            self.verify_motif_scores(
-                tf_names=target_tfs,
-                num_workers=num_workers,
-                batch_size=batch_size,
-                default_jaspar=default_jaspar,
-                cuda=cuda,
-                shuffle_tf_motif=shuffle_tf_motif,
-                shuffle_tf_seed=shuffle_tf_seed,
-                quiet=quiet,
+            # `self.verify_motif_scores` has never existed -- it is an orphaned
+            # reference to the removed `ravel` package (see the commented-out
+            # imports at the top of this module), so this branch always raised
+            # AttributeError. Every caller in biomarker-projects passes
+            # verify_motif_scores=False, which is how a method with 24
+            # consumers survived a broken default. The default is now False so
+            # the working path is the default one; asking for verification
+            # fails loudly and accurately instead of with an AttributeError
+            # about a missing attribute.
+            raise NotImplementedError(
+                "verify_motif_scores=True is not implemented: the underlying "
+                "verify_motif_scores() method does not exist (it was lost in "
+                "the migration away from `ravel`). Pass verify_motif_scores="
+                "False, which is what every existing caller does."
             )
         if unique_regions:
             return self.unique_regions()
@@ -965,7 +970,7 @@ class RegionDataFrame(DataFrameBase):
         merged_df.columns = ["contig", "start", "stop"] + list(merged_df.columns[3:])
         return type(self)(merged_df, ref=self.ref)
 
-    def intersect_with_rdf(self, other, sorted=False, rsuff="other"):
+    def intersect_with_rdf(self, other, sorted=False, rsuff="other", **intersect_kwargs):
         """
         Creates the intersection of RegionDataFrames
         :param other: other RegionDataFrame
@@ -994,10 +999,25 @@ class RegionDataFrame(DataFrameBase):
             other[reordered_columns(other)]
         )
         other_column_names = [(f"{c}_{rsuff}" if c in this_bed_df.columns else c) for c in reordered_columns(other)]
+
+        # `intersect_kwargs` was documented in the docstring but not accepted,
+        # so any caller using it died with TypeError -- which is why
+        # get_overlapping_base_counts (which passes wao=True) could never run.
+        # -wo/-wao already imply writing both A and B, so only default to
+        # wa/wb when the caller has not chosen its own output mode.
+        bedtools_kwargs = dict(intersect_kwargs)
+        if not any(k in bedtools_kwargs for k in ("wa", "wb", "wo", "wao", "u", "c")):
+            bedtools_kwargs.update(wa=True, wb=True)
+
+        names = this_bed_df.columns.tolist() + other_column_names
+        # -wo/-wao append a trailing column holding the overlap length.
+        if bedtools_kwargs.get("wo") or bedtools_kwargs.get("wao"):
+            names = names + ["overlap"]
+
         intersection_rdf = pd.DataFrame(
             this_bedtool.intersect(
-                other_bedtool, sorted=sorted, wa=True, wb=True
-            ).to_dataframe(names=this_bed_df.columns.tolist() + other_column_names),
+                other_bedtool, sorted=sorted, **bedtools_kwargs
+            ).to_dataframe(names=names),
         )
         if len(intersection_rdf) == 0:
             return pd.DataFrame(
@@ -1604,7 +1624,11 @@ class RegionDataFrame(DataFrameBase):
 
         dfs = []
         for values in value_groups:
-            dfs.append(self.query("column_name in @values"))
+            # NOTE: this was `self.query("column_name in @values")` -- a literal
+            # string, so it looked for a column actually named "column_name"
+            # and the parameter was never used. The method could never have
+            # worked for any input.
+            dfs.append(self.query(f"{column_name} in @values"))
 
         return dfs
 
@@ -2109,7 +2133,11 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 for region, record in tqdm(self.iter_region_row(), total=self.nrow)
             ]
             self["fragment_array"] = fragment_arrays
-            assert False
+            # NOTE: a bare `assert False` sat here, immediately after the
+            # fragment arrays were resized, so any resize of an SRDF carrying
+            # fragment arrays crashed unconditionally. It is debug debris --
+            # there is no condition it was guarding, and the assignment above
+            # is the intended end of this branch.
 
         return self
 
@@ -2119,7 +2147,10 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 "can not expand regions if the srdf has fragment arrays."
                 "Hint: If you need to grow regions with fragment arrays you'll need to drop the fragment arrays, resize the regions, and then re-attach the fragment arrays"
             )
-        self = super().expand_regions(*args, **kwargs)
+        # NOTE: this previously ended with `self = super().expand_regions(...)`
+        # and no return. Rebinding the local name has no effect on the caller,
+        # so the method returned None and the expansion was silently discarded.
+        return super().expand_regions(*args, **kwargs)
 
     def resize_regions(self, new_size, *args, **kwargs):
         if self.has_fragment_array:
