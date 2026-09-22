@@ -48,7 +48,13 @@ from torch.utils.data import DataLoader
 
 from background_model.config import TILE, PlumbingConfig
 from background_model.dataset import BackgroundTileDataset
-from background_model_core import LOSSES, BackgroundModel, _prepare_mask
+from background_model_core import (
+    LOSSES,
+    BackgroundModel,
+    BackgroundModelKEN,
+    MaskedMultinomialNLLLoss,
+    _prepare_mask,
+)
 
 DEFAULT_STORE = (
     "/efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr"
@@ -141,6 +147,74 @@ class InstrumentedBackgroundModel(BackgroundModel):
             self.log("grad_2norm", total, prog_bar=False)
 
 
+class InstrumentedBackgroundModelKEN(BackgroundModelKEN):
+    """BackgroundModelKEN + per-track loss, dispersion-trajectory and grad-norm
+    logging.  Mirrors InstrumentedBackgroundModel but for the KEN architecture.
+    """
+
+    def _step(self, batch, log_name):
+        x, y, mask = batch
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+
+        if self.hparams.loss == "multinomial":
+            log_disp = None
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
+        self._log_dispersion_trajectory(log_name, log_disp)
+        self._log_multinomial_nll(log_name, shape_logits, y, mask3)
+        return loss
+
+    @torch.no_grad()
+    def _log_multinomial_nll(self, log_name, shape_logits, y, mask3):
+        stage = log_name.split("_")[0]
+        sl = shape_logits.detach()
+        if mask3 is not None:
+            sl = sl.masked_fill(~mask3, float("-inf"))
+        logp = torch.log_softmax(sl, dim=-1)
+        if mask3 is not None:
+            logp = logp.masked_fill(~mask3, 0.0)
+        totals = y.detach().sum(dim=-1).clamp(min=1.0)
+        nll = -(y.detach() * logp).sum(dim=-1) / totals
+        self.log(f"{stage}_multinomial_nll", nll.mean(), sync_dist=True)
+
+    @torch.no_grad()
+    def _log_per_track(self, log_name, shape_logits, log_disp, y, mask3):
+        stage = log_name.split("_")[0]
+        sl_logits = shape_logits.detach()
+        sl_y = y.detach()
+        for c, name in enumerate(self.output_tracks):
+            ch = slice(c, c + 1)
+            if self.hparams.loss == "multinomial":
+                lt = self.loss_fn(sl_logits[:, ch], sl_y[:, ch], mask3)
+            else:
+                lt = self.loss_fn(
+                    sl_logits[:, ch], log_disp.detach()[:, ch], sl_y[:, ch], mask3
+                )
+            self.log(f"{stage}_track/{name}", lt, sync_dist=True)
+
+    @torch.no_grad()
+    def _log_dispersion_trajectory(self, log_name, log_disp):
+        if log_disp is None:
+            return
+        stage = log_name.split("_")[0]
+        flat = log_disp.detach().reshape(-1).float()
+        self.log(f"{stage}_logdisp/mean", flat.mean(), sync_dist=True)
+        self.log(f"{stage}_logdisp/p10", torch.quantile(flat, 0.10), sync_dist=True)
+        self.log(f"{stage}_logdisp/p90", torch.quantile(flat, 0.90), sync_dist=True)
+
+    def on_before_optimizer_step(self, optimizer):
+        norms = grad_norm(self, norm_type=2)
+        total = norms.get("grad_2.0_norm_total")
+        if total is not None:
+            self.log("grad_2norm", total, prog_bar=False)
+
+
 # --------------------------------------------------------------------------
 # Throughput callback
 # --------------------------------------------------------------------------
@@ -194,24 +268,37 @@ class TrainConfig:
     freeze_dispersion: bool = False
     dispersion_lr_scale: float = 1.0
     dispersion_window_size: int = 256
+    model: str = "cnn"
+    k: int = 6
+    d_embed: int = 64
+    d_context: int = 128
+    n_context_layers: int = 2
+    context_kernel_size: int = 15
+    weight_decay: float = 0.0
 
 
-def build_model(loss: str, lr: float, n_kernels: int = 512,
-                num_residual_layers: int = 2,
-                dropout: float = 0.15,
-                freeze_dispersion: bool = False,
-                dispersion_lr_scale: float = 1.0,
-                dispersion_window_size: int = 256) -> InstrumentedBackgroundModel:
+def build_model(cfg: TrainConfig) -> L.LightningModule:
+    if cfg.model == "ken":
+        return InstrumentedBackgroundModelKEN(
+            k=cfg.k, d_embed=cfg.d_embed, d_context=cfg.d_context,
+            n_context_layers=cfg.n_context_layers,
+            context_kernel_size=cfg.context_kernel_size,
+            loss=cfg.loss, learning_rate=cfg.lr, dropout=cfg.dropout,
+            weight_decay=cfg.weight_decay,
+            freeze_dispersion=cfg.freeze_dispersion,
+            dispersion_lr_scale=cfg.dispersion_lr_scale,
+            dispersion_window_size=cfg.dispersion_window_size,
+        )
     return InstrumentedBackgroundModel(
-        loss=loss, learning_rate=lr, n_kernels=n_kernels,
-        num_residual_layers=num_residual_layers, dropout=dropout,
-        freeze_dispersion=freeze_dispersion,
-        dispersion_lr_scale=dispersion_lr_scale,
-        dispersion_window_size=dispersion_window_size,
+        loss=cfg.loss, learning_rate=cfg.lr, n_kernels=cfg.n_kernels,
+        num_residual_layers=cfg.num_residual_layers, dropout=cfg.dropout,
+        freeze_dispersion=cfg.freeze_dispersion,
+        dispersion_lr_scale=cfg.dispersion_lr_scale,
+        dispersion_window_size=cfg.dispersion_window_size,
     )
 
 
-def build_datasets(store: str, model: BackgroundModel, min_N: int = 50, seed: int = 1337):
+def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: int = 1337):
     """train (jitter+RC ON) and val (center, no RC) datasets on the real store."""
     # Read tile_size from the store's own config so the harness works with any
     # tile size (production 16384 or simulation 2048).
@@ -275,6 +362,7 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "config_hash": train_ds.config_hash,
         "split_version": int(train_ds.split_version),
         "store": cfg.store,
+        "model": cfg.model,
         "loss": cfg.loss,
         "n_kernels": cfg.n_kernels,
         "num_residual_layers": cfg.num_residual_layers,
@@ -294,6 +382,15 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "n_val_pairs": len(val_ds),
         "plumbing_config": json.loads(train_ds.config.full_config_json()),
     }
+    if cfg.model == "ken":
+        meta.update({
+            "k": cfg.k,
+            "d_embed": cfg.d_embed,
+            "d_context": cfg.d_context,
+            "n_context_layers": cfg.n_context_layers,
+            "context_kernel_size": cfg.context_kernel_size,
+            "weight_decay": cfg.weight_decay,
+        })
     with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     return meta
@@ -335,9 +432,7 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
 def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
-    model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers,
-                        cfg.dropout, cfg.freeze_dispersion, cfg.dispersion_lr_scale,
-                        cfg.dispersion_window_size)
+    model = build_model(cfg)
     train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
@@ -408,6 +503,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="relative LR for dispersion head (e.g. 0.1 = 10x slower)")
     p.add_argument("--dispersion-window-size", type=int, default=256,
                    help="dispersion pooling window in bp (1 = per-base, 256 = default)")
+    # KEN model selection and hyperparameters
+    p.add_argument("--model", choices=["cnn", "ken"], default="cnn")
+    p.add_argument("--k", type=int, default=6, help="k-mer size (KEN only)")
+    p.add_argument("--d-embed", type=int, default=64, help="embedding dimension (KEN only)")
+    p.add_argument("--d-context", type=int, default=128, help="context conv channels (KEN only)")
+    p.add_argument("--n-context-layers", type=int, default=2, help="number of context conv layers (KEN only)")
+    p.add_argument("--context-kernel-size", type=int, default=15, help="context conv kernel size (KEN only)")
+    p.add_argument("--weight-decay", type=float, default=0.0, help="L2 on embedding table (KEN only)")
     return p
 
 
@@ -437,6 +540,13 @@ def cfg_from_args(args) -> TrainConfig:
         freeze_dispersion=args.freeze_dispersion,
         dispersion_lr_scale=args.dispersion_lr_scale,
         dispersion_window_size=args.dispersion_window_size,
+        model=args.model,
+        k=args.k,
+        d_embed=args.d_embed,
+        d_context=args.d_context,
+        n_context_layers=args.n_context_layers,
+        context_kernel_size=args.context_kernel_size,
+        weight_decay=args.weight_decay,
     )
 
 
