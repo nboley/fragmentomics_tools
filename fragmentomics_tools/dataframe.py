@@ -1943,8 +1943,26 @@ def _set_fragment_array_weights_from_weights_record(fragment_array, record, left
     return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
 
 
+def _detach_h5_inplace(df):
+    """Replace live FragmentsH5 handles with their file paths in-place."""
+    if "frag_h5" in df.columns:
+        df["frag_h5"] = df["frag_h5"].apply(
+            lambda h5: h5._f_fname if hasattr(h5, '_f_fname') else h5
+        )
+
+
 class SampleAndRegionDataFrame(RegionDataFrame):
     _additional_required_columns = ["sample_id", "frag_h5"]
+
+    def detach_h5(self):
+        """Replace live FragmentsH5 handles with their file paths.
+
+        After detaching, the object can be pickled portably. If the stored
+        paths still resolve on the current system, load_fragment_arrays will
+        transparently re-open them.
+        """
+        _detach_h5_inplace(self)
+        return self
 
     def reorder_columns(self):
         # hacky way to make sure that fragmnet array is displayed at the start if it exists
@@ -2247,15 +2265,38 @@ class SampleDataFrame(DataFrameBase):
         if isinstance(data, pd.core.internals.BlockManager):
             return
 
-        self._fl_dist = FlDist.init_from_sdf(self)
+        if (
+            "frag_h5" in self.columns
+            and len(self) > 0
+            and hasattr(self["frag_h5"].iloc[0], "fragment_length_counts")
+        ):
+            self._fl_dist = FlDist.init_from_sdf(self)
+        else:
+            self._fl_dist = None
 
         return
+
+    def detach_h5(self):
+        """Replace live FragmentsH5 handles with their file paths.
+
+        After detaching, the object can be pickled portably. The fl_dist
+        property remains available if it was built before detach (it is
+        preserved in pandas _metadata through pickle).
+        """
+        _detach_h5_inplace(self)
+        return self
 
     def dropna(self, *args, **kwargs):
         return type(self)(self.df.dropna(*args, **kwargs))
 
     @property
     def fl_dist(self):
+        if self._fl_dist is None:
+            raise RuntimeError(
+                "fl_dist unavailable: frag_h5 handles were not provided or have "
+                "been detached. Build the SampleDataFrame with live FragmentsH5 "
+                "handles to compute fl_dist."
+            )
         return self._fl_dist.subset_by_sample_ids(self.sample_id)
 
     def label_balanced(self, column_name, random_state=None):
