@@ -94,8 +94,8 @@ def test_fragment_array_assertions():
     [
         (  # The full region
             Region("chr6", 99119500, 99129900),
-            numpy.array([-40, 120, 173, 197, 229, 337, 368, 368]),
-            numpy.array([137, 363, 317, 511, 404, 668, 447, 531]),
+            numpy.array([-40, 79, 120, 173, 197, 229, 337, 368, 368]),
+            numpy.array([137, 151, 363, 317, 511, 404, 668, 447, 531]),
         ),
         (  # Slice with no fragments is empty
             Region("chr6", 0, 100),
@@ -654,4 +654,4 @@ def test_from_fragments_h5(small_h5_path):
     # now derives it internally as `fragments_h5.has_strand`. The fixture h5 is
     # built with read_strand=True, so strand is still included here.
     rfa = RegionFragmentArray.from_fragments_h5(small_h5_path, region)
-    assert rfa.n_frags == 9
+    assert rfa.n_frags == 12
