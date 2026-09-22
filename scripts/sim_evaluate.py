@@ -146,7 +146,11 @@ def compute_true_propensity(sim_dir, store_path):
     gt = np.load(os.path.join(sim_dir, "ground_truth.npz"), allow_pickle=True)
     w6 = gt["w6"]
     len_vals = gt["len_vals"]
-    len_p = gt["len_p"]
+    if "len_p" in gt:
+        len_p = gt["len_p"]
+    else:
+        # Per-sample FL distributions: use mean for oracle propensity
+        len_p = gt["len_p_per_sample"].mean(axis=0)
     gcbias = GCBias2D(gt["bias_lengths"], gt["bias_gc_percents"], gt["bias_grid"])
 
     root = zarr.open_group(store_path, mode="r")
