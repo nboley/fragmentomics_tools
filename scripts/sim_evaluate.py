@@ -370,6 +370,12 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--losses", default="all",
                     help="comma-separated losses or 'all'")
+    ap.add_argument("--run-prefix", default="sim_v2_B",
+                    help="run name prefix (run name = {prefix}_{loss})")
+    ap.add_argument("--run-names", default=None,
+                    help="explicit loss:run_name pairs, comma-separated "
+                         "(e.g. 'multinomial:my_run_1,nb_offset:my_run_2'). "
+                         "Overrides --run-prefix.")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -382,10 +388,17 @@ def main():
     print(f"[eval] true propensity for {len(true_prop)} val tiles "
           f"({time.time()-t0:.1f}s)", flush=True)
 
+    # Build loss -> run_name mapping
+    run_name_map = {}
+    if args.run_names:
+        for pair in args.run_names.split(","):
+            l, rn = pair.split(":")
+            run_name_map[l.strip()] = rn.strip()
+
     all_results = {}
     for loss in losses:
         print(f"\n[eval] === {loss} ===", flush=True)
-        run_name = f"sim_v2_B_{loss}"
+        run_name = run_name_map.get(loss, f"{args.run_prefix}_{loss}")
         try:
             ckpt_path, run_dir = find_best_checkpoint(args.runs_root, run_name)
         except FileNotFoundError as e:
