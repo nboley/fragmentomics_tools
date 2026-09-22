@@ -193,18 +193,21 @@ class TrainConfig:
     auto_lr: bool = False
     freeze_dispersion: bool = False
     dispersion_lr_scale: float = 1.0
+    dispersion_window_size: int = 256
 
 
 def build_model(loss: str, lr: float, n_kernels: int = 512,
                 num_residual_layers: int = 2,
                 dropout: float = 0.15,
                 freeze_dispersion: bool = False,
-                dispersion_lr_scale: float = 1.0) -> InstrumentedBackgroundModel:
+                dispersion_lr_scale: float = 1.0,
+                dispersion_window_size: int = 256) -> InstrumentedBackgroundModel:
     return InstrumentedBackgroundModel(
         loss=loss, learning_rate=lr, n_kernels=n_kernels,
         num_residual_layers=num_residual_layers, dropout=dropout,
         freeze_dispersion=freeze_dispersion,
         dispersion_lr_scale=dispersion_lr_scale,
+        dispersion_window_size=dispersion_window_size,
     )
 
 
@@ -333,7 +336,8 @@ def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
     model = build_model(cfg.loss, cfg.lr, cfg.n_kernels, cfg.num_residual_layers,
-                        cfg.dropout, cfg.freeze_dispersion, cfg.dispersion_lr_scale)
+                        cfg.dropout, cfg.freeze_dispersion, cfg.dispersion_lr_scale,
+                        cfg.dispersion_window_size)
     train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
@@ -402,6 +406,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="freeze dispersion head (NB/DM runs at init, ~multinomial)")
     p.add_argument("--dispersion-lr-scale", type=float, default=1.0,
                    help="relative LR for dispersion head (e.g. 0.1 = 10x slower)")
+    p.add_argument("--dispersion-window-size", type=int, default=256,
+                   help="dispersion pooling window in bp (1 = per-base, 256 = default)")
     return p
 
 
@@ -430,6 +436,7 @@ def cfg_from_args(args) -> TrainConfig:
         auto_lr=args.auto_lr,
         freeze_dispersion=args.freeze_dispersion,
         dispersion_lr_scale=args.dispersion_lr_scale,
+        dispersion_window_size=args.dispersion_window_size,
     )
 
 
