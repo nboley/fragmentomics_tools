@@ -438,6 +438,29 @@ class MaskedDirichletMultinomialNLLLoss(torch.nn.Module):
         return nll.mean()
 
 
+class _DispersionClamp(torch.autograd.Function):
+    """Hard value clamp with soft gradient scaling for dispersion stability.
+
+    Forward: ``max(log_r, log_r_floor)`` (hard floor on dispersion).
+    Backward: gradient to ``log_r`` is scaled by ``sigmoid((log_r -
+    log_r_floor) / margin)``, giving a smooth transition from full gradient
+    (well above floor) to zero gradient (at/below floor).  The complement
+    flows to ``log_r_floor`` (and thus to the shape head via the chain rule).
+    """
+
+    @staticmethod
+    def forward(ctx, log_r, log_r_floor, margin):
+        ctx.save_for_backward(log_r, log_r_floor)
+        ctx.margin = margin
+        return torch.maximum(log_r, log_r_floor)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        log_r, log_r_floor = ctx.saved_tensors
+        scale = torch.sigmoid((log_r - log_r_floor) / ctx.margin)
+        return grad_output * scale, grad_output * (1 - scale), None
+
+
 class MaskedNegativeBinomialOffsetNLLLoss(torch.nn.Module):
     """Pseudo-likelihood: independent NB2 per position with observed-N offset.
 
@@ -448,7 +471,24 @@ class MaskedNegativeBinomialOffsetNLLLoss(torch.nn.Module):
 
     torch's NegativeBinomial convention: mean = total_count * exp(logits),
     so logits = log mu - log r with total_count = r.
+
+    Dispersion clamping (``max_dispersion_ratio``):  when set, ``log_r`` is
+    clamped so that Var_NB <= ratio * Var_multinomial at every position.  This
+    prevents the dispersion head from swinging wildly at high-count positions,
+    stabilising training without removing the overdispersion signal.  The
+    clamp uses soft gradient scaling (sigmoid transition over ``clamp_margin``
+    nats) so gradients taper smoothly near the floor rather than switching
+    abruptly between full and zero.
     """
+
+    def __init__(
+        self,
+        max_dispersion_ratio: Optional[float] = 2.0,
+        clamp_margin: float = 1.0,
+    ):
+        super().__init__()
+        self.max_dispersion_ratio = max_dispersion_ratio
+        self.clamp_margin = clamp_margin
 
     def forward(
         self,
@@ -468,6 +508,27 @@ class MaskedNegativeBinomialOffsetNLLLoss(torch.nn.Module):
 
         N = target.sum(dim=-1)  # (B, C)
         log_mu = torch.log(N.clamp(min=1.0))[..., None] + logp  # -inf at masked
+
+        # -- dispersion clamping -------------------------------------------
+        # Clamp r so Var_NB = mu + mu²/r  <=  ratio * Var_multi = ratio*mu*(1-p)
+        #   => r >= mu / (ratio*(1-p) - 1)
+        # Computed per position, pooled to window level via max (tightest
+        # constraint), then applied as a floor on log_dispersion.
+        if self.max_dispersion_ratio is not None:
+            with torch.no_grad():
+                p = logp.exp()                    # (B, C, L)
+                mu = log_mu.exp()                 # 0 at masked positions
+                denom = (self.max_dispersion_ratio * (1.0 - p) - 1.0).clamp(min=0.01)
+                r_floor_pos = mu / denom          # (B, C, L)
+                if mask is not None:
+                    r_floor_pos = r_floor_pos.masked_fill(~mask, 0.0)
+                # Max over positions in each window — tightest constraint
+                r_floor_win = r_floor_pos.reshape(B, C, W, L // W).max(dim=-1).values
+                log_r_floor = torch.log(r_floor_win.clamp(min=1e-6))
+            log_dispersion = _DispersionClamp.apply(
+                log_dispersion, log_r_floor, self.clamp_margin
+            )
+
         log_r = log_dispersion.repeat_interleave(L // W, dim=-1)
         nb_logits = log_mu - log_r
         if mask is not None:
@@ -517,6 +578,8 @@ class BackgroundModel(L.LightningModule):
         loss: str = "dirichlet_multinomial",
         dispersion_window_size: int = 256,
         log_dispersion_init: float = 7.0,
+        max_dispersion_ratio: Optional[float] = 2.0,
+        clamp_margin: float = 1.0,
         block_kwargs: Optional[dict] = None,
     ):
         """
@@ -529,6 +592,11 @@ class BackgroundModel(L.LightningModule):
             output, setting the initial scale (gamma ~ e^7 ~ 1100, i.e.
             near-multinomial at init, so training starts from the baseline
             and learns overdispersion where the data demand it).
+        :param max_dispersion_ratio: for nb_offset only — clamp r so that
+            NB variance does not exceed this multiple of the multinomial
+            variance.  None disables clamping.  Default 2.0.
+        :param clamp_margin: nats of headroom over which the gradient
+            tapers from full to zero near the dispersion floor.
         :param block_kwargs: overrides for ``ResNetDilatedBlock`` config
             (activation, activation_post_sum, skip_batchnorm,
             preact_residual_normalization).  ``padding`` may not be
@@ -586,7 +654,10 @@ class BackgroundModel(L.LightningModule):
         elif loss == "dirichlet_multinomial":
             self.loss_fn = MaskedDirichletMultinomialNLLLoss()
         else:
-            self.loss_fn = MaskedNegativeBinomialOffsetNLLLoss()
+            self.loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
+                max_dispersion_ratio=max_dispersion_ratio,
+                clamp_margin=clamp_margin,
+            )
 
     # -- geometry ----------------------------------------------------------
 

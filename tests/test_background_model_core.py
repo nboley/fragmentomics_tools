@@ -240,8 +240,10 @@ class TestDirichletMultinomialLoss:
 
 
 class TestNegativeBinomialOffsetLoss:
-    def _loss(self, logits, log_r, x, mask=None):
-        return bmc.MaskedNegativeBinomialOffsetNLLLoss()(logits, log_r, x, mask)
+    def _loss(self, logits, log_r, x, mask=None, max_dispersion_ratio=None):
+        return bmc.MaskedNegativeBinomialOffsetNLLLoss(
+            max_dispersion_ratio=max_dispersion_ratio,
+        )(logits, log_r, x, mask)
 
     @staticmethod
     def _reference(logits, r_bp, x):
@@ -300,6 +302,68 @@ class TestNegativeBinomialOffsetLoss:
             t64(logits[..., mask]), t64(log_r[..., mask]), t64(x[..., mask])
         ).item()
         assert np.isclose(masked, subset, atol=1e-10)
+
+    def test_dispersion_clamp_raises_loss(self):
+        """With a very low r (high overdispersion), clamping should raise the
+        loss toward the unclamped-with-higher-r value because the clamp
+        forces r up to the floor."""
+        rng = np.random.default_rng(25)
+        L = 32
+        logits = rng.normal(size=L)
+        x = rng.multinomial(400, softmax(logits)).astype(float)
+        very_low_r = 0.5  # way below multinomial-equivalent
+        log_r = np.log(very_low_r)
+
+        unclamped = self._loss(
+            t64(logits)[None, None], t64([[[log_r]]]), t64(x)[None, None],
+            max_dispersion_ratio=None,
+        ).item()
+        clamped = self._loss(
+            t64(logits)[None, None], t64([[[log_r]]]), t64(x)[None, None],
+            max_dispersion_ratio=2.0,
+        ).item()
+        # The clamp pushes r up, changing the loss value
+        assert clamped != unclamped, "clamp should be active at r=0.5"
+
+    def test_dispersion_clamp_inactive_at_high_r(self):
+        """At high r (near-multinomial), the clamp should not engage."""
+        rng = np.random.default_rng(26)
+        L = 32
+        logits = rng.normal(size=L)
+        x = rng.multinomial(400, softmax(logits)).astype(float)
+        high_r = 10000.0
+        log_r = np.log(high_r)
+
+        unclamped = self._loss(
+            t64(logits)[None, None], t64([[[log_r]]]), t64(x)[None, None],
+            max_dispersion_ratio=None,
+        ).item()
+        clamped = self._loss(
+            t64(logits)[None, None], t64([[[log_r]]]), t64(x)[None, None],
+            max_dispersion_ratio=2.0,
+        ).item()
+        assert np.isclose(unclamped, clamped, atol=1e-8), (
+            f"clamp should be inactive at r={high_r}: {unclamped} vs {clamped}"
+        )
+
+    def test_dispersion_clamp_gradient_flows(self):
+        """Gradients should be finite with clamping active."""
+        rng = np.random.default_rng(27)
+        L = 32
+        logits = torch.tensor(rng.normal(size=(1, 1, L)), dtype=torch.float64,
+                              requires_grad=True)
+        log_r = torch.tensor([[[np.log(0.5)]]], dtype=torch.float64,
+                             requires_grad=True)
+        x = torch.tensor(
+            rng.multinomial(400, softmax(rng.normal(size=L)))[None, None].astype(float),
+            dtype=torch.float64,
+        )
+        loss = bmc.MaskedNegativeBinomialOffsetNLLLoss(
+            max_dispersion_ratio=2.0,
+        )(logits, log_r, x)
+        loss.backward()
+        assert torch.isfinite(logits.grad).all()
+        assert torch.isfinite(log_r.grad).all()
 
 
 # ---------------------------------------------------------------------------
