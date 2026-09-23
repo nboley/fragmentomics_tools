@@ -360,6 +360,10 @@ class DivergenceStop(Callback):
         self.best = None
         self._last_val = None
         self._stall_count = 0
+        # Populated when a guard fires; read after trainer.fit() to
+        # determine why the run stopped.  Keys: reason, epoch, plus
+        # guard-specific detail (value, best, factor, consecutive_epochs).
+        self.stop_reason = None
 
     def on_validation_end(self, trainer, pl_module):
         if trainer.sanity_checking:
@@ -369,6 +373,23 @@ class DivergenceStop(Callback):
             return
         current = float(current)
 
+        # --- Non-finite detection (unconditional, checked first) ---
+        # Must precede the stall check: inf == inf is True, so without
+        # this guard a repeated-inf trace with factor=0 would be
+        # mislabelled as "stalled" instead of "non-finite".
+        if not math.isfinite(current):
+            self.stop_reason = {
+                "reason": "non_finite",
+                "epoch": int(trainer.current_epoch),
+                "value": str(current),  # inf/nan are not JSON-serialisable
+            }
+            trainer.should_stop = True
+            rank_zero_info(
+                f"[DivergenceStop] {self.monitor}={current} is not finite "
+                f"-- stopping at epoch {trainer.current_epoch}."
+            )
+            return
+
         # --- Stall detection (exact equality) ---
         if self.stall_patience > 0:
             if self._last_val is not None and current == self._last_val:
@@ -377,6 +398,12 @@ class DivergenceStop(Callback):
                 self._stall_count = 1
             self._last_val = current
             if self._stall_count >= self.stall_patience:
+                self.stop_reason = {
+                    "reason": "stalled",
+                    "epoch": int(trainer.current_epoch),
+                    "value": current,
+                    "consecutive_epochs": self._stall_count,
+                }
                 trainer.should_stop = True
                 rank_zero_info(
                     f"[DivergenceStop] {self.monitor}={current:.10f} frozen for "
@@ -388,16 +415,17 @@ class DivergenceStop(Callback):
         # --- Divergence detection ---
         if self.factor <= 0:
             return
-        if not math.isfinite(current):
-            trainer.should_stop = True
-            rank_zero_info(
-                f"[DivergenceStop] {self.monitor}={current} is not finite -- stopping."
-            )
-            return
         if self.best is None or current < self.best:
             self.best = current
             return
         if current > self.best * self.factor:
+            self.stop_reason = {
+                "reason": "diverged",
+                "epoch": int(trainer.current_epoch),
+                "value": current,
+                "best": self.best,
+                "factor": self.factor,
+            }
             trainer.should_stop = True
             rank_zero_info(
                 f"[DivergenceStop] {self.monitor}={current:.4f} exceeds "
@@ -685,6 +713,37 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
     return trainer
 
 
+def _determine_stop_reason(trainer, cfg):
+    """Inspect trainer callbacks to determine why the run stopped.
+
+    Returns a dict with at least ``{"reason": <str>, "epoch": <int>}``
+    plus guard-specific detail.  Priority:
+
+    1. Our ``DivergenceStop`` — it records its own reason directly.
+    2. Lightning's ``EarlyStopping`` — ``stopped_epoch`` is 0 by default
+       and set to ``trainer.current_epoch`` when it fires.  With
+       ``patience >= 1`` the earliest possible firing epoch is
+       ``patience``, so ``stopped_epoch > 0`` is a reliable "it fired"
+       signal.  (Patience 0 would fire at epoch 0, making the check
+       ambiguous, but our CLI enforces patience >= 1.)
+    3. Otherwise the run completed normally (hit ``max_epochs``).
+    """
+    for cb in trainer.callbacks:
+        if isinstance(cb, DivergenceStop) and cb.stop_reason is not None:
+            return cb.stop_reason
+    for cb in trainer.callbacks:
+        if isinstance(cb, EarlyStopping) and cb.stopped_epoch > 0:
+            return {
+                "reason": "early_stopped",
+                "epoch": int(cb.stopped_epoch),
+                "patience": cb.patience,
+                "best_score": float(cb.best_score)
+                if cb.best_score is not None
+                else None,
+            }
+    return {"reason": "completed", "epoch": int(trainer.current_epoch)}
+
+
 def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
@@ -727,6 +786,7 @@ def run_training(cfg: TrainConfig):
         else None,
         "global_step": int(trainer.global_step),
         "current_epoch": int(trainer.current_epoch),
+        "stop_reason": _determine_stop_reason(trainer, cfg),
     }
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump({**meta, **summary}, f, indent=2)

@@ -180,3 +180,84 @@ def test_stall_patience_cli_default_and_override():
     assert cfg_from_args(p.parse_args(required)).stall_patience == 5
     cfg = cfg_from_args(p.parse_args(required + ["--stall-patience", "10"]))
     assert cfg.stall_patience == 10
+
+
+# --------------------------------------------------------------------------
+# stop_reason recording
+#
+# DivergenceStop.stop_reason is populated when a guard fires, so that
+# summary.json can report *why* the run stopped without parsing stdout.
+# --------------------------------------------------------------------------
+
+
+def _replay_reason(values, factor=1.10, stall_patience=5):
+    """Like _replay but return (stop_epoch, stop_reason_dict) or (None, None)."""
+    from background_model.train import DivergenceStop
+
+    cb = DivergenceStop(factor, stall_patience=stall_patience)
+    tr = _FakeTrainer()
+    for epoch, v in enumerate(values):
+        tr.current_epoch = epoch
+        tr.callback_metrics = {"val_loss": torch.tensor(float(v))}
+        cb.on_validation_end(tr, None)
+        if tr.should_stop:
+            return epoch, cb.stop_reason
+    return None, None
+
+
+def test_stop_reason_diverged():
+    trace = [7.6042, 7.6021, 7.6008, 7.5984, 7.5783,
+             7.5649, 7.5648, 7.5646, 7.5645, 8.7314]
+    epoch, reason = _replay_reason(trace)
+    assert epoch == 9
+    assert reason["reason"] == "diverged"
+    assert reason["epoch"] == 9
+    assert reason["value"] == pytest.approx(8.7314, rel=1e-5)
+    assert reason["best"] == pytest.approx(7.5645, rel=1e-5)
+    assert reason["factor"] == 1.10
+
+
+def test_stop_reason_stalled():
+    dead = [7.6127061844] * 16
+    epoch, reason = _replay_reason(dead, stall_patience=5)
+    assert epoch == 4
+    assert reason["reason"] == "stalled"
+    assert reason["epoch"] == 4
+    assert reason["value"] == pytest.approx(7.6127061844, rel=1e-5)
+    assert reason["consecutive_epochs"] == 5
+
+
+def test_stop_reason_non_finite_inf():
+    epoch, reason = _replay_reason([7.6, 7.5, float("inf")])
+    assert epoch == 2
+    assert reason["reason"] == "non_finite"
+    assert reason["epoch"] == 2
+    assert reason["value"] == "inf"
+
+
+def test_stop_reason_non_finite_nan():
+    epoch, reason = _replay_reason([7.6, 7.5, float("nan")])
+    assert epoch == 2
+    assert reason["reason"] == "non_finite"
+    assert reason["epoch"] == 2
+    assert reason["value"] == "nan"
+
+
+def test_stop_reason_none_when_healthy():
+    epoch, reason = _replay_reason([7.60, 7.58, 7.56, 7.55, 7.55])
+    assert epoch is None
+    assert reason is None
+
+
+def test_nonfinite_not_mislabeled_as_stall():
+    """Repeated inf with factor=0 must be diagnosed as non_finite, not stall.
+
+    Regression test for the ordering defect in db45699: the stall check ran
+    before the non-finite check, and inf == inf is True, so repeated inf
+    incremented the stall counter.  With factor=0 (divergence disabled) the
+    non-finite check was inside the divergence block and never reached.
+    """
+    trace = [float("inf")] * 6
+    epoch, reason = _replay_reason(trace, factor=0, stall_patience=5)
+    assert epoch == 0  # fires on the very first inf
+    assert reason["reason"] == "non_finite"
