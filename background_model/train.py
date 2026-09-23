@@ -312,7 +312,8 @@ class DivergenceStop(Callback):
     **Divergence** (``factor``): stop when val_loss exceeds ``factor`` x its
     own best.  ``EarlyStopping(check_finite=True)`` only catches NaN/inf;
     observed divergences stayed finite (8.73, 383, 8.4e8) and ran to the
-    epoch cap.  Set ``factor=0`` to disable.
+    epoch cap.  Set ``factor=0`` to disable the divergence-ratio check
+    (non-finite detection is always active regardless of ``factor``).
 
     Divergence threshold rationale, measured on the v3 runs:
 
@@ -713,7 +714,7 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
     return trainer
 
 
-def _determine_stop_reason(trainer, cfg):
+def _determine_stop_reason(trainer):
     """Inspect trainer callbacks to determine why the run stopped.
 
     Returns a dict with at least ``{"reason": <str>, "epoch": <int>}``
@@ -725,7 +726,7 @@ def _determine_stop_reason(trainer, cfg):
        ``patience >= 1`` the earliest possible firing epoch is
        ``patience``, so ``stopped_epoch > 0`` is a reliable "it fired"
        signal.  (Patience 0 would fire at epoch 0, making the check
-       ambiguous, but our CLI enforces patience >= 1.)
+       ambiguous; ``cfg_from_args`` enforces patience >= 1.)
     3. Otherwise the run completed normally (hit ``max_epochs``).
     """
     for cb in trainer.callbacks:
@@ -733,13 +734,17 @@ def _determine_stop_reason(trainer, cfg):
             return cb.stop_reason
     for cb in trainer.callbacks:
         if isinstance(cb, EarlyStopping) and cb.stopped_epoch > 0:
+            bs = cb.best_score
+            if bs is None:
+                best_score_val = None
+            else:
+                bs_float = float(bs)
+                best_score_val = bs_float if math.isfinite(bs_float) else str(bs_float)
             return {
                 "reason": "early_stopped",
                 "epoch": int(cb.stopped_epoch),
                 "patience": cb.patience,
-                "best_score": float(cb.best_score)
-                if cb.best_score is not None
-                else None,
+                "best_score": best_score_val,
             }
     return {"reason": "completed", "epoch": int(trainer.current_epoch)}
 
@@ -786,7 +791,7 @@ def run_training(cfg: TrainConfig):
         else None,
         "global_step": int(trainer.global_step),
         "current_epoch": int(trainer.current_epoch),
-        "stop_reason": _determine_stop_reason(trainer, cfg),
+        "stop_reason": _determine_stop_reason(trainer),
     }
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump({**meta, **summary}, f, indent=2)
@@ -817,8 +822,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--divergence-factor", type=float, default=1.10,
                    help="stop if val_loss exceeds this multiple of its own "
-                        "best (0 disables). Healthy v3 runs peak at 1.0002x; "
-                        "diverged ones reach 380x+.")
+                        "best (0 disables the ratio check; non-finite "
+                        "detection is always active). Healthy v3 runs peak "
+                        "at 1.0002x; diverged ones reach 380x+.")
     p.add_argument("--stall-patience", type=int, default=5,
                    help="stop if val_loss is bitwise identical for this many "
                         "consecutive epochs (0 disables). Healthy v3 runs "
@@ -852,6 +858,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def cfg_from_args(args) -> TrainConfig:
+    if args.patience < 1:
+        raise SystemExit(
+            "error: --patience must be >= 1 (0 would make the early-stopping "
+            "detection ambiguous; use a large value to effectively disable)"
+        )
+    if args.stall_patience == 1 or args.stall_patience < 0:
+        raise SystemExit(
+            "error: --stall-patience must be 0 (disabled) or >= 2 "
+            "(1 would stop on the first validation epoch)"
+        )
     limit = args.limit_batches
     if limit is not None and float(limit).is_integer() and limit >= 1:
         limit = int(limit)

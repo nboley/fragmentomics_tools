@@ -9,7 +9,9 @@ import pytest
 
 from background_model_core import BackgroundModel
 from background_model.train import (
+    DivergenceStop,
     InstrumentedBackgroundModel,
+    _determine_stop_reason,
     build_arg_parser,
     cfg_from_args,
 )
@@ -261,3 +263,142 @@ def test_nonfinite_not_mislabeled_as_stall():
     epoch, reason = _replay_reason(trace, factor=0, stall_patience=5)
     assert epoch == 0  # fires on the very first inf
     assert reason["reason"] == "non_finite"
+
+
+# --------------------------------------------------------------------------
+# _determine_stop_reason
+#
+# The function inspects trainer callbacks after fit() to classify why the run
+# stopped.  Three branches: DivergenceStop fired, EarlyStopping fired, or
+# the run completed normally.
+# --------------------------------------------------------------------------
+
+
+def _make_early_stopping(stopped_epoch=0, patience=5, best_score=None):
+    """Build a real EarlyStopping with attributes pre-set for testing."""
+    from lightning.pytorch.callbacks import EarlyStopping as _ES
+
+    es = _ES(monitor="val_loss", patience=patience)
+    es.stopped_epoch = stopped_epoch
+    if best_score is not None:
+        es.best_score = best_score
+    return es
+
+
+def _make_trainer_with_callbacks(callbacks, current_epoch=0):
+    """Build a _FakeTrainer with an explicit callbacks list."""
+    tr = _FakeTrainer()
+    tr.current_epoch = current_epoch
+    tr.callbacks = callbacks
+    return tr
+
+
+def test_determine_stop_reason_divergence_stop():
+    """DivergenceStop.stop_reason takes priority over EarlyStopping."""
+    div_cb = DivergenceStop(factor=1.10)
+    div_cb.stop_reason = {
+        "reason": "diverged",
+        "epoch": 9,
+        "value": 8.73,
+        "best": 7.56,
+        "factor": 1.10,
+    }
+    # Even with an EarlyStopping that also fired, DivergenceStop wins
+    es_cb = _make_early_stopping(stopped_epoch=8, patience=5, best_score=torch.tensor(7.56))
+    tr = _make_trainer_with_callbacks([div_cb, es_cb], current_epoch=9)
+    result = _determine_stop_reason(tr)
+    assert result["reason"] == "diverged"
+    assert result["epoch"] == 9
+
+
+def test_determine_stop_reason_early_stopped():
+    """EarlyStopping branch fires when stopped_epoch > 0."""
+    div_cb = DivergenceStop(factor=1.10)  # not fired
+    es_cb = _make_early_stopping(stopped_epoch=12, patience=5, best_score=torch.tensor(7.55))
+    tr = _make_trainer_with_callbacks([div_cb, es_cb], current_epoch=12)
+    result = _determine_stop_reason(tr)
+    assert result["reason"] == "early_stopped"
+    assert result["epoch"] == 12
+    assert result["patience"] == 5
+    assert result["best_score"] == pytest.approx(7.55)
+
+
+def test_determine_stop_reason_completed():
+    """Run completed normally (hit max_epochs)."""
+    div_cb = DivergenceStop(factor=1.10)  # not fired
+    es_cb = _make_early_stopping(stopped_epoch=0, patience=5, best_score=torch.tensor(7.55))
+    tr = _make_trainer_with_callbacks([div_cb, es_cb], current_epoch=99)
+    result = _determine_stop_reason(tr)
+    assert result["reason"] == "completed"
+    assert result["epoch"] == 99
+
+
+def test_determine_stop_reason_early_stopped_inf_best_score():
+    """best_score=inf (Lightning's mode='min' init) is stringified for JSON safety.
+
+    This path is currently unreachable in practice because the unconditional
+    non-finite guard in DivergenceStop fires first and takes priority.  The
+    guard is defensive — if EarlyStopping's internals or ordering ever changed,
+    the JSON output would still be valid.
+    """
+    import json
+    import math
+
+    es_cb = _make_early_stopping(
+        stopped_epoch=1, patience=5, best_score=torch.tensor(float("inf"))
+    )
+    tr = _make_trainer_with_callbacks([es_cb], current_epoch=1)
+    result = _determine_stop_reason(tr)
+    assert result["reason"] == "early_stopped"
+    assert result["best_score"] == "inf"
+    # Verify it round-trips through json.dumps without bare Infinity
+    serialised = json.dumps(result)
+    assert "Infinity" not in serialised
+    assert '"inf"' in serialised
+
+
+# --------------------------------------------------------------------------
+# CLI validation (findings 1 and 5)
+# --------------------------------------------------------------------------
+
+
+def test_patience_rejects_zero():
+    p = build_arg_parser()
+    args = p.parse_args(["--loss", "multinomial", "--run-name", "t", "--patience", "0"])
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_patience_rejects_negative():
+    p = build_arg_parser()
+    args = p.parse_args(["--loss", "multinomial", "--run-name", "t", "--patience", "-1"])
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_stall_patience_rejects_one():
+    p = build_arg_parser()
+    args = p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--stall-patience", "1"]
+    )
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_stall_patience_rejects_negative():
+    p = build_arg_parser()
+    args = p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--stall-patience", "-1"]
+    )
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_stall_patience_zero_accepted():
+    """stall_patience=0 is the documented disable path."""
+    p = build_arg_parser()
+    args = p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--stall-patience", "0"]
+    )
+    cfg = cfg_from_args(args)
+    assert cfg.stall_patience == 0
