@@ -4,6 +4,7 @@ The key contract: InstrumentedBackgroundModel adds only detached diagnostic
 logging; its training loss must be byte-for-byte the frozen
 BackgroundModel._step loss.  Also covers CLI arg parsing.
 """
+import json
 import os
 
 import lightning as L
@@ -13,6 +14,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from background_model_core import BackgroundModel, _with_lr_schedule
 from background_model.train import (
+    ApplyLRReduction,
     DivergenceStop,
     InstrumentedBackgroundModel,
     TrainConfig,
@@ -930,3 +932,417 @@ def test_final_lr_level_gets_lr_patience_epochs(tmp_path):
         f"of training before EarlyStopping fires, but got {len(epochs_at_final_lr)}. "
         f"LR history: {model.lr_history}"
     )
+
+
+# --------------------------------------------------------------------------
+# Phase 3: Divergence recovery
+#
+# These tests exercise the recovery mechanism using real Lightning training
+# loops with synthetic models that deterministically diverge.  Per the task
+# instructions: "For anything you can express as a loop invariant, write a
+# test that RUNS a real Lightning loop and asserts the observed behaviour."
+# --------------------------------------------------------------------------
+
+
+class _DivergingModel(L.LightningModule):
+    """Model that produces good val_loss then diverges at controlled epochs.
+
+    val_loss = base_loss - 0.01*epoch  (improvement trend)
+    ... EXCEPT at epochs in ``spike_epochs``, where val_loss = base_loss * spike.
+
+    ``spike_epochs`` is a set of absolute epoch numbers.  After recovery
+    (checkpoint restore + resume), the epoch counter persists, so the model
+    produces the same spike at the same epoch — which is the real-world
+    behaviour (the model's weights haven't changed, so it hits the same
+    bad gradient region).
+
+    If ``spike_every`` is set, the model spikes at every ``spike_every``
+    epochs starting from ``first_spike``, overriding ``spike_epochs``.
+    This creates a model that always re-diverges, useful for testing
+    exhaustion.
+
+    Records (epoch, lr_group0, lr_group1) at each validation for assertions.
+    Uses two param groups with different LRs (scale=0.1) to verify that
+    per-group ratios survive recovery.
+    """
+
+    def __init__(self, lr=1e-2, scale=0.1, spike_epochs=None,
+                 first_spike=3, spike_every=None,
+                 spike=2.0, base_loss=10.0,
+                 lr_patience=4, max_lr_reductions=3, lr_factor=0.5):
+        super().__init__()
+        self.save_hyperparameters()
+        self.layer1 = torch.nn.Linear(4, 4)
+        self.layer2 = torch.nn.Linear(4, 2)
+        self.lr_history = []
+        # Non-hparam state: build the spike set
+        if spike_every is not None:
+            self._spike_epochs = set(
+                range(first_spike, 200, spike_every)
+            )
+        elif spike_epochs is not None:
+            self._spike_epochs = set(spike_epochs)
+        else:
+            self._spike_epochs = {first_spike}
+
+    def forward(self, x):
+        return self.layer2(torch.relu(self.layer1(x)))
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        return torch.nn.functional.mse_loss(self(x), y)
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        ep = self.current_epoch
+        base = self.hparams.base_loss
+        if ep in self._spike_epochs:
+            loss = base * self.hparams.spike
+        else:
+            loss = base - 0.01 * ep
+        self.log("val_loss", float(loss))
+        return torch.tensor(loss)
+
+    def on_validation_epoch_end(self):
+        if not self.trainer.sanity_checking:
+            lrs = [pg["lr"] for pg in self.trainer.optimizers[0].param_groups]
+            self.lr_history.append((self.current_epoch, *lrs))
+
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        scale = self.hparams.scale
+        opt = torch.optim.Adam([
+            {"params": list(self.layer1.parameters()), "lr": lr},
+            {"params": list(self.layer2.parameters()), "lr": lr * scale},
+        ])
+        return _with_lr_schedule(opt, self.hparams)
+
+
+def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
+                        divergence_factor=1.10, max_epochs=30,
+                        lr_patience=4, max_lr_reductions=3):
+    """Run a training loop with the same recovery logic as run_training.
+
+    Returns (final_stop_reason, global_best_score, global_best_path,
+             recoveries_list, model).
+    """
+    dl = _tiny_dataloader()
+    run_dir = str(tmp_path / "run")
+    os.makedirs(run_dir, exist_ok=True)
+
+    derived_patience = (lr_patience + 1) * max_lr_reductions + lr_patience
+
+    def _make_trainer(extra_callbacks=None):
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(run_dir, "checkpoints"),
+            monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
+            filename="{epoch}-{step}-{val_loss:.4f}",
+        )
+        early = EarlyStopping(
+            monitor="val_loss", mode="min",
+            patience=derived_patience, min_delta=0.0,
+        )
+        div = DivergenceStop(divergence_factor)
+        cbs = [ckpt, early, div]
+        if extra_callbacks:
+            cbs.extend(extra_callbacks)
+        return L.Trainer(
+            max_epochs=max_epochs,
+            default_root_dir=run_dir,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=cbs,
+            accelerator="cpu",
+            log_every_n_steps=1,
+        )
+
+    trainer = _make_trainer()
+    trainer.fit(model, dl, dl)
+    stop_reason = _determine_stop_reason(trainer)
+
+    global_best_score = (
+        float(trainer.checkpoint_callback.best_model_score)
+        if trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = trainer.checkpoint_callback.best_model_path
+
+    recoveries = []
+    recovery_count = 0
+    cumulative_factor = 1.0
+
+    while (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count < max_recoveries
+    ):
+        recovery_count += 1
+        cumulative_factor *= recovery_factor
+        resume_ckpt = global_best_path
+        if not resume_ckpt:
+            break
+
+        recovery_event = {
+            "attempt": recovery_count,
+            "epoch": stop_reason["epoch"],
+            "pre_divergence_best": stop_reason.get("best"),
+            "diverged_value": stop_reason.get("value"),
+            "cumulative_lr_factor": cumulative_factor,
+            "checkpoint": resume_ckpt,
+        }
+        recoveries.append(recovery_event)
+
+        trainer = _make_trainer(
+            extra_callbacks=[ApplyLRReduction(cumulative_factor)]
+        )
+        trainer.fit(model, dl, dl, ckpt_path=resume_ckpt)
+        stop_reason = _determine_stop_reason(trainer)
+
+        attempt_score = trainer.checkpoint_callback.best_model_score
+        if attempt_score is not None:
+            attempt_score_f = float(attempt_score)
+            if global_best_score is None or attempt_score_f < global_best_score:
+                global_best_score = attempt_score_f
+                global_best_path = trainer.checkpoint_callback.best_model_path
+
+    if (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count > 0
+        and recovery_count >= max_recoveries
+    ):
+        stop_reason = {
+            "reason": "diverged_unrecovered",
+            "epoch": stop_reason["epoch"],
+            "recoveries_attempted": recovery_count,
+        }
+
+    return stop_reason, global_best_score, global_best_path, recoveries, model
+
+
+def test_recovery_fires_on_divergence(tmp_path):
+    """When a model diverges, recovery restores the best checkpoint and continues.
+
+    The model spikes at epoch 5 only.  After recovery from the best
+    checkpoint (epoch ~4), the resumed run continues past epoch 5 without
+    re-spiking (epoch 5 was the only spike), so it completes normally.
+    """
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs={5}, spike=2.0,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    stop_reason, best_score, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=1, max_epochs=20,
+        lr_patience=2, max_lr_reductions=1,
+    )
+
+    # Recovery must have fired
+    assert len(recoveries) == 1, f"expected 1 recovery, got {len(recoveries)}"
+    assert recoveries[0]["attempt"] == 1
+    assert recoveries[0]["cumulative_lr_factor"] == 0.5
+
+    # The run should NOT end as diverged (epoch 5 was the only spike)
+    assert stop_reason["reason"] != "diverged", (
+        f"Run still diverged after recovery: {stop_reason}"
+    )
+    assert best_score is not None
+
+
+def test_recovery_exhaustion_produces_unrecovered(tmp_path):
+    """When all recovery attempts are exhausted, stop_reason is diverged_unrecovered.
+
+    The model spikes every 3 epochs (3, 6, 9, ...) so every recovery
+    attempt eventually re-diverges.  With max_recoveries=2, we expect
+    exactly 2 recoveries and then diverged_unrecovered.
+    """
+    model = _DivergingModel(
+        lr=1e-2, first_spike=3, spike_every=3, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+    )
+    stop_reason, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=2, max_epochs=50,
+        lr_patience=4, max_lr_reductions=1,
+    )
+
+    assert stop_reason["reason"] == "diverged_unrecovered"
+    assert stop_reason["recoveries_attempted"] == 2
+    assert len(recoveries) == 2
+
+
+def test_recovery_lr_ratios_preserved(tmp_path):
+    """Per-group LR ratios survive divergence recovery.
+
+    The _DivergingModel uses two param groups (lr, lr*0.1).  After recovery,
+    the ratio must still be 0.1 — a scalar LR reset would destroy it.
+    """
+    model = _DivergingModel(
+        lr=1e-2, scale=0.1, spike_epochs={5}, spike=2.0,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    _, _, _, recoveries, model = _run_with_recovery(
+        model, tmp_path, max_recoveries=1, max_epochs=20,
+        lr_patience=2, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) >= 1, "Recovery did not fire"
+
+    # Check every LR pair recorded after the recovery epoch
+    recovery_epoch = recoveries[0]["epoch"]
+    post_recovery_lrs = [
+        (ep, lr0, lr1) for ep, lr0, lr1 in model.lr_history
+        if ep >= recovery_epoch
+    ]
+    assert len(post_recovery_lrs) > 0, "No LR records after recovery"
+    for ep, lr0, lr1 in post_recovery_lrs:
+        ratio = lr1 / lr0
+        assert ratio == pytest.approx(0.1, rel=1e-6), (
+            f"LR ratio at epoch {ep}: {ratio} (expected 0.1). "
+            f"LRs: group0={lr0}, group1={lr1}"
+        )
+
+
+def test_apply_lr_reduction_scales_all_groups(tmp_path):
+    """ApplyLRReduction callback multiplies every param group's LR by factor.
+
+    This is the mechanism that applies the recovery LR reduction AFTER
+    Lightning restores optimizer state from checkpoint (§4.3).
+    """
+    model = _TinyModel(lr=1e-2, secondary_lr_scale=0.1)
+    ckpt_cb = ModelCheckpoint(dirpath=str(tmp_path / "ckpts"), save_last=True)
+    trainer1 = L.Trainer(
+        max_epochs=2, default_root_dir=str(tmp_path / "run1"),
+        enable_progress_bar=False, enable_model_summary=False,
+        callbacks=[ckpt_cb], accelerator="cpu",
+    )
+    dl = _tiny_dataloader()
+    trainer1.fit(model, dl, dl)
+    ckpt_path = ckpt_cb.last_model_path
+
+    # Resume with ApplyLRReduction(0.5) — LR should be halved from checkpoint
+    model2 = _TinyModel(lr=1e-2, secondary_lr_scale=0.1)
+    lr_cb = ApplyLRReduction(0.5)
+    trainer2 = L.Trainer(
+        max_epochs=4, default_root_dir=str(tmp_path / "run2"),
+        enable_progress_bar=False, enable_model_summary=False,
+        callbacks=[lr_cb], accelerator="cpu",
+    )
+    trainer2.fit(model2, dl, dl, ckpt_path=str(ckpt_path))
+
+    opt = trainer2.optimizers[0]
+    # Checkpoint had LR 1e-2 and 1e-3; after 0.5x reduction: 5e-3 and 5e-4
+    assert opt.param_groups[0]["lr"] == pytest.approx(5e-3, rel=1e-4), (
+        f"group0 LR = {opt.param_groups[0]['lr']}, expected 5e-3"
+    )
+    assert opt.param_groups[1]["lr"] == pytest.approx(5e-4, rel=1e-4), (
+        f"group1 LR = {opt.param_groups[1]['lr']}, expected 5e-4"
+    )
+    # Ratio preserved
+    ratio = opt.param_groups[1]["lr"] / opt.param_groups[0]["lr"]
+    assert ratio == pytest.approx(0.1, rel=1e-4)
+
+
+def test_global_best_tracks_across_attempts(tmp_path):
+    """best_val_loss must reflect the global best, not just the last attempt.
+
+    §4.5: fresh callbacks per attempt mean ModelCheckpoint.best_model_score
+    resets.  A later WORSE attempt must not overwrite the global best.
+
+    The model spikes every 4 epochs, so multiple recovery attempts all
+    re-diverge.  The global best should be the minimum of the first
+    attempt's pre-divergence best, not a diverged value from a later attempt.
+    """
+    model = _DivergingModel(
+        lr=1e-2, first_spike=4, spike_every=4, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+    )
+    _, global_best, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=2, max_epochs=50,
+        lr_patience=4, max_lr_reductions=1,
+    )
+
+    assert global_best is not None
+    # The best should be the pre-divergence best (base_loss - 0.01 * epoch),
+    # not the diverged value (base_loss * spike = 50.0)
+    assert global_best < 10.0 * 5.0, (
+        f"global_best={global_best} appears to be from a diverged attempt"
+    )
+    # Best should be close to the improving trend (base_loss - small amount)
+    assert global_best < 10.0, (
+        f"global_best={global_best} should be < base_loss=10.0"
+    )
+
+
+def test_clean_run_unaffected_by_recovery(tmp_path):
+    """A model that never diverges should produce no recoveries and
+    a clean stop_reason."""
+    # No spike epochs means it never diverges
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs=set(), spike=2.0,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    stop_reason, best_score, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=3, max_epochs=10,
+        lr_patience=2, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) == 0
+    assert stop_reason["reason"] in ("completed", "early_stopped")
+    assert best_score is not None
+
+
+def test_recovery_counter_is_explicit_not_lr_based(tmp_path):
+    """Recovery uses an explicit counter, not min_lr floor detection.
+
+    §4.3/§5.1: once all groups sit at min_lr, ReduceLROnPlateau still fires
+    its no-op reduction and resets num_bad_epochs, cycling forever.  The
+    recovery mechanism must count attempts explicitly.
+
+    We verify this by setting max_lr_reductions=0 (LR is already at its
+    floor from the start) and confirming recovery still counts and
+    terminates properly.
+    """
+    model = _DivergingModel(
+        lr=1e-2, first_spike=3, spike_every=3, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=0, lr_factor=0.5,
+    )
+    stop_reason, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=2, max_epochs=50,
+        lr_patience=4, max_lr_reductions=0,
+    )
+
+    # With max_recoveries=2, exactly 2 recovery attempts should fire
+    assert len(recoveries) == 2
+    assert stop_reason["reason"] == "diverged_unrecovered"
+    assert stop_reason["recoveries_attempted"] == 2
+
+
+def test_max_recoveries_zero_disables_recovery(tmp_path):
+    """max_recoveries=0 means no recovery: divergence stops the run."""
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs={3}, spike=2.0,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    stop_reason, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=0, max_epochs=30,
+        lr_patience=2, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) == 0
+    assert stop_reason["reason"] == "diverged"
+
+
+def test_max_recoveries_cli_default_and_override():
+    """--max-recoveries CLI arg plumbs through to TrainConfig."""
+    p = build_arg_parser()
+    required = ["--loss", "multinomial", "--run-name", "t"]
+    cfg = cfg_from_args(p.parse_args(required))
+    assert cfg.max_recoveries == 3
+
+    cfg2 = cfg_from_args(p.parse_args(required + ["--max-recoveries", "1"]))
+    assert cfg2.max_recoveries == 1
+
+    cfg3 = cfg_from_args(p.parse_args(required + ["--max-recoveries", "0"]))
+    assert cfg3.max_recoveries == 0
+
+
+def test_trainconfig_rejects_max_recoveries_negative():
+    with pytest.raises(ValueError, match="max_recoveries must be >= 0"):
+        TrainConfig(**{**_REQUIRED, "max_recoveries": -1})

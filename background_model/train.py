@@ -15,7 +15,8 @@ Usage::
 
 CLI (see ``build_arg_parser``): ``--loss --run-name --max-epochs --batch-size
 --lr --limit-batches`` plus ``--num-workers --seed --lr-patience
---max-lr-reductions --store --runs-root --resume-from`` conveniences.
+--max-lr-reductions --max-recoveries --store --runs-root --resume-from``
+conveniences.
 
 Reproducibility contract: every run dir records ``config_hash``,
 ``split_version``, git sha and the full resolved config in ``run_meta.json``.
@@ -437,6 +438,37 @@ class DivergenceStop(Callback):
 
 
 # --------------------------------------------------------------------------
+# Post-resume LR reduction (Phase 3 — divergence recovery)
+# --------------------------------------------------------------------------
+
+
+class ApplyLRReduction(Callback):
+    """Apply a multiplicative LR reduction after Lightning restores optimizer state.
+
+    Lightning's ``trainer.fit(ckpt_path=...)`` restores ``param_groups[i]["lr"]``
+    from the checkpoint (verified: ``test_lightning_resume_restores_param_group_lr``).
+    Any LR change made *before* the restore is silently overwritten.
+
+    This callback fires on ``on_train_start`` — after the optimizer state is
+    restored — and multiplies each param group's LR by ``factor``.  This
+    preserves inter-group ratios (``dispersion_lr_scale``) because every group
+    is scaled by the same multiplicative factor.
+
+    ``factor`` is the *cumulative* reduction relative to the checkpoint's LR.
+    For the first recovery ``factor = recovery_factor``; for the second
+    ``factor = recovery_factor ** 2``; etc.
+    """
+
+    def __init__(self, factor: float):
+        self.factor = factor
+
+    def on_train_start(self, trainer, pl_module):
+        for opt in trainer.optimizers:
+            for pg in opt.param_groups:
+                pg["lr"] *= self.factor
+
+
+# --------------------------------------------------------------------------
 # Throughput callback
 # --------------------------------------------------------------------------
 
@@ -502,6 +534,8 @@ class TrainConfig:
     lr_patience: int = 4
     max_lr_reductions: int = 3
     lr_factor: float = 0.5
+    max_recoveries: int = 3
+    recovery_factor: float = 0.5
 
     def __post_init__(self):
         if self.lr_patience < 1:
@@ -520,6 +554,10 @@ class TrainConfig:
                 "max_lr_reductions as (lr_patience+1)*max_lr_reductions "
                 "+ lr_patience; 0 would make early-stopping detection "
                 "ambiguous)"
+            )
+        if self.max_recoveries < 0:
+            raise ValueError(
+                "max_recoveries must be >= 0 (0 disables divergence recovery)"
             )
         if self.stall_patience == 1 or self.stall_patience < 0:
             raise ValueError(
@@ -693,6 +731,8 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "lr_patience": cfg.lr_patience,
         "max_lr_reductions": cfg.max_lr_reductions,
         "lr_factor": cfg.lr_factor,
+        "max_recoveries": cfg.max_recoveries,
+        "recovery_factor": cfg.recovery_factor,
         "n_train_pairs": len(train_ds),
         "n_val_pairs": len(val_ds),
         "plumbing_config": json.loads(train_ds.config.full_config_json()),
@@ -815,24 +855,106 @@ def run_training(cfg: TrainConfig):
         print(f"[auto-lr] suggested LR: {suggested:.6e}", flush=True)
         model.hparams.learning_rate = suggested
         model.learning_rate = suggested
-        # Update meta with the discovered LR
         meta["lr"] = suggested
         meta["auto_lr_suggestion"] = suggested
         with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
-    trainer.fit(
-        model, train_loader, val_loader, ckpt_path=cfg.resume_from
-    )
-    # persist final metrics summary
-    summary = {
-        "best_model_path": trainer.checkpoint_callback.best_model_path,
-        "best_val_loss": float(trainer.checkpoint_callback.best_model_score)
+
+    # ── initial fit ───────────────────────────────────────────────────
+    ckpt_path = cfg.resume_from
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+    stop_reason = _determine_stop_reason(trainer)
+
+    # Track global best across recovery attempts (§4.5).  Fresh
+    # callbacks per attempt mean ModelCheckpoint.best_model_score
+    # reflects only the current attempt; we must track the overall best
+    # ourselves, or a later worse attempt gets reported as the run's
+    # result.
+    global_best_score = (
+        float(trainer.checkpoint_callback.best_model_score)
         if trainer.checkpoint_callback.best_model_score is not None
-        else None,
+        else None
+    )
+    global_best_path = trainer.checkpoint_callback.best_model_path
+
+    # ── divergence recovery outer loop (§4) ───────────────────────────
+    recoveries = []
+    recovery_count = 0
+    cumulative_factor = 1.0
+
+    while (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count < cfg.max_recoveries
+    ):
+        recovery_count += 1
+        cumulative_factor *= cfg.recovery_factor
+
+        # The best checkpoint from DivergenceStop is the pre-divergence
+        # best; it is also what ModelCheckpoint recorded as best_model_path.
+        resume_ckpt = global_best_path
+        if not resume_ckpt:
+            rank_zero_info(
+                "[Recovery] No checkpoint available for recovery — "
+                "stopping with diverged_unrecovered."
+            )
+            break
+
+        rank_zero_info(
+            f"[Recovery] Attempt {recovery_count}/{cfg.max_recoveries}: "
+            f"restoring {resume_ckpt}, LR *= {cumulative_factor:.4g}"
+        )
+
+        recovery_event = {
+            "attempt": recovery_count,
+            "epoch": stop_reason["epoch"],
+            "pre_divergence_best": stop_reason.get("best"),
+            "diverged_value": stop_reason.get("value"),
+            "cumulative_lr_factor": cumulative_factor,
+            "checkpoint": resume_ckpt,
+        }
+        recoveries.append(recovery_event)
+
+        # Fresh trainer and callbacks (§4.5): EarlyStopping and
+        # DivergenceStop reset, giving the recovery attempt a full
+        # budget.  ApplyLRReduction fires on_train_start to scale
+        # LR after Lightning restores optimizer state from checkpoint.
+        trainer = build_trainer(cfg, run_dir)
+        trainer.callbacks.append(ApplyLRReduction(cumulative_factor))
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
+        stop_reason = _determine_stop_reason(trainer)
+
+        # Update global best if this attempt improved on it.
+        attempt_score = trainer.checkpoint_callback.best_model_score
+        if attempt_score is not None:
+            attempt_score_f = float(attempt_score)
+            if global_best_score is None or attempt_score_f < global_best_score:
+                global_best_score = attempt_score_f
+                global_best_path = trainer.checkpoint_callback.best_model_path
+
+    # If we exhausted recoveries and still diverged, mark it.
+    if (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count > 0
+        and recovery_count >= cfg.max_recoveries
+    ):
+        stop_reason = {
+            "reason": "diverged_unrecovered",
+            "epoch": stop_reason["epoch"],
+            "recoveries_attempted": recovery_count,
+            "final_value": stop_reason.get("value"),
+            "best_before_final_divergence": stop_reason.get("best"),
+        }
+
+    # ── persist final metrics summary ─────────────────────────────────
+    summary = {
+        "best_model_path": global_best_path,
+        "best_val_loss": global_best_score,
         "global_step": int(trainer.global_step),
         "current_epoch": int(trainer.current_epoch),
-        "stop_reason": _determine_stop_reason(trainer),
+        "stop_reason": stop_reason,
     }
+    if recoveries:
+        summary["recoveries"] = recoveries
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump({**meta, **summary}, f, indent=2)
     return trainer, model
@@ -874,6 +996,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="stop if val_loss is bitwise identical for this many "
                         "consecutive epochs (0 disables). Healthy v3 runs "
                         "repeat at most 2; collapsed runs repeat indefinitely.")
+    p.add_argument("--max-recoveries", type=int, default=3,
+                   help="max divergence recovery attempts (0 disables recovery; "
+                        "each recovery restores the best checkpoint and halves LR)")
     p.add_argument("--min-N", type=int, default=50,
                    help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
@@ -949,6 +1074,7 @@ def cfg_from_args(args) -> TrainConfig:
             fl_dist_npz=args.fl_dist_npz,
             lr_patience=lr_patience,
             max_lr_reductions=max_lr_reductions,
+            max_recoveries=args.max_recoveries,
         )
     except ValueError as exc:
         raise SystemExit(f"error: {exc}") from None
