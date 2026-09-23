@@ -450,24 +450,58 @@ class ApplyLRReduction(Callback):
     Any LR change made *before* the restore is silently overwritten.
 
     This callback fires on ``on_train_start`` — after the optimizer state is
-    restored — and multiplies each param group's LR by ``factor``.  This
-    preserves inter-group ratios (``dispersion_lr_scale``) because every group
-    is scaled by the same multiplicative factor.
+    restored — and multiplies each param group's LR by ``factor``, then clamps
+    each group's LR to the ``ReduceLROnPlateau`` scheduler's per-group
+    ``min_lrs`` floor (if a plateau scheduler is configured).  Without the
+    clamp, repeated recoveries can drive the LR below the floor, making the
+    scheduler permanently inert (see ``_with_lr_schedule``'s docstring).
 
-    ``factor`` is the reduction *relative to the resume checkpoint's stored LR*.
-    The recovery loop computes it so that the Nth recovery trains at
-    ``recovery_factor ** N`` times the ORIGINAL learning rate, accounting for
-    any reductions already baked into the checkpoint when the global best
-    moved to a recovery-era checkpoint.
+    When the clamp binds for any group, ``self.clamped_groups`` records
+    per-group detail so the caller can include it in ``summary.json``.
     """
 
     def __init__(self, factor: float):
         self.factor = factor
+        self.clamped_groups = None  # populated if any group is clamped
 
     def on_train_start(self, trainer, pl_module):
+        # Read the floor from the live ReduceLROnPlateau, if present.
+        min_lrs = self._get_min_lrs(trainer)
+
+        clamped = []
         for opt in trainer.optimizers:
-            for pg in opt.param_groups:
-                pg["lr"] *= self.factor
+            for i, pg in enumerate(opt.param_groups):
+                requested = pg["lr"] * self.factor
+                if min_lrs is not None and i < len(min_lrs):
+                    floor = min_lrs[i]
+                    if requested < floor:
+                        pg["lr"] = floor
+                        clamped.append({
+                            "group": i,
+                            "requested_lr": requested,
+                            "clamped_lr": floor,
+                        })
+                        rank_zero_info(
+                            f"[ApplyLRReduction] group {i}: requested LR "
+                            f"{requested:.4e} < floor {floor:.4e} — clamped "
+                            f"to floor (recovery budget effectively spent)"
+                        )
+                        continue
+                pg["lr"] = requested
+
+        if clamped:
+            self.clamped_groups = clamped
+
+    @staticmethod
+    def _get_min_lrs(trainer):
+        """Read per-group min_lrs from the trainer's ReduceLROnPlateau, if any."""
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+        for sched_cfg in trainer.lr_scheduler_configs:
+            scheduler = sched_cfg.scheduler
+            if isinstance(scheduler, ReduceLROnPlateau):
+                return scheduler.min_lrs
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -568,7 +602,7 @@ class TrainConfig:
             )
         if self.stall_patience == 1 or self.stall_patience < 0:
             raise ValueError(
-                "--stall-patience must be 0 (disabled) or >= 2 "
+                "stall_patience must be 0 (disabled) or >= 2 "
                 "(1 would stop on the first validation epoch)"
             )
 
@@ -851,9 +885,15 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
     """Divergence recovery outer loop (§4).
 
     Retries training after divergence, restoring the best checkpoint and
-    reducing the LR by *recovery_factor* for each attempt.  The Nth
-    recovery trains at ``recovery_factor ** N`` times the ORIGINAL learning
-    rate, regardless of which checkpoint is resumed.
+    reducing the LR by *recovery_factor* for each attempt.  The target LR
+    for the Nth recovery is ``recovery_factor ** N`` times the original
+    learning rate, but two mechanisms may cause the actual LR to differ:
+
+    1. Plateau reductions inside an improving attempt are preserved in the
+       checkpoint and not compensated — the stored LR reflects them.
+    2. Each group's LR is clamped to the ``ReduceLROnPlateau`` scheduler's
+       per-group ``min_lrs`` floor.  When the clamp binds, the recovery
+       event records the per-group detail in ``"floor_clamped_groups"``.
 
     Parameters
     ----------
@@ -880,7 +920,9 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
     recovery_count = 0
     # Track how many recovery reductions are baked into the current
     # best checkpoint's stored LR so the applied factor always targets
-    # recovery_factor**N × original_lr.
+    # recovery_factor**N × original_lr.  The actual LR may be higher
+    # (clamped to the scheduler floor) or lower (plateau reductions
+    # inside an improving attempt baked into the checkpoint).
     best_recovery_level = 0
 
     while (
@@ -904,11 +946,11 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
         recovery_count += 1
         # Factor relative to the resume checkpoint's stored LR so
         # that the effective LR = recovery_factor**N × original_lr.
-        lr_factor = recovery_factor ** (recovery_count - best_recovery_level)
+        applied_factor = recovery_factor ** (recovery_count - best_recovery_level)
 
         rank_zero_info(
             f"[Recovery] Attempt {recovery_count}/{max_recoveries}: "
-            f"restoring {resume_ckpt}, LR *= {lr_factor:.4g} "
+            f"restoring {resume_ckpt}, LR *= {applied_factor:.4g} "
             f"(target {recovery_factor ** recovery_count:.4g}x original)"
         )
 
@@ -917,14 +959,19 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
             "epoch": stop_reason["epoch"],
             "pre_divergence_best": stop_reason.get("best"),
             "diverged_value": stop_reason.get("value"),
-            "lr_factor": lr_factor,
+            "recovery_lr_factor": applied_factor,
             "checkpoint": resume_ckpt,
         }
 
+        lr_cb = ApplyLRReduction(applied_factor)
         epoch_tracker = _RecoveryEpochTracker()
         trainer = build_and_fit(
-            resume_ckpt, [ApplyLRReduction(lr_factor), epoch_tracker]
+            resume_ckpt, [lr_cb, epoch_tracker]
         )
+
+        # Record floor-clamp detail if any group was clamped
+        if lr_cb.clamped_groups is not None:
+            recovery_event["floor_clamped_groups"] = lr_cb.clamped_groups
         stop_reason = _determine_stop_reason(trainer)
 
         # A recovery that trains zero epochs (max_epochs already reached

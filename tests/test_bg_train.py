@@ -461,12 +461,12 @@ def test_trainconfig_rejects_max_lr_reductions_negative():
 
 
 def test_trainconfig_rejects_stall_patience_one():
-    with pytest.raises(ValueError, match="stall-patience must be 0.*or >= 2"):
+    with pytest.raises(ValueError, match="stall_patience must be 0.*or >= 2"):
         TrainConfig(**{**_REQUIRED, "stall_patience": 1})
 
 
 def test_trainconfig_rejects_stall_patience_negative():
-    with pytest.raises(ValueError, match="stall-patience must be 0.*or >= 2"):
+    with pytest.raises(ValueError, match="stall_patience must be 0.*or >= 2"):
         TrainConfig(**{**_REQUIRED, "stall_patience": -1})
 
 
@@ -1102,7 +1102,7 @@ def test_recovery_fires_on_divergence(tmp_path):
     # Recovery must have fired
     assert len(recoveries) == 1, f"expected 1 recovery, got {len(recoveries)}"
     assert recoveries[0]["attempt"] == 1
-    assert recoveries[0]["lr_factor"] == 0.5
+    assert recoveries[0]["recovery_lr_factor"] == 0.5
 
     # The run should NOT end as diverged (epoch 5 was the only spike)
     assert stop_reason["reason"] != "diverged", (
@@ -1333,6 +1333,9 @@ def test_recovery_lr_ladder_when_best_improves(tmp_path):
     - Recovery 2 resumes from recovery-1 best (stored LR = 0.5L).
       Correct: apply 0.5 → 0.25L.
       Buggy (cumulative from original): apply 0.25 → 0.5L × 0.25 = 0.125L.
+
+    Uses max_lr_reductions=3 so the plateau floor (1.25e-3) is below the
+    recovery-2 target (2.5e-3) and the clamp does not interfere.
     """
     from collections import defaultdict
 
@@ -1340,12 +1343,12 @@ def test_recovery_lr_ladder_when_best_improves(tmp_path):
     model = _DivergingModel(
         lr=original_lr, scale=0.1,
         spike_epochs={5, 15}, spike=2.0, base_loss=10.0,
-        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+        lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
     )
 
     stop_reason, _, _, recoveries, model = _run_with_recovery(
         model, tmp_path, max_recoveries=3, max_epochs=40,
-        recovery_factor=0.5, lr_patience=4, max_lr_reductions=1,
+        recovery_factor=0.5, lr_patience=4, max_lr_reductions=3,
     )
 
     assert len(recoveries) >= 2, f"Need >= 2 recoveries, got {len(recoveries)}"
@@ -1561,5 +1564,194 @@ def test_recoveries_written_to_summary_json(tmp_path):
     for event in loaded["recoveries"]:
         assert "attempt" in event
         assert "epoch" in event
-        assert "lr_factor" in event
+        assert "recovery_lr_factor" in event
         assert "checkpoint" in event
+
+
+# --------------------------------------------------------------------------
+# BUG PROOF: recovery LR can go below the plateau scheduler's floor
+#
+# The plateau scheduler computes min_lrs = [g["lr"] * factor ** max_reductions]
+# from the INITIAL lr at optimizer-build time.  The recovery ladder multiplies
+# param_group["lr"] directly with no reference to that floor.  After enough
+# recoveries, the LR drops below the floor, making the scheduler permanently
+# inert (it clamps to min_lr on every step, but old_lr == new_lr so the
+# assignment guard fires and num_bad_epochs resets silently forever).
+# --------------------------------------------------------------------------
+
+
+def test_recovery_lr_breaches_plateau_floor(tmp_path):
+    """PROOF: recovery drives LR below the scheduler's min_lr floor.
+
+    Setup: lr=1e-2, lr_factor=0.5, max_lr_reductions=1 → floor = 5e-3.
+    recovery_factor=0.5, max_recoveries=3.
+    Model spikes every 4 epochs to force repeated recovery.
+
+    After recovery 1: LR = 5e-3 (== floor, OK)
+    After recovery 2: LR = 2.5e-3 (< floor 5e-3, BUG)
+
+    This test FAILS on f598a36 (proving the bug) and must PASS after the fix.
+    """
+    original_lr = 1e-2
+    model = _DivergingModel(
+        lr=original_lr, scale=0.1,
+        first_spike=4, spike_every=4, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+    )
+
+    stop_reason, _, _, recoveries, model = _run_with_recovery(
+        model, tmp_path, max_recoveries=3, max_epochs=50,
+        recovery_factor=0.5, lr_patience=4, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) >= 2, f"Need >= 2 recoveries, got {len(recoveries)}"
+
+    # The plateau floor for group 0: 1e-2 * 0.5^1 = 5e-3
+    floor_lr0 = original_lr * 0.5 ** 1
+
+    # Check that NO recorded LR is below the floor
+    for ep, lr0, lr1 in model.lr_history:
+        assert lr0 >= floor_lr0 - 1e-10, (
+            f"epoch {ep}: group0 LR={lr0:.6e} < floor={floor_lr0:.6e}. "
+            f"Recovery drove the LR below the scheduler's min_lr."
+        )
+
+
+def test_floor_clamp_reported_in_recovery_event_and_json(tmp_path):
+    """When the clamp binds, floor_clamped_groups reaches summary.json.
+
+    Same setup as test_recovery_lr_breaches_plateau_floor: the second
+    recovery clamps.  Verify the event structure and JSON round-trip.
+    """
+    original_lr = 1e-2
+    model = _DivergingModel(
+        lr=original_lr, scale=0.1,
+        first_spike=4, spike_every=4, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+    )
+
+    _, best_score, best_path, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=3, max_epochs=50,
+        recovery_factor=0.5, lr_patience=4, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) >= 2
+
+    # At least one recovery should have floor_clamped_groups
+    clamped_events = [r for r in recoveries if "floor_clamped_groups" in r]
+    assert len(clamped_events) >= 1, (
+        f"Expected at least one clamped recovery, got none. "
+        f"Events: {recoveries}"
+    )
+
+    # Check structure of the clamp report
+    for event in clamped_events:
+        for entry in event["floor_clamped_groups"]:
+            assert "group" in entry
+            assert "requested_lr" in entry
+            assert "clamped_lr" in entry
+            assert entry["clamped_lr"] >= entry["requested_lr"]
+
+    # JSON round-trip
+    run_dir = str(tmp_path / "summary_run")
+    os.makedirs(run_dir, exist_ok=True)
+    summary = {
+        "best_model_path": best_path,
+        "best_val_loss": best_score,
+        "recoveries": recoveries,
+    }
+    summary_path = os.path.join(run_dir, "summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    with open(summary_path) as f:
+        loaded = json.load(f)
+
+    loaded_clamped = [r for r in loaded["recoveries"]
+                      if "floor_clamped_groups" in r]
+    assert len(loaded_clamped) == len(clamped_events)
+    for event in loaded_clamped:
+        for entry in event["floor_clamped_groups"]:
+            assert isinstance(entry["group"], int)
+            assert isinstance(entry["requested_lr"], float)
+            assert isinstance(entry["clamped_lr"], float)
+
+
+def test_no_clamp_when_recovery_stays_above_floor(tmp_path):
+    """A run that never reaches the floor produces no floor_clamped_groups.
+
+    Uses max_lr_reductions=3 → floor = lr * 0.5^3 = 1.25e-3.
+    Single recovery at factor=0.5 → LR = 5e-3, well above the floor.
+    """
+    model = _DivergingModel(
+        lr=1e-2, scale=0.1, spike_epochs={5}, spike=2.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
+    )
+    _, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=1, max_epochs=20,
+        recovery_factor=0.5, lr_patience=4, max_lr_reductions=3,
+    )
+
+    assert len(recoveries) == 1
+    assert "floor_clamped_groups" not in recoveries[0], (
+        f"No clamp expected when LR stays above floor, "
+        f"but got: {recoveries[0].get('floor_clamped_groups')}"
+    )
+
+
+def test_multi_group_floor_clamp_different_floors(tmp_path):
+    """Groups with different initial LRs have different floors; both are clamped.
+
+    _DivergingModel uses scale=0.1, so:
+      group 0: lr=1e-2, floor = 1e-2 * 0.5 = 5e-3
+      group 1: lr=1e-3, floor = 1e-3 * 0.5 = 5e-4
+
+    After recovery 1: group 0 = 5e-3, group 1 = 5e-4 (both at floor).
+    After recovery 2: both requested below floor → both clamped.
+    """
+    original_lr = 1e-2
+    scale = 0.1
+    model = _DivergingModel(
+        lr=original_lr, scale=scale,
+        first_spike=4, spike_every=4, spike=5.0, base_loss=10.0,
+        lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
+    )
+
+    _, _, _, recoveries, model = _run_with_recovery(
+        model, tmp_path, max_recoveries=3, max_epochs=50,
+        recovery_factor=0.5, lr_patience=4, max_lr_reductions=1,
+    )
+
+    assert len(recoveries) >= 2
+
+    # Find a recovery where both groups were clamped
+    multi_clamped = [
+        r for r in recoveries
+        if "floor_clamped_groups" in r
+        and len(r["floor_clamped_groups"]) == 2
+    ]
+    assert len(multi_clamped) >= 1, (
+        f"Expected at least one recovery clamping both groups. "
+        f"Events: {recoveries}"
+    )
+
+    # Verify per-group floors
+    floor_g0 = original_lr * 0.5
+    floor_g1 = original_lr * scale * 0.5
+    for event in multi_clamped:
+        groups = {e["group"]: e for e in event["floor_clamped_groups"]}
+        assert 0 in groups and 1 in groups
+        assert groups[0]["clamped_lr"] == pytest.approx(floor_g0, rel=1e-6)
+        assert groups[1]["clamped_lr"] == pytest.approx(floor_g1, rel=1e-6)
+        # Floors differ by the scale factor
+        assert groups[1]["clamped_lr"] / groups[0]["clamped_lr"] == pytest.approx(
+            scale, rel=1e-6
+        )
+
+    # LR history must respect both floors
+    for ep, lr0, lr1 in model.lr_history:
+        assert lr0 >= floor_g0 - 1e-10, (
+            f"epoch {ep}: group0 LR={lr0:.6e} < floor={floor_g0:.6e}"
+        )
+        assert lr1 >= floor_g1 - 1e-10, (
+            f"epoch {ep}: group1 LR={lr1:.6e} < floor={floor_g1:.6e}"
+        )
