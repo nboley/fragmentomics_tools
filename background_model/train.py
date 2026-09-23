@@ -42,6 +42,7 @@ from lightning.pytorch.callbacks import (
     Callback,
     DeviceStatsMonitor,
     EarlyStopping,
+    LearningRateMonitor,
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import CSVLogger
@@ -695,7 +696,7 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
         dirpath=os.path.join(run_dir, "checkpoints"),
         monitor="val_loss",
         mode="min",
-        save_top_k=2,
+        save_top_k=-1,
         save_last=True,
         filename="{epoch}-{step}-{val_loss:.4f}",
     )
@@ -716,6 +717,7 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
         callbacks=[ckpt, early,
                    DivergenceStop(cfg.divergence_factor,
                                   stall_patience=cfg.stall_patience),
+                   LearningRateMonitor(logging_interval="epoch"),
                    ThroughputCallback(cfg.batch_size),
                    DeviceStatsMonitor(cpu_stats=False)],
         limit_train_batches=limit if limit is not None else 1.0,

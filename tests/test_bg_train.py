@@ -4,8 +4,12 @@ The key contract: InstrumentedBackgroundModel adds only detached diagnostic
 logging; its training loss must be byte-for-byte the frozen
 BackgroundModel._step loss.  Also covers CLI arg parsing.
 """
+import os
+
+import lightning as L
 import torch
 import pytest
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from background_model_core import BackgroundModel
 from background_model.train import (
@@ -14,6 +18,7 @@ from background_model.train import (
     TrainConfig,
     _determine_stop_reason,
     build_arg_parser,
+    build_trainer,
     cfg_from_args,
 )
 
@@ -458,3 +463,158 @@ def test_trainconfig_accepts_stall_patience_two():
     """stall_patience=2 is the minimum enabled value."""
     cfg = TrainConfig(**{**_REQUIRED, "stall_patience": 2})
     assert cfg.stall_patience == 2
+
+
+# --------------------------------------------------------------------------
+# Phase 1: Empirical verification of Lightning checkpoint/LR behavior
+#
+# Design §8 inferred (but did not verify) that:
+#   (a) Lightning checkpoints include optimizer_states
+#   (b) trainer.fit(ckpt_path=...) restores param_groups[i]["lr"]
+# These tests confirm both empirically with a tiny synthetic model.
+# --------------------------------------------------------------------------
+
+
+class _TinyModel(L.LightningModule):
+    """Minimal multi-param-group model for checkpoint tests."""
+
+    def __init__(self, lr=1e-2, secondary_lr_scale=0.1):
+        super().__init__()
+        self.save_hyperparameters()
+        self.layer1 = torch.nn.Linear(4, 4)
+        self.layer2 = torch.nn.Linear(4, 2)
+
+    def forward(self, x):
+        return self.layer2(torch.relu(self.layer1(x)))
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        loss = torch.nn.functional.mse_loss(self(x), y)
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        loss = torch.nn.functional.mse_loss(self(x), y)
+        self.log("val_loss", loss)
+        return loss
+
+    def configure_optimizers(self):
+        lr = self.hparams.lr
+        scale = self.hparams.secondary_lr_scale
+        return torch.optim.Adam([
+            {"params": list(self.layer1.parameters()), "lr": lr},
+            {"params": list(self.layer2.parameters()), "lr": lr * scale},
+        ])
+
+
+def _tiny_dataloader(n=16, in_dim=4, out_dim=2):
+    x = torch.randn(n, in_dim)
+    y = torch.randn(n, out_dim)
+    ds = torch.utils.data.TensorDataset(x, y)
+    return torch.utils.data.DataLoader(ds, batch_size=8)
+
+
+def test_lightning_checkpoint_contains_optimizer_states(tmp_path):
+    """Design §8 verification (a): checkpoints include optimizer_states."""
+    model = _TinyModel(lr=1e-2)
+    ckpt_cb = ModelCheckpoint(dirpath=str(tmp_path), save_top_k=-1,
+                              filename="{epoch}")
+    trainer = L.Trainer(
+        max_epochs=2, default_root_dir=str(tmp_path),
+        enable_progress_bar=False, enable_model_summary=False,
+        callbacks=[ckpt_cb], accelerator="cpu",
+    )
+    dl = _tiny_dataloader()
+    trainer.fit(model, dl, dl)
+
+    # Load the epoch-1 checkpoint and inspect
+    ckpt_path = ckpt_cb.best_model_path
+    assert ckpt_path, "no checkpoint written"
+    ckpt = torch.load(ckpt_path, weights_only=False)
+    assert "optimizer_states" in ckpt, (
+        "Lightning checkpoint does NOT contain optimizer_states — "
+        "design §4.2 assumption is WRONG"
+    )
+    opt_state = ckpt["optimizer_states"]
+    assert len(opt_state) >= 1
+    # Verify param_groups with LR are recorded
+    param_groups = opt_state[0]["param_groups"]
+    assert len(param_groups) == 2
+    assert "lr" in param_groups[0]
+    assert "lr" in param_groups[1]
+
+
+def test_lightning_resume_restores_param_group_lr(tmp_path):
+    """Design §8 verification (b): ckpt_path restores param_groups[i]["lr"].
+
+    Train 2 epochs at lr=1e-2 (secondary=1e-3), save checkpoint.
+    Build a NEW model with lr=5e-5 (secondary=5e-6), resume from checkpoint.
+    After resume, optimizer LRs should match the CHECKPOINT (1e-2 / 1e-3),
+    not the freshly-constructed model (5e-5 / 5e-6).
+    """
+    # Phase 1: train and checkpoint
+    model1 = _TinyModel(lr=1e-2, secondary_lr_scale=0.1)
+    ckpt_cb = ModelCheckpoint(dirpath=str(tmp_path / "ckpts"), save_last=True)
+    trainer1 = L.Trainer(
+        max_epochs=2, default_root_dir=str(tmp_path / "run1"),
+        enable_progress_bar=False, enable_model_summary=False,
+        callbacks=[ckpt_cb], accelerator="cpu",
+    )
+    dl = _tiny_dataloader()
+    trainer1.fit(model1, dl, dl)
+    ckpt_path = ckpt_cb.last_model_path
+    assert ckpt_path
+
+    # Phase 2: new model with DIFFERENT LR, resume from checkpoint
+    model2 = _TinyModel(lr=5e-5, secondary_lr_scale=0.1)
+    trainer2 = L.Trainer(
+        max_epochs=4, default_root_dir=str(tmp_path / "run2"),
+        enable_progress_bar=False, enable_model_summary=False,
+        accelerator="cpu",
+    )
+    trainer2.fit(model2, dl, dl, ckpt_path=str(ckpt_path))
+
+    # Check what LR the optimizer actually has
+    opt = trainer2.optimizers[0]
+    restored_lr0 = opt.param_groups[0]["lr"]
+    restored_lr1 = opt.param_groups[1]["lr"]
+
+    # If Lightning restores LR from checkpoint: 1e-2 and 1e-3
+    # If it uses the model's LR: 5e-5 and 5e-6
+    assert restored_lr0 == pytest.approx(1e-2, rel=1e-4), (
+        f"LR group 0 = {restored_lr0}; expected 1e-2 from checkpoint. "
+        f"Design §4.3 assumption may be WRONG."
+    )
+    assert restored_lr1 == pytest.approx(1e-3, rel=1e-4), (
+        f"LR group 1 = {restored_lr1}; expected 1e-3 from checkpoint. "
+        f"Design §4.3 assumption may be WRONG."
+    )
+
+
+# --------------------------------------------------------------------------
+# Phase 1: Checkpoint retention and LR logging
+# --------------------------------------------------------------------------
+
+
+def test_build_trainer_saves_all_epochs(tmp_path):
+    """save_top_k=-1 retains every epoch's checkpoint."""
+    cfg = TrainConfig(**{**_REQUIRED, "runs_root": str(tmp_path)})
+    run_dir = os.path.join(str(tmp_path), cfg.run_name)
+    trainer = build_trainer(cfg, run_dir)
+    ckpt_cb = trainer.checkpoint_callback
+    assert ckpt_cb.save_top_k == -1, f"expected save_top_k=-1, got {ckpt_cb.save_top_k}"
+    assert ckpt_cb.save_last is True
+
+
+def test_build_trainer_includes_lr_monitor(tmp_path):
+    """LearningRateMonitor is in the trainer's callback list."""
+    from lightning.pytorch.callbacks import LearningRateMonitor
+
+    cfg = TrainConfig(**{**_REQUIRED, "runs_root": str(tmp_path)})
+    run_dir = os.path.join(str(tmp_path), cfg.run_name)
+    trainer = build_trainer(cfg, run_dir)
+    lr_monitors = [cb for cb in trainer.callbacks
+                   if isinstance(cb, LearningRateMonitor)]
+    assert len(lr_monitors) == 1, "expected exactly one LearningRateMonitor"
+    assert lr_monitors[0].logging_interval == "epoch"
