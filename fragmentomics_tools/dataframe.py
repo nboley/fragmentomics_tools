@@ -292,6 +292,33 @@ class DataFrameBase(pandas.DataFrame):
         return indices, records
 
     def parallel_apply(self, fn, n_workers=None, verbose=True):
+        """Apply `fn` to each row across worker processes.
+
+        :param fn: called with one row (a Series). It may be a lambda or other
+            unpicklable callable -- workers inherit it via fork rather than
+            receiving it pickled.
+        :param n_workers: worker count; None uses every CPU. 1 runs in-process
+            without forking, which is useful when debugging `fn`.
+        :param verbose: show a progress bar.
+        :return: a plain ``pandas.DataFrame``, NOT this subclass, because `fn`
+            decides the output columns and they need not satisfy this class's
+            required-column contract.
+
+            If `fn` returns DataFrames they are concatenated and an
+            ``original_index`` column is added mapping each output row back to
+            the input row it came from; `fn` must not itself return that
+            column. Otherwise records are treated as rows and the result
+            carries this frame's index.
+
+            **An empty input returns an empty DataFrame with no columns** --
+            `fn` is never called, so the column set is unknowable.
+
+        Raises whatever `fn` raises. If a worker dies outright (an OOM kill,
+        say) this raises ``BrokenProcessPool`` rather than hanging.
+
+        Concurrent calls from different threads are independent. Calls may also
+        nest: `fn` may itself call ``parallel_apply``.
+        """
         # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
         if n_workers == 1:
             indices = []
