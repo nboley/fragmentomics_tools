@@ -454,9 +454,11 @@ class ApplyLRReduction(Callback):
     preserves inter-group ratios (``dispersion_lr_scale``) because every group
     is scaled by the same multiplicative factor.
 
-    ``factor`` is the *cumulative* reduction relative to the checkpoint's LR.
-    For the first recovery ``factor = recovery_factor``; for the second
-    ``factor = recovery_factor ** 2``; etc.
+    ``factor`` is the reduction *relative to the resume checkpoint's stored LR*.
+    The recovery loop computes it so that the Nth recovery trains at
+    ``recovery_factor ** N`` times the ORIGINAL learning rate, accounting for
+    any reductions already baked into the checkpoint when the global best
+    moved to a recovery-era checkpoint.
     """
 
     def __init__(self, factor: float):
@@ -558,6 +560,11 @@ class TrainConfig:
         if self.max_recoveries < 0:
             raise ValueError(
                 "max_recoveries must be >= 0 (0 disables divergence recovery)"
+            )
+        if not (0 < self.recovery_factor <= 1):
+            raise ValueError(
+                "recovery_factor must be in (0, 1] "
+                "(0 would zero every LR; >1 raises LR on recovery)"
             )
         if self.stall_patience == 1 or self.stall_patience < 0:
             raise ValueError(
@@ -829,6 +836,138 @@ def _determine_stop_reason(trainer):
     return {"reason": "completed", "epoch": int(trainer.current_epoch)}
 
 
+class _RecoveryEpochTracker(Callback):
+    """Track whether any training epochs started during a fit."""
+
+    def __init__(self):
+        self.epochs_started = 0
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epochs_started += 1
+
+
+def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
+                       global_best_path, max_recoveries, recovery_factor):
+    """Divergence recovery outer loop (§4).
+
+    Retries training after divergence, restoring the best checkpoint and
+    reducing the LR by *recovery_factor* for each attempt.  The Nth
+    recovery trains at ``recovery_factor ** N`` times the ORIGINAL learning
+    rate, regardless of which checkpoint is resumed.
+
+    Parameters
+    ----------
+    build_and_fit : callable(ckpt_path, extra_callbacks) -> Trainer
+        Builds a fresh Trainer (with fresh callbacks), calls
+        ``trainer.fit(model, ..., ckpt_path=ckpt_path)`` with the given
+        extra callbacks appended, and returns the fitted Trainer.
+    stop_reason : dict
+        Result of ``_determine_stop_reason`` from the preceding fit.
+    global_best_score : float | None
+        Best val_loss across all fits so far.
+    global_best_path : str
+        Path to the checkpoint with *global_best_score*.
+    max_recoveries : int
+        Maximum number of recovery attempts (0 disables recovery).
+    recovery_factor : float
+        Multiplicative LR reduction per recovery (e.g. 0.5 → halve).
+
+    Returns
+    -------
+    tuple of (stop_reason, global_best_score, global_best_path, recoveries)
+    """
+    recoveries = []
+    recovery_count = 0
+    # Track how many recovery reductions are baked into the current
+    # best checkpoint's stored LR so the applied factor always targets
+    # recovery_factor**N × original_lr.
+    best_recovery_level = 0
+
+    while (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count < max_recoveries
+    ):
+        resume_ckpt = global_best_path
+        if not resume_ckpt:
+            rank_zero_info(
+                "[Recovery] No checkpoint available for recovery — "
+                "stopping with diverged_unrecovered."
+            )
+            stop_reason = {
+                "reason": "diverged_unrecovered",
+                "epoch": stop_reason["epoch"],
+                "recoveries_attempted": recovery_count,
+                "detail": "no checkpoint available",
+            }
+            break
+
+        recovery_count += 1
+        # Factor relative to the resume checkpoint's stored LR so
+        # that the effective LR = recovery_factor**N × original_lr.
+        lr_factor = recovery_factor ** (recovery_count - best_recovery_level)
+
+        rank_zero_info(
+            f"[Recovery] Attempt {recovery_count}/{max_recoveries}: "
+            f"restoring {resume_ckpt}, LR *= {lr_factor:.4g} "
+            f"(target {recovery_factor ** recovery_count:.4g}x original)"
+        )
+
+        recovery_event = {
+            "attempt": recovery_count,
+            "epoch": stop_reason["epoch"],
+            "pre_divergence_best": stop_reason.get("best"),
+            "diverged_value": stop_reason.get("value"),
+            "lr_factor": lr_factor,
+            "checkpoint": resume_ckpt,
+        }
+
+        epoch_tracker = _RecoveryEpochTracker()
+        trainer = build_and_fit(
+            resume_ckpt, [ApplyLRReduction(lr_factor), epoch_tracker]
+        )
+        stop_reason = _determine_stop_reason(trainer)
+
+        # A recovery that trains zero epochs (max_epochs already reached
+        # from the checkpoint's epoch) must not be reported as completed.
+        if epoch_tracker.epochs_started == 0:
+            recovery_event["zero_epochs"] = True
+            recoveries.append(recovery_event)
+            stop_reason = {
+                "reason": "diverged_unrecovered",
+                "epoch": recovery_event["epoch"],
+                "recoveries_attempted": recovery_count,
+                "detail": "recovery trained zero epochs (max_epochs reached)",
+            }
+            break
+
+        recoveries.append(recovery_event)
+
+        # Update global best if this attempt improved on it.
+        attempt_score = trainer.checkpoint_callback.best_model_score
+        if attempt_score is not None:
+            attempt_score_f = float(attempt_score)
+            if global_best_score is None or attempt_score_f < global_best_score:
+                global_best_score = attempt_score_f
+                global_best_path = trainer.checkpoint_callback.best_model_path
+                best_recovery_level = recovery_count
+
+    # If we exhausted recoveries and still diverged, mark it.
+    if (
+        stop_reason.get("reason") == "diverged"
+        and recovery_count > 0
+        and recovery_count >= max_recoveries
+    ):
+        stop_reason = {
+            "reason": "diverged_unrecovered",
+            "epoch": stop_reason["epoch"],
+            "recoveries_attempted": recovery_count,
+            "final_value": stop_reason.get("value"),
+            "best_before_final_divergence": stop_reason.get("best"),
+        }
+
+    return stop_reason, global_best_score, global_best_path, recoveries
+
+
 def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
@@ -865,11 +1004,6 @@ def run_training(cfg: TrainConfig):
     trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
     stop_reason = _determine_stop_reason(trainer)
 
-    # Track global best across recovery attempts (§4.5).  Fresh
-    # callbacks per attempt mean ModelCheckpoint.best_model_score
-    # reflects only the current attempt; we must track the overall best
-    # ourselves, or a later worse attempt gets reported as the run's
-    # result.
     global_best_score = (
         float(trainer.checkpoint_callback.best_model_score)
         if trainer.checkpoint_callback.best_model_score is not None
@@ -878,72 +1012,22 @@ def run_training(cfg: TrainConfig):
     global_best_path = trainer.checkpoint_callback.best_model_path
 
     # ── divergence recovery outer loop (§4) ───────────────────────────
-    recoveries = []
-    recovery_count = 0
-    cumulative_factor = 1.0
+    def _build_and_fit(ckpt_path, extra_callbacks):
+        t = build_trainer(cfg, run_dir)
+        t.callbacks.extend(extra_callbacks)
+        t.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+        return t
 
-    while (
-        stop_reason.get("reason") == "diverged"
-        and recovery_count < cfg.max_recoveries
-    ):
-        recovery_count += 1
-        cumulative_factor *= cfg.recovery_factor
-
-        # The best checkpoint from DivergenceStop is the pre-divergence
-        # best; it is also what ModelCheckpoint recorded as best_model_path.
-        resume_ckpt = global_best_path
-        if not resume_ckpt:
-            rank_zero_info(
-                "[Recovery] No checkpoint available for recovery — "
-                "stopping with diverged_unrecovered."
-            )
-            break
-
-        rank_zero_info(
-            f"[Recovery] Attempt {recovery_count}/{cfg.max_recoveries}: "
-            f"restoring {resume_ckpt}, LR *= {cumulative_factor:.4g}"
+    stop_reason, global_best_score, global_best_path, recoveries = (
+        run_recovery_loop(
+            build_and_fit=_build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=cfg.max_recoveries,
+            recovery_factor=cfg.recovery_factor,
         )
-
-        recovery_event = {
-            "attempt": recovery_count,
-            "epoch": stop_reason["epoch"],
-            "pre_divergence_best": stop_reason.get("best"),
-            "diverged_value": stop_reason.get("value"),
-            "cumulative_lr_factor": cumulative_factor,
-            "checkpoint": resume_ckpt,
-        }
-        recoveries.append(recovery_event)
-
-        # Fresh trainer and callbacks (§4.5): EarlyStopping and
-        # DivergenceStop reset, giving the recovery attempt a full
-        # budget.  ApplyLRReduction fires on_train_start to scale
-        # LR after Lightning restores optimizer state from checkpoint.
-        trainer = build_trainer(cfg, run_dir)
-        trainer.callbacks.append(ApplyLRReduction(cumulative_factor))
-        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
-        stop_reason = _determine_stop_reason(trainer)
-
-        # Update global best if this attempt improved on it.
-        attempt_score = trainer.checkpoint_callback.best_model_score
-        if attempt_score is not None:
-            attempt_score_f = float(attempt_score)
-            if global_best_score is None or attempt_score_f < global_best_score:
-                global_best_score = attempt_score_f
-                global_best_path = trainer.checkpoint_callback.best_model_path
-
-    # If we exhausted recoveries and still diverged, mark it.
-    if (
-        stop_reason.get("reason") == "diverged"
-        and recovery_count > 0
-        and recovery_count >= cfg.max_recoveries
-    ):
-        stop_reason = {
-            "reason": "diverged_unrecovered",
-            "epoch": stop_reason["epoch"],
-            "recoveries_attempted": recovery_count,
-            "final_value": stop_reason.get("value"),
-            "best_before_final_divergence": stop_reason.get("best"),
-        }
+    )
 
     # ── persist final metrics summary ─────────────────────────────────
     summary = {
@@ -998,7 +1082,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "repeat at most 2; collapsed runs repeat indefinitely.")
     p.add_argument("--max-recoveries", type=int, default=3,
                    help="max divergence recovery attempts (0 disables recovery; "
-                        "each recovery restores the best checkpoint and halves LR)")
+                        "each recovery restores the best checkpoint and reduces LR)")
+    p.add_argument("--recovery-factor", type=float, default=0.5,
+                   help="multiplicative LR reduction per recovery attempt "
+                        "(e.g. 0.5 = halve; Nth recovery trains at factor^N × original LR)")
     p.add_argument("--min-N", type=int, default=50,
                    help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
@@ -1075,6 +1162,7 @@ def cfg_from_args(args) -> TrainConfig:
             lr_patience=lr_patience,
             max_lr_reductions=max_lr_reductions,
             max_recoveries=args.max_recoveries,
+            recovery_factor=args.recovery_factor,
         )
     except ValueError as exc:
         raise SystemExit(f"error: {exc}") from None
