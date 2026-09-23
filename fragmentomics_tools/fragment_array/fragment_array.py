@@ -338,6 +338,10 @@ class FragmentArray:
                 raise ValueError(
                     "Last covered base weights length should match data length"
                 )
+            if self.gc is not None and len(self.gc) != len(self.starts_0):
+                raise ValueError(
+                    f"gc length ({len(self.gc)}) must match fragment count ({len(self.starts_0)})"
+                )
             if self.fragment_strands is not None:
                 uq_strands = numpy.unique(self.fragment_strands)
                 if len(uq_strands) == 1 and uq_strands[0] == "N":
@@ -455,6 +459,13 @@ class FragmentArray:
         num_cytosines = numpy.concatenate([self.num_cytosines, other.num_cytosines])
         num_converted_cytosines = numpy.concatenate([self.num_converted_cytosines, other.num_converted_cytosines])
 
+        # gc handling: concatenate if both have gc, else None. Mixed gc/None produces
+        # None rather than a misaligned array — gc becomes "unavailable" for the merged
+        # result, which is semantically correct (we can't provide gc for all fragments).
+        if self.gc is not None and other.gc is not None:
+            gc = numpy.concatenate([self.gc, other.gc])
+        else:
+            gc = None
 
         assert (
             self.max_frag_len == other.max_frag_len
@@ -471,6 +482,7 @@ class FragmentArray:
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
+            gc=gc,
             validate_data=False,
         )
 
@@ -743,6 +755,10 @@ class FragmentArray:
             ]
         )
 
+        # GC fraction is invariant under reverse-complement (G↔C, A↔T swap),
+        # so values stay the same — only the order reverses to match fragment order.
+        gc = None if self.gc is None else self.gc[::-1]
+
         return self._replace(
             starts_0=starts_0[::-1],
             stops_0=stops_0[::-1],
@@ -754,6 +770,7 @@ class FragmentArray:
             num_converted_cpgs=self.num_converted_cpgs[::-1],
             num_cytosines=self.num_cytosines[::-1],
             num_converted_cytosines=self.num_converted_cytosines[::-1],
+            gc=gc,
             validate_data=False,
             is_flipped=(not self.is_flipped),
         )
@@ -990,6 +1007,10 @@ class FragmentArray:
         # will just be re-created as default in __init__.
         df = getattr(self, '_default_fields', set())
 
+        # gc is an optional field (None means "never fetched"), not default-allocated.
+        # Subset it when present.
+        gc = None if self.gc is None else self.gc[mask]
+
         return self._replace(
             starts_0=self.starts_0[mask],
             stops_0=self.stops_0[mask],
@@ -1001,6 +1022,7 @@ class FragmentArray:
             num_converted_cpgs=None if 'num_converted_cpgs' in df else self.num_converted_cpgs[mask],
             num_cytosines=None if 'num_cytosines' in df else self.num_cytosines[mask],
             num_converted_cytosines=None if 'num_converted_cytosines' in df else self.num_converted_cytosines[mask],
+            gc=gc,
             validate_data=validate_data,
         )
 
@@ -1607,6 +1629,15 @@ class RegionFragmentArray(FragmentArray):
         num_converted_cpgs = numpy.concatenate([self.num_converted_cpgs, other.num_converted_cpgs])
         num_cytosines = numpy.concatenate([self.num_cytosines, other.num_cytosines])
         num_converted_cytosines = numpy.concatenate([self.num_converted_cytosines, other.num_converted_cytosines])
+
+        # gc handling: concatenate if both have gc, else None. Mixed gc/None produces
+        # None rather than a misaligned array — gc becomes "unavailable" for the merged
+        # result, which is semantically correct (we can't provide gc for all fragments).
+        if self.gc is not None and other.gc is not None:
+            gc = numpy.concatenate([self.gc, other.gc])
+        else:
+            gc = None
+
         if region is None:
             return FragmentArray(
                 starts_0=starts_0,
@@ -1621,6 +1652,7 @@ class RegionFragmentArray(FragmentArray):
                 num_cytosines=num_cytosines,
                 num_converted_cytosines=num_converted_cytosines,
                 max_frag_len=max_frag_len,
+                gc=gc,
                 validate_data=False,
             )
         return RegionFragmentArray(
@@ -1636,6 +1668,7 @@ class RegionFragmentArray(FragmentArray):
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             region=region,
+            gc=gc,
             validate_data=False,
         )
 
