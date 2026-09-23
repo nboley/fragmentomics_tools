@@ -34,6 +34,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 
+import numpy as np
 import lightning as L
 import torch
 from lightning.pytorch.callbacks import (
@@ -51,6 +52,7 @@ from background_model.dataset import BackgroundTileDataset
 from background_model_core import (
     LOSSES,
     BackgroundModel,
+    BackgroundModelHybrid,
     BackgroundModelKEN,
     MaskedMultinomialNLLLoss,
     _prepare_mask,
@@ -60,6 +62,50 @@ DEFAULT_STORE = (
     "/efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr"
 )
 DEFAULT_RUNS_ROOT = "/efs/analytics/nathanboley/background_model/runs"
+
+# Track-to-FL-band mapping: which FL band each of the 12 tracks belongs to.
+# Layout: 2 strands × 2 FL bands × 3 coverage types
+# Tracks 0-2 = (+, short), 3-5 = (+, mono), 6-8 = (-, short), 9-11 = (-, mono)
+_TRACK_TO_BAND = torch.tensor([0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1])
+
+
+def _apply_fl_reweighting(loss_unweighted, fl_fracs, shape_logits, y, mask3,
+                           loss_fn, log_disp, loss_name):
+    """Recompute loss with per-sample, per-track FL band weighting.
+
+    Each sample's loss contribution is weighted by its own FL band fractions,
+    so tracks with more fragments in THAT sample's length distribution
+    contribute proportionally more to the gradient.
+
+    fl_fracs: (B, n_bands) — fraction of fragments in each FL band per sample
+    Returns: scalar weighted loss (with gradients)
+    """
+    B, C, L = shape_logits.shape
+    band_idx = _TRACK_TO_BAND.to(shape_logits.device)  # (C,)
+    # Per-sample, per-track weights
+    w = fl_fracs[:, band_idx]  # (B, C)
+    w = w / w.sum(dim=1, keepdim=True) * C  # normalize per sample
+
+    # Compute per-sample, per-track multinomial NLL inline
+    sl = shape_logits
+    if mask3 is not None:
+        sl = sl.masked_fill(~mask3, float("-inf"))
+    logp = torch.log_softmax(sl, dim=-1)
+    if mask3 is not None:
+        logp = logp.masked_fill(~mask3, 0.0)
+    N = y.sum(dim=-1).clamp(min=1.0)  # (B, C)
+    nll = -(y * logp).sum(dim=-1) / N  # (B, C) per-sample per-track
+
+    if loss_name != "multinomial" and log_disp is not None:
+        # For NB-offset: use the full NB loss per sample per track.
+        # Fall back to the unweighted loss — FL reweighting is most
+        # important for shape learning (multinomial component).
+        # TODO: implement per-sample NB loss if needed.
+        return loss_unweighted
+
+    # Weighted mean: each (sample, track) pair weighted by that sample's
+    # FL band fraction for that track's band
+    return (nll * w).sum() / (B * C)
 
 
 # --------------------------------------------------------------------------
@@ -75,7 +121,11 @@ class InstrumentedBackgroundModel(BackgroundModel):
     """
 
     def _step(self, batch, log_name):
-        x, y, mask = batch
+        if len(batch) == 4:
+            x, y, mask, fl_fracs = batch
+        else:
+            x, y, mask = batch
+            fl_fracs = None
         mask3 = _prepare_mask(mask, y)
         shape_logits, dispersion_bp = self(x)
 
@@ -85,6 +135,13 @@ class InstrumentedBackgroundModel(BackgroundModel):
         else:
             log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
             loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+
+        # FL-conditioned per-track reweighting: scale the loss by each
+        # sample's FL band fractions so tracks with more fragments in that
+        # sample's length distribution contribute proportionally more.
+        if fl_fracs is not None:
+            loss = _apply_fl_reweighting(loss, fl_fracs, shape_logits, y, mask3,
+                                         self.loss_fn, log_disp, self.hparams.loss)
 
         self.log(log_name, loss, prog_bar=True, sync_dist=True)
         self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
@@ -147,13 +204,22 @@ class InstrumentedBackgroundModel(BackgroundModel):
             self.log("grad_2norm", total, prog_bar=False)
 
 
-class InstrumentedBackgroundModelKEN(BackgroundModelKEN):
-    """BackgroundModelKEN + per-track loss, dispersion-trajectory and grad-norm
-    logging.  Mirrors InstrumentedBackgroundModel but for the KEN architecture.
+class _EmbeddingModelInstrumentation:
+    """Per-track loss, dispersion-trajectory, multinomial-NLL and grad-norm
+    logging for the embedding-based architectures (KEN and Hybrid).
+
+    Mirrors InstrumentedBackgroundModel.  These methods touch only
+    ``self.hparams.loss``, ``self.loss_fn``, ``self.output_tracks`` and
+    ``self._pooled_log_dispersion``, so they are architecture-agnostic — mix
+    into any model exposing that interface.
     """
 
     def _step(self, batch, log_name):
-        x, y, mask = batch
+        if len(batch) == 4:
+            x, y, mask, fl_fracs = batch
+        else:
+            x, y, mask = batch
+            fl_fracs = None
         mask3 = _prepare_mask(mask, y)
         shape_logits, dispersion_bp = self(x)
 
@@ -163,6 +229,10 @@ class InstrumentedBackgroundModelKEN(BackgroundModelKEN):
         else:
             log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
             loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+
+        if fl_fracs is not None:
+            loss = _apply_fl_reweighting(loss, fl_fracs, shape_logits, y, mask3,
+                                         self.loss_fn, log_disp, self.hparams.loss)
 
         self.log(log_name, loss, prog_bar=True, sync_dist=True)
         self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
@@ -213,6 +283,18 @@ class InstrumentedBackgroundModelKEN(BackgroundModelKEN):
         total = norms.get("grad_2.0_norm_total")
         if total is not None:
             self.log("grad_2norm", total, prog_bar=False)
+
+
+class InstrumentedBackgroundModelKEN(
+    _EmbeddingModelInstrumentation, BackgroundModelKEN
+):
+    """BackgroundModelKEN + training instrumentation."""
+
+
+class InstrumentedBackgroundModelHybrid(
+    _EmbeddingModelInstrumentation, BackgroundModelHybrid
+):
+    """BackgroundModelHybrid + training instrumentation."""
 
 
 # --------------------------------------------------------------------------
@@ -275,6 +357,45 @@ class TrainConfig:
     n_context_layers: int = 2
     context_kernel_size: int = 15
     weight_decay: float = 0.0
+    fl_dist_npz: str | None = None
+
+
+def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
+    """Load per-sample FL band fractions from an NPZ file.
+
+    Returns (n_samples_in_store, n_bands) float32 array where each row sums
+    to ~1 (the fraction of fragments in each FL band for that sample).
+    Samples are matched by index order in the store.
+    """
+    from background_model_core import FL_BANDS
+
+    data = np.load(fl_dist_npz)
+    fl_counts = data["counts"]        # (n_fl_samples, n_lengths)
+    fl_lengths = data["fragment_length"]  # (n_lengths,)
+
+    # For each FL sample, compute fraction in each band
+    n_fl = fl_counts.shape[0]
+    n_bands = len(FL_BANDS)
+    band_fracs = np.zeros((n_fl, n_bands), dtype=np.float32)
+    totals = fl_counts.sum(axis=1, keepdims=True).astype(np.float64)
+    totals = np.maximum(totals, 1.0)
+    for b, (lo, hi) in enumerate(FL_BANDS):
+        mask = (fl_lengths >= lo) & (fl_lengths < hi)
+        band_fracs[:, b] = fl_counts[:, mask].sum(axis=1) / totals.ravel()
+
+    # Match to store samples: the simulation assigns FL distributions to
+    # samples in order (sample 0 gets fl_dist 0, etc.). For real data,
+    # the mapping would come from the sample sheet.
+    import zarr
+    root = zarr.open_group(store_path, mode="r")
+    n_store_samples = root["samples/role"].shape[0]
+
+    if n_fl >= n_store_samples:
+        return band_fracs[:n_store_samples]
+    else:
+        # Fewer FL samples than store samples — tile cyclically
+        reps = (n_store_samples + n_fl - 1) // n_fl
+        return np.tile(band_fracs, (reps, 1))[:n_store_samples]
 
 
 def build_model(cfg: TrainConfig) -> L.LightningModule:
@@ -283,6 +404,16 @@ def build_model(cfg: TrainConfig) -> L.LightningModule:
             k=cfg.k, d_embed=cfg.d_embed, d_context=cfg.d_context,
             n_context_layers=cfg.n_context_layers,
             context_kernel_size=cfg.context_kernel_size,
+            loss=cfg.loss, learning_rate=cfg.lr, dropout=cfg.dropout,
+            weight_decay=cfg.weight_decay,
+            freeze_dispersion=cfg.freeze_dispersion,
+            dispersion_lr_scale=cfg.dispersion_lr_scale,
+            dispersion_window_size=cfg.dispersion_window_size,
+        )
+    if cfg.model == "hybrid":
+        return InstrumentedBackgroundModelHybrid(
+            k=cfg.k, d_embed=cfg.d_embed, n_kernels=cfg.n_kernels,
+            num_residual_layers=cfg.num_residual_layers,
             loss=cfg.loss, learning_rate=cfg.lr, dropout=cfg.dropout,
             weight_decay=cfg.weight_decay,
             freeze_dispersion=cfg.freeze_dispersion,
@@ -298,7 +429,8 @@ def build_model(cfg: TrainConfig) -> L.LightningModule:
     )
 
 
-def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: int = 1337):
+def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: int = 1337,
+                    fl_band_fracs=None):
     """train (jitter+RC ON) and val (center, no RC) datasets on the real store."""
     # Read tile_size from the store's own config so the harness works with any
     # tile size (production 16384 or simulation 2048).
@@ -314,6 +446,7 @@ def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: 
         min_N=min_N,
         train_mode=True,   # jitter + RC ON
         seed=seed,
+        fl_band_fracs=fl_band_fracs,
     )
     val_ds = BackgroundTileDataset(
         store_path=store,
@@ -323,6 +456,7 @@ def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: 
         min_N=min_N,
         train_mode=False,  # center crop, no RC
         seed=seed,
+        fl_band_fracs=fl_band_fracs,
     )
     return train_ds, val_ds
 
@@ -391,6 +525,12 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
             "context_kernel_size": cfg.context_kernel_size,
             "weight_decay": cfg.weight_decay,
         })
+    elif cfg.model == "hybrid":
+        meta.update({
+            "k": cfg.k,
+            "d_embed": cfg.d_embed,
+            "weight_decay": cfg.weight_decay,
+        })
     with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     return meta
@@ -433,7 +573,16 @@ def run_training(cfg: TrainConfig):
     L.seed_everything(cfg.seed, workers=True)
     run_dir = os.path.join(cfg.runs_root, cfg.run_name)
     model = build_model(cfg)
-    train_ds, val_ds = build_datasets(cfg.store, model, min_N=cfg.min_N, seed=cfg.seed)
+
+    # ── optional FL-conditioned loss reweighting ──────────────────────
+    fl_band_fracs = None
+    if cfg.fl_dist_npz is not None:
+        fl_band_fracs = _load_fl_band_fracs(cfg.fl_dist_npz, cfg.store)
+
+    train_ds, val_ds = build_datasets(
+        cfg.store, model, min_N=cfg.min_N, seed=cfg.seed,
+        fl_band_fracs=fl_band_fracs,
+    )
     meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
     train_loader, val_loader = build_loaders(
         train_ds, val_ds, cfg.batch_size, cfg.num_workers
@@ -504,13 +653,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dispersion-window-size", type=int, default=256,
                    help="dispersion pooling window in bp (1 = per-base, 256 = default)")
     # KEN model selection and hyperparameters
-    p.add_argument("--model", choices=["cnn", "ken"], default="cnn")
-    p.add_argument("--k", type=int, default=6, help="k-mer size (KEN only)")
+    p.add_argument("--model", choices=["cnn", "ken", "hybrid"], default="cnn")
+    p.add_argument("--k", type=int, default=6,
+                   help="k-mer size (KEN and hybrid only)")
     p.add_argument("--d-embed", type=int, default=64, help="embedding dimension (KEN only)")
     p.add_argument("--d-context", type=int, default=128, help="context conv channels (KEN only)")
     p.add_argument("--n-context-layers", type=int, default=2, help="number of context conv layers (KEN only)")
     p.add_argument("--context-kernel-size", type=int, default=15, help="context conv kernel size (KEN only)")
     p.add_argument("--weight-decay", type=float, default=0.0, help="L2 on embedding table (KEN only)")
+    p.add_argument("--fl-dist-npz", default=None,
+                   help="path to per-sample FL distribution NPZ (gw_fldist_*.npz); "
+                        "enables FL-conditioned loss reweighting per track")
     return p
 
 
@@ -547,6 +700,7 @@ def cfg_from_args(args) -> TrainConfig:
         n_context_layers=args.n_context_layers,
         context_kernel_size=args.context_kernel_size,
         weight_decay=args.weight_decay,
+        fl_dist_npz=args.fl_dist_npz,
     )
 
 

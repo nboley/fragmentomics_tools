@@ -1040,6 +1040,288 @@ class BackgroundModelKEN(L.LightningModule):
         return {"probs": probs, "log_dispersion": log_dispersion}
 
 
+class BackgroundModelHybrid(L.LightningModule):
+    """K-mer embedding + one-hot conv stem, fused into a dilated ResNet trunk.
+
+    Two parallel input representations are concatenated on the channel axis
+    and fed to the dilated residual stack:
+
+      * **k-mer embedding** — an exact ``Embedding`` lookup of the k-mer
+        centered on each position.  Supplies the combinatorial cut-site
+        weight that a convolution over one-hot bases can only approximate.
+      * **conv stem** — ``Conv1d`` over the one-hot sequence.  Supplies what
+        a fixed-width lookup cannot: variable-width motifs, partial matches,
+        positional base preferences.
+
+    The dilated residual blocks then aggregate both over a long receptive
+    field, which is what GC x fragment-length bias requires (fragments span
+    40-175 bp, far beyond the k-mer itself).  Residual skip connections carry
+    the local signal through largely intact while the dilated branch adds
+    contextual corrections — matching the structure of the bias: cut-site
+    weight is the dominant term, GC x FL a modulation on top.
+
+    RC weight tying is applied to the embedding (each k-mer shares a row with
+    its reverse complement); the conv branch relies on RC data augmentation,
+    as in ``BackgroundModel``.
+    """
+
+    def __init__(
+        self,
+        output_tracks: Optional[List[str]] = None,
+        k: int = 6,
+        d_embed: int = 64,
+        n_kernels: int = 128,
+        kernel_size: int = 32,
+        num_residual_layers: int = 3,
+        dropout: float = 0.15,
+        learning_rate: float = 1e-3,
+        loss: str = "multinomial",
+        dispersion_window_size: int = 256,
+        log_dispersion_init: float = 7.0,
+        max_dispersion_ratio: Optional[float] = 2.0,
+        clamp_margin: float = 1.0,
+        freeze_dispersion: bool = False,
+        dispersion_lr_scale: float = 1.0,
+        weight_decay: float = 0.0,
+        block_kwargs: Optional[dict] = None,
+    ):
+        """
+        :param k: k-mer width for the embedding branch.  Must not exceed
+            ``kernel_size`` — the conv stem trims more than the k-mer unfold,
+            so the embedding output is center-cropped down to match it.
+        :param d_embed: embedding dimension per k-mer.
+        :param n_kernels: channel count for the conv stem and the residual
+            trunk.  The concatenated (n_kernels + d_embed) channels are
+            projected back to n_kernels by a 1x1 conv before the trunk.
+        :param weight_decay: applied to the embedding table only; the rest of
+            the network trains unregularized.
+        """
+        super().__init__()
+        if loss not in LOSSES:
+            raise ValueError(f"loss must be one of {LOSSES} (got '{loss}')")
+        if k > kernel_size:
+            raise ValueError(
+                f"k ({k}) must not exceed kernel_size ({kernel_size}): the "
+                f"embedding branch is center-cropped to the conv stem length"
+            )
+        if output_tracks is None:
+            output_tracks = list(DEFAULT_OUTPUT_TRACKS)
+        for t in output_tracks:
+            track_name_to_index_key(t)
+        self.save_hyperparameters()
+        self.output_tracks = output_tracks
+
+        n_tracks = len(output_tracks)
+        vocab_size = 4 ** k
+
+        # -- embedding branch ---------------------------------------------
+        self.register_buffer(
+            "_powers",
+            4 ** torch.arange(k - 1, -1, -1, dtype=torch.long),
+        )
+        rc_perm = rc_kmer_permutation(k)
+        canonical = np.minimum(np.arange(vocab_size, dtype=np.int64), rc_perm)
+        _, to_canonical = np.unique(canonical, return_inverse=True)
+        self.register_buffer(
+            "_to_canonical",
+            torch.from_numpy(to_canonical.astype(np.int64)),
+        )
+        n_canonical = int(to_canonical.max()) + 1  # 2080 for k=6
+        self.embed = torch.nn.Embedding(n_canonical, d_embed)
+        self.embed_dropout = SpatialDropout(dropout)
+
+        # -- conv stem branch ---------------------------------------------
+        self.conv_stem = torch.nn.Sequential(
+            torch.nn.Conv1d(4, n_kernels, kernel_size, padding=0),
+            torch.nn.LeakyReLU(),
+            SpatialDropout(dropout),
+        )
+
+        # -- fusion + dilated trunk ----------------------------------------
+        resolved_block_kwargs = dict(
+            activation=torch.nn.LeakyReLU,
+            activation_post_sum=True,
+            skip_batchnorm=True,
+            preact_residual_normalization=False,
+        )
+        resolved_block_kwargs.update(block_kwargs or {})
+        assert resolved_block_kwargs.get("padding", 0) == 0, (
+            "block padding is fixed at 0: calc_input_region_size assumes "
+            "unpadded blocks"
+        )
+        resolved_block_kwargs["padding"] = 0
+
+        self.fuse = torch.nn.Conv1d(n_kernels + d_embed, n_kernels, 1)
+        self.trunk = torch.nn.Sequential(
+            *[
+                ResNetDilatedBlock(
+                    input_channels=n_kernels,
+                    profile_kernel_size=kernel_size,
+                    dilation_rate=2**i,
+                    **resolved_block_kwargs,
+                )
+                for i in range(1, num_residual_layers + 1)
+            ],
+        )
+
+        self.shape_head = torch.nn.Conv1d(n_kernels, n_tracks, kernel_size, padding=0)
+        self.dispersion_head = (
+            None
+            if loss == "multinomial"
+            else torch.nn.Conv1d(n_kernels, n_tracks, kernel_size, padding=0)
+        )
+
+        if loss == "multinomial":
+            self.loss_fn = MaskedMultinomialNLLLoss()
+        elif loss == "dirichlet_multinomial":
+            self.loss_fn = MaskedDirichletMultinomialNLLLoss()
+        else:
+            self.loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
+                max_dispersion_ratio=max_dispersion_ratio,
+                clamp_margin=clamp_margin,
+            )
+
+        if freeze_dispersion and self.dispersion_head is not None:
+            for p in self.dispersion_head.parameters():
+                p.requires_grad = False
+
+    # -- geometry ----------------------------------------------------------
+
+    def calc_input_region_size(self, output_region_size: int) -> int:
+        """Sequence length required to emit ``output_region_size`` positions.
+
+        The conv stem and shape head each trim (kernel_size - 1); residual
+        block i trims (kernel_size - 1) * 2**i.  The embedding branch trims
+        only (k - 1) and is center-cropped down to the stem's length, so it
+        never binds — which is why ``k <= kernel_size`` is required.
+
+        Every term is even, so the result has the same parity as
+        ``output_region_size``; even tile sizes yield the even input length
+        the dataset requires, with no rounding.
+        """
+        ks = self.hparams.kernel_size
+        return (
+            output_region_size
+            + 2 * (ks - 1)
+            + sum(
+                (ks - 1) * 2**i
+                for i in range(1, self.hparams.num_residual_layers + 1)
+            )
+        )
+
+    # -- lightning ---------------------------------------------------------
+
+    def forward(self, x):
+        # x: (B, 4, L_in) one-hot
+        h_conv = self.conv_stem(x)                       # (B, n_kernels, L_c)
+
+        kmer_idx = one_hot_to_kmer_indices(x, self.hparams.k, self._powers)
+        canonical_idx = self._to_canonical[kmer_idx]
+        h_embed = self.embed(canonical_idx)              # (B, L_k, d_embed)
+        h_embed = h_embed.transpose(1, 2)                # (B, d_embed, L_k)
+        h_embed = self.embed_dropout(h_embed)
+
+        # The embedding branch trims (k-1); the stem trims (kernel_size-1).
+        # Center-crop the longer embedding output down to the stem's length.
+        target = h_conv.shape[-1]
+        diff = h_embed.shape[-1] - target
+        if diff > 0:
+            lo = diff // 2
+            h_embed = h_embed[..., lo:lo + target]
+
+        h = torch.cat([h_conv, h_embed], dim=1)          # (B, n_k + d_e, L_c)
+        h = self.fuse(h)                                 # (B, n_kernels, L_c)
+        h = self.trunk(h)
+
+        shape_logits = self.shape_head(h)
+        if self.dispersion_head is None:
+            return shape_logits, None
+        return shape_logits, self.dispersion_head(h)
+
+    def _pooled_log_dispersion(self, dispersion_bp, mask):
+        L = dispersion_bp.shape[-1]
+        if self.hparams.loss == "dirichlet_multinomial":
+            out_size = 1
+        else:
+            w = self.hparams.dispersion_window_size
+            assert L % w == 0, (
+                f"tile size {L} not divisible by dispersion_window_size {w}"
+            )
+            out_size = L // w
+        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
+        pooled = pooled + self.hparams.log_dispersion_init
+        if self.hparams.loss == "dirichlet_multinomial":
+            pooled = pooled.squeeze(-1)
+        return pooled
+
+    def _step(self, batch, log_name):
+        x, y, mask = batch
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+        if self.hparams.loss == "multinomial":
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._step(batch, "train_loss")
+
+    def validation_step(self, batch, batch_idx):
+        return self._step(batch, "val_loss")
+
+    def configure_optimizers(self):
+        lr = self.hparams.learning_rate
+        wd = self.hparams.weight_decay
+        scale = self.hparams.dispersion_lr_scale
+
+        embed_params = list(self.embed.parameters())
+        embed_ids = {id(p) for p in embed_params}
+
+        if (
+            self.dispersion_head is not None
+            and not self.hparams.freeze_dispersion
+            and scale != 1.0
+        ):
+            disp_params = list(self.dispersion_head.parameters())
+            disp_ids = {id(p) for p in disp_params}
+            main_params = [
+                p for p in self.parameters()
+                if id(p) not in embed_ids and id(p) not in disp_ids
+            ]
+            return torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+                {"params": disp_params, "lr": lr * scale, "weight_decay": 0.0},
+            ])
+        main_params = [p for p in self.parameters() if id(p) not in embed_ids]
+        return torch.optim.Adam([
+            {"params": embed_params, "lr": lr, "weight_decay": wd},
+            {"params": main_params, "lr": lr, "weight_decay": 0.0},
+        ])
+
+    @torch.no_grad()
+    def predict_profile(self, one_hot_seq: np.ndarray,
+                        mask: Optional[np.ndarray] = None):
+        self.eval()
+        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
+        shape_logits, dispersion_bp = self(x[None])
+        mask3 = None
+        if mask is not None:
+            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+            mask3 = mask3[None, None, :]
+            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
+        log_dispersion = None
+        if dispersion_bp is not None:
+            log_dispersion = (
+                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
+            )
+        return {"probs": probs, "log_dispersion": log_dispersion}
+
+
 # --------------------------------------------------------------------------
 # Deviation testing / calibration diagnostics (post-hoc, numpy/scipy)
 #
