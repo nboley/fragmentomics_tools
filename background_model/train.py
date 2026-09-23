@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import time
@@ -45,6 +46,7 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import CSVLogger
 from lightning.pytorch.utilities import grad_norm
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from torch.utils.data import DataLoader
 
 from background_model.config import TILE, PlumbingConfig
@@ -298,6 +300,63 @@ class InstrumentedBackgroundModelHybrid(
 
 
 # --------------------------------------------------------------------------
+# Divergence guard
+# --------------------------------------------------------------------------
+
+
+class DivergenceStop(Callback):
+    """Stop training once val_loss blows past its own best by ``factor``.
+
+    ``EarlyStopping(check_finite=True)`` only catches NaN/inf.  Observed
+    divergences stayed finite -- 8.73, 383, 8.4e8 -- so they ran on until the
+    epoch cap, burning GPU on garbage.
+
+    Threshold rationale, measured on the v3 runs:
+
+    ======================================  =================
+    run                                     max val/best
+    ======================================  =================
+    KEN, CNN multinomial, CNN frozen-NB     1.0001 - 1.0002
+    CNN multinomial lr=1e-2 (diverged)      380
+    Hybrid lr=5e-3 (diverged)               1.9e9
+    ======================================  =================
+
+    The default 1.10 sits ~500x above the healthy noise floor and ~3400x
+    below the smallest real divergence, so it cannot plausibly fire on a
+    healthy run.  Set ``factor=0`` to disable.
+    """
+
+    def __init__(self, factor: float = 1.10, monitor: str = "val_loss"):
+        self.factor = factor
+        self.monitor = monitor
+        self.best = None
+
+    def on_validation_end(self, trainer, pl_module):
+        if self.factor <= 0 or trainer.sanity_checking:
+            return
+        current = trainer.callback_metrics.get(self.monitor)
+        if current is None:
+            return
+        current = float(current)
+        if not math.isfinite(current):
+            trainer.should_stop = True
+            rank_zero_info(
+                f"[DivergenceStop] {self.monitor}={current} is not finite -- stopping."
+            )
+            return
+        if self.best is None or current < self.best:
+            self.best = current
+            return
+        if current > self.best * self.factor:
+            trainer.should_stop = True
+            rank_zero_info(
+                f"[DivergenceStop] {self.monitor}={current:.4f} exceeds "
+                f"{self.factor:.2f}x best ({self.best:.4f}) -- diverged, stopping "
+                f"at epoch {trainer.current_epoch}."
+            )
+
+
+# --------------------------------------------------------------------------
 # Throughput callback
 # --------------------------------------------------------------------------
 
@@ -358,6 +417,7 @@ class TrainConfig:
     context_kernel_size: int = 15
     weight_decay: float = 0.0
     fl_dist_npz: str | None = None
+    divergence_factor: float = 1.10
 
 
 def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
@@ -559,7 +619,8 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
         deterministic=True,
         default_root_dir=run_dir,
         logger=csv_logger,
-        callbacks=[ckpt, early, ThroughputCallback(cfg.batch_size),
+        callbacks=[ckpt, early, DivergenceStop(cfg.divergence_factor),
+                   ThroughputCallback(cfg.batch_size),
                    DeviceStatsMonitor(cpu_stats=False)],
         limit_train_batches=limit if limit is not None else 1.0,
         limit_val_batches=limit if limit is not None else 1.0,
@@ -639,6 +700,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--patience", type=int, default=5)
+    p.add_argument("--divergence-factor", type=float, default=1.10,
+                   help="stop if val_loss exceeds this multiple of its own "
+                        "best (0 disables). Healthy v3 runs peak at 1.0002x; "
+                        "diverged ones reach 380x+.")
     p.add_argument("--min-N", type=int, default=50,
                    help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
@@ -681,6 +746,7 @@ def cfg_from_args(args) -> TrainConfig:
         num_workers=args.num_workers,
         seed=args.seed,
         patience=args.patience,
+        divergence_factor=args.divergence_factor,
         store=args.store,
         runs_root=args.runs_root,
         resume_from=args.resume_from,
