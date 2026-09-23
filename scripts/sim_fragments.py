@@ -310,29 +310,46 @@ def load_regions(bed: str, n_regions: int, region_len: int, ref: str = "hg38"):
 def precompute_region(region: dict, region_len: int):
     """Per-region hexamer-index and cumulative-GC arrays (independent of w6).
 
-    Fetches the region sequence padded by HEX_HALF on each side so hexamer
-    windows for cuts at region-local 0..region_len resolve.  Returns:
-      fwd_cut  (region_len+1,)  forward hexamer index for a cut at region-local c
-      rc_cut   (region_len+1,)  reverse-complement hexamer index for that cut
-      valid    (region_len+1,)  window all-ACGT
-      cum_gc   (region_len+1,)  cumulative (#G+#C) over region-local [0, x)
+    Fetches the region sequence padded by HEX_HALF on each side (plus KMER-1
+    extra on the right for positional hexamers) so hexamer windows for cuts at
+    region-local 0..region_len resolve.  Returns:
+      fwd_cut       (region_len+1,)  forward hexamer index for a cut at c
+      rc_cut        (region_len+1,)  reverse-complement hexamer index for cut c
+      valid         (region_len+1,)  window all-ACGT
+      cum_gc        (region_len+1,)  cumulative (#G+#C) over region-local [0, x)
+      pos_hex       (region_len,)    hexamer index of 6-mer starting at position p
+      pos_hex_valid (region_len,)    True if the 6-mer at p is all-ACGT
     A fragment (start p, stop q) uses the left cut at c=p (forward hexamer) and
     the right/far cut at c=q (reverse-complement hexamer).
     """
     import pysam
     fa = pysam.FastaFile(FASTA)
+    # Extended fetch: +KMER-1 extra bases on right for positional hexamers
     seq = fa.fetch(region["contig"], region["gstart"] - HEX_HALF,
-                   region["gstop"] + HEX_HALF).upper()
+                   region["gstop"] + HEX_HALF + KMER - 1).upper()
     fa.close()
     seq_bytes = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
-    # seq_bytes[i] is region-local position (i - HEX_HALF).  A cut at region-local
-    # c spans bases [c-3, c+3) = seq_bytes[c : c+6], so fwd_cut[c] = window at c.
-    fwd_cut, rc_cut, valid = hexamer_indices(seq_bytes)  # length region_len+1
+
+    # Cut-site hexamers (existing): seq_bytes[c:c+6] for c in 0..region_len
+    cut_seq = seq_bytes[:region_len + 2 * HEX_HALF]
+    fwd_cut, rc_cut, valid = hexamer_indices(cut_seq)
     assert len(fwd_cut) == region_len + 1, (len(fwd_cut), region_len)
+
     core = seq_bytes[HEX_HALF:HEX_HALF + region_len]
     is_gc = (core == ord("G")) | (core == ord("C"))
     cum_gc = np.concatenate([[0], np.cumsum(is_gc)]).astype(np.int64)
-    return {"fwd_cut": fwd_cut, "rc_cut": rc_cut, "valid": valid, "cum_gc": cum_gc}
+
+    # Positional hexamers: 6-mer starting at region-local position p
+    # seq_bytes[HEX_HALF + p : HEX_HALF + p + 6] = genomic [gstart+p, gstart+p+6)
+    pos_fwd, _, pos_valid = hexamer_indices(seq_bytes[HEX_HALF:])
+    pos_hex = np.zeros(region_len, dtype=np.int64)
+    pos_hex_valid = np.zeros(region_len, dtype=bool)
+    n_pos = min(len(pos_fwd), region_len)
+    pos_hex[:n_pos] = pos_fwd[:n_pos]
+    pos_hex_valid[:n_pos] = pos_valid[:n_pos]
+
+    return {"fwd_cut": fwd_cut, "rc_cut": rc_cut, "valid": valid, "cum_gc": cum_gc,
+            "pos_hex": pos_hex, "pos_hex_valid": pos_hex_valid}
 
 
 # ── empirical inputs from the real h5 ─────────────────────────────────────
@@ -448,9 +465,153 @@ def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
             np.concatenate(all_stop), np.concatenate(all_strand).astype("U1"))
 
 
+def simulate_sample_nb(region_pre, target_counts, w6, gcbias, len_vals, len_p,
+                       region_len, rng, hexamer_r, gc_lookup_table=None):
+    """NB-overdispersed variant of simulate_sample.
+
+    Instead of drawing N fragments from a single categorical distribution
+    (multinomial), this generates per-position NB counts with hexamer-specific
+    dispersion, then samples fragment lengths from the per-position conditional
+    distribution.
+
+    For each region:
+      1. Compute per-(position, length) weights exactly as simulate_sample.
+      2. Marginalize over lengths → per-position weight w_pos[p].
+      3. Expected count: mu_p = N * w_pos[p] / sum(w_pos).
+      4. Draw count_p ~ NB(r=hexamer_r[hex_at_p], mu=mu_p).
+      5. For each position p with count_p > 0, sample count_p fragment
+         lengths from the conditional distribution p(L|p).
+      6. Assign strand 50/50.
+
+    The total fragment count per region is no longer exactly N; it varies
+    according to the NB variance, which is the desired overdispersion.
+    """
+    all_ridx, all_start, all_stop, all_strand = [], [], [], []
+
+    for ridx, (pre, target) in enumerate(zip(region_pre, target_counts)):
+        if target <= 0:
+            continue
+        fwd_cut = pre["fwd_cut"]; rc_cut = pre["rc_cut"]
+        valid = pre["valid"]; cum_gc = pre["cum_gc"]
+        pos_hex = pre["pos_hex"]
+        lw_all = w6[fwd_cut]
+        rw_all = w6[rc_cut]
+
+        # Build flat (start, stop, weight) arrays — same as simulate_sample
+        flat_p = []
+        flat_q = []
+        flat_w = []
+        for li, L in enumerate(len_vals):
+            if len_p[li] < 1e-8:
+                continue
+            L = int(L)
+            max_p = region_len - L
+            if max_p < 0:
+                continue
+            ok = valid[:max_p + 1] & valid[L:L + max_p + 1]
+            p_ok = np.nonzero(ok)[0]
+            if len(p_ok) == 0:
+                continue
+            q_ok = p_ok + L
+            gc_pct = 100.0 * (cum_gc[q_ok] - cum_gc[p_ok]) / L
+            if gc_lookup_table is not None:
+                gc_int = np.rint(gc_pct).astype(np.intp) + GCBias2D._GC_PAD
+                gc_w = gc_lookup_table[L, gc_int]
+            else:
+                gc_w = gcbias(L, gc_pct)
+            w = lw_all[p_ok] * rw_all[q_ok] * gc_w * len_p[li]
+            flat_p.append(p_ok)
+            flat_q.append(q_ok)
+            flat_w.append(w)
+
+        if not flat_w:
+            continue
+
+        all_p_arr = np.concatenate(flat_p)
+        all_q_arr = np.concatenate(flat_q)
+        all_w_arr = np.concatenate(flat_w)
+
+        # Per-position marginalized weights
+        w_pos = np.zeros(region_len, dtype=np.float64)
+        np.add.at(w_pos, all_p_arr, all_w_arr)
+        total_w = w_pos.sum()
+        if total_w <= 0:
+            continue
+
+        # Expected per-position counts
+        mu_pos = target * w_pos / total_w
+
+        # NB sampling per position
+        active = mu_pos > 1e-12
+        nb_counts = np.zeros(region_len, dtype=np.int64)
+        if active.any():
+            mu_a = mu_pos[active]
+            r_a = hexamer_r[pos_hex[active]]
+            # Guard: NaN → Poisson (r → ∞); very large r → Poisson
+            r_a = np.where(np.isfinite(r_a) & (r_a > 0), r_a, 1e8)
+            use_poisson = r_a >= 1e6
+            use_nb = ~use_poisson
+            counts_a = np.zeros(len(mu_a), dtype=np.int64)
+            if use_poisson.any():
+                counts_a[use_poisson] = rng.poisson(mu_a[use_poisson])
+            if use_nb.any():
+                p_nb = r_a[use_nb] / (r_a[use_nb] + mu_a[use_nb])
+                counts_a[use_nb] = rng.negative_binomial(r_a[use_nb], p_nb)
+            nb_counts[active] = counts_a
+
+        total_frags = nb_counts.sum()
+        if total_frags == 0:
+            continue
+
+        # Sort (start, stop, weight) by start position for fast lookup
+        sort_order = np.argsort(all_p_arr, kind="stable")
+        sorted_p = all_p_arr[sort_order]
+        sorted_q = all_q_arr[sort_order]
+        sorted_w = all_w_arr[sort_order]
+        boundaries = np.searchsorted(sorted_p, np.arange(region_len + 1))
+
+        # Sample fragment lengths per position from conditional distribution
+        starts = []
+        stops = []
+        active_pos = np.nonzero(nb_counts > 0)[0]
+        for p in active_pos:
+            n = int(nb_counts[p])
+            lo_b = boundaries[p]
+            hi_b = boundaries[p + 1]
+            if lo_b >= hi_b:
+                continue
+            w_seg = sorted_w[lo_b:hi_b]
+            q_seg = sorted_q[lo_b:hi_b]
+            w_sum = w_seg.sum()
+            if w_sum <= 0:
+                continue
+            idx = rng.choice(hi_b - lo_b, size=n, p=w_seg / w_sum)
+            starts.append(np.full(n, p, dtype=np.int32))
+            stops.append(q_seg[idx].astype(np.int32))
+
+        if not starts:
+            continue
+
+        s_arr = np.concatenate(starts)
+        e_arr = np.concatenate(stops)
+        strand = np.where(rng.random(size=len(s_arr)) < 0.5, "+", "-")
+
+        all_ridx.append(np.full(len(s_arr), ridx, dtype=np.int32))
+        all_start.append(s_arr)
+        all_stop.append(e_arr)
+        all_strand.append(strand)
+
+    if not all_ridx:
+        return (np.empty(0, np.int32), np.empty(0, np.int32),
+                np.empty(0, np.int32), np.empty(0, "U1"))
+
+    return (np.concatenate(all_ridx), np.concatenate(all_start),
+            np.concatenate(all_stop), np.concatenate(all_strand).astype("U1"))
+
+
 def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
                          gcbias, len_vals, len_p_s, region_len,
-                         sample_seed, gc_lookup_table):
+                         sample_seed, gc_lookup_table, hexamer_r=None):
     """Top-level helper for ProcessPoolExecutor (must be picklable).
 
     ``len_p_s`` is the per-sample fragment-length pmf (may differ across
@@ -458,6 +619,10 @@ def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
     """
     w6_s = w6 * np.exp(log_jitter_s)
     srng = np.random.default_rng(int(sample_seed))
+    if hexamer_r is not None:
+        return simulate_sample_nb(region_pre, target_counts_s, w6_s, gcbias,
+                                  len_vals, len_p_s, region_len, srng,
+                                  hexamer_r, gc_lookup_table=gc_lookup_table)
     return simulate_sample(region_pre, target_counts_s, w6_s, gcbias,
                            len_vals, len_p_s, region_len, srng,
                            gc_lookup_table=gc_lookup_table)
@@ -467,7 +632,7 @@ def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
 
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         heldout_h5, region_len=REGION_LEN, real_store=None, workers=1,
-        fl_dist_npz=None):
+        fl_dist_npz=None, nb_dispersion=None):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
@@ -539,6 +704,19 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
     print(f"[sim] built GC bias lookup table {gc_lut.shape} ({time.time()-t0:.1f}s)",
           flush=True)
 
+    # Load hexamer NB dispersion if provided
+    hexamer_r = None
+    if nb_dispersion is not None:
+        with open(nb_dispersion) as f:
+            disp_data = json.load(f)
+        hexamer_r_list = disp_data["hexamer_r"]
+        hexamer_r = np.array([v if v is not None else np.nan
+                              for v in hexamer_r_list], dtype=np.float64)
+        n_valid = int(np.isfinite(hexamer_r).sum())
+        print(f"[sim] NB dispersion: {n_valid} valid hexamers, "
+              f"median r={np.nanmedian(hexamer_r):.1f} ({time.time()-t0:.1f}s)",
+              flush=True)
+
     # regime-B per-sample jitter of w6 (recorded as ground truth)
     if regime == "B":
         jitter_rng = np.random.default_rng(seed + 1)
@@ -560,7 +738,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
             ridx, start, stop, strand = _simulate_one_sample(
                 region_pre, target_counts[s], w6, log_jitter[s],
                 gcbias, len_vals, len_p_per_sample[s], region_len,
-                per_sample_seeds[s], gc_lut)
+                per_sample_seeds[s], gc_lut, hexamer_r=hexamer_r)
             np.savez(os.path.join(out_dir, f"sample_{s:03d}.npz"),
                      region_idx=ridx, start=start, stop=stop, strand=strand)
             total_frags += len(ridx)
@@ -575,7 +753,7 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
                     _simulate_one_sample,
                     region_pre, target_counts[s], w6, log_jitter[s],
                     gcbias, len_vals, len_p_per_sample[s], region_len,
-                    per_sample_seeds[s], gc_lut)
+                    per_sample_seeds[s], gc_lut, hexamer_r=hexamer_r)
                 futures[fut] = s
             for fut in concurrent.futures.as_completed(futures):
                 s = futures[fut]
@@ -594,12 +772,16 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
              region_len=np.int64(region_len))
 
     # ground truth
-    np.savez(os.path.join(out_dir, "ground_truth.npz"),
-             w6=w6, log_jitter=log_jitter, target_counts=target_counts,
-             real_counts=real_counts, len_vals=len_vals,
-             len_p_per_sample=len_p_per_sample,
-             bias_grid=gcbias.grid, bias_lengths=gcbias.lengths,
-             bias_gc_percents=gcbias.gc_percents, rc_perm=RC_PERM)
+    gt_kwargs = dict(
+        w6=w6, log_jitter=log_jitter, target_counts=target_counts,
+        real_counts=real_counts, len_vals=len_vals,
+        len_p_per_sample=len_p_per_sample,
+        bias_grid=gcbias.grid, bias_lengths=gcbias.lengths,
+        bias_gc_percents=gcbias.gc_percents, rc_perm=RC_PERM,
+    )
+    if hexamer_r is not None:
+        gt_kwargs["hexamer_r"] = hexamer_r
+    np.savez(os.path.join(out_dir, "ground_truth.npz"), **gt_kwargs)
     gt_json = dict(
         regime=regime, n_samples=n_samples, seed=seed,
         w6_dynamic_range=w6_dynamic_range,
@@ -611,6 +793,9 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         training_tiles=TRAINING_TILES,
         per_sample_fl=fl_dist_npz is not None,
         fl_dist_npz=fl_dist_npz or "",
+        nb_dispersion=nb_dispersion or "",
+        nb_dispersion_median_r=(float(np.nanmedian(hexamer_r))
+                                if hexamer_r is not None else None),
         surface_for_simulation="bias_grid_2d_row_centred",
         extrapolation_policy=gcbias.extrapolation_policy,
         acceptance_normaliser=float((w6.max() ** 2) * gcbias.max_bias),
@@ -904,6 +1089,10 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=1,
                     help="number of parallel workers for sample simulation "
                          "(default 1 = sequential)")
+    ap.add_argument("--nb-dispersion", default=None,
+                    help="path to hexamer_dispersion.json (from "
+                         "fit_hexamer_dispersion.py). When provided, per-position "
+                         "counts are drawn from NB(r, mu) instead of multinomial.")
     ap.add_argument("--validate", action="store_true",
                     help="run the four validation gates after simulating")
     ap.add_argument("--validate-only", metavar="DIR",
@@ -919,7 +1108,8 @@ def main(argv=None):
                   args.n_regions, args.out_root, args.heldout_h5,
                   region_len=args.region_len,
                   real_store=args.real_store, workers=args.workers,
-                  fl_dist_npz=args.fl_dist_npz)
+                  fl_dist_npz=args.fl_dist_npz,
+                  nb_dispersion=args.nb_dispersion)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))
