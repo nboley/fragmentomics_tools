@@ -510,7 +510,7 @@ implied by the tables in §2-§8.**
 | R2 | `drop_unlabeled_records` undefined, on a default path | **RESOLVED by deletion** — the whole binary-labeling API removed; R6 and R7 were defects in the same method and went with it | `7a7220c` |
 | R3 | empty-intersection coverage returns wrong-shaped array | **OPEN** | — |
 | R4, R8, R10, R14 | resize/binning boundary conditions | **OPEN** | — |
-| R5 | fragment mask uses OR where AND intended | **OPEN — domain owner** | — |
+| R5 | fragment mask uses OR where AND intended | **FIXED** with explicit owner approval — see §11.7 | `ab2132c` |
 | R6, R7 | dead `label_column` param, `inplace` not honoured | **RESOLVED by deletion** — both were in `set_binary_label` | `7a7220c` |
 | R11 | `resize_regions` logs a discard warning even when nothing was discarded | **OPEN** (low) | — |
 | R12, R13 | strict thresholds, no `random_state` | **RESOLVED by deletion** — both lived in the deleted labeling methods | `7a7220c` |
@@ -609,7 +609,7 @@ that exact file (§9.4).
 
 Highest-value remaining work, in order:
 
-1. **The three domain-owner findings** — R5 (OR vs AND fragment mask), S5 (median named `mean_fragment_counts`), S4 (duplicate sample_ids silently dropped). These alter scientific output and were deliberately not changed. R12 was a fourth until the method containing it was deleted.
+1. **The two remaining domain-owner findings** — S5 (median returned under the name `mean_fragment_counts`) and S4 (duplicate sample_ids silently dropped). Both alter scientific output and remain unchanged. R5 was a third until it was fixed (§11.7); R12 was a fourth until the method containing it was deleted.
 2. **`test_dataframe.py`** — 26 tests, blocked on the synthetic-fixture decision in §9.4.
 3. **The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer and the labeling API were.
 
@@ -660,3 +660,46 @@ confidence among the reviewing agents. Execution made that concrete:
 - **One "library regression" was the opposite.** The fragment-count failures looked like 2.13.3 breaking inclusion; the fragment turned out to be present in the BAM *and* the h5, clean by every criterion, and absent only from a hardcoded array. The tests were asserting a bug that had since been fixed.
 
 The general lesson, and the reason §1 outranked everything: **a codebase with no feedback loop accumulates defects that no amount of reading will find.**
+
+## 11.7 R5 — the fragment weight mask (fixed with owner approval)
+
+Each `pred_dist.*` column is a weight track for one (strand, fl_band,
+coverage_type) combination. A fragment should receive that track's weights only
+if it is in the band **and** on the strand. The mask used OR.
+
+The length line turned out to be **accidentally correct**: `&` binds tighter
+than `|`, so `mask | (lengths >= lb) & (lengths <= ub)` parses as
+`False | in_band`, and the leading `mask |` is a no-op that merely *reads* as
+accumulation. That no-op is most likely what disguised the real defect on the
+next line, by making the two conditions look symmetric and deliberate.
+
+Measured, band 40-65, strand `+`:
+
+```
+lengths [50, 50, 200, 200], strands [+, -, +, -]
+after length line : [ T  T  F  F]
+after strand line : [ T  T  T  F]   <- OR
+intended          : [ T  F  F  F]   <- AND
+```
+
+A 200 bp fragment, far outside the band, was selected for the `(+, 40-65)`
+track purely because it was on the plus strand. The loop overwrites
+`attr[mask]` once per combination, so the weight a fragment ended up with
+depended on **iteration order**.
+
+The strandless (`.`) branch skips the strand clause entirely, leaving the band
+as the only filter. That is correct, and is now pinned by a test so the fix
+cannot silently change it.
+
+**Blast radius was nil.** `set_fragment_array_weights` has zero callers in this
+library and none in `biomarker`, `biomarker-pipeline` or `biomarker-projects`;
+the sibling `_set_fragment_array_weights_from_pred_record` is dead behind an
+`assert False`; and both import from `bias_correction/`, which `CLAUDE.md`
+marks superseded. No published result can have been affected. An earlier
+revision of this document implied otherwise — that was speculation stated as
+fact, and it is corrected here.
+
+Both copies were fixed, including the dead one, so the defect cannot return
+with it. `test/test_fragment_weight_mask.py` adds 5 tests; against the pre-fix
+code **4 fail and the strandless one passes**, which is the expected signature
+of a fix that touches only the strand clause.
