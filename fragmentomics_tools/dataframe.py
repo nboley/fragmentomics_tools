@@ -1907,7 +1907,9 @@ def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_ex
                 mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
                 mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
                 if strand in '-+':
-                    mask = (mask | (fragment_array.fragment_strands == strand))
+                    # AND, not OR: a fragment must be in this length band *and*
+                    # on this strand to receive this track's weights.
+                    mask = (mask & (fragment_array.fragment_strands == strand))
                 means = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
                 weights = means.mean()/means
                 count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
@@ -1942,7 +1944,9 @@ def _set_fragment_array_weights_from_weights_record(fragment_array, record, left
                 mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
                 mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
                 if strand in '-+':
-                    mask = (mask | (fragment_array.fragment_strands == strand))
+                    # AND, not OR: a fragment must be in this length band *and*
+                    # on this strand to receive this track's weights.
+                    mask = (mask & (fragment_array.fragment_strands == strand))
                 weights = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
                 count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
                 assert (count_indices >= 0).all()
