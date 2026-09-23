@@ -422,10 +422,17 @@ def test_stall_patience_zero_accepted():
 # --------------------------------------------------------------------------
 
 # Minimal required fields for direct TrainConfig construction.
+# `patience` is DERIVED from the LR schedule, so pin it to the same expression
+# cfg_from_args uses rather than a literal — a bare 19 silently drifts out of
+# agreement the moment lr_patience or max_lr_reductions changes.
+_LR_PATIENCE = TrainConfig.lr_patience
+_MAX_LR_REDUCTIONS = TrainConfig.max_lr_reductions
+_DERIVED_PATIENCE = (_LR_PATIENCE + 1) * _MAX_LR_REDUCTIONS + _LR_PATIENCE
+
 _REQUIRED = dict(
     loss="multinomial", run_name="t", max_epochs=10, batch_size=8,
     lr=1e-4, limit_batches=None, num_workers=0, seed=1337,
-    patience=19, store="/tmp/fake.zarr", runs_root="/tmp/runs",
+    patience=_DERIVED_PATIENCE, store="/tmp/fake.zarr", runs_root="/tmp/runs",
     resume_from=None,
 )
 

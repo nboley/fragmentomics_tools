@@ -1109,7 +1109,7 @@ PYTHONPATH=. python -m background_model.train \
     --model ken --k 6 --d-embed 64 --d-context 128 \
     --n-context-layers 2 --context-kernel-size 15 \
     --loss multinomial --lr 1e-3 --batch-size 64 \
-    --precision bf16-mixed --lr-patience 4 --max-lr-reductions 2 --max-epochs 200 \
+    --precision bf16-mixed --lr-patience 4 --max-lr-reductions 3 --max-epochs 200 \
     --store /efs/analytics/nathanboley/background_model/simulation_v2/stores/sim_store_B.zarr \
     --runs-root /efs/analytics/nathanboley/background_model/simulation_v2/runs \
     --run-name sim_v2_B_ken6_multinomial \
@@ -1261,7 +1261,7 @@ PYTHONPATH=. python -m background_model.train \
     --model ken --k 6 --d-embed 64 --d-context 128 \
     --n-context-layers 2 --context-kernel-size 15 \
     --loss multinomial --lr 1e-3 --batch-size 64 \
-    --precision bf16-mixed --lr-patience 4 --max-lr-reductions 2 --max-epochs 200 \
+    --precision bf16-mixed --lr-patience 4 --max-lr-reductions 3 --max-epochs 200 \
     --store /efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr \
     --runs-root /efs/analytics/nathanboley/background_model/runs \
     --run-name ken6_multinomial_real \

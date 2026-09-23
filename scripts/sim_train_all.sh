@@ -25,7 +25,7 @@ for LOSS in multinomial dirichlet_multinomial nb_offset; do
         --store "$STORE" \
         --runs-root "$RUNS" \
         --max-epochs 200 \
-        --lr-patience 5 --max-lr-reductions 2 \
+        --lr-patience 4 --max-lr-reductions 3 \
         --batch-size 8 \
         --lr 1e-4 \
         --num-workers 2 \
