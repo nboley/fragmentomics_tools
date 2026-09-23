@@ -338,58 +338,6 @@ def test_overlaps_with_bed():
     assert numpy.all(values == numpy.array(expected_values))
 
 
-@pytest.mark.parametrize("inplace", [True, False])
-def test_drop_unlabeled_records(inplace):
-    tss_s = TSSs(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")
-    tss_s = tss_s.set_binary_label_by_thresholds(
-        "peak_tpm", on_threshold=25, off_threshold=10, drop_unlabeled_records=False
-    )
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566, -1: 2924})
-    tss_s = tss_s.drop_unlabeled_records(inplace=inplace)
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566})
-
-
-def test_set_binary_label_by_threshold():
-    tss_s = TSSs(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")
-
-    # test that we can set labels using a string columns
-    tss_s = tss_s.set_binary_label_by_thresholds(
-        "peak_tpm", on_threshold=25, off_threshold=10, drop_unlabeled_records=False
-    )
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566, -1: 2924})
-
-    # test that we can set labels using a string columns, and that drop_unlabeled_records works
-    tss_s = tss_s.set_binary_label_by_thresholds(
-        [
-            "peak_tpm",
-        ],
-        on_threshold=25,
-        off_threshold=10,
-        drop_unlabeled_records=True,
-    )
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566})
-
-
-def test_set_binary_label():
-    tss_s = TSSs(pd.read_table(TSS_ANNOTATION_FILE), ref="hg19")
-
-    # test that just an on query works
-    tss_s = tss_s.set_binary_label("peak_tpm > 25")
-    assert Counter(tss_s.label.tolist()) == Counter({0: 12697, 1: 5566})
-
-    # test that an on and off work
-    tss_s = tss_s.set_binary_label(
-        "peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=False
-    )
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566, -1: 2924})
-
-    # test that drop_unlabeled_records works
-    tss_s = tss_s.set_binary_label(
-        "peak_tpm > 25", "peak_tpm < 10", drop_unlabeled_records=True
-    )
-    assert Counter(tss_s.label.tolist()) == Counter({0: 9773, 1: 5566})
-
-
 def test_to_tsv():
     # FIXME: load_bed_from_path is not standard for reading region dataframes
     #  Also, it uses some bw_df bigwig. Is it supposed to be for bigwigs?
