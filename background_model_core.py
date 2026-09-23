@@ -588,6 +588,36 @@ class MaskedNegativeBinomialOffsetNLLLoss(torch.nn.Module):
 LOSSES = ("multinomial", "dirichlet_multinomial", "nb_offset")
 
 
+def _with_lr_schedule(optimizer, hparams):
+    """Wrap an optimizer with ReduceLROnPlateau, returning the Lightning dict.
+
+    Computes per-group ``min_lr`` from each group's initial LR so that the
+    inter-group ratios (e.g. ``dispersion_lr_scale``) are preserved at the
+    floor.  A scalar ``min_lr`` would flatten all groups to a single value
+    and silently destroy the ratio — see design §3.1 / §5.0.
+    """
+    factor = hparams.lr_factor
+    max_reductions = hparams.max_lr_reductions
+    patience = hparams.lr_patience
+    min_lrs = [
+        g["lr"] * factor ** max_reductions for g in optimizer.param_groups
+    ]
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=factor,
+        patience=patience,
+        min_lr=min_lrs,
+    )
+    return {
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": scheduler,
+            "monitor": "val_loss",
+        },
+    }
+
+
 class BackgroundModel(L.LightningModule):
     """Sequence -> per-position profile logits (+ per-window dispersion).
 
@@ -619,6 +649,9 @@ class BackgroundModel(L.LightningModule):
         clamp_margin: float = 1.0,
         freeze_dispersion: bool = False,
         dispersion_lr_scale: float = 1.0,
+        lr_patience: int = 4,
+        max_lr_reductions: int = 3,
+        lr_factor: float = 0.5,
         block_kwargs: Optional[dict] = None,
     ):
         """
@@ -779,13 +812,15 @@ class BackgroundModel(L.LightningModule):
             disp_ids = {id(p) for p in self.dispersion_head.parameters()}
             main_params = [p for p in self.parameters() if id(p) not in disp_ids]
             disp_params = list(self.dispersion_head.parameters())
-            return torch.optim.Adam([
+            optimizer = torch.optim.Adam([
                 {"params": main_params, "lr": lr},
                 {"params": disp_params, "lr": lr * scale},
             ])
-        return torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.parameters()), lr=lr
-        )
+        else:
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, self.parameters()), lr=lr
+            )
+        return _with_lr_schedule(optimizer, self.hparams)
 
     # -- inference ---------------------------------------------------------
 
@@ -856,6 +891,9 @@ class BackgroundModelKEN(L.LightningModule):
         freeze_dispersion: bool = False,
         dispersion_lr_scale: float = 1.0,
         weight_decay: float = 0.0,
+        lr_patience: int = 4,
+        max_lr_reductions: int = 3,
+        lr_factor: float = 0.5,
     ):
         super().__init__()
         if loss not in LOSSES:
@@ -1008,17 +1046,19 @@ class BackgroundModelKEN(L.LightningModule):
             disp_ids = {id(p) for p in self.dispersion_head.parameters()}
             main_params = [p for p in self.parameters()
                           if id(p) not in embed_ids and id(p) not in disp_ids]
-            return torch.optim.Adam([
+            optimizer = torch.optim.Adam([
                 {"params": embed_params, "lr": lr, "weight_decay": wd},
                 {"params": main_params, "lr": lr, "weight_decay": 0.0},
                 {"params": list(self.dispersion_head.parameters()),
                  "lr": lr * scale, "weight_decay": 0.0},
             ])
-        main_params = [p for p in self.parameters() if id(p) not in embed_ids]
-        return torch.optim.Adam([
-            {"params": embed_params, "lr": lr, "weight_decay": wd},
-            {"params": main_params, "lr": lr, "weight_decay": 0.0},
-        ])
+        else:
+            main_params = [p for p in self.parameters() if id(p) not in embed_ids]
+            optimizer = torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+            ])
+        return _with_lr_schedule(optimizer, self.hparams)
 
     @torch.no_grad()
     def predict_profile(self, one_hot_seq: np.ndarray,
@@ -1083,6 +1123,9 @@ class BackgroundModelHybrid(L.LightningModule):
         freeze_dispersion: bool = False,
         dispersion_lr_scale: float = 1.0,
         weight_decay: float = 0.0,
+        lr_patience: int = 4,
+        max_lr_reductions: int = 3,
+        lr_factor: float = 0.5,
         block_kwargs: Optional[dict] = None,
     ):
         """
@@ -1291,16 +1334,18 @@ class BackgroundModelHybrid(L.LightningModule):
                 p for p in self.parameters()
                 if id(p) not in embed_ids and id(p) not in disp_ids
             ]
-            return torch.optim.Adam([
+            optimizer = torch.optim.Adam([
                 {"params": embed_params, "lr": lr, "weight_decay": wd},
                 {"params": main_params, "lr": lr, "weight_decay": 0.0},
                 {"params": disp_params, "lr": lr * scale, "weight_decay": 0.0},
             ])
-        main_params = [p for p in self.parameters() if id(p) not in embed_ids]
-        return torch.optim.Adam([
-            {"params": embed_params, "lr": lr, "weight_decay": wd},
-            {"params": main_params, "lr": lr, "weight_decay": 0.0},
-        ])
+        else:
+            main_params = [p for p in self.parameters() if id(p) not in embed_ids]
+            optimizer = torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+            ])
+        return _with_lr_schedule(optimizer, self.hparams)
 
     @torch.no_grad()
     def predict_profile(self, one_hot_seq: np.ndarray,

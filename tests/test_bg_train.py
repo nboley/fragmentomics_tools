@@ -11,7 +11,7 @@ import torch
 import pytest
 from lightning.pytorch.callbacks import ModelCheckpoint
 
-from background_model_core import BackgroundModel
+from background_model_core import BackgroundModel, _with_lr_schedule
 from background_model.train import (
     DivergenceStop,
     InstrumentedBackgroundModel,
@@ -368,18 +368,22 @@ def test_determine_stop_reason_early_stopped_inf_best_score():
 # --------------------------------------------------------------------------
 
 
-def test_patience_rejects_zero():
+def test_lr_patience_cli_default_and_override():
     p = build_arg_parser()
-    args = p.parse_args(["--loss", "multinomial", "--run-name", "t", "--patience", "0"])
-    with pytest.raises(SystemExit):
-        cfg_from_args(args)
+    required = ["--loss", "multinomial", "--run-name", "t"]
+    cfg = cfg_from_args(p.parse_args(required))
+    assert cfg.lr_patience == 4
+    assert cfg.max_lr_reductions == 3
+    # EarlyStopping patience derived: 4 * (3+1) = 16
+    assert cfg.patience == 16
 
-
-def test_patience_rejects_negative():
-    p = build_arg_parser()
-    args = p.parse_args(["--loss", "multinomial", "--run-name", "t", "--patience", "-1"])
-    with pytest.raises(SystemExit):
-        cfg_from_args(args)
+    cfg2 = cfg_from_args(p.parse_args(
+        required + ["--lr-patience", "3", "--max-lr-reductions", "1"]
+    ))
+    assert cfg2.lr_patience == 3
+    assert cfg2.max_lr_reductions == 1
+    # EarlyStopping patience derived: 3 * (1+1) = 6
+    assert cfg2.patience == 6
 
 
 def test_stall_patience_rejects_one():
@@ -421,7 +425,7 @@ def test_stall_patience_zero_accepted():
 _REQUIRED = dict(
     loss="multinomial", run_name="t", max_epochs=10, batch_size=8,
     lr=1e-4, limit_batches=None, num_workers=0, seed=1337,
-    patience=5, store="/tmp/fake.zarr", runs_root="/tmp/runs",
+    patience=16, store="/tmp/fake.zarr", runs_root="/tmp/runs",
     resume_from=None,
 )
 
@@ -447,9 +451,9 @@ def test_trainconfig_rejects_stall_patience_negative():
 
 
 def test_trainconfig_accepts_valid_defaults():
-    """Default patience=5 and stall_patience=5 must construct cleanly."""
+    """Default patience=16 (derived) and stall_patience=5 must construct cleanly."""
     cfg = TrainConfig(**_REQUIRED)
-    assert cfg.patience == 5
+    assert cfg.patience == 16
     assert cfg.stall_patience == 5
 
 
@@ -618,3 +622,140 @@ def test_build_trainer_includes_lr_monitor(tmp_path):
                    if isinstance(cb, LearningRateMonitor)]
     assert len(lr_monitors) == 1, "expected exactly one LearningRateMonitor"
     assert lr_monitors[0].logging_interval == "epoch"
+
+
+# --------------------------------------------------------------------------
+# Phase 2: ReduceLROnPlateau — per-group LR ratios, min_lr floor, derived patience
+# --------------------------------------------------------------------------
+
+
+class _FakeHparams:
+    """Minimal hparams namespace for _with_lr_schedule tests."""
+    def __init__(self, lr_patience=4, max_lr_reductions=3, lr_factor=0.5):
+        self.lr_patience = lr_patience
+        self.max_lr_reductions = max_lr_reductions
+        self.lr_factor = lr_factor
+
+
+def _make_multi_group_optimizer(lr=1e-2, scale=0.1):
+    """3-group optimizer mimicking hybrid: embed(lr,wd), main(lr,wd=0), disp(lr*scale,wd=0)."""
+    layers = [torch.nn.Linear(4, 4) for _ in range(3)]
+    optimizer = torch.optim.Adam([
+        {"params": list(layers[0].parameters()), "lr": lr, "weight_decay": 0.01},
+        {"params": list(layers[1].parameters()), "lr": lr, "weight_decay": 0.0},
+        {"params": list(layers[2].parameters()), "lr": lr * scale, "weight_decay": 0.0},
+    ])
+    return optimizer, layers
+
+
+def _simulate_plateau_reductions(optimizer, scheduler, n_bad_epochs):
+    """Feed n_bad_epochs of worsening val_loss to trigger reductions."""
+    for i in range(n_bad_epochs):
+        scheduler.step(100.0 + i)  # always worse
+
+
+def test_lr_ratios_survive_one_reduction():
+    """Per-group LR ratios are preserved after one ReduceLROnPlateau step."""
+    opt, _ = _make_multi_group_optimizer(lr=1e-2, scale=0.1)
+    hp = _FakeHparams(lr_patience=2, max_lr_reductions=3, lr_factor=0.5)
+    result = _with_lr_schedule(opt, hp)
+    scheduler = result["lr_scheduler"]["scheduler"]
+
+    # Record initial ratios
+    initial_lrs = [g["lr"] for g in opt.param_groups]
+    assert initial_lrs[0] == pytest.approx(1e-2)
+    assert initial_lrs[1] == pytest.approx(1e-2)
+    assert initial_lrs[2] == pytest.approx(1e-3)
+
+    # Trigger one reduction: patience=2 → step 0 sets best, steps 1-2
+    # are bad (patience countdown), step 3 triggers the reduction.
+    _simulate_plateau_reductions(opt, scheduler, 4)
+
+    reduced_lrs = [g["lr"] for g in opt.param_groups]
+    # Each group halved
+    assert reduced_lrs[0] == pytest.approx(5e-3)
+    assert reduced_lrs[1] == pytest.approx(5e-3)
+    assert reduced_lrs[2] == pytest.approx(5e-4)
+    # Ratios preserved
+    assert reduced_lrs[2] / reduced_lrs[0] == pytest.approx(0.1)
+
+
+def test_lr_ratios_hold_at_min_lr_floor():
+    """Per-group LR ratios are preserved when LR hits the min_lr floor.
+
+    This is the specific failure mode a scalar min_lr would cause: all
+    groups would converge to the same floor, destroying dispersion_lr_scale.
+    """
+    opt, _ = _make_multi_group_optimizer(lr=1e-2, scale=0.1)
+    hp = _FakeHparams(lr_patience=1, max_lr_reductions=2, lr_factor=0.5)
+    result = _with_lr_schedule(opt, hp)
+    scheduler = result["lr_scheduler"]["scheduler"]
+
+    # Drive LR to the floor: max_lr_reductions=2 → 2 halvings allowed
+    # patience=1 → 2 bad epochs per reduction
+    _simulate_plateau_reductions(opt, scheduler, 20)
+
+    floor_lrs = [g["lr"] for g in opt.param_groups]
+    # Floor = initial * factor^max_lr_reductions
+    assert floor_lrs[0] == pytest.approx(1e-2 * 0.25)  # 2.5e-3
+    assert floor_lrs[1] == pytest.approx(1e-2 * 0.25)
+    assert floor_lrs[2] == pytest.approx(1e-3 * 0.25)  # 2.5e-4
+    # Ratio preserved at the floor
+    assert floor_lrs[2] / floor_lrs[0] == pytest.approx(0.1)
+
+
+def test_reduction_cap_binds():
+    """LR does not go below initial * factor^max_lr_reductions."""
+    opt, _ = _make_multi_group_optimizer(lr=1e-2, scale=0.1)
+    hp = _FakeHparams(lr_patience=1, max_lr_reductions=3, lr_factor=0.5)
+    result = _with_lr_schedule(opt, hp)
+    scheduler = result["lr_scheduler"]["scheduler"]
+
+    # Feed many bad epochs — more than enough to exhaust all reductions
+    _simulate_plateau_reductions(opt, scheduler, 50)
+
+    lrs = [g["lr"] for g in opt.param_groups]
+    # 3 halvings: floor = initial * 0.5^3 = initial / 8
+    assert lrs[0] == pytest.approx(1e-2 / 8)
+    assert lrs[2] == pytest.approx(1e-3 / 8)
+
+
+def test_derived_early_stopping_patience_max_reductions_3():
+    """EarlyStopping patience = lr_patience * (max_lr_reductions + 1) = 4 * 4 = 16."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t",
+         "--lr-patience", "4", "--max-lr-reductions", "3"]
+    ))
+    assert cfg.patience == 16
+
+
+def test_derived_early_stopping_patience_max_reductions_1():
+    """EarlyStopping patience = lr_patience * (max_lr_reductions + 1) = 4 * 2 = 8."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t",
+         "--lr-patience", "4", "--max-lr-reductions", "1"]
+    ))
+    assert cfg.patience == 8
+
+
+def test_configure_optimizers_returns_scheduler():
+    """All three model classes return a scheduler dict from configure_optimizers."""
+    from background_model_core import BackgroundModelKEN, BackgroundModelHybrid
+
+    for cls, kw in [
+        (BackgroundModel, {"n_kernels": 8}),
+        (BackgroundModelKEN, {"d_embed": 8, "d_context": 8}),
+        (BackgroundModelHybrid, {"n_kernels": 8, "d_embed": 8}),
+    ]:
+        model = cls(loss="multinomial", learning_rate=1e-3,
+                    lr_patience=4, max_lr_reductions=3, lr_factor=0.5, **kw)
+        result = model.configure_optimizers()
+        assert isinstance(result, dict), f"{cls.__name__} should return a dict"
+        assert "optimizer" in result
+        assert "lr_scheduler" in result
+        sched_cfg = result["lr_scheduler"]
+        assert sched_cfg["monitor"] == "val_loss"
+        scheduler = sched_cfg["scheduler"]
+        assert isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)

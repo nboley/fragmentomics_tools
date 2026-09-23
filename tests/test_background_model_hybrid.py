@@ -227,7 +227,8 @@ def test_freeze_dispersion():
 
 def test_weight_decay_applies_only_to_embedding():
     model = tiny(weight_decay=0.01)
-    groups = model.configure_optimizers().param_groups
+    result = model.configure_optimizers()
+    groups = result["optimizer"].param_groups
     decayed = [g for g in groups if g["weight_decay"] > 0]
     assert len(decayed) == 1
     embed_ids = {id(p) for p in model.embed.parameters()}
@@ -236,7 +237,8 @@ def test_weight_decay_applies_only_to_embedding():
 
 def test_dispersion_lr_scale_creates_separate_group():
     model = tiny(loss="nb_offset", dispersion_lr_scale=0.1, learning_rate=1e-3)
-    groups = model.configure_optimizers().param_groups
+    result = model.configure_optimizers()
+    groups = result["optimizer"].param_groups
     assert len(groups) == 3
     lrs = sorted(g["lr"] for g in groups)
     assert lrs[0] == pytest.approx(1e-4)

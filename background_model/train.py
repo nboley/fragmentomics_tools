@@ -14,8 +14,8 @@ Usage::
         --max-epochs 10 --batch-size 8 --lr 1e-4
 
 CLI (see ``build_arg_parser``): ``--loss --run-name --max-epochs --batch-size
---lr --limit-batches`` plus ``--num-workers --seed --patience --store
---runs-root --resume-from`` conveniences.
+--lr --limit-batches`` plus ``--num-workers --seed --lr-patience
+--max-lr-reductions --store --runs-root --resume-from`` conveniences.
 
 Reproducibility contract: every run dir records ``config_hash``,
 ``split_version``, git sha and the full resolved config in ``run_meta.json``.
@@ -499,6 +499,9 @@ class TrainConfig:
     fl_dist_npz: str | None = None
     divergence_factor: float = 1.10
     stall_patience: int = 5
+    lr_patience: int = 4
+    max_lr_reductions: int = 3
+    lr_factor: float = 0.5
 
     def __post_init__(self):
         if self.patience < 1:
@@ -552,6 +555,11 @@ def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
 
 
 def build_model(cfg: TrainConfig) -> L.LightningModule:
+    lr_kw = dict(
+        lr_patience=cfg.lr_patience,
+        max_lr_reductions=cfg.max_lr_reductions,
+        lr_factor=cfg.lr_factor,
+    )
     if cfg.model == "ken":
         return InstrumentedBackgroundModelKEN(
             k=cfg.k, d_embed=cfg.d_embed, d_context=cfg.d_context,
@@ -562,6 +570,7 @@ def build_model(cfg: TrainConfig) -> L.LightningModule:
             freeze_dispersion=cfg.freeze_dispersion,
             dispersion_lr_scale=cfg.dispersion_lr_scale,
             dispersion_window_size=cfg.dispersion_window_size,
+            **lr_kw,
         )
     if cfg.model == "hybrid":
         return InstrumentedBackgroundModelHybrid(
@@ -572,6 +581,7 @@ def build_model(cfg: TrainConfig) -> L.LightningModule:
             freeze_dispersion=cfg.freeze_dispersion,
             dispersion_lr_scale=cfg.dispersion_lr_scale,
             dispersion_window_size=cfg.dispersion_window_size,
+            **lr_kw,
         )
     return InstrumentedBackgroundModel(
         loss=cfg.loss, learning_rate=cfg.lr, n_kernels=cfg.n_kernels,
@@ -579,6 +589,7 @@ def build_model(cfg: TrainConfig) -> L.LightningModule:
         freeze_dispersion=cfg.freeze_dispersion,
         dispersion_lr_scale=cfg.dispersion_lr_scale,
         dispersion_window_size=cfg.dispersion_window_size,
+        **lr_kw,
     )
 
 
@@ -667,6 +678,9 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "patience": cfg.patience,
         "divergence_factor": cfg.divergence_factor,
         "stall_patience": cfg.stall_patience,
+        "lr_patience": cfg.lr_patience,
+        "max_lr_reductions": cfg.max_lr_reductions,
+        "lr_factor": cfg.lr_factor,
         "n_train_pairs": len(train_ds),
         "n_val_pairs": len(val_ds),
         "plumbing_config": json.loads(train_ds.config.full_config_json()),
@@ -833,7 +847,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="training precision (bf16-mixed for ~2x speedup on A10G)")
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=1337)
-    p.add_argument("--patience", type=int, default=5)
+    p.add_argument("--lr-patience", type=int, default=4,
+                   help="epochs without val_loss improvement before cutting LR "
+                        "(ReduceLROnPlateau patience)")
+    p.add_argument("--max-lr-reductions", type=int, default=3,
+                   help="max number of LR halvings; EarlyStopping patience is "
+                        "derived as lr_patience * (max_lr_reductions + 1)")
     p.add_argument("--divergence-factor", type=float, default=1.10,
                    help="stop if val_loss exceeds this multiple of its own "
                         "best (0 disables the ratio check; non-finite "
@@ -875,6 +894,11 @@ def cfg_from_args(args) -> TrainConfig:
     limit = args.limit_batches
     if limit is not None and float(limit).is_integer() and limit >= 1:
         limit = int(limit)
+    lr_patience = args.lr_patience
+    max_lr_reductions = args.max_lr_reductions
+    # EarlyStopping patience derived from LR schedule: the worst case is
+    # lr_patience barren epochs per LR level × (max_lr_reductions + 1) levels.
+    patience = lr_patience * (max_lr_reductions + 1)
     try:
         return TrainConfig(
             loss=args.loss,
@@ -885,7 +909,7 @@ def cfg_from_args(args) -> TrainConfig:
             limit_batches=limit,
             num_workers=args.num_workers,
             seed=args.seed,
-            patience=args.patience,
+            patience=patience,
             divergence_factor=args.divergence_factor,
             stall_patience=args.stall_patience,
             store=args.store,
@@ -908,6 +932,8 @@ def cfg_from_args(args) -> TrainConfig:
             context_kernel_size=args.context_kernel_size,
             weight_decay=args.weight_decay,
             fl_dist_npz=args.fl_dist_npz,
+            lr_patience=lr_patience,
+            max_lr_reductions=max_lr_reductions,
         )
     except ValueError as exc:
         raise SystemExit(f"error: {exc}") from None
