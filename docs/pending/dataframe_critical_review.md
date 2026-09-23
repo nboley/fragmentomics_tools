@@ -503,15 +503,17 @@ implied by the tables in §2-§8.**
 | ID | Finding | Outcome | Commit |
 |---|---|---|---|
 | B1 | Required-column validation ineffective | **DOWNGRADED** Critical -> Low after measurement; closed no-action (§10) | `c3c7aeb` |
-| B2-B5 | `parallel_apply` hangs / crashes | **OPEN** — untested multiprocessing, unrecoverable hangs | — |
-| B6-B9 | mutation of caller frames, dead `rv`, mutable class defaults, no coverage | **OPEN** (low) | — |
+| B2-B5 | `parallel_apply` hangs / crashes | **FIXED** — internals replaced; hang confirmed by execution first, then eliminated. See §11.5 | `6e6583d`, `7501454`, `8b72221`, `3d52915`, `8e6d65a` |
+| B6, B7, B9 | mutation of caller frames, dead `rv`, no coverage | **FIXED** — `assign()` instead of in-place; dead `rv` removed with the old worker; 0 -> 21 tests | same as above |
+| B8 | mutable class-level list defaults (`_metadata = []` etc.) | **OPEN** (low) — latent footgun; all current subclasses reassign rather than mutate | — |
 | R1 | `split_on_column` queried literal `"column_name"` | **FIXED** + regression test | `062a7b8` |
-| R2 | `drop_unlabeled_records` undefined, on a default path | **OPEN** — needs implementing; tests define its contract | — |
+| R2 | `drop_unlabeled_records` undefined, on a default path | **RESOLVED by deletion** — the whole binary-labeling API removed; R6 and R7 were defects in the same method and went with it | `7a7220c` |
 | R3 | empty-intersection coverage returns wrong-shaped array | **OPEN** | — |
 | R4, R8, R10, R14 | resize/binning boundary conditions | **OPEN** | — |
 | R5 | fragment mask uses OR where AND intended | **OPEN — domain owner** | — |
-| R6, R7 | dead `label_column` param, `inplace` not honoured | **OPEN** | — |
-| R11-R13 | warning always logged, strict thresholds, no `random_state` | **OPEN** (low) | — |
+| R6, R7 | dead `label_column` param, `inplace` not honoured | **RESOLVED by deletion** — both were in `set_binary_label` | `7a7220c` |
+| R11 | `resize_regions` logs a discard warning even when nothing was discarded | **OPEN** (low) | — |
+| R12, R13 | strict thresholds, no `random_state` | **RESOLVED by deletion** — both lived in the deleted labeling methods | `7a7220c` |
 | I1 | `get_overlapping_base_counts` — `TypeError` on every call | **FIXED**, verified numerically | `062a7b8` |
 | I2 | `merge_regions` NaN-fills every column past the third | **FIXED** + regression test | `b7c4758` |
 | I3 | `attach_blacklist_regions` returns the query region, not the blacklist | **FIXED** + regression test | `b7c4758` |
@@ -562,13 +564,41 @@ none of them, because each requires running the code.
 | `RegionFragmentArray.from_frag_bed` + `FragmentBedReader`, `MethylFragmentBedReader`, `FragmentBigBedReader`, `FragmentBedWriter` | Zero callers in the library, the tests, or any of the four dependent repos; also unreachable via `get_default_reader_class`, which is a hardcoded chain naming six other classes. Their 16 tests were **ported** to `from_fragments_h5`, not deleted. | `5f5c30f` |
 | `ref_path`, `region_mask` | Both dead, both broken; orphaned `ravel` references | `52024b6` |
 | Two commented-out `ravel` imports | Last consumers removed | `52024b6` |
+| `set_binary_label`, `set_binary_label_by_thresholds`, `downsample_stratified_by_label` + 3 tests | The binary-labeling API (R2/R6/R7). Broken by default and unused — see below. | `7a7220c` |
 
-**382 lines deleted, no behaviour change.**
+**528 lines deleted, no behaviour change.**
+
+### The binary-labeling API (R2, R6, R7)
+
+`set_binary_label` called `self.drop_unlabeled_records`, which is defined
+nowhere in the codebase. The *parameter* of the same name defaults to `True`,
+so the **default path raised `AttributeError`**, and
+`set_binary_label_by_thresholds` reached it by delegation — both public entry
+points were broken unless the caller explicitly passed `False`. Two further
+defects in the same method were silent: `label_column` was accepted and then
+ignored (the body hardcodes `self["label"]`), and `inplace` was ignored for the
+labeling itself, which always mutated `self`.
+
+Zero call sites across `biomarker`, `biomarker-pipeline` and
+`biomarker-projects`, and none in the library beyond the internal delegation.
+It survived because the only tests exercising it live in `test_dataframe.py`,
+which cannot collect (§9.3) — **the broken default had never run.**
+
+Implementing was the alternative, and the test contract is explicit enough to
+code against (drop rows where `label == -1`, honour `inplace`). It was rejected
+because that contract **cannot be executed**: the assertions pin exact counts
+from the unrecoverable fixture, so the code would have been written against a
+specification nothing can check — the same shape as the false "17/17 passing"
+claim in §8.
+
+`label_balanced` and `get_indices_of_balanced_labels` were **kept**: they take
+an arbitrary column name, work correctly, and have doctests. They are
+label-adjacent by name only.
 
 ## 11.4 Current state
 
 ```
-pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 219 passed
+pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 240 passed
 ```
 
 The 2 failures are missing data only: `test_slice_encode_big_wig` (encode
@@ -579,12 +609,47 @@ that exact file (§9.4).
 
 Highest-value remaining work, in order:
 
-1. **`parallel_apply`** (B2-B5) — unrecoverable hangs, zero test coverage. The largest untouched risk.
-2. **The four domain-owner findings** — R5 (OR vs AND fragment mask), S5 (median named mean), S4 (duplicate sample_ids), R12 (threshold strictness). These alter scientific output and were deliberately not changed.
-3. **`drop_unlabeled_records`** (R2) — undefined but on a default path, with tests that already define its contract.
-4. **The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer was.
+1. **The three domain-owner findings** — R5 (OR vs AND fragment mask), S5 (median named `mean_fragment_counts`), S4 (duplicate sample_ids silently dropped). These alter scientific output and were deliberately not changed. R12 was a fourth until the method containing it was deleted.
+2. **`test_dataframe.py`** — 26 tests, blocked on the synthetic-fixture decision in §9.4.
+3. **The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer and the labeling API were.
 
-## 11.5 What this exercise demonstrated
+One latent item found while deleting the labeling API and left alone: the
+doctest on `get_indices_of_balanced_labels` fails under numpy 2.x, which
+renders `np.int64(1)` where the docstring expects `1`. It is pre-existing
+(reproduces identically against the pre-deletion file) and invisible to the
+suite, which does not run `--doctest-modules`.
+
+## 11.5 `parallel_apply` — rewritten under a three-round review loop
+
+B2–B5 were the largest untouched risk in §11.4 of the previous revision. The
+hang was confirmed by execution first: killing a worker mid-run left the parent
+waiting forever (`timeout` exit 124), because the dead worker had already
+claimed its row from the shared counter, so no other worker would process it
+and the loop could never be satisfied.
+
+Replaced with `ProcessPoolExecutor`, which supervises its workers and raises
+`BrokenProcessPool`. This **deleted** the hand-rolled counter, pipe, lock and
+polling loop rather than adding guards to them. The one good property of the
+old design is preserved — a `fork` context means children inherit the frame
+copy-on-write and it is never serialized, so `fn` may be a lambda.
+
+| Round | Grade | Outcome |
+|---|---|---|
+| 1 | **C+** | Found a **thread-safety regression I introduced**: passing state via a module global replaced the old per-`Process` arguments, so concurrent calls from threads silently returned each other's data. Fixed by moving state into `initializer`/`initargs`, which under `fork` is still not pickled. |
+| 2 | **A-** | Independently re-verified round 1's fixes hold. Found mixed return types silently corrupting output and `None` returns producing a cryptic pandas error. Both now rejected with named errors. |
+| 3 | **A-** | Found the round-2 guard did not cover its own stated contract — mixed Series/dict slipped through. Guard generalized to compare return *kinds*. |
+
+Tests went from **zero to 21**. The new suite hangs against the old
+implementation (exit 124), so it genuinely exercises the defect it was written
+for.
+
+The round-1 finding is the important one. A rewrite motivated by a hang
+introduced a *silent corruption* — strictly worse — and it was caught only
+because a reviewer with no stake in the design went looking. The same
+verify-don't-assume discipline this document argues for applies to the
+document's own remediation work.
+
+## 11.6 What this exercise demonstrated
 
 The review's own §8 note argued that acknowledged uncertainty beat unverifiable
 confidence among the reviewing agents. Execution made that concrete:
