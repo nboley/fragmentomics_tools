@@ -298,7 +298,8 @@ class DataFrameBase(pandas.DataFrame):
             unpicklable callable -- workers inherit it via fork rather than
             receiving it pickled.
         :param n_workers: worker count; None uses every CPU. 1 runs in-process
-            without forking, which is useful when debugging `fn`.
+            without forking, which is useful when debugging `fn`. 0 or negative
+            raises ``ValueError``.
         :param verbose: show a progress bar.
         :return: a plain ``pandas.DataFrame``, NOT this subclass, because `fn`
             decides the output columns and they need not satisfy this class's
@@ -348,23 +349,38 @@ class DataFrameBase(pandas.DataFrame):
         # Reject a partially-DataFrame result rather than falling through to the
         # row branch, where each DataFrame would be stuffed into a cell as a
         # Series and the output would be quietly garbage.
-        n_frames = sum(isinstance(x, pd.DataFrame) for x in records)
-        if 0 < n_frames < len(records):
-            raise ValueError(
-                f"fn must return the same kind of value for every row, but "
-                f"returned a DataFrame for {n_frames} of {len(records)} rows "
-                f"and something else for the rest"
-            )
-
         # fn returning None is a common mistake (a fn that mutates and forgets
         # to return). Left alone it surfaces as "'NoneType' object is not
         # iterable" from the DataFrame constructor, which names neither fn nor
         # the row.
-        n_none = sum(x is None for x in records)
+        #
+        # The kind tally distinguishes Series from plain rows as well as from
+        # DataFrames. An earlier version only counted DataFrames, so a fn
+        # returning a Series for some rows and a dict for others slipped past
+        # and died in pandas with "'dict' object has no attribute 'dtype'" --
+        # which names neither fn nor the contract it broke.
+        n_none = 0
+        kinds = set()
+        for x in records:
+            if x is None:
+                n_none += 1
+            elif isinstance(x, pd.DataFrame):
+                kinds.add("DataFrame")
+            elif isinstance(x, pd.Series):
+                kinds.add("Series")
+            else:
+                kinds.add("row")
+
         if n_none:
             raise ValueError(
                 f"fn returned None for {n_none} of {len(records)} rows; it must "
                 f"return a value for every row"
+            )
+        if len(kinds) > 1:
+            raise ValueError(
+                f"fn must return the same kind of value for every row, but "
+                f"returned a mix of {', '.join(sorted(kinds))} across "
+                f"{len(records)} rows"
             )
 
         # if everything is a data frame

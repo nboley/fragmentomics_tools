@@ -57,6 +57,17 @@ def _mixed_frame_and_dict(row):
     return pd.DataFrame({"v": [row.start]}) if row.start == 50 else {"v": row.start}
 
 
+def _mixed_series_and_dict(row):
+    # slipped past the first version of the guard, which only counted
+    # DataFrames, and died in pandas with "'dict' object has no attribute
+    # 'dtype'"
+    return pd.Series({"v": row.start}) if row.start == 50 else {"v": row.start}
+
+
+def _as_series(row):
+    return pd.Series({"v": row.start})
+
+
 def _returns_none_on_one(row):
     return None if row.start == 50 else {"v": row.start}
 
@@ -165,10 +176,21 @@ class TestCallerMistakes:
         with pytest.raises(ValueError, match="returned None"):
             rdf.parallel_apply(_returns_none_on_one, n_workers=3, verbose=False)
 
+    def test_mixed_series_and_dict_are_rejected(self):
+        rdf = make_rdf()
+        with pytest.raises(ValueError, match="same kind of value"):
+            rdf.parallel_apply(_mixed_series_and_dict, n_workers=3, verbose=False)
+
     def test_all_frames_still_works(self):
         # the mixed-type guard must not fire when every record is a frame
         rdf = make_rdf()
         out = rdf.parallel_apply(_as_frame, n_workers=3, verbose=False)
+        assert list(out["v"]) == list(rdf.start)
+
+    def test_all_series_still_works(self):
+        # uniform Series is legitimate and must survive the tightened guard
+        rdf = make_rdf()
+        out = rdf.parallel_apply(_as_series, n_workers=3, verbose=False)
         assert list(out["v"]) == list(rdf.start)
 
     def test_all_dicts_still_works(self):
