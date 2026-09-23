@@ -70,17 +70,25 @@ DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
 
 
-# State handed to forked workers. This is deliberately a module global rather
-# than an argument: with the "fork" start method the children inherit it
-# copy-on-write, so the DataFrame is never serialized and `fn` may be a lambda
-# or other unpicklable callable. Passing either through the executor's task
-# queue would pickle it per call, which both regresses performance on large
-# frames and breaks lambdas.
+# Per-worker state. This global is only ever written inside a worker process,
+# by _init_parallel_apply_worker, which the executor runs once per worker at
+# startup. It is deliberately NOT set in the parent: doing so shares one
+# mutable slot across every concurrent caller, and two threads calling
+# parallel_apply at once then silently compute each other's data. Each
+# executor forks its own workers, so per-worker state keeps concurrent calls
+# isolated.
 #
-# Consequence: only one parallel_apply may be in flight per process. That was
-# already true of the previous implementation (a single shared counter and
-# pipe); it is now written down.
+# The frame and callable reach the workers through the executor's `initargs`
+# rather than through the task queue. Under a "fork" context initargs are
+# inherited rather than pickled, so the DataFrame is never serialized and `fn`
+# may be a lambda. Sending them per task would pickle both on every row.
 _PARALLEL_APPLY_STATE = {}
+
+
+def _init_parallel_apply_worker(df, fn):
+    """Runs once per worker process, at fork time."""
+    _PARALLEL_APPLY_STATE["df"] = df
+    _PARALLEL_APPLY_STATE["fn"] = fn
 
 
 def _apply_fn(idx):
@@ -239,8 +247,15 @@ class DataFrameBase(pandas.DataFrame):
     def _parallel_apply(self, fn, n_workers, verbose):
         # Use a fork context so the frame is inherited copy-on-write rather
         # than serialized into each worker. Only the row index is sent through
-        # the task queue; `self` and `fn` reach the children via the module
-        # global set below, which fork duplicates for free.
+        # the task queue.
+        #
+        # NOTE: "fork" is load-bearing here -- it is what avoids serializing
+        # the frame and what allows `fn` to be unpicklable (e.g. a lambda).
+        # Python 3.12+ warns that forking a multi-threaded process may deadlock
+        # (tqdm's monitor thread alone is enough to trigger that warning), and
+        # the default start method changes in later versions. Moving to "spawn"
+        # would require pickling both the frame and `fn` on every call, so it is
+        # not a drop-in substitution; it would need a different design.
         #
         # This previously hand-rolled a shared counter, a pipe, a lock and a
         # polling loop. That loop waited for exactly shape[0] results with no
@@ -248,27 +263,31 @@ class DataFrameBase(pandas.DataFrame):
         # unpicklable result or exception) hung the parent forever -- verified
         # by execution before this change. ProcessPoolExecutor supervises its
         # workers and raises BrokenProcessPool instead.
+        #
+        # `self` and `fn` are handed over via initargs, which the executor
+        # applies once per worker. Under fork those are inherited, not pickled,
+        # so the frame is not serialized and `fn` may be a lambda. Keeping the
+        # state per-worker (rather than in a module global in the parent) is
+        # what makes concurrent calls from different threads independent.
         ctx = multiprocessing.get_context("fork")
 
         # clear any cache -- works around a jupyter display bug
         tqdm._instances.clear()
 
-        _PARALLEL_APPLY_STATE["df"] = self
-        _PARALLEL_APPLY_STATE["fn"] = fn
-        try:
-            indices = []
-            records = []
-            with ProcessPoolExecutor(
-                max_workers=n_workers, mp_context=ctx
-            ) as executor:
-                results = executor.map(_apply_fn, range(self.shape[0]))
-                for idx, record in tqdm(
-                    results, total=self.shape[0], disable=(not verbose)
-                ):
-                    indices.append(idx)
-                    records.append(record)
-        finally:
-            _PARALLEL_APPLY_STATE.clear()
+        indices = []
+        records = []
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=ctx,
+            initializer=_init_parallel_apply_worker,
+            initargs=(self, fn),
+        ) as executor:
+            results = executor.map(_apply_fn, range(self.shape[0]))
+            for idx, record in tqdm(
+                results, total=self.shape[0], disable=(not verbose)
+            ):
+                indices.append(idx)
+                records.append(record)
 
         return indices, records
 

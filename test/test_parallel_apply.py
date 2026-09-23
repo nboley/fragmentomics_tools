@@ -63,6 +63,26 @@ def _returns_unpicklable(row):
     return lambda: row.start
 
 
+def _identity_start(row):
+    return {"v": row.start}
+
+
+def _outer_that_nests(row):
+    """A callable that itself calls parallel_apply, from inside a worker."""
+    sub = RegionDataFrame(
+        pd.DataFrame(
+            {
+                "contig": ["chr1"] * 4,
+                "start": [500 + i * 10 for i in range(4)],
+                "stop": [500 + i * 10 + 5 for i in range(4)],
+            }
+        ),
+        ref="hg38",
+    )
+    inner = sub.parallel_apply(_identity_start, n_workers=2, verbose=False)
+    return {"v": row.start, "inner_sum": int(inner["v"].sum())}
+
+
 class TestResultsAndOrdering:
     def test_dict_records_build_a_frame(self):
         rdf = make_rdf()
@@ -151,17 +171,72 @@ class TestCallerStateIsNotMutated:
         fresh = _as_frame(rdf.iloc[0])
         assert "original_index" not in fresh.columns
 
-    def test_worker_state_is_cleared_after_use(self):
+    def test_parent_process_state_is_never_populated(self):
+        # The frame and callable are handed to workers via the executor's
+        # initargs, so the parent's copy of this global must stay empty. An
+        # earlier version set it in the parent, which made two threads calling
+        # parallel_apply concurrently overwrite each other -- see
+        # TestConcurrentCallers below.
         from fragmentomics_tools.dataframe import _PARALLEL_APPLY_STATE
 
         rdf = make_rdf(4)
         rdf.parallel_apply(_double_start, n_workers=2, verbose=False)
         assert _PARALLEL_APPLY_STATE == {}
 
-    def test_worker_state_is_cleared_after_failure(self):
-        from fragmentomics_tools.dataframe import _PARALLEL_APPLY_STATE
 
-        rdf = make_rdf()
-        with pytest.raises(RuntimeError):
-            rdf.parallel_apply(_raises_on_one, n_workers=2, verbose=False)
-        assert _PARALLEL_APPLY_STATE == {}
+class TestConcurrentCallers:
+    """Two callers must not see each other's data.
+
+    A previous implementation stashed the frame and callable in a module
+    global in the parent process. Concurrent calls from threads overwrote that
+    slot, and workers silently computed against whichever frame happened to be
+    installed -- returning confident, wrong numbers rather than failing. These
+    tests fail against that version.
+    """
+
+    def test_threads_do_not_corrupt_each_other(self):
+        import threading
+
+        results = {}
+        errors = {}
+
+        def run(tid):
+            rdf = RegionDataFrame(
+                pd.DataFrame(
+                    {
+                        "contig": ["chr1"] * 6,
+                        "start": [tid * 1000 + i * 10 for i in range(6)],
+                        "stop": [tid * 1000 + i * 10 + 5 for i in range(6)],
+                    }
+                ),
+                ref="hg38",
+            )
+            try:
+                out = rdf.parallel_apply(_identity_start, n_workers=2,
+                                         verbose=False)
+                results[tid] = list(out["v"])
+            except Exception as exc:  # pragma: no cover - diagnostic only
+                errors[tid] = f"{type(exc).__name__}: {exc}"
+
+        threads = [threading.Thread(target=run, args=(t,)) for t in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == {}, f"threads raised: {errors}"
+        for tid in range(3):
+            expected = [tid * 1000 + i * 10 for i in range(6)]
+            assert results[tid] == expected, (
+                f"thread {tid} got another thread's data: "
+                f"{results[tid]} != {expected}"
+            )
+
+    def test_nested_calls_work(self):
+        # a callable that itself runs parallel_apply, from inside a worker.
+        # Per-worker state makes this safe; a parent-side global did not.
+        rdf = make_rdf(4)
+        out = rdf.parallel_apply(_outer_that_nests, n_workers=2, verbose=False)
+        expected_inner = sum(500 + i * 10 for i in range(4))
+        assert list(out["v"]) == [0, 10, 20, 30]
+        assert all(s == expected_inner for s in out["inner_sum"])
