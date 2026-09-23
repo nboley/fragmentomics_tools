@@ -78,11 +78,11 @@ class _FakeTrainer:
         self.sanity_checking = False
 
 
-def _replay(values, factor=1.10):
+def _replay(values, factor=1.10, stall_patience=5):
     """Feed a val_loss sequence to the guard; return the stop epoch or None."""
     from background_model.train import DivergenceStop
 
-    cb = DivergenceStop(factor)
+    cb = DivergenceStop(factor, stall_patience=stall_patience)
     tr = _FakeTrainer()
     for epoch, v in enumerate(values):
         tr.current_epoch = epoch
@@ -135,3 +135,48 @@ def test_divergence_factor_cli_default_and_override():
     assert cfg_from_args(p.parse_args(required)).divergence_factor == 1.10
     cfg = cfg_from_args(p.parse_args(required + ["--divergence-factor", "2.5"]))
     assert cfg.divergence_factor == 2.5
+
+
+# --------------------------------------------------------------------------
+# Stall detection
+#
+# A collapsed model produces bitwise identical val_loss every epoch (the
+# per-batch loss depends only on which tiles are in the batch, and the
+# epoch-level mean stabilises quickly).  Healthy runs never repeat more than
+# twice; the dead run (lrsweep_ken_lr2e-2) repeated 16 times.
+# --------------------------------------------------------------------------
+
+
+def test_stall_stop_fires_on_dead_trace():
+    """lrsweep_ken_lr2e-2: val_loss frozen at 7.6127061844 for all 16 epochs."""
+    dead = [7.6127061844] * 16
+    # patience=5 → epochs 0-4 are 5 identical values → stop at epoch 4
+    assert _replay(dead, stall_patience=5) == 4
+
+
+def test_stall_stop_tolerates_healthy_consecutive():
+    """Healthy runs (e.g. lrsweep_ken_lr2e-3) have at most 2 consecutive identical values."""
+    trace = [7.60, 7.58, 7.57, 7.57, 7.56, 7.55, 7.55, 7.54]
+    assert _replay(trace, stall_patience=5) is None
+
+
+def test_stall_counter_resets_on_change():
+    """Stall counter must reset when the metric changes."""
+    # 4 identical, then a change, then 4 identical — never hits patience=5
+    # factor=0 disables divergence so the 1.0→2.0 jump doesn't interfere
+    trace = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+    assert _replay(trace, factor=0, stall_patience=5) is None
+
+
+def test_stall_stop_disabled_by_zero_patience():
+    """stall_patience=0 disables the stall check entirely."""
+    dead = [7.6127061844] * 16
+    assert _replay(dead, stall_patience=0) is None
+
+
+def test_stall_patience_cli_default_and_override():
+    p = build_arg_parser()
+    required = ["--loss", "multinomial", "--run-name", "t"]
+    assert cfg_from_args(p.parse_args(required)).stall_patience == 5
+    cfg = cfg_from_args(p.parse_args(required + ["--stall-patience", "10"]))
+    assert cfg.stall_patience == 10

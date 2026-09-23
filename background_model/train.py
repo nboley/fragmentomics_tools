@@ -305,13 +305,16 @@ class InstrumentedBackgroundModelHybrid(
 
 
 class DivergenceStop(Callback):
-    """Stop training once val_loss blows past its own best by ``factor``.
+    """Stop training on divergence or metric stall.
 
-    ``EarlyStopping(check_finite=True)`` only catches NaN/inf.  Observed
-    divergences stayed finite -- 8.73, 383, 8.4e8 -- so they ran on until the
-    epoch cap, burning GPU on garbage.
+    Two independent guards, each independently disableable:
 
-    Threshold rationale, measured on the v3 runs:
+    **Divergence** (``factor``): stop when val_loss exceeds ``factor`` x its
+    own best.  ``EarlyStopping(check_finite=True)`` only catches NaN/inf;
+    observed divergences stayed finite (8.73, 383, 8.4e8) and ran to the
+    epoch cap.  Set ``factor=0`` to disable.
+
+    Divergence threshold rationale, measured on the v3 runs:
 
     ======================================  =================
     run                                     max val/best
@@ -323,21 +326,68 @@ class DivergenceStop(Callback):
 
     The default 1.10 sits ~500x above the healthy noise floor and ~3400x
     below the smallest real divergence, so it cannot plausibly fire on a
-    healthy run.  Set ``factor=0`` to disable.
+    healthy run.
+
+    **Stall** (``stall_patience``): stop when ``stall_patience`` consecutive
+    validation epochs produce a *bitwise identical* metric value — the
+    signature of a collapsed model whose output is constant and whose
+    per-epoch loss depends only on batch composition.  This is deliberately
+    exact equality, not an epsilon test: an epsilon-based "no improvement"
+    check is what ``EarlyStopping(patience=...)`` already does, and
+    duplicating it would risk firing on slow convergence.
+    Set ``stall_patience=0`` to disable.
+
+    Stall threshold rationale, measured across 15 v3 simulation runs:
+
+    ======================================  ==========  ====================
+    run                                     epochs      longest identical run
+    ======================================  ==========  ====================
+    all 13 healthy runs                     16-124      1 (two runs reach 2)
+    lrsweep_ken_lr2e-3                      32          2
+    lrsweep_ken_lr1e-3                      37          2
+    **lrsweep_ken_lr2e-2 (dead)**           16          **16**
+    ======================================  ==========  ====================
+
+    The default 5 sits ~2.5x above the healthy ceiling of 2 and far below
+    the observed failure of 16.
     """
 
-    def __init__(self, factor: float = 1.10, monitor: str = "val_loss"):
+    def __init__(self, factor: float = 1.10, monitor: str = "val_loss",
+                 stall_patience: int = 5):
         self.factor = factor
         self.monitor = monitor
+        self.stall_patience = stall_patience
         self.best = None
+        self._last_val = None
+        self._stall_count = 0
 
     def on_validation_end(self, trainer, pl_module):
-        if self.factor <= 0 or trainer.sanity_checking:
+        if trainer.sanity_checking:
             return
         current = trainer.callback_metrics.get(self.monitor)
         if current is None:
             return
         current = float(current)
+
+        # --- Stall detection (exact equality) ---
+        if self.stall_patience > 0:
+            if self._last_val is not None and current == self._last_val:
+                self._stall_count += 1
+            else:
+                self._stall_count = 1
+            self._last_val = current
+            if self._stall_count >= self.stall_patience:
+                trainer.should_stop = True
+                rank_zero_info(
+                    f"[DivergenceStop] {self.monitor}={current:.10f} frozen for "
+                    f"{self._stall_count} consecutive epochs -- stalled, stopping "
+                    f"at epoch {trainer.current_epoch}."
+                )
+                return
+
+        # --- Divergence detection ---
+        if self.factor <= 0:
+            return
         if not math.isfinite(current):
             trainer.should_stop = True
             rank_zero_info(
@@ -418,6 +468,7 @@ class TrainConfig:
     weight_decay: float = 0.0
     fl_dist_npz: str | None = None
     divergence_factor: float = 1.10
+    stall_patience: int = 5
 
 
 def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
@@ -572,6 +623,8 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
         "num_workers": cfg.num_workers,
         "seed": cfg.seed,
         "patience": cfg.patience,
+        "divergence_factor": cfg.divergence_factor,
+        "stall_patience": cfg.stall_patience,
         "n_train_pairs": len(train_ds),
         "n_val_pairs": len(val_ds),
         "plumbing_config": json.loads(train_ds.config.full_config_json()),
@@ -619,7 +672,9 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
         deterministic=True,
         default_root_dir=run_dir,
         logger=csv_logger,
-        callbacks=[ckpt, early, DivergenceStop(cfg.divergence_factor),
+        callbacks=[ckpt, early,
+                   DivergenceStop(cfg.divergence_factor,
+                                  stall_patience=cfg.stall_patience),
                    ThroughputCallback(cfg.batch_size),
                    DeviceStatsMonitor(cpu_stats=False)],
         limit_train_batches=limit if limit is not None else 1.0,
@@ -704,6 +759,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="stop if val_loss exceeds this multiple of its own "
                         "best (0 disables). Healthy v3 runs peak at 1.0002x; "
                         "diverged ones reach 380x+.")
+    p.add_argument("--stall-patience", type=int, default=5,
+                   help="stop if val_loss is bitwise identical for this many "
+                        "consecutive epochs (0 disables). Healthy v3 runs "
+                        "repeat at most 2; collapsed runs repeat indefinitely.")
     p.add_argument("--min-N", type=int, default=50,
                    help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
@@ -747,6 +806,7 @@ def cfg_from_args(args) -> TrainConfig:
         seed=args.seed,
         patience=args.patience,
         divergence_factor=args.divergence_factor,
+        stall_patience=args.stall_patience,
         store=args.store,
         runs_root=args.runs_root,
         resume_from=args.resume_from,
