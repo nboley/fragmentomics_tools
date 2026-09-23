@@ -45,6 +45,22 @@ def _frame_with_reserved_col(row):
     return pd.DataFrame({"v": [row.start], "original_index": [999]})
 
 
+def _slow_for_early_rows(row):
+    # invert completion order: row 0 sleeps longest, the last row returns first
+    import time
+
+    time.sleep(max(0, (70 - row.start)) / 1000.0)
+    return {"v": row.start}
+
+
+def _mixed_frame_and_dict(row):
+    return pd.DataFrame({"v": [row.start]}) if row.start == 50 else {"v": row.start}
+
+
+def _returns_none_on_one(row):
+    return None if row.start == 50 else {"v": row.start}
+
+
 def _raises_on_one(row):
     if row.start == 50:
         raise RuntimeError("boom in worker")
@@ -89,12 +105,23 @@ class TestResultsAndOrdering:
         out = rdf.parallel_apply(_double_start, n_workers=3, verbose=False)
         assert list(out["v"]) == [s * 2 for s in rdf.start]
 
-    def test_order_matches_input_not_completion(self):
-        # workers finish out of order; the result must still line up with the
-        # input rows, which is what the index bookkeeping exists for
+    def test_order_matches_input(self):
         rdf = make_rdf(24)
         out = rdf.parallel_apply(_double_start, n_workers=4, verbose=False)
         assert list(out["v"]) == [s * 2 for s in rdf.start]
+        assert list(out.index) == list(rdf.index)
+
+    def test_order_survives_skewed_completion_times(self):
+        # Row 0 finishes last. executor.map yields in submission order, so the
+        # re-sort in _parallel_apply is currently a no-op -- a review removed it
+        # by mutation and all tests still passed, which means the old name of
+        # the test above ("..._not_completion") claimed something it never
+        # checked. This pins the end-to-end property instead of the mechanism,
+        # so it still holds if the implementation ever moves to as_completed,
+        # where completion order would genuinely leak through.
+        rdf = make_rdf(8)
+        out = rdf.parallel_apply(_slow_for_early_rows, n_workers=4, verbose=False)
+        assert list(out["v"]) == list(rdf.start)
         assert list(out.index) == list(rdf.index)
 
     def test_frame_records_are_concatenated_in_order(self):
@@ -117,6 +144,37 @@ class TestResultsAndOrdering:
         out = rdf.parallel_apply(lambda row: {"v": row.start + 1},
                                  n_workers=3, verbose=False)
         assert list(out["v"]) == [s + 1 for s in rdf.start]
+
+
+class TestCallerMistakes:
+    """fn contract violations must be named, not silently absorbed.
+
+    Both of these were found by review. Before the guards, mixed return types
+    produced a frame with Series objects sitting in cells and no error at all,
+    and returning None surfaced as "'NoneType' object is not iterable" from the
+    DataFrame constructor -- naming neither fn nor the offending row.
+    """
+
+    def test_mixed_return_types_are_rejected(self):
+        rdf = make_rdf()
+        with pytest.raises(ValueError, match="same kind of value"):
+            rdf.parallel_apply(_mixed_frame_and_dict, n_workers=3, verbose=False)
+
+    def test_returning_none_is_rejected(self):
+        rdf = make_rdf()
+        with pytest.raises(ValueError, match="returned None"):
+            rdf.parallel_apply(_returns_none_on_one, n_workers=3, verbose=False)
+
+    def test_all_frames_still_works(self):
+        # the mixed-type guard must not fire when every record is a frame
+        rdf = make_rdf()
+        out = rdf.parallel_apply(_as_frame, n_workers=3, verbose=False)
+        assert list(out["v"]) == list(rdf.start)
+
+    def test_all_dicts_still_works(self):
+        rdf = make_rdf()
+        out = rdf.parallel_apply(_double_start, n_workers=3, verbose=False)
+        assert list(out["v"]) == [s * 2 for s in rdf.start]
 
 
 class TestFailureModes:

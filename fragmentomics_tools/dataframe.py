@@ -313,8 +313,15 @@ class DataFrameBase(pandas.DataFrame):
             **An empty input returns an empty DataFrame with no columns** --
             `fn` is never called, so the column set is unknowable.
 
+        `fn` must return the same kind of value for every row, and must not
+        return None; both raise ``ValueError`` rather than producing a quietly
+        malformed frame.
+
         Raises whatever `fn` raises. If a worker dies outright (an OOM kill,
-        say) this raises ``BrokenProcessPool`` rather than hanging.
+        say) this raises ``BrokenProcessPool`` rather than hanging. One
+        limitation inherited from multiprocessing: an exception that cannot be
+        pickled (one holding a lambda or a lock, say) reaches the caller as a
+        pickling error instead of itself, losing the original message.
 
         Concurrent calls from different threads are independent. Calls may also
         nest: `fn` may itself call ``parallel_apply``.
@@ -337,6 +344,28 @@ class DataFrameBase(pandas.DataFrame):
         # pd.concat([]) with "No objects to concatenate".
         if len(records) == 0:
             return pandas.DataFrame(index=self.index[:0])
+
+        # Reject a partially-DataFrame result rather than falling through to the
+        # row branch, where each DataFrame would be stuffed into a cell as a
+        # Series and the output would be quietly garbage.
+        n_frames = sum(isinstance(x, pd.DataFrame) for x in records)
+        if 0 < n_frames < len(records):
+            raise ValueError(
+                f"fn must return the same kind of value for every row, but "
+                f"returned a DataFrame for {n_frames} of {len(records)} rows "
+                f"and something else for the rest"
+            )
+
+        # fn returning None is a common mistake (a fn that mutates and forgets
+        # to return). Left alone it surfaces as "'NoneType' object is not
+        # iterable" from the DataFrame constructor, which names neither fn nor
+        # the row.
+        n_none = sum(x is None for x in records)
+        if n_none:
+            raise ValueError(
+                f"fn returned None for {n_none} of {len(records)} rows; it must "
+                f"return a value for every row"
+            )
 
         # if everything is a data frame
         if all(isinstance(x, pd.DataFrame) for x in records):
