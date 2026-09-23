@@ -595,6 +595,14 @@ def _with_lr_schedule(optimizer, hparams):
     inter-group ratios (e.g. ``dispersion_lr_scale``) are preserved at the
     floor.  A scalar ``min_lr`` would flatten all groups to a single value
     and silently destroy the ratio — see design §3.1 / §5.0.
+
+    **Known behaviour at the floor:** once all param groups sit at their
+    ``min_lr``, ``ReduceLROnPlateau`` still fires its (no-op) reduction and
+    **resets ``num_bad_epochs`` to 0**, cycling indefinitely.  The LR never
+    changes and nothing is reported — the floor silently absorbs the event.
+    This matters for Phase 3's divergence recovery: a floor cannot report a
+    refusal, so recovery must use an explicit reduction counter rather than
+    relying on ``min_lr`` to cap reductions.
     """
     factor = hparams.lr_factor
     max_reductions = hparams.max_lr_reductions

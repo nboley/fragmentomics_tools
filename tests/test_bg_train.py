@@ -9,7 +9,7 @@ import os
 import lightning as L
 import torch
 import pytest
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from background_model_core import BackgroundModel, _with_lr_schedule
 from background_model.train import (
@@ -374,16 +374,16 @@ def test_lr_patience_cli_default_and_override():
     cfg = cfg_from_args(p.parse_args(required))
     assert cfg.lr_patience == 4
     assert cfg.max_lr_reductions == 3
-    # EarlyStopping patience derived: 4 * (3+1) = 16
-    assert cfg.patience == 16
+    # EarlyStopping patience derived: (4+1)*3 + 4 = 19
+    assert cfg.patience == 19
 
     cfg2 = cfg_from_args(p.parse_args(
         required + ["--lr-patience", "3", "--max-lr-reductions", "1"]
     ))
     assert cfg2.lr_patience == 3
     assert cfg2.max_lr_reductions == 1
-    # EarlyStopping patience derived: 3 * (1+1) = 6
-    assert cfg2.patience == 6
+    # EarlyStopping patience derived: (3+1)*1 + 3 = 7
+    assert cfg2.patience == 7
 
 
 def test_stall_patience_rejects_one():
@@ -425,7 +425,7 @@ def test_stall_patience_zero_accepted():
 _REQUIRED = dict(
     loss="multinomial", run_name="t", max_epochs=10, batch_size=8,
     lr=1e-4, limit_batches=None, num_workers=0, seed=1337,
-    patience=16, store="/tmp/fake.zarr", runs_root="/tmp/runs",
+    patience=19, store="/tmp/fake.zarr", runs_root="/tmp/runs",
     resume_from=None,
 )
 
@@ -440,6 +440,16 @@ def test_trainconfig_rejects_patience_negative():
         TrainConfig(**{**_REQUIRED, "patience": -1})
 
 
+def test_trainconfig_rejects_lr_patience_zero():
+    with pytest.raises(ValueError, match="lr_patience must be >= 1"):
+        TrainConfig(**{**_REQUIRED, "lr_patience": 0})
+
+
+def test_trainconfig_rejects_max_lr_reductions_negative():
+    with pytest.raises(ValueError, match="max_lr_reductions must be >= 0"):
+        TrainConfig(**{**_REQUIRED, "max_lr_reductions": -1})
+
+
 def test_trainconfig_rejects_stall_patience_one():
     with pytest.raises(ValueError, match="stall-patience must be 0.*or >= 2"):
         TrainConfig(**{**_REQUIRED, "stall_patience": 1})
@@ -451,9 +461,9 @@ def test_trainconfig_rejects_stall_patience_negative():
 
 
 def test_trainconfig_accepts_valid_defaults():
-    """Default patience=16 (derived) and stall_patience=5 must construct cleanly."""
+    """Default patience=19 (derived) and stall_patience=5 must construct cleanly."""
     cfg = TrainConfig(**_REQUIRED)
-    assert cfg.patience == 16
+    assert cfg.patience == 19
     assert cfg.stall_patience == 5
 
 
@@ -721,23 +731,33 @@ def test_reduction_cap_binds():
 
 
 def test_derived_early_stopping_patience_max_reductions_3():
-    """EarlyStopping patience = lr_patience * (max_lr_reductions + 1) = 4 * 4 = 16."""
+    """EarlyStopping patience = (lr_patience+1)*max_lr_reductions + lr_patience = 5*3+4 = 19."""
     p = build_arg_parser()
     cfg = cfg_from_args(p.parse_args(
         ["--loss", "multinomial", "--run-name", "t",
          "--lr-patience", "4", "--max-lr-reductions", "3"]
     ))
-    assert cfg.patience == 16
+    assert cfg.patience == 19
 
 
 def test_derived_early_stopping_patience_max_reductions_1():
-    """EarlyStopping patience = lr_patience * (max_lr_reductions + 1) = 4 * 2 = 8."""
+    """EarlyStopping patience = (lr_patience+1)*max_lr_reductions + lr_patience = 5*1+4 = 9."""
     p = build_arg_parser()
     cfg = cfg_from_args(p.parse_args(
         ["--loss", "multinomial", "--run-name", "t",
          "--lr-patience", "4", "--max-lr-reductions", "1"]
     ))
-    assert cfg.patience == 8
+    assert cfg.patience == 9
+
+
+def test_derived_early_stopping_patience_max_reductions_0():
+    """max_lr_reductions=0: patience = lr_patience = 4 (no LR reductions, just early stop)."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t",
+         "--lr-patience", "4", "--max-lr-reductions", "0"]
+    ))
+    assert cfg.patience == 4
 
 
 def test_configure_optimizers_returns_scheduler():
@@ -759,3 +779,147 @@ def test_configure_optimizers_returns_scheduler():
         assert sched_cfg["monitor"] == "val_loss"
         scheduler = sched_cfg["scheduler"]
         assert isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
+
+
+# --------------------------------------------------------------------------
+# Finding 4 — CLI bounds validation for --lr-patience and --max-lr-reductions
+# --------------------------------------------------------------------------
+
+
+def test_lr_patience_rejects_zero_via_cli():
+    """--lr-patience 0 triggers the validation error through cfg_from_args."""
+    p = build_arg_parser()
+    args = p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--lr-patience", "0"]
+    )
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_max_lr_reductions_rejects_negative_via_cli():
+    """--max-lr-reductions -1 triggers the validation error through cfg_from_args."""
+    p = build_arg_parser()
+    args = p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--max-lr-reductions", "-1"]
+    )
+    with pytest.raises(SystemExit):
+        cfg_from_args(args)
+
+
+def test_max_lr_reductions_zero_accepted():
+    """max_lr_reductions=0 is valid: no LR schedule, pure early stopping."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(
+        ["--loss", "multinomial", "--run-name", "t", "--max-lr-reductions", "0"]
+    ))
+    assert cfg.max_lr_reductions == 0
+    # patience = (4+1)*0 + 4 = 4
+    assert cfg.patience == 4
+
+
+# --------------------------------------------------------------------------
+# Behavioural test: the derived patience formula produces the intended
+# training policy in a real Lightning loop.
+#
+# This is the test that would have caught the off-by-one in the original
+# formula.  It runs an actual Trainer with ReduceLROnPlateau and
+# EarlyStopping both active, on a synthetic model that never improves,
+# and asserts that the final LR level receives lr_patience training epochs
+# before EarlyStopping fires.
+# --------------------------------------------------------------------------
+
+
+class _NeverImprovingModel(L.LightningModule):
+    """Model that returns a constant, worsening val_loss per epoch.
+
+    Each epoch's val_loss = 100 + epoch, so the metric never improves.
+    This drives both ReduceLROnPlateau and EarlyStopping on their worst-case
+    (no improvement) path.
+    """
+
+    def __init__(self, lr=1e-2, lr_patience=2, max_lr_reductions=2, lr_factor=0.5):
+        super().__init__()
+        self.save_hyperparameters()
+        self.layer = torch.nn.Linear(4, 2)
+        self.lr_history = []  # (epoch, lr) recorded at each validation
+
+    def forward(self, x):
+        return self.layer(x)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        return torch.nn.functional.mse_loss(self(x), y)
+
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        # Constant worsening loss so the metric never improves
+        loss = 100.0 + self.current_epoch
+        self.log("val_loss", float(loss))
+        return torch.tensor(loss)
+
+    def on_validation_epoch_end(self):
+        if not self.trainer.sanity_checking:
+            lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+            self.lr_history.append((self.current_epoch, lr))
+
+    def configure_optimizers(self):
+        opt = torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+        return _with_lr_schedule(opt, self.hparams)
+
+
+def test_final_lr_level_gets_lr_patience_epochs(tmp_path):
+    """The final LR level must receive lr_patience training epochs before stopping.
+
+    This is the behavioural assertion that the derived EarlyStopping patience
+    formula is correct.  With lr_patience=2, max_lr_reductions=2, factor=0.5:
+
+    - ReduceLROnPlateau fires after lr_patience+1 = 3 bad epochs (strict >)
+    - 2 reductions happen, then lr_patience=2 more bad epochs, then stop
+    - Derived patience = (2+1)*2 + 2 = 8
+    - Total epochs trained = 1 (sets best) + 8 (bad) = 9 (epochs 0-8)
+    - Final LR level starts after epoch with the 2nd reduction and must
+      get exactly lr_patience=2 epochs of training before EarlyStopping fires.
+    """
+    lr_patience = 2
+    max_reductions = 2
+    lr_factor = 0.5
+    initial_lr = 1e-2
+    derived_patience = (lr_patience + 1) * max_reductions + lr_patience  # 8
+
+    model = _NeverImprovingModel(
+        lr=initial_lr, lr_patience=lr_patience,
+        max_lr_reductions=max_reductions, lr_factor=lr_factor,
+    )
+
+    early = EarlyStopping(
+        monitor="val_loss", mode="min", patience=derived_patience, min_delta=0.0
+    )
+
+    trainer = L.Trainer(
+        max_epochs=50,  # high cap; EarlyStopping should fire well before this
+        default_root_dir=str(tmp_path),
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=[early],
+        accelerator="cpu",
+        log_every_n_steps=1,
+    )
+
+    dl = _tiny_dataloader()
+    trainer.fit(model, dl, dl)
+
+    # EarlyStopping must have fired (not hit max_epochs)
+    assert early.stopped_epoch > 0, "EarlyStopping did not fire"
+
+    # Identify the final LR level from the recorded history
+    final_lr = initial_lr * lr_factor ** max_reductions
+    epochs_at_final_lr = [
+        ep for ep, lr in model.lr_history
+        if abs(lr - final_lr) / final_lr < 1e-6
+    ]
+
+    assert len(epochs_at_final_lr) == lr_patience, (
+        f"Final LR level ({final_lr}) should get exactly {lr_patience} epochs "
+        f"of training before EarlyStopping fires, but got {len(epochs_at_final_lr)}. "
+        f"LR history: {model.lr_history}"
+    )

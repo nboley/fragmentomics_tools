@@ -504,10 +504,22 @@ class TrainConfig:
     lr_factor: float = 0.5
 
     def __post_init__(self):
+        if self.lr_patience < 1:
+            raise ValueError(
+                "lr_patience must be >= 1 (0 would make LR reduction and "
+                "early-stopping detection ambiguous)"
+            )
+        if self.max_lr_reductions < 0:
+            raise ValueError(
+                "max_lr_reductions must be >= 0 (-1 would set min_lr above "
+                "the initial LR, making the schedule silently inert)"
+            )
         if self.patience < 1:
             raise ValueError(
-                "--patience must be >= 1 (0 would make the early-stopping "
-                "detection ambiguous; use a large value to effectively disable)"
+                "patience must be >= 1 (derived from lr_patience and "
+                "max_lr_reductions as (lr_patience+1)*max_lr_reductions "
+                "+ lr_patience; 0 would make early-stopping detection "
+                "ambiguous)"
             )
         if self.stall_patience == 1 or self.stall_patience < 0:
             raise ValueError(
@@ -852,7 +864,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(ReduceLROnPlateau patience)")
     p.add_argument("--max-lr-reductions", type=int, default=3,
                    help="max number of LR halvings; EarlyStopping patience is "
-                        "derived as lr_patience * (max_lr_reductions + 1)")
+                        "derived as (lr_patience+1)*max_lr_reductions + lr_patience")
     p.add_argument("--divergence-factor", type=float, default=1.10,
                    help="stop if val_loss exceeds this multiple of its own "
                         "best (0 disables the ratio check; non-finite "
@@ -896,9 +908,12 @@ def cfg_from_args(args) -> TrainConfig:
         limit = int(limit)
     lr_patience = args.lr_patience
     max_lr_reductions = args.max_lr_reductions
-    # EarlyStopping patience derived from LR schedule: the worst case is
-    # lr_patience barren epochs per LR level × (max_lr_reductions + 1) levels.
-    patience = lr_patience * (max_lr_reductions + 1)
+    # EarlyStopping patience derived from LR schedule.  ReduceLROnPlateau
+    # reduces when num_bad_epochs > patience (strict >), so each reduction
+    # takes lr_patience + 1 bad epochs.  EarlyStopping stops when
+    # wait_count >= patience, i.e. after exactly `patience` bad epochs.
+    # For the final LR level to train lr_patience epochs before stopping:
+    patience = (lr_patience + 1) * max_lr_reductions + lr_patience
     try:
         return TrainConfig(
             loss=args.loss,
