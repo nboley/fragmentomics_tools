@@ -658,6 +658,7 @@ confidence among the reviewing agents. Execution made that concrete:
 - **Nine real defects were invisible to static review**, including one where the package was broken against its own declared numpy range.
 - **The single highest-value fix was not a code change at all** — four undeclared conda packages took the suite from 63 failures to 34, with no code and no fixtures touched.
 - **One "library regression" was the opposite.** The fragment-count failures looked like 2.13.3 breaking inclusion; the fragment turned out to be present in the BAM *and* the h5, clean by every criterion, and absent only from a hardcoded array. The tests were asserting a bug that had since been fixed.
+- **Three blast-radius claims in this document were overconfident**, each from a search whose filter quietly decided the answer: fixtures "recoverable" from a manifest whose bucket was deleted; a review agent accused of wrong line numbers when it was reading a different branch; and R5 declared unreachable because the search excluded notebooks (§11.7). Two were caught by someone else, one by a later accident. Assume the same failure mode is still present somewhere in here.
 
 The general lesson, and the reason §1 outranked everything: **a codebase with no feedback loop accumulates defects that no amount of reading will find.**
 
@@ -691,13 +692,44 @@ The strandless (`.`) branch skips the strand clause entirely, leaving the band
 as the only filter. That is correct, and is now pinned by a test so the fix
 cannot silently change it.
 
-**Blast radius was nil.** `set_fragment_array_weights` has zero callers in this
-library and none in `biomarker`, `biomarker-pipeline` or `biomarker-projects`;
-the sibling `_set_fragment_array_weights_from_pred_record` is dead behind an
-`assert False`; and both import from `bias_correction/`, which `CLAUDE.md`
-marks superseded. No published result can have been affected. An earlier
-revision of this document implied otherwise — that was speculation stated as
-fact, and it is corrected here.
+### Blast radius — CORRECTED, this bug reached real analyses
+
+A previous revision of this section claimed the blast radius was nil and that
+"no published result can have been affected". **That was wrong**, and the error
+is worth recording because of how it happened.
+
+The search behind that claim used `--include=*.py`. The v1 weight-setting API
+is called from **notebooks**, which that filter silently excluded. Re-run
+across `*.ipynb`, `biomarker-projects` contains real executable calls:
+
+| Notebook | calls |
+|---|---|
+| `bias_correction_notebooks/model_qc.ipynb` | `set_fragment_array_weights` ×5 |
+| `bias_correction_notebooks/uniformity_filter.ipynb` | ×6 |
+| `ibd_analysis/fragmentomics/CTCF_classifier.ipynb` | ×1 |
+| `ibd_analysis/fragmentomics/CTCF_classifier_CV.ipynb` | ×1 |
+| `tf_binding_site_classification/.../IBD_processing.ipynb` | ×2, plus `set_fragment_array_gc_weights` |
+
+e.g. `on_srdf.set_fragment_array_weights(model)` — an executable cell, not a
+comment.
+
+So **any bias-corrected fragment weights produced by those notebooks are
+suspect**: a fragment on the matching strand but outside the length band
+received weights it should not have, and because the loop overwrites
+`attr[mask]` once per combination, the final weight depended on iteration
+order. What cannot be determined from here is whether those outputs fed
+anything published, or how large the numerical effect was. That requires
+someone who knows the analyses.
+
+What remains true: `_set_fragment_array_weights_from_pred_record` is dead
+behind an `assert False`, and both functions live in `bias_correction/`, which
+`CLAUDE.md` marks superseded. Superseded is not the same as unused.
+
+**The methodological point**: this is the third time in this exercise that an
+incomplete search produced an overconfident claim, and the pattern is always
+the same shape — a filter that looks neutral (`--include=*.py`) quietly defines
+the answer. §8 argues that acknowledged uncertainty beats unverifiable
+confidence. This is that argument turned on the document itself.
 
 Both copies were fixed, including the dead one, so the defect cannot return
 with it. `test/test_fragment_weight_mask.py` adds 5 tests; against the pre-fix
