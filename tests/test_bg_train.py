@@ -11,6 +11,7 @@ from background_model_core import BackgroundModel
 from background_model.train import (
     DivergenceStop,
     InstrumentedBackgroundModel,
+    TrainConfig,
     _determine_stop_reason,
     build_arg_parser,
     cfg_from_args,
@@ -402,3 +403,58 @@ def test_stall_patience_zero_accepted():
     )
     cfg = cfg_from_args(args)
     assert cfg.stall_patience == 0
+
+
+# --------------------------------------------------------------------------
+# Direct-construction validation (TrainConfig.__post_init__)
+#
+# The invariants must hold regardless of how TrainConfig is built —
+# not just through the CLI path.
+# --------------------------------------------------------------------------
+
+# Minimal required fields for direct TrainConfig construction.
+_REQUIRED = dict(
+    loss="multinomial", run_name="t", max_epochs=10, batch_size=8,
+    lr=1e-4, limit_batches=None, num_workers=0, seed=1337,
+    patience=5, store="/tmp/fake.zarr", runs_root="/tmp/runs",
+    resume_from=None,
+)
+
+
+def test_trainconfig_rejects_patience_zero():
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        TrainConfig(**{**_REQUIRED, "patience": 0})
+
+
+def test_trainconfig_rejects_patience_negative():
+    with pytest.raises(ValueError, match="patience must be >= 1"):
+        TrainConfig(**{**_REQUIRED, "patience": -1})
+
+
+def test_trainconfig_rejects_stall_patience_one():
+    with pytest.raises(ValueError, match="stall-patience must be 0.*or >= 2"):
+        TrainConfig(**{**_REQUIRED, "stall_patience": 1})
+
+
+def test_trainconfig_rejects_stall_patience_negative():
+    with pytest.raises(ValueError, match="stall-patience must be 0.*or >= 2"):
+        TrainConfig(**{**_REQUIRED, "stall_patience": -1})
+
+
+def test_trainconfig_accepts_valid_defaults():
+    """Default patience=5 and stall_patience=5 must construct cleanly."""
+    cfg = TrainConfig(**_REQUIRED)
+    assert cfg.patience == 5
+    assert cfg.stall_patience == 5
+
+
+def test_trainconfig_accepts_stall_patience_zero():
+    """stall_patience=0 is the documented disable path."""
+    cfg = TrainConfig(**{**_REQUIRED, "stall_patience": 0})
+    assert cfg.stall_patience == 0
+
+
+def test_trainconfig_accepts_stall_patience_two():
+    """stall_patience=2 is the minimum enabled value."""
+    cfg = TrainConfig(**{**_REQUIRED, "stall_patience": 2})
+    assert cfg.stall_patience == 2

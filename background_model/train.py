@@ -499,6 +499,18 @@ class TrainConfig:
     divergence_factor: float = 1.10
     stall_patience: int = 5
 
+    def __post_init__(self):
+        if self.patience < 1:
+            raise ValueError(
+                "--patience must be >= 1 (0 would make the early-stopping "
+                "detection ambiguous; use a large value to effectively disable)"
+            )
+        if self.stall_patience == 1 or self.stall_patience < 0:
+            raise ValueError(
+                "--stall-patience must be 0 (disabled) or >= 2 "
+                "(1 would stop on the first validation epoch)"
+            )
+
 
 def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
     """Load per-sample FL band fractions from an NPZ file.
@@ -726,7 +738,7 @@ def _determine_stop_reason(trainer):
        ``patience >= 1`` the earliest possible firing epoch is
        ``patience``, so ``stopped_epoch > 0`` is a reliable "it fired"
        signal.  (Patience 0 would fire at epoch 0, making the check
-       ambiguous; ``cfg_from_args`` enforces patience >= 1.)
+       ambiguous; ``TrainConfig.__post_init__`` enforces patience >= 1.)
     3. Otherwise the run completed normally (hit ``max_epochs``).
     """
     for cb in trainer.callbacks:
@@ -858,52 +870,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def cfg_from_args(args) -> TrainConfig:
-    if args.patience < 1:
-        raise SystemExit(
-            "error: --patience must be >= 1 (0 would make the early-stopping "
-            "detection ambiguous; use a large value to effectively disable)"
-        )
-    if args.stall_patience == 1 or args.stall_patience < 0:
-        raise SystemExit(
-            "error: --stall-patience must be 0 (disabled) or >= 2 "
-            "(1 would stop on the first validation epoch)"
-        )
     limit = args.limit_batches
     if limit is not None and float(limit).is_integer() and limit >= 1:
         limit = int(limit)
-    return TrainConfig(
-        loss=args.loss,
-        run_name=args.run_name,
-        max_epochs=args.max_epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        limit_batches=limit,
-        num_workers=args.num_workers,
-        seed=args.seed,
-        patience=args.patience,
-        divergence_factor=args.divergence_factor,
-        stall_patience=args.stall_patience,
-        store=args.store,
-        runs_root=args.runs_root,
-        resume_from=args.resume_from,
-        n_kernels=args.n_kernels,
-        num_residual_layers=args.num_residual_layers,
-        precision=args.precision,
-        min_N=args.min_N,
-        dropout=args.dropout,
-        auto_lr=args.auto_lr,
-        freeze_dispersion=args.freeze_dispersion,
-        dispersion_lr_scale=args.dispersion_lr_scale,
-        dispersion_window_size=args.dispersion_window_size,
-        model=args.model,
-        k=args.k,
-        d_embed=args.d_embed,
-        d_context=args.d_context,
-        n_context_layers=args.n_context_layers,
-        context_kernel_size=args.context_kernel_size,
-        weight_decay=args.weight_decay,
-        fl_dist_npz=args.fl_dist_npz,
-    )
+    try:
+        return TrainConfig(
+            loss=args.loss,
+            run_name=args.run_name,
+            max_epochs=args.max_epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            limit_batches=limit,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            patience=args.patience,
+            divergence_factor=args.divergence_factor,
+            stall_patience=args.stall_patience,
+            store=args.store,
+            runs_root=args.runs_root,
+            resume_from=args.resume_from,
+            n_kernels=args.n_kernels,
+            num_residual_layers=args.num_residual_layers,
+            precision=args.precision,
+            min_N=args.min_N,
+            dropout=args.dropout,
+            auto_lr=args.auto_lr,
+            freeze_dispersion=args.freeze_dispersion,
+            dispersion_lr_scale=args.dispersion_lr_scale,
+            dispersion_window_size=args.dispersion_window_size,
+            model=args.model,
+            k=args.k,
+            d_embed=args.d_embed,
+            d_context=args.d_context,
+            n_context_layers=args.n_context_layers,
+            context_kernel_size=args.context_kernel_size,
+            weight_decay=args.weight_decay,
+            fl_dist_npz=args.fl_dist_npz,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from None
 
 
 def main(argv=None):
