@@ -42,19 +42,13 @@ SIM_RF_BUDGET = 2_048
 
 FASTA = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
 
-# Track layout (must match background_model/preprocess.py)
-STRANDS = ("+", "-")
-FL_BANDS = ((40, 65), (120, 175))
-COVERAGE_TYPES = ("first", "last", "midpoint")
-N_TRACKS = len(STRANDS) * len(FL_BANDS) * len(COVERAGE_TYPES)  # 12
-
-TRACK_INDEX = {}
-_idx = 0
-for _s in STRANDS:
-    for _fl in FL_BANDS:
-        for _c in COVERAGE_TYPES:
-            TRACK_INDEX[(_s, _fl, _c)] = _idx
-            _idx += 1
+from background_model.tracks import (
+    COVERAGE_TYPES,
+    FL_BANDS,
+    N_TRACKS,
+    STRANDS,
+    TRACK_INDEX,
+)
 
 # Split/role codes (must match dataset.py)
 SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2}

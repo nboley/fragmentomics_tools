@@ -33,18 +33,13 @@ import torch
 FASTA = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
 LOSSES = ["multinomial", "dirichlet_multinomial", "nb_offset"]
 
-# ── Track layout (must match preprocess/store) ────────────────────────────
-STRANDS = ("+", "-")
-FL_BANDS = ((40, 65), (120, 175))
-COVERAGE_TYPES = ("first", "last", "midpoint")
-TRACK_INDEX = {}
-_idx = 0
-for _s in STRANDS:
-    for _fl in FL_BANDS:
-        for _c in COVERAGE_TYPES:
-            TRACK_INDEX[(_s, _fl, _c)] = _idx
-            _idx += 1
-N_TRACKS = _idx
+from background_model.tracks import (
+    COVERAGE_TYPES,
+    FL_BANDS,
+    N_TRACKS,
+    STRANDS,
+    TRACK_INDEX,
+)
 
 
 def find_best_checkpoint(runs_root, run_name):

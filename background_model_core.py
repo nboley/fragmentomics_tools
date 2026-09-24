@@ -100,9 +100,7 @@ from fragmentomics_tools.region import Region
 # Track naming
 # --------------------------------------------------------------------------
 
-STRANDS = ("+", "-")
-FL_BANDS = ((40, 65), (120, 175))  # short (TF footprint) / mononucleosomal
-COVERAGE_TYPES = ("first", "last", "midpoint")
+from background_model.tracks import COVERAGE_TYPES, FL_BANDS, STRANDS
 
 _TRACK_PAT = re.compile(
     r"strand_([+-.])__fl_(\d+)_(\d+)__coverage_(first|last|midpoint)"
@@ -631,9 +629,12 @@ class _BackgroundModelMixin:
 
     Provides the methods that are identical across BackgroundModel,
     BackgroundModelKEN, and BackgroundModelHybrid.  Each concrete class
-    must define ``forward()``, ``configure_optimizers()``, ``loss_fn``,
-    ``dispersion_head``, ``output_tracks``, and ``hparams`` with the
-    standard keys.
+    must define ``forward()``, ``loss_fn``, ``dispersion_head``,
+    ``output_tracks``, and ``hparams`` with the standard keys.
+
+    ``configure_optimizers`` is provided here for models with an embedding
+    table (KEN, Hybrid) that apply weight_decay to the embed params only.
+    BackgroundModel (CNN-only, no embed) overrides it.
     """
 
     def _pooled_log_dispersion(self, dispersion_bp, mask):
@@ -670,6 +671,42 @@ class _BackgroundModelMixin:
 
     def validation_step(self, batch, batch_idx):
         return self._step(batch, "val_loss")
+
+    def configure_optimizers(self):
+        """Optimizer with weight_decay on embed params only (KEN / Hybrid).
+
+        BackgroundModel overrides this — it has no embedding table.
+        """
+        lr = self.hparams.learning_rate
+        wd = self.hparams.weight_decay
+        scale = self.hparams.dispersion_lr_scale
+
+        embed_params = list(self.embed.parameters())
+        embed_ids = {id(p) for p in embed_params}
+
+        if (
+            self.dispersion_head is not None
+            and not self.hparams.freeze_dispersion
+            and scale != 1.0
+        ):
+            disp_params = list(self.dispersion_head.parameters())
+            disp_ids = {id(p) for p in disp_params}
+            main_params = [
+                p for p in self.parameters()
+                if id(p) not in embed_ids and id(p) not in disp_ids
+            ]
+            optimizer = torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+                {"params": disp_params, "lr": lr * scale, "weight_decay": 0.0},
+            ])
+        else:
+            main_params = [p for p in self.parameters() if id(p) not in embed_ids]
+            optimizer = torch.optim.Adam([
+                {"params": embed_params, "lr": lr, "weight_decay": wd},
+                {"params": main_params, "lr": lr, "weight_decay": 0.0},
+            ])
+        return _with_lr_schedule(optimizer, self.hparams)
 
     @torch.no_grad()
     def predict_profile(self, one_hot_seq: np.ndarray, mask: Optional[np.ndarray] = None):
@@ -1023,33 +1060,6 @@ class BackgroundModelKEN(_BackgroundModelMixin, L.LightningModule):
             return shape_logits, None
         return shape_logits, self.dispersion_head(h)
 
-    def configure_optimizers(self):
-        lr = self.hparams.learning_rate
-        wd = self.hparams.weight_decay
-        scale = self.hparams.dispersion_lr_scale
-
-        # Apply weight decay only to the embedding table
-        embed_params = list(self.embed.parameters())
-        embed_ids = {id(p) for p in embed_params}
-
-        if self.dispersion_head is not None and not self.hparams.freeze_dispersion and scale != 1.0:
-            disp_ids = {id(p) for p in self.dispersion_head.parameters()}
-            main_params = [p for p in self.parameters()
-                          if id(p) not in embed_ids and id(p) not in disp_ids]
-            optimizer = torch.optim.Adam([
-                {"params": embed_params, "lr": lr, "weight_decay": wd},
-                {"params": main_params, "lr": lr, "weight_decay": 0.0},
-                {"params": list(self.dispersion_head.parameters()),
-                 "lr": lr * scale, "weight_decay": 0.0},
-            ])
-        else:
-            main_params = [p for p in self.parameters() if id(p) not in embed_ids]
-            optimizer = torch.optim.Adam([
-                {"params": embed_params, "lr": lr, "weight_decay": wd},
-                {"params": main_params, "lr": lr, "weight_decay": 0.0},
-            ])
-        return _with_lr_schedule(optimizer, self.hparams)
-
 
 class BackgroundModelHybrid(_BackgroundModelMixin, L.LightningModule):
     """K-mer embedding + one-hot conv stem, fused into a dilated ResNet trunk.
@@ -1251,38 +1261,6 @@ class BackgroundModelHybrid(_BackgroundModelMixin, L.LightningModule):
         if self.dispersion_head is None:
             return shape_logits, None
         return shape_logits, self.dispersion_head(h)
-
-    def configure_optimizers(self):
-        lr = self.hparams.learning_rate
-        wd = self.hparams.weight_decay
-        scale = self.hparams.dispersion_lr_scale
-
-        embed_params = list(self.embed.parameters())
-        embed_ids = {id(p) for p in embed_params}
-
-        if (
-            self.dispersion_head is not None
-            and not self.hparams.freeze_dispersion
-            and scale != 1.0
-        ):
-            disp_params = list(self.dispersion_head.parameters())
-            disp_ids = {id(p) for p in disp_params}
-            main_params = [
-                p for p in self.parameters()
-                if id(p) not in embed_ids and id(p) not in disp_ids
-            ]
-            optimizer = torch.optim.Adam([
-                {"params": embed_params, "lr": lr, "weight_decay": wd},
-                {"params": main_params, "lr": lr, "weight_decay": 0.0},
-                {"params": disp_params, "lr": lr * scale, "weight_decay": 0.0},
-            ])
-        else:
-            main_params = [p for p in self.parameters() if id(p) not in embed_ids]
-            optimizer = torch.optim.Adam([
-                {"params": embed_params, "lr": lr, "weight_decay": wd},
-                {"params": main_params, "lr": lr, "weight_decay": 0.0},
-            ])
-        return _with_lr_schedule(optimizer, self.hparams)
 
 
 # --------------------------------------------------------------------------

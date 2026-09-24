@@ -37,19 +37,12 @@ from background_model.store import (
 
 log = logging.getLogger(__name__)
 
-# ── Track index (maps build_coverage_counts keys to canonical order) ─────
-
-STRANDS = ("+", "-")
-FL_BANDS = ((40, 65), (120, 175))
-COVERAGE_TYPES = ("first", "last", "midpoint")
-
-TRACK_INDEX = {}
-_idx = 0
-for _s in STRANDS:
-    for _fl in FL_BANDS:
-        for _c in COVERAGE_TYPES:
-            TRACK_INDEX[(_s, _fl, _c)] = _idx
-            _idx += 1
+from background_model.tracks import (  # noqa: E402 — must follow config import
+    COVERAGE_TYPES,
+    FL_BANDS,
+    STRANDS,
+    TRACK_INDEX,
+)
 
 
 # ── Contig geometry ──────────────────────────────────────────────────────

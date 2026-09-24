@@ -246,22 +246,23 @@ class TestTrackIndex:
         assert max(TRACK_INDEX.values()) == C - 1
 
     def test_track_order_matches_core_canonical(self):
-        """Cross-file invariant: the track constants are deliberately
-        TRIPLICATED (background_model_core.py, config.py, preprocess.py — see
-        design doc Reconciliation notes). A silent order mismatch between
-        preprocess's TRACK_INDEX and the model's DEFAULT_OUTPUT_TRACKS would
-        corrupt every stored count, so lock all three to core's canonical
-        order here."""
+        """Cross-file invariant: all track constants come from the canonical
+        background_model.tracks module.  A silent order mismatch between
+        TRACK_INDEX and the model's DEFAULT_OUTPUT_TRACKS would corrupt every
+        stored count, so verify alignment here."""
         core = pytest.importorskip("background_model_core")
+        from background_model import tracks as bg_tracks
         from background_model import config as bg_config
-        from background_model import preprocess as bg_preprocess
 
-        # config.py constants == core constants (order included)
-        assert bg_config._STRANDS == core.STRANDS
-        assert bg_config._FL_BANDS_DEFAULT == core.FL_BANDS
-        assert bg_config._COVERAGE_TYPES == core.COVERAGE_TYPES
+        # config.py re-exports from tracks (identity, not just equality)
+        assert bg_config._FL_BANDS_DEFAULT is bg_tracks.FL_BANDS
 
-        # preprocess.py TRACK_INDEX maps each key to the exact position of
+        # core re-exports from tracks
+        assert core.STRANDS is bg_tracks.STRANDS
+        assert core.FL_BANDS is bg_tracks.FL_BANDS
+        assert core.COVERAGE_TYPES is bg_tracks.COVERAGE_TYPES
+
+        # TRACK_INDEX maps each key to the exact position of
         # its track name in core's DEFAULT_OUTPUT_TRACKS
         assert len(TRACK_INDEX) == len(core.DEFAULT_OUTPUT_TRACKS)
         for (strand, fl_band, cov), idx in TRACK_INDEX.items():
