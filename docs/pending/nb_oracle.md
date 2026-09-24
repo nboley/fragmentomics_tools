@@ -264,3 +264,66 @@ assumption in an implementation.
 Second weakness: the choice of anchor A over C is a judgement about which
 question is worth answering, and reasonable people could prefer C. I have argued
 for A rather than proved it correct.
+
+---
+
+## Review Notes (2026-09-24)
+
+**Verdict**: APPROVED WITH CONDITIONS
+**Grade**: A-
+
+### Verification summary
+
+Every factual claim was checked against source. The central claim (§2.3) is
+mathematically correct:
+
+- `MaskedNegativeBinomialOffsetNLLLoss` computes `N = target.sum(dim=-1)` and
+  anchors `mu_i = N * softmax(logits)_i` (`background_model_core.py:546-547`).
+  The docstring opens with "Pseudo-likelihood" (line 502). **Verified by code.**
+- `simulate_sample_nb` uses `mu_pos = target * w_pos / total_w` with `target`
+  being `N_target`, not `N_observed` (`sim_fragments.py:542`). **Verified by code.**
+- Gibbs' inequality does not transfer to this pseudo-likelihood because the
+  offset `N` is data-dependent and the product-NB is not a proper distribution
+  over the data vector. **Verified by reasoning; the math is sound.**
+- All numerical values (oracle 4.115647, uniform 4.204456, untrained KEN
+  4.093257, untrained hybrid 4.108722, multinomial anchors, gap identity to
+  2.7e-5, 154%/162%, 12800 vs 61440 pairs) match their source files. Untrained
+  KEN val_loss confirmed in the training run's `metrics.csv` (epoch-0). **Verified.**
+
+### Conditions
+
+1. **Resolve §2.4 before implementation.** The clamp_effect being 0.0 is not
+   suspicious — it is expected. Per-position mu = N_track × p_i ≈ (hundreds) ×
+   (1/2048) ≈ 0.1–5, far below true r ≈ 7.18. The clamp floor
+   `r >= mu / (2(1-p) - 1) ≈ mu` never exceeds the true r. Replace the
+   suspicion with this back-of-envelope resolution so implementers don't
+   investigate a non-issue.
+
+2. **Add a third outcome to §4 step 0 for intermediate fitted r.** The binary
+   framing (r >> 7.18 → proceed; r ≈ 7.18 → stop) leaves no plan if the
+   minimum is at, say, r = 50–200. Suggested: "r intermediate (20–500) → the
+   objective has partial sensitivity to overdispersion; proceed with anchor A
+   and flag the finding."
+
+### Risks
+
+1. Step 0 could produce an intermediate r with no defined action plan.
+2. If the fitted r lands near 1096, the NB oracle adds no information beyond
+   the already-verified multinomial oracle — the finding would be "this
+   objective cannot see the overdispersion this store exists to test." The
+   design handles this correctly (§3, §7 Q1) but it means the entire
+   implementation could conclude with a negative result after an hour of work.
+3. §2.4's suspicious framing could waste implementation time (minor).
+
+### Key tradeoffs
+
+- **Anchor A over C**: A isolates propensity (the right question for "% bias
+  captured"), avoids overfitting 2048-dim propensity on 1600 val pairs, and is
+  a 1-D optimisation. C is theoretically correct but answers a harder question
+  that the data may not support. Reviewer agrees with A.
+- **Scalar r over per-hexamer**: scalar is conservative and answers the
+  first-order question. Per-hexamer (4096 params on ~3.2M data points) is a
+  valid follow-up if the scalar r proves interesting.
+- **Step 0 before implementation**: the cheapest possible falsification test
+  (25 loss evaluations on 1600 pairs). Correct design choice — a wrong
+  diagnosis caught at step 0 costs an hour, not a week.
