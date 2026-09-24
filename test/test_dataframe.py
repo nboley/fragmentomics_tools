@@ -20,16 +20,12 @@ Deleted (15 tests): 10 were dead code that never ran -- they depended on an
     by owner decision rather than kept as permanent skips.  See git log for
     per-test justification.
 
-Library defect found during triage (reported, not fixed here):
-    ``intersect_with_rdf`` does not return geometric intersections.  The
-    original implementation passed ``**intersect_kwargs`` straight through with
-    no defaults; the current one adds ``wa=True, wb=True`` when the caller has
-    not chosen an output mode, so a bare call returns the whole A interval.
-    A=[1000,1500) against B=[1300,2100) yields chr1:1000-1500, not
-    chr1:1300-1500.  The default is *required* by attach_blacklist_regions and
-    get_overlapping_base_counts, so it is not simply removable -- but both the
-    method docstring and CLAUDE.md still advertise this as "Intersections".
-    test_intersect_region_dataframe below asserts current behaviour.
+Library defect found during triage (reported, now fixed):
+    ``intersect_with_rdf`` did not return geometric intersections — it returned
+    whole A intervals joined on overlap.  It has been renamed to
+    ``join_on_overlap`` to reflect its actual behaviour; the old name raises
+    AttributeError.  test_intersect_region_dataframe below asserts current
+    behaviour via the new name.
 """
 import tempfile
 
@@ -98,10 +94,9 @@ def test_split_on_contig():
 def test_intersect_region_dataframe():
     """Intersection of two synthetic RDFs returns expected overlapping regions.
 
-    NOTE: intersect_with_rdf currently defaults to wa=True, wb=True (bedtools
-    -wa -wb), so it returns whole A intervals that overlap B rather than the
-    geometric intersection.  This test asserts the current behavior; see the
-    module docstring for the reported bug.
+    NOTE: join_on_overlap defaults to wa=True, wb=True (bedtools -wa -wb),
+    so it returns whole A intervals that overlap B rather than the geometric
+    intersection.  This test asserts that behaviour.
     """
     rdf_1 = RegionDataFrame.from_regions(
         [Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19"
@@ -119,7 +114,7 @@ def test_intersect_region_dataframe():
 
     # The two entry-points agree with each other.
     for region_1, region_2 in zip(
-        rdf_1.intersect_with_rdf(rdf_2).iter_regions(),
+        rdf_1.join_on_overlap(rdf_2).iter_regions(),
         intersect_region_dataframes([rdf_1, rdf_2]).iter_regions(),
     ):
         assert region_1 == region_2, f"{region_1}, {region_2}"

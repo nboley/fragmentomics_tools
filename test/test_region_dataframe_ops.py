@@ -92,7 +92,7 @@ class TestMergeRegions:
 class TestGetOverlappingBaseCounts:
     """This method raised TypeError on every call before the fix.
 
-    It passes wao=True through intersect_with_bed to intersect_with_rdf, whose
+    It passes wao=True through intersect_with_bed to join_on_overlap, whose
     signature did not accept **intersect_kwargs even though its docstring
     documented them.
     """
@@ -232,9 +232,10 @@ class TestGetFragmentCoverageSum:
 
 
 class TestIntersectWithRdfReturnType:
-    """I4: intersect_with_rdf returned a plain DataFrame when the intersection
-    was empty, but a RegionDataFrame otherwise. Callers chaining RDF methods
-    hit AttributeError only on the empty path."""
+    """I4: join_on_overlap (formerly intersect_with_rdf) returned a plain
+    DataFrame when the intersection was empty, but a RegionDataFrame
+    otherwise. Callers chaining RDF methods hit AttributeError only on
+    the empty path."""
 
     def test_empty_intersection_returns_subclass(self):
         rdf1 = RegionDataFrame(
@@ -245,7 +246,7 @@ class TestIntersectWithRdfReturnType:
             pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
             ref="hg38",
         )
-        result = rdf1.intersect_with_rdf(rdf2)
+        result = rdf1.join_on_overlap(rdf2)
         assert isinstance(result, RegionDataFrame), (
             f"expected RegionDataFrame, got {type(result).__name__}"
         )
@@ -260,16 +261,50 @@ class TestIntersectWithRdfReturnType:
             pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
             ref="hg38",
         )
-        empty = rdf1.intersect_with_rdf(rdf_far)
+        empty = rdf1.join_on_overlap(rdf_far)
 
         # overlapping
         rdf_near = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
             ref="hg38",
         )
-        nonempty = rdf1.intersect_with_rdf(rdf_near)
+        nonempty = rdf1.join_on_overlap(rdf_near)
 
         assert set(empty.columns) == set(nonempty.columns)
+
+
+class TestIntersectWithRdfRaises:
+    """F9: intersect_with_rdf was renamed to join_on_overlap because the old
+    name implied geometric intersection, which it never performed.  The old
+    name must raise so that stale callers break loudly."""
+
+    def test_old_name_raises_with_guidance(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        other = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
+            ref="hg38",
+        )
+        with pytest.raises(AttributeError, match="join_on_overlap"):
+            rdf.intersect_with_rdf(other)
+
+    def test_new_name_works(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        other = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
+            ref="hg38",
+        )
+        result = rdf.join_on_overlap(other)
+        assert isinstance(result, RegionDataFrame)
+        assert len(result) == 1
+        # Returns whole A interval, not geometric intersection
+        assert int(result.start.iloc[0]) == 100
+        assert int(result.stop.iloc[0]) == 200
 
 
 class TestEqSemantics:

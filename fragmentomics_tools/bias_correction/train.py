@@ -69,7 +69,7 @@ def build_ctcf_rdfs():
     ).resize_regions(1024)
     dhs_rdf["strand"] = "."
     ctcf_rdf = build_ctcf_binding_sites().resize_regions(1024)
-    intersect_rdf = dhs_rdf.intersect_with_rdf(ctcf_rdf).drop_duplicates()
+    intersect_rdf = dhs_rdf.join_on_overlap(ctcf_rdf).drop_duplicates()
     train_and_val_rdf = dhs_rdf.loc[~dhs_rdf.index.isin(intersect_rdf.index), :].sample(
         n_train + n_val
     )

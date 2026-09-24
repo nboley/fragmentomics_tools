@@ -29,7 +29,7 @@ Sanctioned entry points:
 | Load a BED | `RegionDataFrame.from_bed(path, ref=...)` — `ref` is **required** |
 | Merge several BEDs | `RegionDataFrame.from_beds_merged(...)` |
 | Blacklist / exclusion filtering | `.drop_overlapping_regions(other_rdf)` |
-| Intersections | `.intersect_with_rdf(other)` |
+| Join on overlap | `.join_on_overlap(other)` — returns whole A intervals, NOT geometric intersections |
 | Resize / pad regions | `.expand_regions(...)`, `.resize_regions(...)` |
 | Attach fragments to regions | `SampleAndRegionDataFrame.attach_fragment_arrays(...)` |
 | Per-region fragment loading | `RegionFragmentArray.from_fragments_h5(...)` |

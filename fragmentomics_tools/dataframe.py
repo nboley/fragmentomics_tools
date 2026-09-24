@@ -1013,15 +1013,21 @@ class RegionDataFrame(DataFrameBase):
         merged_df.columns = ["contig", "start", "stop"] + list(merged_df.columns[3:])
         return type(self)(merged_df, ref=self.ref)
 
-    def intersect_with_rdf(self, other, sorted=False, rsuff="other", **intersect_kwargs):
-        """
-        Creates the intersection of RegionDataFrames
+    def join_on_overlap(self, other, sorted=False, rsuff="other", **intersect_kwargs):
+        """Join two RegionDataFrames on genomic overlap, returning whole intervals.
+
+        This is NOT a geometric intersection.  By default (wa=True, wb=True) it
+        returns the entire A interval for each A/B overlap, plus B's columns
+        suffixed with ``rsuff``.  For example, A=[1000,1500) overlapping
+        B=[1300,2100) returns A's full interval chr1:1000-1500, not the
+        geometric clip chr1:1300-1500.
+
         :param other: other RegionDataFrame
         :param sorted: RegionDataFrames are both sorted -- use Bedtools chromsweep algorithm
         :param rsuff: Suffix to append to other dataframe
         :param intersect_kwargs: Bedtools intersect kwargs, such as wa, wo, etc. For more info, consult
             https://daler.github.io/pybedtools/autodocs/pybedtools.bedtool.BedTool.intersect.html
-        :return: RegionDataFrame that is the intersection of two RegionDataFrames
+        :return: RegionDataFrame with one row per A/B overlap pair
         """
 
         def reordered_columns(rdf):
@@ -1071,6 +1077,19 @@ class RegionDataFrame(DataFrameBase):
         intersection_rdf = intersection_rdf.set_index("index")
         return type(self)(intersection_rdf, ref=self.ref)
 
+    def intersect_with_rdf(self, *args, **kwargs):
+        """Removed: this method never returned geometric intersections.
+
+        Use ``join_on_overlap`` instead — it has the same signature and
+        behaviour, but the name accurately reflects what it does: a join
+        of whole A intervals against B, keyed on overlap.
+        """
+        raise AttributeError(
+            "intersect_with_rdf has been renamed to join_on_overlap.  "
+            "The old name was misleading: the method never returned "
+            "geometric intersections.  Update your call site."
+        )
+
     def intersect_with_bed(
         self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
     ):
@@ -1082,7 +1101,7 @@ class RegionDataFrame(DataFrameBase):
         :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
         """
         other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
-        overlap_rdf = self.intersect_with_rdf(
+        overlap_rdf = self.join_on_overlap(
             other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
         )
 
@@ -1224,11 +1243,11 @@ class RegionDataFrame(DataFrameBase):
 
     def drop_overlapping_regions(self, other_rdf):
         """Return a copy with regions that overlap other_rdf removed."""
-        tmp = self.intersect_with_rdf(other_rdf)
+        tmp = self.join_on_overlap(other_rdf)
         return self.loc[self.index.difference(tmp.index), :]
 
     def attach_blacklist_regions(self, bed_fname, rsuff="other"):
-        tmp = self.intersect_with_rdf(
+        tmp = self.join_on_overlap(
             RegionDataFrame.from_bed(bed_fname, ref=self.ref), rsuff=rsuff
         )
         if len(tmp) == 0:
@@ -1240,7 +1259,7 @@ class RegionDataFrame(DataFrameBase):
         # it here attached each query region to itself instead of the
         # overlapping blacklist interval -- silently, with no error. The
         # blacklist coordinates live in the `_{rsuff}`-suffixed columns that
-        # intersect_with_rdf produces.
+        # join_on_overlap produces.
         def _blacklist_regions_for(group):
             return [
                 Region(
@@ -2322,5 +2341,5 @@ def intersect_region_dataframes(region_dataframes, sort=False):
         region_dataframes = [rdf.sort() for rdf in region_dataframes]
     intersected_rdf = region_dataframes[0]
     for rdf in region_dataframes[1:]:
-        intersected_rdf = intersected_rdf.intersect_with_rdf(rdf, sorted=sort)
+        intersected_rdf = intersected_rdf.join_on_overlap(rdf, sorted=sort)
     return intersected_rdf
