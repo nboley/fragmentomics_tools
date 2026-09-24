@@ -1595,14 +1595,22 @@ class RegionDataFrame(DataFrameBase):
             if mode == "full":
                 return region.resize(int(stride * math.ceil(region.length / stride)))
             elif mode == "valid":
-                new_len = int(stride * math.floor(region.length / stride))
-                if new_len == 0:
+                if region.length < window_size:
                     raise ValueError(
                         f"region {region.chrom}:{region.start}-{region.stop} "
-                        f"(length {region.length}) is shorter than stride "
-                        f"({stride}); no valid windows can be produced"
+                        f"(length {region.length}) is shorter than window_size "
+                        f"({window_size}); no valid windows can be produced"
                     )
-                return region.resize(new_len)
+                n_windows = (region.length - window_size) // stride + 1
+                new_len = n_windows * stride
+                # Start-anchored, not centered: the widening step (line below)
+                # extends every window rightward by (window_size - stride).
+                # A centered resize would shift the start right, wasting left
+                # margin while the right side overshoots the original region.
+                return Region(
+                    region.chrom, region.start, region.start + new_len,
+                    region.strand, region.ref, region.data,
+                )
             elif mode == "exact":
                 assert window_size % stride == 0
                 if region.length % stride != 0:

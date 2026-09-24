@@ -551,12 +551,37 @@ class TestResizeBoundaryConditions:
 
 
 class TestBinRegionsIntoWindows:
-    """R10: region shorter than stride in valid mode gave an opaque error."""
+    """R10: region shorter than stride in valid mode gave an opaque error.
+    R4: valid mode with stride < window_size produced windows overshooting
+    the original region."""
 
     def test_short_region_valid_mode_gives_clear_error(self):
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [1020]}),
             ref="hg38",
         )
-        with pytest.raises(ValueError, match="shorter than stride"):
+        with pytest.raises(ValueError, match="shorter than window_size"):
             rdf.bin_regions_into_windows(window_size=100, mode="valid", stride=50)
+
+    @pytest.mark.parametrize("window_size,stride,expected_n", [
+        (100, 100, 10),   # stride == window_size: no overlap, 10 windows
+        (200, 100, 9),    # stride < window_size: 9 windows fit
+        (400, 100, 7),    # bigger window: 7 windows fit
+        (1000, 100, 1),   # window == region: 1 window
+    ])
+    def test_valid_mode_windows_stay_within_region(
+        self, window_size, stride, expected_n
+    ):
+        """R4: every window produced by valid mode must lie within the
+        original region.  Before the fix, stride < window_size caused the
+        last window to overshoot by window_size - stride."""
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [2000]}),
+            ref="hg38",
+        )
+        result = rdf.bin_regions_into_windows(
+            window_size=window_size, mode="valid", stride=stride,
+        )
+        assert len(result) == expected_n
+        assert result["start"].min() >= 1000, "window starts before region"
+        assert result["stop"].max() <= 2000, "window extends past region"
