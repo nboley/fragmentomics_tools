@@ -1353,6 +1353,35 @@ def test_recovery_lr_ladder_when_best_improves(tmp_path):
 
     assert len(recoveries) >= 2, f"Need >= 2 recoveries, got {len(recoveries)}"
 
+    # ── guard this test's own premise ────────────────────────────────────
+    # This test discriminates 0.25L (correct) from 0.125L (double-counting
+    # bug).  The floor clamp added in 0e1473c can interfere with that, so
+    # assert we are still in a regime where the comparison is meaningful.
+    # Without this, a future parameter tweak could slide the buggy value
+    # into a range the clamp masks, silently retiring the regression guard.
+    #
+    # NOTE: the floor here equals the buggy value EXACTLY (both 1.25e-3),
+    # so this test sits precisely on the clamp boundary.  That is benign --
+    # under strict `<` the clamp does not fire, and even under `<=` the
+    # clamped result is still != expected -- but it is benign by
+    # coincidence rather than by construction, which is why it is asserted
+    # here instead of left to a comment.
+    floor = original_lr * 0.5 ** 3  # lr_factor ** max_lr_reductions
+    expected_lr = original_lr * 0.25
+    buggy_lr = original_lr * 0.125
+    assert floor < expected_lr, (
+        f"Premise broken: plateau floor {floor:.4e} is not below the "
+        f"expected recovery-2 LR {expected_lr:.4e}, so the clamp would mask "
+        f"the correct value and this test can no longer prove the ladder."
+    )
+    clamped_buggy = max(buggy_lr, floor)  # what the clamp would yield
+    assert clamped_buggy != pytest.approx(expected_lr, rel=1e-4), (
+        f"Premise broken: the buggy LR {buggy_lr:.4e} clamps to "
+        f"{clamped_buggy:.4e}, indistinguishable from the expected "
+        f"{expected_lr:.4e}. This test would PASS against the very bug it "
+        f"exists to catch. Re-pick the parameters."
+    )
+
     # Group lr_history entries by epoch; later entries for the same epoch
     # come from recovery attempts (the model object persists across fits).
     epoch_lr_records = defaultdict(list)
