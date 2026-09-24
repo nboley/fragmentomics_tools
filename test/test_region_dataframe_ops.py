@@ -453,3 +453,25 @@ class TestUniqueRegions:
         # should be ascending coordinate order
         assert list(result.contig) == ["chr1", "chr1", "chr2"]
         assert list(result.start) == [100, 300, 200]
+
+
+class TestGetIntervalDict:
+    """I5: get_interval_dict rejected unstranded regions with expand."""
+
+    def test_unstranded_with_expand_does_not_crash(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1"],
+                "start": [100],
+                "stop": [200],
+                "strand": ["."],
+            }),
+            ref="hg38",
+        )
+        d = rdf.get_interval_dict(
+            data_cols=None, expand_upstream=10, expand_downstream=10
+        )
+        tree = d["chr1"]
+        # unstranded: symmetric expand by max(10, 10) = 10 in both directions
+        assert len(tree[90:210]) > 0
+        assert len(tree[89:90]) == 0  # just outside

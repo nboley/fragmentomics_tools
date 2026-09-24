@@ -596,13 +596,18 @@ class RegionDataFrame(DataFrameBase):
             else:
                 data = tuple(row.loc[data_cols].tolist())
             if expand_upstream != 0 or expand_downstream != 0:
-                assert row["strand"] in {"-", "+"}
-                if row["strand"] == "+":
+                strand = row["strand"]
+                if strand == "+":
                     start = row["start"] - expand_upstream
                     stop = row["stop"] + expand_downstream
-                elif row["strand"] == "-":
+                elif strand == "-":
                     start = row["start"] - expand_downstream
                     stop = row["stop"] + expand_upstream
+                else:
+                    # Unstranded: expand symmetrically in both directions
+                    expand = max(expand_upstream, expand_downstream)
+                    start = row["start"] - expand
+                    stop = row["stop"] + expand
             else:
                 start = row["start"]
                 stop = row["stop"]
