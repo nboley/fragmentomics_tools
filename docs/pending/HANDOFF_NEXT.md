@@ -24,28 +24,46 @@ merged and pushed. Library suite 2 failed / 289 passed; background_model suite
 suite produces `ModuleNotFoundError` for `lightning`/`zarr` and looks like
 broken code. It is not.
 
-```
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 <env>/bin/python -m pytest test/ \
-    --ignore=test/test_dataframe.py -q -p no:cacheprovider
+**`<env>/bin` must be on `PATH`, not merely used to locate python.** The library
+suite shells out to eight binaries — `bgzip`, `tabix`, `bedToBigBed`,
+`bigBedInfo`, `bigBedToBed`, `bedGraphToBigWig`, `samtools`, `bedtools`. All are
+installed in `<env>/bin/`, but invoking `<env>/bin/python` by absolute path does
+**not** put that directory on `PATH`. Omit it and you get **48 failed / 243
+passed** instead of 2/289: 26 `FileNotFoundError: 'bgzip'`, 11
+`'bedToBigBed'`, and 7 `pybedtools` `NotImplementedError` for `intersectBed` /
+`sortBed`. Every one of those reads as a code defect, and none of them is one.
+
+> **Correction (2026-09-24).** An earlier revision of this file gave the command
+> without the `PATH` assignment. Its *numbers* were right — 2/289 reproduces
+> exactly — but the command as written does not produce them. This is the trap
+> `CLAUDE.md` already flags: `bedtools` ships in the conda env's `bin/` and "is
+> frequently *not* on `PATH` in sandboxes." Measured, not inferred.
+
+```bash
+E=/home/nathanboley/.local/share/mamba/envs/fragtools-test
+PATH="$E/bin:$PATH" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $E/bin/python \
+    -m pytest test/ --ignore=test/test_dataframe.py -q -p no:cacheprovider
 ```
 
 ---
 
 ## 1. Tests: three distinct problems, in priority order
 
-### 1a. The suite is NOT reproducible from a clean checkout — fix first
+### 1a. Clean-checkout reproducibility — DONE (`59ccb00`)
 
-`test/fragment_array/data/` is **gitignored** (`.gitignore:2: data/`), so the
-fixtures live only in the working tree. From a fresh clone **20 tests error**
-with `FileNotFoundError: .../small.chr6.bam`.
+`test/fragment_array/data/` was **gitignored** (`.gitignore:2: data/`), so the
+fixtures lived only in whatever working tree happened to have them, and a fresh
+clone errored **20 tests** with `FileNotFoundError: .../small.chr6.bam`. Both the
+20 and the gitignore cause were confirmed by cloning to `/tmp` and running it.
 
-The files are 620 KB total (196 KB BAM + 280 KB FASTA + indexes), recovered
-from `~/src/fragments_h5/tests/data/`. Options: add a `.gitignore` exception
-and commit them; or add a conftest fixture that fetches them on demand. Doing
-neither means every new checkout starts 20 tests in the red for no reason.
+Resolved by committing the five files (624 KB) behind a `.gitignore` exception
+block mirroring the one already present for `tests/data/` — the same convention
+the owner had established for the same reason, rather than a new policy.
+Fetch-on-demand was rejected: there is no CI to exercise such a fetch, so a
+broken one would stay silently broken until the next clone.
 
-This is the single highest-value test task — it is what makes every other test
-number trustworthy.
+Verified end to end: a clean clone of `59ccb00` now gives **2 failed / 289
+passed / 0 errors**, matching the tree that had the files.
 
 ### 1b. `test_dataframe.py` — 26 tests, still uncollectable
 
@@ -148,6 +166,13 @@ wrong "zero consumers" answer here.
 - **Prove a test fails against the unfixed code.** Extract the old version with
   `git show <sha>:path`, copy the package to `/tmp`, set `PYTHONPATH`. Never
   revert the working tree — another session may be live in it.
+- **A grep hit in a `.ipynb` is not necessarily a consumer.** The `.py`-only
+  search that missed notebook callers is recorded below, but the opposite error
+  is just as easy: `attach_num_tss_overlaps` (I13) matched three times in
+  `biomarker-projects`, and all three were **output cells** — `dir()` dumps, not
+  calls. Parse the notebook and check `cell["source"]` rather than grepping the
+  raw JSON. A tell: those same dumps listed `ref_path` and `set_binary_label`,
+  both deleted long before.
 - **Bash traps that produced wrong answers here:** `$?` after a pipeline is the
   last command's status, not the one you care about; a grep that times out
   (exit 124) piped to `head` looks exactly like "no matches"; `git tag` sorts
