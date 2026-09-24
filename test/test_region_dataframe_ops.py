@@ -270,3 +270,35 @@ class TestIntersectWithRdfReturnType:
         nonempty = rdf1.intersect_with_rdf(rdf_near)
 
         assert set(empty.columns) == set(nonempty.columns)
+
+
+class TestEqSemantics:
+    """I10: __eq__ used to return a scalar bool, breaking the pandas contract
+    for element-wise comparison and making instances unhashable."""
+
+    def test_eq_returns_elementwise(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        # pandas __eq__ should return a DataFrame of booleans, not a scalar
+        result = rdf == rdf
+        assert isinstance(result, pd.DataFrame), (
+            f"expected DataFrame from ==, got {type(result).__name__}"
+        )
+
+    def test_equals_rdf_compares_regions(self):
+        rdf1 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        rdf2 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        rdf3 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [300]}),
+            ref="hg38",
+        )
+        assert rdf1.equals_rdf(rdf2)
+        assert not rdf1.equals_rdf(rdf3)

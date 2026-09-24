@@ -483,9 +483,11 @@ class RegionDataFrame(DataFrameBase):
             merged_rdf = merged_rdf & rdf
         return merged_rdf
 
-    def __eq__(self, other):
-        """
-        Checks if two region dataframes have identical regions, in the same order
+    def equals_rdf(self, other):
+        """Check if two region dataframes have identical regions, in the same order.
+
+        This was previously ``__eq__``, which broke the pandas contract
+        (element-wise comparison) and made instances unhashable.
         """
         if len(self) != len(other):
             return False
