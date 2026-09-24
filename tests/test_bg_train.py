@@ -15,6 +15,7 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from background_model_core import BackgroundModel, _with_lr_schedule
 from background_model.train import (
     ApplyLRReduction,
+    RECOVERABLE_REASONS,
     DivergenceStop,
     InstrumentedBackgroundModel,
     TrainConfig,
@@ -980,7 +981,8 @@ class _DivergingModel(L.LightningModule):
     def __init__(self, lr=1e-2, scale=0.1, spike_epochs=None,
                  first_spike=3, spike_every=None,
                  spike=2.0, base_loss=10.0, trend=-0.01,
-                 lr_patience=4, max_lr_reductions=3, lr_factor=0.5):
+                 lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
+                 nan_epochs=None):
         super().__init__()
         self.save_hyperparameters()
         self.layer1 = torch.nn.Linear(4, 4)
@@ -1007,6 +1009,10 @@ class _DivergingModel(L.LightningModule):
         x, y = batch
         ep = self.current_epoch
         base = self.hparams.base_loss
+        # nan_epochs defaults to None so existing tests are unaffected.
+        if self.hparams.nan_epochs and ep in set(self.hparams.nan_epochs):
+            self.log("val_loss", float("nan"))
+            return torch.tensor(float("nan"))
         if ep in self._spike_epochs:
             loss = base * self.hparams.spike
         else:
@@ -1087,6 +1093,11 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
             global_best_path=global_best_path,
             max_recoveries=max_recoveries,
             recovery_factor=recovery_factor,
+            # Same derivation production uses: min_lr / original_lr.
+            # Taken from the MODEL's hparams, because those are what
+            # _with_lr_schedule used to compute the scheduler's min_lrs.
+            floor_ratio=(model.hparams.lr_factor
+                         ** model.hparams.max_lr_reductions),
         )
     )
 
@@ -1585,7 +1596,10 @@ def test_recovery_factor_cli_default_and_override():
     p = build_arg_parser()
     required = ["--loss", "multinomial", "--run-name", "t"]
     cfg = cfg_from_args(p.parse_args(required))
-    assert cfg.recovery_factor == 0.5
+    # 0.2 (cut by 80%), changed from 0.5 on 2026-09-24 together with
+    # lr_factor. The two must stay equal so the recovery ladder and the
+    # plateau floor bottom out at the same value.
+    assert cfg.recovery_factor == 0.2
 
     cfg2 = cfg_from_args(p.parse_args(required + ["--recovery-factor", "0.3"]))
     assert cfg2.recovery_factor == pytest.approx(0.3)
@@ -1859,3 +1873,119 @@ def test_multi_group_floor_clamp_different_floors(tmp_path):
         assert lr1 >= floor_g1 - 1e-10, (
             f"epoch {ep}: group1 LR={lr1:.6e} < floor={floor_g1:.6e}"
         )
+
+
+# --------------------------------------------------------------------------
+# Absolute LR rung (2026-09-24).  ApplyLRReduction targets
+# recovery_factor**N x ORIGINAL lr rather than multiplying the resumed
+# checkpoint's LR by a factor relative to it.  That removed the
+# best_recovery_level bookkeeping which caused the ladder double-count.
+# --------------------------------------------------------------------------
+
+
+def _fake_trainer(current_lrs, min_lrs):
+    """Optimizer + real ReduceLROnPlateau wired like _with_lr_schedule does."""
+    from types import SimpleNamespace
+    groups = [{"params": [torch.nn.Parameter(torch.zeros(1))], "lr": lr}
+              for lr in current_lrs]
+    opt = torch.optim.Adam(groups)
+    sch = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, min_lr=list(min_lrs))
+    return SimpleNamespace(optimizers=[opt],
+                           lr_scheduler_configs=[SimpleNamespace(scheduler=sch)]), opt
+
+
+def test_recovery_rung_is_absolute_regardless_of_resume_depth():
+    """The Nth rung is recovery_factor**N x ORIGINAL lr, whatever we resume from.
+
+    This is the regression guard for the ladder double-count: under the old
+    relative scheme, resuming from an already-reduced checkpoint multiplied the
+    from-original factor on top, giving 0.125L where 0.25L was intended.
+    """
+    L, rf, floor_ratio = 5e-3, 0.2, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+
+    for n, resume_lr in ((1, L), (2, L * rf), (3, L * rf ** 2)):
+        tr, opt = _fake_trainer([resume_lr, resume_lr * 0.1], min_lrs)
+        ApplyLRReduction(rf ** n, floor_ratio).on_train_start(tr, None)
+        got = opt.param_groups[0]["lr"]
+        want = max(L * rf ** n, min_lrs[0])
+        assert got == pytest.approx(want, rel=1e-9), (
+            f"N={n} resuming at {resume_lr:.4g}: got {got:.6g}, want rung {want:.6g}"
+        )
+        # inter-group ratio must survive (dispersion_lr_scale)
+        assert opt.param_groups[1]["lr"] / got == pytest.approx(0.1, rel=1e-9)
+
+
+def test_recovery_rung_never_raises_lr():
+    """If plateau drove the LR BELOW the rung, recovery must not raise it.
+
+    A bare absolute assignment would snap back up to the rung, undoing plateau
+    adaptation and increasing the LR right after a divergence.  min(current,
+    rung) is what preserves the monotonicity the multiplicative form had.
+    """
+    L, rf, floor_ratio = 5e-3, 0.2, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+    deep = L * 1e-2                      # far below rung 1, above the floor
+    assert deep < L * rf and deep > min_lrs[0]
+
+    tr, opt = _fake_trainer([deep, deep * 0.1], min_lrs)
+    ApplyLRReduction(rf ** 1, floor_ratio).on_train_start(tr, None)
+    assert opt.param_groups[0]["lr"] <= deep, "recovery raised the LR"
+    assert opt.param_groups[0]["lr"] == pytest.approx(deep, rel=1e-9)
+
+
+def test_floor_clamp_applies_even_without_floor_ratio():
+    """The floor binds whenever the scheduler exposes one.
+
+    Regression guard: an earlier version of this change skipped the clamp when
+    floor_ratio was absent, which let a caller drive the LR below min_lr and
+    re-created the very bug the clamp exists to prevent.
+    """
+    L = 5e-3
+    min_lrs = [L * 0.5 ** 3]
+    tr, opt = _fake_trainer([L * 0.5 ** 3], min_lrs)     # already at the floor
+    cb = ApplyLRReduction(0.25, None)                    # no floor_ratio
+    cb.on_train_start(tr, None)
+    assert opt.param_groups[0]["lr"] >= min_lrs[0] - 1e-18
+    assert cb.clamped_groups, "clamp did not fire without floor_ratio"
+
+
+def test_applied_lrs_recorded_for_audit():
+    L, floor_ratio = 5e-3, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+    tr, opt = _fake_trainer([L, L * 0.1], min_lrs)
+    cb = ApplyLRReduction(0.2, floor_ratio)
+    cb.on_train_start(tr, None)
+    assert cb.applied_lrs == [pytest.approx(g["lr"]) for g in opt.param_groups]
+
+
+def test_ladder_and_floor_bottom_out_together_by_default():
+    """recovery_factor == lr_factor and max_recoveries == max_lr_reductions,
+    so the deepest rung lands exactly on the plateau floor rather than
+    agreeing only by coincidence."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(["--loss", "multinomial", "--run-name", "t"]))
+    assert cfg.lr_factor == 0.2
+    assert cfg.recovery_factor == 0.2
+    assert cfg.recovery_factor == cfg.lr_factor
+    assert cfg.max_recoveries == cfg.max_lr_reductions
+    deepest = cfg.recovery_factor ** cfg.max_recoveries
+    floor = cfg.lr_factor ** cfg.max_lr_reductions
+    assert deepest == pytest.approx(floor, rel=1e-12)
+
+
+def test_non_finite_triggers_recovery(tmp_path):
+    """A NaN loss must be recoverable, not fatal.
+
+    The hybrid+NB run died at epoch 7 with stop_reason=non_finite and simply
+    stopped -- recovery only handled reason=='diverged'.  Owner approved
+    treating non-finite as recoverable on 2026-09-24.
+    """
+    assert "non_finite" in RECOVERABLE_REASONS
+    model = _DivergingModel(lr=1e-2, spike_epochs=set(), nan_epochs={3},
+                            base_loss=10.0, trend=-0.01)
+    stop_reason, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=2, recovery_factor=0.2, max_epochs=8,
+    )
+    assert recoveries, "NaN did not trigger recovery"
+    assert recoveries[0]["epoch"] == 3

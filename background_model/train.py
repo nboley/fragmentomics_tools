@@ -479,52 +479,99 @@ class DivergenceStop(Callback):
 
 
 class ApplyLRReduction(Callback):
-    """Apply a multiplicative LR reduction after Lightning restores optimizer state.
+    """Set each param group to its ABSOLUTE recovery rung after Lightning
+    restores optimizer state.
 
     Lightning's ``trainer.fit(ckpt_path=...)`` restores ``param_groups[i]["lr"]``
     from the checkpoint (verified: ``test_lightning_resume_restores_param_group_lr``).
-    Any LR change made *before* the restore is silently overwritten.
+    Any LR change made *before* the restore is silently overwritten, so this
+    fires on ``on_train_start``, after the restore.
 
-    This callback fires on ``on_train_start`` — after the optimizer state is
-    restored — and multiplies each param group's LR by ``factor``, then clamps
-    each group's LR to the ``ReduceLROnPlateau`` scheduler's per-group
-    ``min_lrs`` floor (if a plateau scheduler is configured).  Without the
-    clamp, repeated recoveries can drive the LR below the floor, making the
-    scheduler permanently inert (see ``_with_lr_schedule``'s docstring).
+    Per group::
 
-    When the clamp binds for any group, ``self.clamped_groups`` records
+        target = original_lr_i * target_ratio          # absolute rung
+        new    = max(min_lr_i, min(current_lr, target))
+
+    **Why absolute rather than multiplicative** (changed 2026-09-24). The
+    original form multiplied the restored LR by a factor computed *relative to
+    the resume checkpoint*, which forced the caller to track how many
+    reductions were already baked into that checkpoint (``best_recovery_level``).
+    That bookkeeping was the source of the LR-ladder double-count bug: an
+    attempt that improved the global best moved the pointer onto an
+    already-reduced checkpoint, and the from-original factor was applied on top
+    (measured 1.25e-3 where 2.5e-3 was intended). Targeting the rung absolutely
+    removes the state, and with it that whole class of error.
+
+    **Why ``min(current_lr, target)``.** A bare absolute set can *raise* the LR:
+    if the plateau scheduler pushed the LR below the rung during the previous
+    attempt, snapping back to the rung would undo that adaptation and increase
+    the LR immediately after a divergence. Taking the minimum keeps the
+    reduction monotonic — the property the multiplicative form had for free —
+    while still pinning the ladder exactly when plateau has not intervened.
+
+    ``original_lr_i`` is derived from the live scheduler rather than passed in:
+    ``_with_lr_schedule`` sets ``min_lr_i = original_lr_i * floor_ratio``, so
+    ``original_lr_i = min_lr_i / floor_ratio``. One authoritative source, no
+    second copy of the formula to drift — the same reasoning as the floor clamp.
+
+    When the floor binds for any group, ``self.clamped_groups`` records
     per-group detail so the caller can include it in ``summary.json``.
+
+    If no ``ReduceLROnPlateau`` is configured there is no ``min_lrs`` and hence
+    no way to recover ``original_lr``; the callback then falls back to the old
+    multiplicative behaviour (``lr *= target_ratio``), which is only reachable
+    from tests that build a trainer without the project's scheduler.
     """
 
-    def __init__(self, factor: float):
-        self.factor = factor
-        self.clamped_groups = None  # populated if any group is clamped
+    def __init__(self, target_ratio: float, floor_ratio: float | None = None):
+        #: ratio of the target rung to the ORIGINAL lr, i.e. recovery_factor**N
+        self.target_ratio = target_ratio
+        #: min_lr / original_lr, i.e. lr_factor ** max_lr_reductions
+        self.floor_ratio = floor_ratio
+        self.clamped_groups = None   # populated if the floor binds
+        self.applied_lrs = None      # per-group LR actually installed
 
     def on_train_start(self, trainer, pl_module):
-        # Read the floor from the live ReduceLROnPlateau, if present.
         min_lrs = self._get_min_lrs(trainer)
 
-        clamped = []
+        clamped, applied = [], []
         for opt in trainer.optimizers:
             for i, pg in enumerate(opt.param_groups):
-                requested = pg["lr"] * self.factor
-                if min_lrs is not None and i < len(min_lrs):
-                    floor = min_lrs[i]
-                    if requested < floor:
-                        pg["lr"] = floor
-                        clamped.append({
-                            "group": i,
-                            "requested_lr": requested,
-                            "clamped_lr": floor,
-                        })
-                        rank_zero_info(
-                            f"[ApplyLRReduction] group {i}: requested LR "
-                            f"{requested:.4e} < floor {floor:.4e} — clamped "
-                            f"to floor (recovery budget effectively spent)"
-                        )
-                        continue
-                pg["lr"] = requested
+                current = pg["lr"]
+                floor = min_lrs[i] if (min_lrs is not None and i < len(min_lrs)) else None
 
+                if floor is not None and self.floor_ratio:
+                    # Absolute rung, derived from the live scheduler's floor.
+                    original = floor / self.floor_ratio
+                    new = min(current, original * self.target_ratio)
+                else:
+                    # No way to recover original_lr — treat target_ratio as a
+                    # RELATIVE step from the current LR.  Only reachable from
+                    # callers that build a trainer without the project's
+                    # scheduler, or that omit floor_ratio.
+                    new = current * self.target_ratio
+
+                # The floor binds whenever the scheduler exposes one, whatever
+                # route produced `new`.  Keeping this outside the branch above
+                # matters: an earlier version skipped the clamp when
+                # floor_ratio was absent, which let a caller drive the LR below
+                # min_lr and re-created the bug the clamp exists to prevent.
+                if floor is not None and new < floor:
+                    clamped.append({
+                        "group": i,
+                        "requested_lr": new,
+                        "clamped_lr": floor,
+                    })
+                    rank_zero_info(
+                        f"[ApplyLRReduction] group {i}: rung {new:.4e} < floor "
+                        f"{floor:.4e} — clamped (recovery budget effectively spent)"
+                    )
+                    new = floor
+
+                pg["lr"] = new
+                applied.append(new)
+
+        self.applied_lrs = applied
         if clamped:
             self.clamped_groups = clamped
 
@@ -605,9 +652,9 @@ class TrainConfig:
     stall_patience: int = 5
     lr_patience: int = 4
     max_lr_reductions: int = 3
-    lr_factor: float = 0.5
+    lr_factor: float = 0.2
     max_recoveries: int = 3
-    recovery_factor: float = 0.5
+    recovery_factor: float = 0.2
 
     def __post_init__(self):
         if self.lr_patience < 1:
@@ -917,19 +964,30 @@ class _RecoveryEpochTracker(Callback):
 
 
 def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
-                       global_best_path, max_recoveries, recovery_factor):
+                       global_best_path, max_recoveries, recovery_factor,
+                       floor_ratio=None):
     """Divergence recovery outer loop (§4).
 
-    Retries training after divergence, restoring the best checkpoint and
-    reducing the LR by *recovery_factor* for each attempt.  The target LR
-    for the Nth recovery is ``recovery_factor ** N`` times the original
-    learning rate, but two mechanisms may cause the actual LR to differ:
+    Retries training after divergence (or a non-finite loss), restoring the
+    best checkpoint and lowering the LR for each attempt.
 
-    1. Plateau reductions inside an improving attempt are preserved in the
-       checkpoint and not compensated — the stored LR reflects them.
-    2. Each group's LR is clamped to the ``ReduceLROnPlateau`` scheduler's
-       per-group ``min_lrs`` floor.  When the clamp binds, the recovery
-       event records the per-group detail in ``"floor_clamped_groups"``.
+    The Nth recovery targets an **absolute** rung, ``recovery_factor ** N``
+    times the ORIGINAL learning rate, independent of which checkpoint is being
+    resumed.  ``ApplyLRReduction`` installs ``min(current_lr, rung)`` so the LR
+    can never be raised, then clamps up to the per-group ``min_lrs`` floor.
+    Two consequences worth knowing:
+
+    1. If the plateau scheduler drove the LR *below* the rung during an earlier
+       attempt, that deeper adaptation is kept — the rung is a ceiling, not an
+       assignment.
+    2. When the floor binds, the recovery event records per-group detail in
+       ``"floor_clamped_groups"``; ``"applied_lrs"`` always records the LRs
+       actually installed, so the ladder is auditable from ``summary.json``.
+
+    This replaced a multiplicative scheme whose factor was relative to the
+    resume checkpoint, which required tracking how many reductions that
+    checkpoint already contained.  That bookkeeping produced the LR-ladder
+    double-count bug; targeting the rung absolutely removes the state.
 
     Parameters
     ----------
@@ -946,7 +1004,14 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
     max_recoveries : int
         Maximum number of recovery attempts (0 disables recovery).
     recovery_factor : float
-        Multiplicative LR reduction per recovery (e.g. 0.5 → halve).
+        LR reduction per recovery (e.g. 0.2 → cut by 80%).  Keep equal to
+        ``lr_factor`` so the ladder and the plateau floor bottom out together.
+    floor_ratio : float | None
+        ``min_lr / original_lr``, i.e. ``lr_factor ** max_lr_reductions``.
+        Lets ``ApplyLRReduction`` recover each group's original LR from the
+        live scheduler's ``min_lrs``; Lightning does not record ``initial_lr``
+        for ``ReduceLROnPlateau``, so it cannot be read off the optimizer.
+        ``None`` falls back to multiplicative behaviour (tests only).
 
     Returns
     -------
@@ -954,12 +1019,6 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
     """
     recoveries = []
     recovery_count = 0
-    # Track how many recovery reductions are baked into the current
-    # best checkpoint's stored LR so the applied factor always targets
-    # recovery_factor**N × original_lr.  The actual LR may be higher
-    # (clamped to the scheduler floor) or lower (plateau reductions
-    # inside an improving attempt baked into the checkpoint).
-    best_recovery_level = 0
 
     while (
         stop_reason.get("reason") in RECOVERABLE_REASONS
@@ -980,14 +1039,16 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
             break
 
         recovery_count += 1
-        # Factor relative to the resume checkpoint's stored LR so
-        # that the effective LR = recovery_factor**N × original_lr.
-        applied_factor = recovery_factor ** (recovery_count - best_recovery_level)
+        # ABSOLUTE rung: the Nth recovery targets recovery_factor**N x the
+        # ORIGINAL lr, regardless of which checkpoint is being resumed.
+        # ApplyLRReduction takes min(current, rung) so this can never raise
+        # the LR, and clamps to the scheduler floor.
+        target_ratio = recovery_factor ** recovery_count
 
         rank_zero_info(
             f"[Recovery] Attempt {recovery_count}/{max_recoveries}: "
-            f"restoring {resume_ckpt}, LR *= {applied_factor:.4g} "
-            f"(target {recovery_factor ** recovery_count:.4g}x original)"
+            f"restoring {resume_ckpt}, target LR = "
+            f"{target_ratio:.4g}x original"
         )
 
         recovery_event = {
@@ -995,11 +1056,11 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
             "epoch": stop_reason["epoch"],
             "pre_divergence_best": stop_reason.get("best"),
             "diverged_value": stop_reason.get("value"),
-            "recovery_lr_factor": applied_factor,
+            "recovery_lr_factor": target_ratio,
             "checkpoint": resume_ckpt,
         }
 
-        lr_cb = ApplyLRReduction(applied_factor)
+        lr_cb = ApplyLRReduction(target_ratio, floor_ratio)
         epoch_tracker = _RecoveryEpochTracker()
         trainer = build_and_fit(
             resume_ckpt, [lr_cb, epoch_tracker]
@@ -1008,6 +1069,8 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
         # Record floor-clamp detail if any group was clamped
         if lr_cb.clamped_groups is not None:
             recovery_event["floor_clamped_groups"] = lr_cb.clamped_groups
+        if lr_cb.applied_lrs is not None:
+            recovery_event["applied_lrs"] = lr_cb.applied_lrs
         stop_reason = _determine_stop_reason(trainer)
 
         # A recovery that trains zero epochs (max_epochs already reached
@@ -1032,7 +1095,6 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
             if global_best_score is None or attempt_score_f < global_best_score:
                 global_best_score = attempt_score_f
                 global_best_path = trainer.checkpoint_callback.best_model_path
-                best_recovery_level = recovery_count
 
     # If we exhausted recoveries and still diverged, mark it.
     if (
@@ -1109,6 +1171,11 @@ def run_training(cfg: TrainConfig):
             global_best_path=global_best_path,
             max_recoveries=cfg.max_recoveries,
             recovery_factor=cfg.recovery_factor,
+            # min_lr / original_lr, so ApplyLRReduction can recover each
+            # group's ORIGINAL lr from the live scheduler's min_lrs rather
+            # than being told it separately (Lightning does not record
+            # initial_lr for ReduceLROnPlateau).
+            floor_ratio=cfg.lr_factor ** cfg.max_lr_reductions,
         )
     )
 
@@ -1152,8 +1219,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="epochs without val_loss improvement before cutting LR "
                         "(ReduceLROnPlateau patience)")
     p.add_argument("--max-lr-reductions", type=int, default=3,
-                   help="max number of LR halvings; EarlyStopping patience is "
-                        "derived as (lr_patience+1)*max_lr_reductions + lr_patience")
+                   help="max number of LR reductions, so the per-group min_lr "
+                        "floor is lr * lr_factor**this (= lr/125 at the "
+                        "default lr_factor 0.2). EarlyStopping patience is "
+                        "derived as (lr_patience+1)*max_lr_reductions "
+                        "+ lr_patience.")
     p.add_argument("--divergence-factor", type=float, default=1.005,
                    help="stop if val_loss exceeds this multiple of its own "
                         "best, and hand the run to divergence recovery "
@@ -1168,9 +1238,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-recoveries", type=int, default=3,
                    help="max divergence recovery attempts (0 disables recovery; "
                         "each recovery restores the best checkpoint and reduces LR)")
-    p.add_argument("--recovery-factor", type=float, default=0.5,
+    p.add_argument("--recovery-factor", type=float, default=0.2,
                    help="multiplicative LR reduction per recovery attempt "
-                        "(e.g. 0.5 = halve; Nth recovery trains at factor^N × original LR)")
+                        "(0.2 = cut by 80%%; Nth recovery targets factor**N x "
+                        "original LR, subject to the min_lr clamp). Changed "
+                        "from 0.5 on 2026-09-24 together with lr_factor, "
+                        "which moved 0.5 -> 0.2 in the same step: at 0.5 the "
+                        "KEN+NB run spent all 3 recoveries in ~3 minutes and "
+                        "still diverged. Keep this EQUAL to lr_factor -- the "
+                        "recovery ladder and the plateau floor must bottom "
+                        "out together, see the DivergenceStop docstring.")
     p.add_argument("--min-N", type=int, default=50,
                    help="min per-track count to include a (sample, tile) pair")
     p.add_argument("--store", default=DEFAULT_STORE)
