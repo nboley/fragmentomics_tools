@@ -633,41 +633,6 @@ class RegionDataFrame(DataFrameBase):
 
         return self.apply(is_olap, axis=1)
 
-    def attach_num_tss_overlaps(
-        self,
-        tss_intervals=None,
-        from_midpoint: bool = True,
-        expand_upstream: int = 4000,
-        expand_downstream: int = 0,
-        conservative: bool = False,
-    ) -> "RegionDataFrame":
-        """
-        :param tss_intervals: If provided, will skip re-querying the TSS intervals
-        :param from_midpoint: If true, regions are resized to 1bp so the overalps are calculated relative to the center.
-        # The following options are only used if tss_intervals is None for re-querying it.
-        :param expand_upstream: How far upstream of the TSS to look for an overlap
-        :param expand_downstream: How far downstream of the TSS to look for an overlap
-        :param conservative: If the conservative set should be used
-        :return:
-        """
-        if tss_intervals is None:
-            tss_intervals = self.get_tss_intervals(
-                expand_upstream=expand_upstream,
-                expand_downstream=expand_downstream,
-                conservative=conservative,
-            )
-        n_tss = np.zeros(len(self), dtype=int)
-
-        if from_midpoint:
-            rdf = self.resize_regions(1)
-        else:
-            rdf = self
-
-        for i, (_, row) in enumerate(rdf.iterrows()):
-            n_tss[i] = len(tss_intervals[row["contig"]][row["start"] : row["stop"]])
-        self.loc[:, "num_tss_overlaps"] = n_tss
-        return self
-
     def center_on_summit(self):
         """Center regions on summit, resize the regions, and then drop the summit column."""
         if "summit" not in self.columns:

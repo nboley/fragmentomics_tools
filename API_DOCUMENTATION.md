@@ -205,8 +205,6 @@
 - `annotate_regions_with_max_tf_scores(self, target_tfs, target_len: int, num_workers: int, batch_size: int, cuda: bool, inplace: bool, default_jaspar: bool)` (dataframe.py:756)
   - Add TF related columns and set start/stop to be the start/stop of the tf. Each region in the output will be `target_len` long. The max tf score involves
 - `attach_blacklist_regions(self, bed_fname)` (dataframe.py:1147)
-- `attach_num_tss_overlaps(self, tss_intervals, from_midpoint: bool, expand_upstream: int, expand_downstream: int, conservative: bool)` (dataframe.py:551)
-  - :param tss_intervals: If provided, will skip re-querying the TSS intervals
 - `attach_one_hot_encoded_sequence(self)` (dataframe.py:1684)
 - `attach_sequence(self)` (dataframe.py:1666)
 - `bases_overlap_with_bed(self, bed_file)` (dataframe.py:1115)
