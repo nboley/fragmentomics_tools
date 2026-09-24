@@ -2003,6 +2003,21 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
     num_cytosines = numpy.concatenate([ar.num_cytosines for ar in ars])
     num_converted_cytosines = numpy.concatenate([ar.num_converted_cytosines for ar in ars])
 
+    # Same rule as the pairwise __add__ paths: concatenate only when EVERY
+    # input has gc, else None. A partial array would be misaligned, which is
+    # the one outcome that must not happen.
+    #
+    # No flip handling is needed here. When make_data_direction_match_strand
+    # applies, `ars` was already rebound above to the flipped members, and
+    # reverse_strand reverses gc with the rest -- so these are the post-flip
+    # arrays and their gc is already in the right order. That correctness
+    # depends on flipping BEFORE this concatenation; test_merge_gc_flipped
+    # pins it.
+    if all(ar.gc is not None for ar in ars):
+        gc = numpy.concatenate([ar.gc for ar in ars])
+    else:
+        gc = None
+
     if len(regions) == 1 and regions[0] is not None and not force_fragment_array:
         region = regions.pop()
         return RegionFragmentArray(
@@ -2016,6 +2031,7 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
+            gc=gc,
         )
     else:
         return FragmentArray(
@@ -2029,4 +2045,5 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
+            gc=gc,
         )
