@@ -881,7 +881,7 @@ def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
     return meta
 
 
-def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
+def build_trainer(cfg: TrainConfig, run_dir: str, attempt: int = 0) -> L.Trainer:
     ckpt = ModelCheckpoint(
         dirpath=os.path.join(run_dir, "checkpoints"),
         monitor="val_loss",
@@ -893,7 +893,15 @@ def build_trainer(cfg: TrainConfig, run_dir: str) -> L.Trainer:
     early = EarlyStopping(
         monitor="val_loss", mode="min", patience=cfg.patience, min_delta=0.0
     )
-    csv_logger = CSVLogger(save_dir=cfg.runs_root, name="", version=cfg.run_name)
+    # Each recovery attempt gets its OWN metrics.csv.  Lightning's CSVLogger
+    # re-initialises when recovery re-fits, so reusing one version silently
+    # overwrote the file and left only the LAST attempt: a 26-epoch run that
+    # recovered 3x retained 5 epochs, and train_loss for the overwritten
+    # attempts was unrecoverable (checkpoint filenames preserve val_loss but
+    # not train_loss).  attempt 0 keeps the original path so existing readers
+    # and the analysis docs are unaffected.
+    version = cfg.run_name if attempt == 0 else f"{cfg.run_name}/recovery_{attempt}"
+    csv_logger = CSVLogger(save_dir=cfg.runs_root, name="", version=version)
     limit = cfg.limit_batches
     trainer = L.Trainer(
         accelerator="auto",
@@ -1063,7 +1071,7 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
         lr_cb = ApplyLRReduction(target_ratio, floor_ratio)
         epoch_tracker = _RecoveryEpochTracker()
         trainer = build_and_fit(
-            resume_ckpt, [lr_cb, epoch_tracker]
+            resume_ckpt, [lr_cb, epoch_tracker], attempt=recovery_count
         )
 
         # Record floor-clamp detail if any group was clamped
@@ -1157,8 +1165,8 @@ def run_training(cfg: TrainConfig):
     global_best_path = trainer.checkpoint_callback.best_model_path
 
     # ── divergence recovery outer loop (§4) ───────────────────────────
-    def _build_and_fit(ckpt_path, extra_callbacks):
-        t = build_trainer(cfg, run_dir)
+    def _build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        t = build_trainer(cfg, run_dir, attempt=attempt)
         t.callbacks.extend(extra_callbacks)
         t.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
         return t

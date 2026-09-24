@@ -1049,7 +1049,7 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
 
     derived_patience = (lr_patience + 1) * max_lr_reductions + lr_patience
 
-    def build_and_fit(ckpt_path, extra_callbacks):
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
         ckpt = ModelCheckpoint(
             dirpath=os.path.join(run_dir, "checkpoints"),
             monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
@@ -1512,7 +1512,7 @@ def test_zero_epoch_recovery_reports_unrecovered(tmp_path):
     os.makedirs(run_dir, exist_ok=True)
     derived_patience = (4 + 1) * 1 + 4  # 9
 
-    def build_and_fit(ckpt_path, extra_callbacks, max_epochs=10):
+    def build_and_fit(ckpt_path, extra_callbacks, max_epochs=10, attempt=0):
         ckpt_cb = ModelCheckpoint(
             dirpath=os.path.join(run_dir, "checkpoints"),
             monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
@@ -1547,7 +1547,7 @@ def test_zero_epoch_recovery_reports_unrecovered(tmp_path):
 
     # Phase 2: recovery with max_epochs=2, so the checkpoint at epoch 1
     # leaves zero room to train.
-    def build_and_fit_capped(ckpt_path, extra_callbacks):
+    def build_and_fit_capped(ckpt_path, extra_callbacks, attempt=0):
         return build_and_fit(ckpt_path, extra_callbacks, max_epochs=2)
 
     stop_reason, _, _, recoveries = run_recovery_loop(
@@ -1989,3 +1989,24 @@ def test_non_finite_triggers_recovery(tmp_path):
     )
     assert recoveries, "NaN did not trigger recovery"
     assert recoveries[0]["epoch"] == 3
+
+
+def test_each_recovery_attempt_gets_its_own_metrics_csv(tmp_path):
+    """Recovery must not overwrite the previous attempt's metrics.csv.
+
+    Lightning's CSVLogger re-initialises when recovery re-fits.  Reusing one
+    version silently clobbered the file: a real 26-epoch KEN run that recovered
+    3x retained only 5 epochs, and train_loss for the overwritten attempts was
+    gone for good (checkpoint filenames carry val_loss, not train_loss).
+    """
+    cfg = TrainConfig(**{**_REQUIRED, "run_name": "r",
+                         "runs_root": str(tmp_path / "runs")})
+    base = build_trainer(cfg, str(tmp_path / "run"), attempt=0)
+    rec1 = build_trainer(cfg, str(tmp_path / "run"), attempt=1)
+    rec2 = build_trainer(cfg, str(tmp_path / "run"), attempt=2)
+
+    dirs = [t.logger.log_dir for t in (base, rec1, rec2)]
+    assert len(set(dirs)) == 3, f"attempts share a log dir: {dirs}"
+    # attempt 0 keeps the original path so existing readers are unaffected
+    assert dirs[0].rstrip("/").endswith(cfg.run_name)
+    assert "recovery_1" in dirs[1] and "recovery_2" in dirs[2]
