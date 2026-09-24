@@ -684,3 +684,36 @@ conclusion §6 reached by a different route.
 Sample 190000 has `d ~ 1.02` against ~1.31 for the others and correlates least
 with them (0.44-0.72). A different duplication regime; treat separately or
 exclude.
+
+### The comparison grids do not match (`scripts/compare_spike_vs_ztnb.py`)
+
+Both surfaces now compute and render side by side, normalised at the same
+reference cell. The figure is a MECHANISM DEMO, not a result — the only ZTNB
+model available was fitted on a pipeline test sample (8012 reads), not on the
+sample the spike counts came from.
+
+What the figure does show, and it is a real design problem:
+
+**ZTNB's grid is much coarser than the spike grid.** Its 8 length bins cannot
+resolve the spike panel's 9 lengths, so several spike rows map onto one ZTNB
+bin and receive identical values:
+
+```
+spike 24bp and 32bp   -> both ZTNB bin (20,40)    identical 0.05, 0.02, 0.26, 0.15
+spike 125/150/175bp   -> all ZTNB bin (101,200)   identical 0.51, 0.11
+```
+
+A cell-by-cell comparison therefore invents differences ZTNB cannot express —
+the right-hand panel shows a "difference" between 150 bp and 175 bp that ZTNB
+does not distinguish. That is a flaw in the comparison, not in either method.
+
+ZTNB also has no fit above 65% GC (the whole 70% column is empty), and only 20
+of 45 spike cells have any ZTNB counterpart at all.
+
+The reported `log2 mean = +3.06` (8.3x) is an artifact of comparing different
+samples across mismatched bins including clamped cells. **It is not a finding.**
+
+**A real comparison needs:** the same sample on both sides; the spike grid
+aggregated UP to ZTNB's bins rather than pretending ZTNB resolves 9 lengths;
+and exclusion of cells where `p_seen < 1/MAX_WEIGHT`, which are clamp defaults
+rather than estimates.
