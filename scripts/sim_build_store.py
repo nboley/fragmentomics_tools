@@ -300,10 +300,6 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
 
     # /tiles/
     tiles_grp = root.create_group("tiles")
-    z2_create = (lambda g, n, **kw: g.create_dataset(n, **kw)
-                 if int(zarr.__version__.split(".")[0]) < 3
-                 else lambda g, n, **kw: g.create_array(n, **kw))
-
     def _ca(grp, name, **kwargs):
         if int(zarr.__version__.split(".")[0]) >= 3:
             return grp.create_array(name, **kwargs)

@@ -129,38 +129,44 @@ def predict_on_store(model, store_path, split="val", sample_role="train",
 def compute_true_propensity(sim_dir, store_path):
     """Compute the true per-position endpoint propensity from ground truth w6.
 
-    For each tile and each track, compute the expected density from the known
-    hexamer weights. This is the gold standard against which predicted probs
-    are compared.
+    Delegates to ``compute_oracle_propensity_for_tile`` in ``sim_oracle.py``,
+    which computes propensity over the full l_target extent and is verified
+    against the dataset's center-crop (see docs/pending/training_analysis.md §7.3).
 
     Returns dict: tile_idx -> (C, tile_size) true propensity array.
     """
     import pysam
     import zarr
     from background_model.config import PlumbingConfig
-    from scripts.sim_fragments import (
-        hexamer_indices, GCBias2D, HEX_HALF, NHEX, RC_PERM,
-        GC_BIAS_JSON,
-    )
+    from scripts.sim_fragments import GCBias2D
+    from scripts.sim_oracle import compute_oracle_propensity_for_tile
 
     gt = np.load(os.path.join(sim_dir, "ground_truth.npz"), allow_pickle=True)
     w6 = gt["w6"]
     len_vals = gt["len_vals"]
-    if "len_p" in gt:
-        len_p = gt["len_p"]
+    if "len_p_per_sample" in gt:
+        len_p_per_sample = gt["len_p_per_sample"]
     else:
-        # Per-sample FL distributions: use mean for oracle propensity
-        len_p = gt["len_p_per_sample"].mean(axis=0)
+        # Older ground truth with a single shared len_p
+        len_p_per_sample = gt["len_p"][np.newaxis, :]
     gcbias = GCBias2D(gt["bias_lengths"], gt["bias_gc_percents"], gt["bias_grid"])
 
     root = zarr.open_group(store_path, mode="r")
     cfg = PlumbingConfig.from_json(root.attrs["config_json"])
     tile_size = cfg.tile_size
+    l_target = cfg.l_target
 
     contigs = root["tiles/contig"][:]
     starts = root["tiles/start"][:]
     stops = root["tiles/stop"][:]
     splits = root["tiles/split"][:]
+
+    # Center-crop offset (matches BackgroundTileDataset val mode)
+    crop_start = (l_target - tile_size) // 2
+    crop_stop = crop_start + tile_size
+
+    # Use all samples for a mean propensity
+    sample_idxs = np.arange(len_p_per_sample.shape[0])
 
     fa = pysam.FastaFile(FASTA)
     true_prop = {}
@@ -171,71 +177,17 @@ def compute_true_propensity(sim_dir, store_path):
         contig = str(contigs[t_idx])
         gstart = int(starts[t_idx])
         gstop = int(stops[t_idx])
-        region_len = gstop - gstart
 
-        # Fetch sequence with hexamer margin
-        seq = fa.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
-        seq_bytes = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
-        fwd_cut, rc_cut, valid = hexamer_indices(seq_bytes)
+        # Compute propensity over the full l_target extent
+        prop_full = compute_oracle_propensity_for_tile(
+            contig, gstart, gstop, l_target, w6, gcbias, len_vals,
+            len_p_per_sample, sample_idxs, fa,
+        )
+        # prop_full: (n_samples, C, l_target) — average across samples
+        prop = prop_full.mean(axis=0)  # (C, l_target)
 
-        # Cumulative GC for the region
-        core = seq_bytes[HEX_HALF:HEX_HALF + region_len]
-        is_gc = (core == ord("G")) | (core == ord("C"))
-        cum_gc = np.concatenate([[0], np.cumsum(is_gc)]).astype(np.int64)
-
-        prop = np.zeros((N_TRACKS, tile_size), dtype=np.float64)
-
-        # For each fragment length, compute per-position propensity
-        for li, L in enumerate(len_vals):
-            if len_p[li] <= 0:
-                continue
-            for fl_idx, (fl_lo, fl_hi) in enumerate(FL_BANDS):
-                if L < fl_lo or L >= fl_hi:
-                    continue
-
-                # For each start position p, fragment [p, p+L)
-                max_p = region_len - L
-                if max_p < 0:
-                    continue
-                ps = np.arange(0, max_p + 1)
-                qs = ps + L
-
-                # Check validity at both cut sites
-                v = valid[ps] & valid[qs]
-                ps_v = ps[v]
-                qs_v = qs[v]
-
-                if len(ps_v) == 0:
-                    continue
-
-                # Acceptance weight for each fragment placement
-                lw = w6[fwd_cut[ps_v]]
-                rw = w6[rc_cut[qs_v]]
-                gc_pct = 100.0 * (cum_gc[qs_v] - cum_gc[ps_v]) / L
-                gb = gcbias(L, gc_pct)
-                weight = lw * rw * gb * len_p[li]
-
-                # Distribute weight to endpoint tracks
-                for strand_idx, strand in enumerate(STRANDS):
-                    # "first" = 5' end, "last" = 3' end, "midpoint"
-                    if strand == "+":
-                        first_pos = ps_v
-                        last_pos = qs_v - 1
-                    else:
-                        first_pos = qs_v - 1
-                        last_pos = ps_v
-                    mid_pos = (ps_v + qs_v) // 2
-
-                    for ci, (cov_type, endpoints) in enumerate(
-                        [("first", first_pos), ("last", last_pos),
-                         ("midpoint", mid_pos)]
-                    ):
-                        track = TRACK_INDEX[(strand, (fl_lo, fl_hi), cov_type)]
-                        # Clip to tile bounds
-                        in_bounds = (endpoints >= 0) & (endpoints < tile_size)
-                        if in_bounds.any():
-                            np.add.at(prop[track], endpoints[in_bounds],
-                                      weight[in_bounds] * 0.5)  # 50% per strand
+        # Center-crop to tile_size (matches dataset's center-crop)
+        prop = prop[:, crop_start:crop_stop]  # (C, tile_size)
 
         # Normalize each track to a probability distribution
         for t in range(N_TRACKS):

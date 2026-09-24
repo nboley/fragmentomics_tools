@@ -125,18 +125,11 @@ _POW = (4 ** np.arange(KMER - 1, -1, -1)).astype(np.int64)  # big-endian weights
 def rc_hexamer_permutation() -> np.ndarray:
     """Permutation p such that p[i] = index of the reverse-complement of hexamer i.
 
-    Complement in 2-bit code is (3 - code) (A0<->T3, C1<->G2); RC also reverses
-    base order.  Involution: p[p[i]] == i.
+    Delegates to ``rc_kmer_permutation(6)`` in background_model_core.py.
+    Involution: p[p[i]] == i.
     """
-    idx = np.arange(NHEX, dtype=np.int64)
-    # decode each index to its 6 base codes (big-endian)
-    codes = np.empty((NHEX, KMER), dtype=np.int64)
-    rem = idx.copy()
-    for k in range(KMER):
-        codes[:, KMER - 1 - k] = rem % 4
-        rem //= 4
-    rc_codes = (3 - codes)[:, ::-1]
-    return (rc_codes @ _POW).astype(np.int64)
+    from background_model_core import rc_kmer_permutation
+    return rc_kmer_permutation(KMER)
 
 
 RC_PERM = rc_hexamer_permutation()
