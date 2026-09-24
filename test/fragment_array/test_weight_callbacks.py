@@ -55,6 +55,41 @@ def _fitted_gcfl_model(fit=True):
     return model
 
 
+def _spike_grid_gcfl_model():
+    """A REAL GCFlDistModel fitted by the OTHER path: spike-in controls.
+
+    This is a different estimator from the ZTNB fit above -- a grid
+    interpolator over log molarity-scaled spike counts, with a polynomial
+    fallback outside the grid -- so it needs its own coverage. The grid here
+    spans length 30-70 and gc 30-70%.
+    """
+    if not os.path.isdir(BIOMARKER_SRC):
+        pytest.skip("biomarker source not available")
+    if BIOMARKER_SRC not in sys.path:
+        sys.path.insert(0, BIOMARKER_SRC)
+    pytest.importorskip("flgc.model")
+    from flgc.model import GCFlDistModel
+
+    rows = []
+    for length in (30, 40, 50, 60, 70):
+        for gc in (30, 40, 50, 60, 70):
+            # mid-GC / mid-length recovered best, the usual spike-in shape
+            count = 100.0 * numpy.exp(
+                -0.001 * (gc - 50) ** 2 - 0.001 * (length - 50) ** 2
+            )
+            rows.append(
+                {
+                    "name": f"spike-{length}-{gc}",
+                    "length": length,
+                    "gc_perc": float(gc),
+                    "model_gc_perc": gc,
+                    "molarity_scaled_count": count,
+                    "use_with_model": True,
+                }
+            )
+    return GCFlDistModel.fit_from_spikes(spike_df=pd.DataFrame(rows))
+
+
 def _fragment_array(n=4, gc=None):
     return FragmentArray(
         starts_0=[10, 20, 30, 40][:n],
@@ -178,6 +213,54 @@ class TestGCFlWeights:
         assert got == pytest.approx(expected)
         # real correction weights, not a degenerate all-ones vector
         assert ((got >= 1.0) & (got <= model.max_weight)).all()
+
+    def test_spike_grid_model_end_to_end(self):
+        """The other fitting path: spike-grid, not ZTNB.
+
+        Uses a real fit_from_spikes model and cross-checks against its own
+        predict(). Covers both grid regimes in one array -- length 50 is inside
+        the fitted grid, length 150 is outside it and takes the polynomial
+        fallback -- so a regression in either shows up here.
+        """
+        model = _spike_grid_gcfl_model()
+        assert model._method == "spike_grid", "fixture did not use the spike path"
+
+        fa = FragmentArray(
+            starts_0=[10, 100],
+            stops_0=[60, 250],
+            length=1000,
+            max_frag_len=511,
+            gc=numpy.array([0.50, 0.50]),
+        )
+        assert list(fa.fragment_lengths) == [50, 150]  # in-grid, out-of-grid
+
+        got = GCFlWeights(model)(fa)
+
+        expected = numpy.array([model.predict(50, 50.0), model.predict(150, 50.0)])
+        assert got == pytest.approx(expected)
+        assert numpy.isfinite(got).all()
+        assert (got <= model.max_weight).all()
+
+    def test_spike_grid_can_downweight_below_one(self):
+        """Spike-grid weights may fall BELOW 1.0, unlike the ZTNB path.
+
+        ZTNB weight is min(1/P(seen), max_weight), so it never drops under 1.
+        The spike-grid estimator can down-weight over-represented (length, gc)
+        cells. A shared assertion of `>= 1.0` would therefore be wrong here,
+        and this pins that the two paths are not interchangeable.
+        """
+        model = _spike_grid_gcfl_model()
+
+        # sweep the fitted grid; the best-recovered cell should be down-weighted
+        lengths = numpy.array([30, 40, 50, 60, 70])
+        weights = numpy.atleast_1d(model.predict(lengths, numpy.full(5, 50.0)))
+
+        assert numpy.isfinite(weights).all()
+        assert (weights > 0).all()
+        assert weights.min() < 1.0, (
+            "expected the spike-grid model to down-weight its best-recovered "
+            f"cell; got {weights}"
+        )
 
     def test_real_model_through_the_srdf_entry_point(self):
         """The whole path: SRDF -> callback -> fitted model -> weights in place."""
