@@ -475,3 +475,25 @@ class TestGetIntervalDict:
         # unstranded: symmetric expand by max(10, 10) = 10 in both directions
         assert len(tree[90:210]) > 0
         assert len(tree[89:90]) == 0  # just outside
+
+
+class TestDropOverlappingRegions:
+    """I7: drop_overlapping_regions hardcoded assert ref == 'hg38'."""
+
+    def test_works_with_non_hg38_reference(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1", "chr1"],
+                "start": [100, 500],
+                "stop": [200, 600],
+            }),
+            ref="hg19",
+        )
+        blacklist = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
+            ref="hg19",
+        )
+        result = rdf.drop_overlapping_regions(blacklist)
+        # chr1:100-200 overlaps blacklist, chr1:500-600 does not
+        assert len(result) == 1
+        assert int(result.start.iloc[0]) == 500

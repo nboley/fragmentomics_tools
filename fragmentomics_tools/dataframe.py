@@ -1217,13 +1217,7 @@ class RegionDataFrame(DataFrameBase):
         return bases_overlap_per_bed
 
     def drop_overlapping_regions(self, other_rdf):
-        """
-        Masks blacklist regions, returning a new dataframe with regions that don't overlap blacklist regions.
-        OPTIONALLY, also masks repeat regions. To do this, must provide a max repeat size allowed
-        """
-        assert (
-            self.ref == "hg38"
-        ), "Must use hg38 reference if excluding blacklist regions"
+        """Return a copy with regions that overlap other_rdf removed."""
         tmp = self.intersect_with_rdf(other_rdf)
         return self.loc[self.index.difference(tmp.index), :]
 
