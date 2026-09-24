@@ -117,14 +117,47 @@ models. An alignment bug would instead show up as a mis-centred shift-correlatio
 and a units bug as a constant offset — neither predicts a well-behaved interior
 minimum in `r`.
 
-### 2.4 Secondary corroboration
+### 2.4 The clamp reporting zero effect is EXPECTED — do not investigate it
 
-`oracle_nb.json` reports `clamp_effect_on_oracle: 0.0` — the dispersion clamp
-never bound. With true r ≈ 7.18 the clamp floor `r >= mu / (2(1-p) - 1)` should
-bind at every position where `mu` exceeds ~7. That it reported exactly zero
-effect suggests either the clamp was not applied on the oracle path or `mu` is
-far smaller than assumed. Worth resolving during implementation; it is a
-consistency check on the whole computation, not a separate bug report.
+*Revised 2026-09-24 after design review. This section previously flagged
+`clamp_effect_on_oracle: 0.0` as suspicious. That was wrong, and chasing it
+would have wasted implementation time.*
+
+`oracle_nb.json` reports `clamp_effect_on_oracle: 0.0`, i.e. the dispersion
+clamp never bound. That is exactly what should happen, by a back-of-envelope
+the original draft failed to do:
+
+- the clamp floor is `r >= mu / (2(1-p) - 1)`, which for small `p` is ≈ `mu`;
+- per-position `mu = N_track * p_i`, with `N_track` in the hundreds and
+  `p_i ≈ 1/2048`, so `mu ≈ 0.1–5`;
+- that is **far below** the true `r ≈ 7.18`, so the floor never exceeds it.
+
+The clamp cannot bind at these per-position count levels. Zero effect is a
+consistency check passing, not an anomaly. **This is not an open question.**
+
+### 2.5 Scope check — the OTHER way a plug-in oracle can fail does not apply here
+
+There is a second, independent mechanism that can stop true parameters being a
+floor, and it has bitten this project on a different store: **if the model class
+cannot express the true parameters, the true parameters are not its floor.**
+Concretely, in a regime-B simulation the hexamer surface varies per sample
+(`w6_s = w6 * exp(log_jitter_s)`), while the model is a function of sequence
+alone and emits one profile for all samples. The best sample-agnostic predictor
+is then some optimal *average* surface, not the true `w6`, and a model that
+finds it will legitimately score below a true-`w6` oracle with no overfitting.
+
+**That mechanism does NOT apply to this store.** Verified, not assumed:
+`simulation_v3_nb/A/ground_truth.json` has `regime: "A"`, `jitter_sd: 0.0`, and
+`ground_truth.npz:log_jitter` has standard deviation **exactly 0.0** — the w6
+surface is shared across all samples. So the only failure mode in play here is
+§2.3's pseudo-likelihood argument.
+
+Stated because the general principle is what matters and it now has two distinct
+instances: **plugging in true generative parameters yields a floor only when (a)
+the objective is a proper likelihood of the generative process, and (b) the
+model class can express those parameters.** This store violates (a) only. A
+future store that is both overdispersed *and* regime B would violate both at
+once, and an oracle fixing only §2.3 would still not be a floor.
 
 ---
 
@@ -168,10 +201,22 @@ right response is to change the objective or the simulation, not the oracle.
 propensity at truth, sweep scalar `r` over a log grid (say 1 to 1e5, 25 points),
 plot the loss. Cheap, and decisive:
 
-- Interior minimum far above 7.18, below both untrained models → §2.3 confirmed,
-  proceed with anchor A.
-- Minimum at or near 7.18 → §2.3 is **wrong**; stop and re-diagnose. Do not
+Three outcomes, not two *(the third added 2026-09-24 after design review, which
+correctly pointed out the original binary framing left the most interesting case
+with no plan)*:
+
+- **`r` far above 7.18** (say > 500), minimum below both untrained models →
+  §2.3 confirmed. Proceed with anchor A.
+- **`r` intermediate** (roughly 20–500) → the objective has *partial* sensitivity
+  to the injected overdispersion. Proceed with anchor A, and **report the fitted
+  value as a headline result**: it quantifies how much of the generative
+  dispersion survives the offset conditioning, which is the most scientifically
+  interesting outcome of the three and the one this store was built to probe.
+- **`r` at or near 7.18** → §2.3 is **wrong**. Stop and re-diagnose. Do not
   proceed to step 1 on a falsified premise.
+
+Record the swept curve itself, not just the argmin — a ragged or flat curve means
+the fitted minimum is not meaningful regardless of where it sits (see §5).
 
 This step is the whole reason to review this design before implementing it.
 
