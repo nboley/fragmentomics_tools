@@ -157,11 +157,9 @@ def _bytes_to_float(b):
 
 
 class DataFrameBase(pandas.DataFrame):
-    _metadata = []  # Metadata is optional, you can pass it in
-    _required_metadata = (
-        []
-    )  # This must be a subset of metadata, but it is required for init
-    _required_columns = []  # These columns will be checked for existence during init.
+    _metadata = ()  # Metadata is optional, you can pass it in
+    _required_metadata = ()  # This must be a subset of metadata, but it is required for init
+    _required_columns = ()  # These columns will be checked for existence during init.
     _potentially_confused_columns = {}
 
     @property
