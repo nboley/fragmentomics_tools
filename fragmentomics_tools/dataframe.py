@@ -472,14 +472,15 @@ class RegionDataFrame(DataFrameBase):
                     f"{self} and {other} have different metadata for {metadata_key}: "
                     f"{self.__dict__[metadata_key]} and {other.__dict__[metadata_key]}"
                 )
-        return RegionDataFrame(pandas.concat([self, other]), ref=self.ref)
+        return type(self)(pandas.concat([self, other]), ref=self.ref)
 
-    @staticmethod
-    def concat(rdfs):
-        # copy the references so that I can pop
+    @classmethod
+    def concat(cls, rdfs):
         rdfs = list(rdfs)
-        merged_rdf = rdfs.pop().copy()
-        for rdf in rdfs:
+        if len(rdfs) == 0:
+            raise ValueError("concat requires at least one RegionDataFrame")
+        merged_rdf = rdfs[0].copy()
+        for rdf in rdfs[1:]:
             merged_rdf = merged_rdf & rdf
         return merged_rdf
 

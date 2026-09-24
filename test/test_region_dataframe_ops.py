@@ -352,3 +352,25 @@ class TestOverlapsRdf:
         result = rdf.overlaps_rdf(query)
         # chr1 overlaps, chr2 does not (contig absent from query)
         assert list(result) == [True, False]
+
+
+class TestAndAndConcat:
+    """I17: __and__ hardcoded RegionDataFrame, dropping subclass identity.
+    I19: concat([]) crashed with IndexError instead of a useful error."""
+
+    def test_concat_empty_raises_valueerror(self):
+        with pytest.raises(ValueError, match="at least one"):
+            RegionDataFrame.concat([])
+
+    def test_concat_preserves_data(self):
+        rdf1 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        rdf2 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr2"], "start": [300], "stop": [400]}),
+            ref="hg38",
+        )
+        result = RegionDataFrame.concat([rdf1, rdf2])
+        assert len(result) == 2
+        assert isinstance(result, RegionDataFrame)
