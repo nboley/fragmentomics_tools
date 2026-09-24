@@ -263,3 +263,93 @@ again.
 enough to fund, fund the UMIs. The input quantity is already known; the
 molecule identity was never encoded, and no amount of statistics recovers a
 measurement that was not made.
+
+---
+
+## 8. Reopened: use the SPANK UMIs to measure duplication
+
+§7's "do not pursue" verdict is **superseded**. It rested on framing SPANK as an
+*anchor for P(seen)* — a quantity that varies strongly with (length, GC),
+because that variation is precisely the bias being modelled, so transferring it
+from two points was indefensible.
+
+The better framing: SPANK's UMIs measure the **duplication rate**, and that is a
+different quantity with a much better chance of being flat across the grid.
+
+```
+molecules_seen(L,G) ~= reads(L,G) / E[reads | seen]      # E[...] measured from SPANK UMIs
+P(seen | L,G)        = molecules_seen(L,G) / (3e4 x volume)
+```
+
+The load-bearing assumption becomes "duplication rate is roughly
+(length, GC)-independent" rather than "recovery is linear across a 10x
+concentration gap". Weaker, more plausible — and, unlike the old one,
+**measurable from data already on disk.**
+
+### Experiment A — how much does duplication actually vary?
+
+`fit_ztnb_per_cell` (`flgc/model.py:69-95`) already stores per-cell duplication
+parameters for every bin meeting `MIN_CELL_SIZE`:
+
+```python
+records.append({
+    "len_bin_idx", "gc_bin_idx", "len_range", "gc_range",
+    "pi_mix",                      # P(seen)
+    "r_hat", "p_hat", "w_hat",     # the duplication structure, per cell
+})
+```
+
+**Input:** any already-fitted ZTNB `GCFlDistModel` (`._records`), ideally
+several samples across depths.
+**Compute:** `E[reads | seen]` per cell from `(r_hat, p_hat, w_hat)`; then its
+spread across cells — absolute range, and whether it trends with length or GC
+rather than scattering.
+**Decides:** flat -> the SPANK transfer is justified and the whole approach
+works. Structured -> it does not, but you can bound the induced error, and a
+trend in length or GC is itself a publishable characterisation of the assay.
+**Cost:** a script. No new data, no library change.
+
+This is the experiment that should run first, because a negative result kills
+the approach cheaply and a positive one licenses everything after it.
+
+### Experiment B — is the ZTNB extrapolation trustworthy?
+
+At the SPANK points there are **two independent estimates of P(seen)**:
+
+| source | how obtained |
+|---|---|
+| SPANK | **measured** — UMI families give `seen_unique` directly (`spikein_ztnb_fit.py:334-341`) |
+| native ZTNB | **inferred** — zero-class extrapolated from duplicate structure |
+
+**Input:** a cohort with both SPANK UMI counts and a fitted native ZTNB model.
+**Compute:** `pi_mix` from each, at the bins containing the SPANK lengths
+(52 bp and 75 bp; note SNMv3 and SNMv4 carry only ONE SPANK spike — see §3.4).
+Compare per sample, then look for systematic offset versus scatter.
+**Decides:** agreement is **empirical support for the ZTNB extrapolation across
+the whole grid**, which is the exact weakness that motivated this document — it
+would largely dissolve the "input is inferred, not measured" objection.
+Systematic disagreement is a finding about a model that is already shipping.
+**Cost:** a script plus cohort selection.
+
+This is higher value than anything in §7, and it validates the estimator rather
+than merely bounding its uncertainty.
+
+### What these do NOT resolve
+
+- **Duplication and capture are not separable from reads alone.**
+  `E[reads | seen]` folds PCR amplification and sequencing depth together, so
+  the conversion assumes both are shared between SPANK and the GC-dSparks. Same
+  library, so plausible — but assumed, not shown.
+- **Spike -> native transfer is untouched.** Even a perfect spike P(seen)
+  surface assumes blunt-ended synthetic oligos recover like nucleosome-bound,
+  methylated native fragments with varied termini. That gap survives every
+  route considered here and is the one worth quantifying independently.
+
+### Revised recommendation
+
+Run Experiment A, then B. Both are scripts over existing data, and between them
+they either license the spike-based absolute estimate or explain precisely why
+it fails. Only if both land favourably does implementation work become
+justified — and at that point the UMI panel redesign (§6) may still be the
+better investment, because it removes the assumptions rather than validating
+them.
