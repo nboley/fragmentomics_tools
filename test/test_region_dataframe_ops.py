@@ -197,3 +197,35 @@ class TestAttachBlacklistRegions:
         attached = list(out["blacklist_regions"])[0]
         spans = sorted((r.start, r.stop) for r in attached)
         assert spans == [(150, 180), (500, 520)]
+
+
+class TestGetFragmentCoverageSum:
+    """R3: _get_fragment_coverage_sum returned a length-0 array on an empty
+    BED intersection, where a length-len(self) zero array was expected."""
+
+    @pytest.fixture
+    def empty_bed(self):
+        """A BED file with one region that does not overlap any test query."""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "empty.bed")
+            with open(path, "w") as fh:
+                fh.write("chrX\t9000\t9999\n")
+            yield path
+
+    def test_empty_intersection_returns_correct_shape(self, empty_bed):
+        rdf = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr2"],
+                    "start": [100, 200],
+                    "stop": [150, 250],
+                    "id": ["a", "b"],
+                }
+            ),
+            ref="hg38",
+        )
+        result = rdf._get_fragment_coverage_sum(empty_bed)
+        assert len(result) == len(rdf), (
+            f"expected length {len(rdf)}, got {len(result)}"
+        )
+        assert (result == 0).all()

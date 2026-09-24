@@ -1359,7 +1359,7 @@ class RegionDataFrame(DataFrameBase):
 
             counts_vect = numpy.zeros(len(self))
             if intersect_df.shape[0] == 0:
-                return numpy.array([])
+                return counts_vect
             for peak, group in intersect_df.groupby("id_2"):
                 counts_vect[peak2idx[peak]] = len(group)
             return counts_vect
