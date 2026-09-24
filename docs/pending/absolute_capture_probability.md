@@ -414,8 +414,11 @@ does not disturb reads-per-observed-molecule.
 
 ### What remains assumed
 
-- Duplication rate is roughly (length, GC)-independent. Testable — see
-  Experiment A (§8), and the 5-GC-peer check above.
+- Duplication rate is roughly (length, GC)-independent. The LENGTH half is
+  testable from the spikes (`d(52)` vs `d(75)`, §10 Check 1). The **GC half is
+  not testable within the spike panel at all** — only the peers vary in GC and
+  they carry no UMIs. Approaching it requires the per-cell `r_hat`/`p_hat` of
+  native ZTNB fits (Experiment A, §8), which is a different population.
 - Duplication is insensitive to concentration across the 4x gap. The failure
   mode is saturation, whose signature is SPANK's duplicate distribution being
   right-SHIFTED rather than merely scaled.
