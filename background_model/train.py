@@ -828,54 +828,19 @@ def _git_sha() -> str:
 
 def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
     os.makedirs(run_dir, exist_ok=True)
-    meta = {
-        "run_name": cfg.run_name,
+    import dataclasses as _dc
+    # Serialize ALL TrainConfig fields so new fields cannot silently go
+    # missing.  Previously a hand-maintained dict omitted 8+ fields
+    # (dispersion_window_size, min_N, fl_dist_npz, d_context, etc.).
+    meta = _dc.asdict(cfg)
+    meta.update({
         "git_sha": _git_sha(),
         "config_hash": train_ds.config_hash,
         "split_version": int(train_ds.split_version),
-        "store": cfg.store,
-        "model": cfg.model,
-        "loss": cfg.loss,
-        "n_kernels": cfg.n_kernels,
-        "num_residual_layers": cfg.num_residual_layers,
-        "dropout": cfg.dropout,
-        "auto_lr": cfg.auto_lr,
-        "freeze_dispersion": cfg.freeze_dispersion,
-        "dispersion_lr_scale": cfg.dispersion_lr_scale,
-        "precision": cfg.precision,
-        "max_epochs": cfg.max_epochs,
-        "batch_size": cfg.batch_size,
-        "lr": cfg.lr,
-        "limit_batches": cfg.limit_batches,
-        "num_workers": cfg.num_workers,
-        "seed": cfg.seed,
-        "patience": cfg.patience,
-        "divergence_factor": cfg.divergence_factor,
-        "stall_patience": cfg.stall_patience,
-        "lr_patience": cfg.lr_patience,
-        "max_lr_reductions": cfg.max_lr_reductions,
-        "lr_factor": cfg.lr_factor,
-        "max_recoveries": cfg.max_recoveries,
-        "recovery_factor": cfg.recovery_factor,
         "n_train_pairs": len(train_ds),
         "n_val_pairs": len(val_ds),
         "plumbing_config": json.loads(train_ds.config.full_config_json()),
-    }
-    if cfg.model == "ken":
-        meta.update({
-            "k": cfg.k,
-            "d_embed": cfg.d_embed,
-            "d_context": cfg.d_context,
-            "n_context_layers": cfg.n_context_layers,
-            "context_kernel_size": cfg.context_kernel_size,
-            "weight_decay": cfg.weight_decay,
-        })
-    elif cfg.model == "hybrid":
-        meta.update({
-            "k": cfg.k,
-            "d_embed": cfg.d_embed,
-            "weight_decay": cfg.weight_decay,
-        })
+    })
     with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
     return meta
@@ -1023,10 +988,16 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
 
     Returns
     -------
-    tuple of (stop_reason, global_best_score, global_best_path, recoveries)
+    tuple of (stop_reason, global_best_score, global_best_path, recoveries, last_trainer)
+        ``last_trainer`` is the Trainer from the final recovery attempt, or
+        ``None`` if no recovery was attempted.  Callers need this because
+        the initial-fit Trainer becomes stale after recovery: its
+        ``global_step`` and ``current_epoch`` describe only the first
+        attempt.
     """
     recoveries = []
     recovery_count = 0
+    last_trainer = None
 
     while (
         stop_reason.get("reason") in RECOVERABLE_REASONS
@@ -1073,6 +1044,7 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
         trainer = build_and_fit(
             resume_ckpt, [lr_cb, epoch_tracker], attempt=recovery_count
         )
+        last_trainer = trainer
 
         # Record floor-clamp detail if any group was clamped
         if lr_cb.clamped_groups is not None:
@@ -1118,7 +1090,7 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
             "best_before_final_divergence": stop_reason.get("best"),
         }
 
-    return stop_reason, global_best_score, global_best_path, recoveries
+    return stop_reason, global_best_score, global_best_path, recoveries, last_trainer
 
 
 def run_training(cfg: TrainConfig):
@@ -1171,7 +1143,7 @@ def run_training(cfg: TrainConfig):
         t.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
         return t
 
-    stop_reason, global_best_score, global_best_path, recoveries = (
+    stop_reason, global_best_score, global_best_path, recoveries, last_trainer = (
         run_recovery_loop(
             build_and_fit=_build_and_fit,
             stop_reason=stop_reason,
@@ -1187,19 +1159,24 @@ def run_training(cfg: TrainConfig):
         )
     )
 
+    # Use the recovery loop's final trainer if recovery fired, otherwise
+    # the initial-fit trainer.  Before this fix, the initial trainer was
+    # always used, making global_step/current_epoch stale on recovered runs.
+    final_trainer = last_trainer if last_trainer is not None else trainer
+
     # ── persist final metrics summary ─────────────────────────────────
     summary = {
         "best_model_path": global_best_path,
         "best_val_loss": global_best_score,
-        "global_step": int(trainer.global_step),
-        "current_epoch": int(trainer.current_epoch),
+        "global_step": int(final_trainer.global_step),
+        "current_epoch": int(final_trainer.current_epoch),
         "stop_reason": stop_reason,
     }
     if recoveries:
         summary["recoveries"] = recoveries
     with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump({**meta, **summary}, f, indent=2)
-    return trainer, model
+    return final_trainer, model
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

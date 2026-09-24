@@ -1085,7 +1085,7 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
     global_best_path = trainer.checkpoint_callback.best_model_path
 
     # Production recovery loop
-    stop_reason, global_best_score, global_best_path, recoveries = (
+    stop_reason, global_best_score, global_best_path, recoveries, _ = (
         run_recovery_loop(
             build_and_fit=build_and_fit,
             stop_reason=stop_reason,
@@ -1550,7 +1550,7 @@ def test_zero_epoch_recovery_reports_unrecovered(tmp_path):
     def build_and_fit_capped(ckpt_path, extra_callbacks, attempt=0):
         return build_and_fit(ckpt_path, extra_callbacks, max_epochs=2)
 
-    stop_reason, _, _, recoveries = run_recovery_loop(
+    stop_reason, _, _, recoveries, _ = run_recovery_loop(
         build_and_fit=build_and_fit_capped,
         stop_reason=stop_reason,
         global_best_score=global_best_score,
@@ -2010,3 +2010,209 @@ def test_each_recovery_attempt_gets_its_own_metrics_csv(tmp_path):
     # attempt 0 keeps the original path so existing readers are unaffected
     assert dirs[0].rstrip("/").endswith(cfg.run_name)
     assert "recovery_1" in dirs[1] and "recovery_2" in dirs[2]
+
+
+# --------------------------------------------------------------------------
+# Defect: summary.json global_step/current_epoch are stale on recovered runs
+#
+# run_training reads trainer.global_step / trainer.current_epoch from the
+# INITIAL-fit trainer.  The recovery loop builds fresh trainers that are
+# never assigned back.  On any run that recovered, both fields describe
+# only the first attempt.
+#
+# The fix makes run_recovery_loop return a 5th element: the last trainer
+# built during recovery (or None when no recovery fired).  run_training
+# then uses that trainer for the summary dict.
+# --------------------------------------------------------------------------
+
+
+def test_recovery_loop_returns_final_trainer(tmp_path):
+    """run_recovery_loop must return the final trainer as 5th element.
+
+    After recovery, the returned trainer's current_epoch and global_step
+    must exceed the initial trainer's, since the recovered run trained
+    additional epochs.
+    """
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs={5}, spike=2.0, base_loss=10.0, trend=-0.01,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    dl = _tiny_dataloader()
+    run_dir = str(tmp_path / "run")
+    os.makedirs(run_dir, exist_ok=True)
+    derived_patience = (2 + 1) * 1 + 2  # 5
+
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(run_dir, "checkpoints"),
+            monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
+            filename="{epoch}-{step}-{val_loss:.4f}",
+        )
+        early = EarlyStopping(
+            monitor="val_loss", mode="min",
+            patience=derived_patience, min_delta=0.0,
+        )
+        div = DivergenceStop(1.10)
+        cbs = [ckpt, early, div] + list(extra_callbacks)
+        trainer = L.Trainer(
+            max_epochs=20,
+            default_root_dir=run_dir,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=cbs,
+            accelerator="cpu",
+            log_every_n_steps=1,
+        )
+        trainer.fit(model, dl, dl, ckpt_path=ckpt_path)
+        return trainer
+
+    # Initial fit
+    initial_trainer = build_and_fit(None, [])
+    stop_reason = _determine_stop_reason(initial_trainer)
+    global_best_score = (
+        float(initial_trainer.checkpoint_callback.best_model_score)
+        if initial_trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = initial_trainer.checkpoint_callback.best_model_path
+
+    # Destructure 5 return values — fails on unfixed code (ValueError)
+    stop_reason, global_best_score, global_best_path, recoveries, last_trainer = (
+        run_recovery_loop(
+            build_and_fit=build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=1,
+            recovery_factor=0.5,
+            floor_ratio=0.5 ** 1,
+        )
+    )
+
+    assert len(recoveries) >= 1, "Recovery must fire for this test"
+    assert last_trainer is not None, "last_trainer must be set after recovery"
+
+    # The final trainer must have progressed beyond the initial fit
+    assert last_trainer.current_epoch > initial_trainer.current_epoch, (
+        f"final epoch {last_trainer.current_epoch} should exceed "
+        f"initial epoch {initial_trainer.current_epoch}"
+    )
+    assert last_trainer.global_step > initial_trainer.global_step, (
+        f"final step {last_trainer.global_step} should exceed "
+        f"initial step {initial_trainer.global_step}"
+    )
+
+
+def test_recovery_loop_returns_none_trainer_without_recovery(tmp_path):
+    """When no recovery fires, last_trainer must be None.
+
+    This ensures the zero-recovery path is unchanged: the caller uses the
+    initial-fit trainer for the summary, which is correct when there was
+    no recovery.
+    """
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs=set(), spike=2.0, base_loss=10.0, trend=-0.01,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    dl = _tiny_dataloader()
+    run_dir = str(tmp_path / "run")
+    os.makedirs(run_dir, exist_ok=True)
+    derived_patience = (2 + 1) * 1 + 2  # 5
+
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(run_dir, "checkpoints"),
+            monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
+            filename="{epoch}-{step}-{val_loss:.4f}",
+        )
+        early = EarlyStopping(
+            monitor="val_loss", mode="min",
+            patience=derived_patience, min_delta=0.0,
+        )
+        div = DivergenceStop(1.10)
+        cbs = [ckpt, early, div] + list(extra_callbacks)
+        trainer = L.Trainer(
+            max_epochs=10,
+            default_root_dir=run_dir,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=cbs,
+            accelerator="cpu",
+            log_every_n_steps=1,
+        )
+        trainer.fit(model, dl, dl, ckpt_path=ckpt_path)
+        return trainer
+
+    # Initial fit — no divergence
+    initial_trainer = build_and_fit(None, [])
+    stop_reason = _determine_stop_reason(initial_trainer)
+    global_best_score = (
+        float(initial_trainer.checkpoint_callback.best_model_score)
+        if initial_trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = initial_trainer.checkpoint_callback.best_model_path
+
+    # Destructure 5 return values — fails on unfixed code (ValueError)
+    stop_reason, _, _, recoveries, last_trainer = (
+        run_recovery_loop(
+            build_and_fit=build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=3,
+            recovery_factor=0.5,
+        )
+    )
+
+    assert len(recoveries) == 0, "No recovery should fire for a clean run"
+    assert last_trainer is None, (
+        "last_trainer must be None when no recovery fired"
+    )
+
+
+# --------------------------------------------------------------------------
+# Defect: run_meta.json omits TrainConfig fields
+#
+# _write_run_meta manually lists fields.  When TrainConfig gains new fields,
+# they are silently omitted.  The fix uses dataclasses.asdict(cfg) so that
+# any new field is automatically included.
+# --------------------------------------------------------------------------
+
+
+class _FakeDataset:
+    """Minimal mock for _write_run_meta's dataset interface."""
+
+    config_hash = "test_hash_abc123"
+    split_version = 42
+
+    class config:
+        @staticmethod
+        def full_config_json():
+            return '{"tile_size": 2048}'
+
+    def __len__(self):
+        return 100
+
+
+def test_run_meta_contains_all_trainconfig_fields(tmp_path):
+    """Every TrainConfig field must appear in run_meta.json.
+
+    Asserts the COMPLETENESS PROPERTY: the set of dataclasses.fields(TrainConfig)
+    is a subset of the meta dict keys.  This catches any future field that is
+    added to TrainConfig but not plumbed through to _write_run_meta.
+    """
+    import dataclasses
+    from background_model.train import _write_run_meta
+
+    cfg = TrainConfig(**{**_REQUIRED, "runs_root": str(tmp_path)})
+    run_dir = str(tmp_path / cfg.run_name)
+
+    meta = _write_run_meta(run_dir, cfg, _FakeDataset(), _FakeDataset())
+
+    all_field_names = {f.name for f in dataclasses.fields(TrainConfig)}
+    missing = all_field_names - set(meta.keys())
+    assert not missing, (
+        f"run_meta.json is missing {len(missing)} TrainConfig field(s): "
+        f"{sorted(missing)}"
+    )
