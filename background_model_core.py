@@ -626,7 +626,88 @@ def _with_lr_schedule(optimizer, hparams):
     }
 
 
-class BackgroundModel(L.LightningModule):
+class _BackgroundModelMixin:
+    """Shared training/inference logic for all background model variants.
+
+    Provides the methods that are identical across BackgroundModel,
+    BackgroundModelKEN, and BackgroundModelHybrid.  Each concrete class
+    must define ``forward()``, ``configure_optimizers()``, ``loss_fn``,
+    ``dispersion_head``, ``output_tracks``, and ``hparams`` with the
+    standard keys.
+    """
+
+    def _pooled_log_dispersion(self, dispersion_bp, mask):
+        """Pool the bp-resolution dispersion output per the configured loss."""
+        L = dispersion_bp.shape[-1]
+        if self.hparams.loss == "dirichlet_multinomial":
+            out_size = 1
+        else:  # nb_offset
+            w = self.hparams.dispersion_window_size
+            assert L % w == 0, (
+                f"tile size {L} not divisible by dispersion_window_size {w}"
+            )
+            out_size = L // w
+        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
+        pooled = pooled + self.hparams.log_dispersion_init
+        if self.hparams.loss == "dirichlet_multinomial":
+            pooled = pooled.squeeze(-1)  # (B, C)
+        return pooled
+
+    def _step(self, batch, log_name):
+        x, y, mask = batch
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+        if self.hparams.loss == "multinomial":
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._step(batch, "train_loss")
+
+    def validation_step(self, batch, batch_idx):
+        return self._step(batch, "val_loss")
+
+    @torch.no_grad()
+    def predict_profile(self, one_hot_seq: np.ndarray, mask: Optional[np.ndarray] = None):
+        """(4, L_in) one-hot -> dict with the null parameters for one tile.
+
+        Returns:
+            probs: (n_tracks, L_out) per-position probabilities (each track
+                sums to 1 over valid positions) — the profile *shape*.
+                Multiply by an observed N for expected counts.
+            log_dispersion: (n_tracks,) log gamma  [dirichlet_multinomial],
+                (n_tracks, W) log r per window     [nb_offset],
+                or None                            [multinomial].
+
+        mask: optional (L_out,) bool of valid positions.
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
+            shape_logits, dispersion_bp = self(x[None])
+            mask3 = None
+            if mask is not None:
+                mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
+                mask3 = mask3[None, None, :]
+                shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+            probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
+            log_dispersion = None
+            if dispersion_bp is not None:
+                log_dispersion = (
+                    self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
+                )
+            return {"probs": probs, "log_dispersion": log_dispersion}
+        finally:
+            if was_training:
+                self.train()
+
+
+class BackgroundModel(_BackgroundModelMixin, L.LightningModule):
     """Sequence -> per-position profile logits (+ per-window dispersion).
 
     Input:  one-hot sequence (B, 4, L_in)
@@ -774,41 +855,6 @@ class BackgroundModel(L.LightningModule):
             return shape_logits, None
         return shape_logits, self.dispersion_head(h)
 
-    def _pooled_log_dispersion(self, dispersion_bp, mask):
-        """Pool the bp-resolution dispersion output per the configured loss."""
-        L = dispersion_bp.shape[-1]
-        if self.hparams.loss == "dirichlet_multinomial":
-            out_size = 1
-        else:  # nb_offset
-            w = self.hparams.dispersion_window_size
-            assert L % w == 0, (
-                f"tile size {L} not divisible by dispersion_window_size {w}"
-            )
-            out_size = L // w
-        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
-        pooled = pooled + self.hparams.log_dispersion_init
-        if self.hparams.loss == "dirichlet_multinomial":
-            pooled = pooled.squeeze(-1)  # (B, C)
-        return pooled
-
-    def _step(self, batch, log_name):
-        x, y, mask = batch
-        mask3 = _prepare_mask(mask, y)
-        shape_logits, dispersion_bp = self(x)
-        if self.hparams.loss == "multinomial":
-            loss = self.loss_fn(shape_logits, y, mask3)
-        else:
-            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
-            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
-        self.log(log_name, loss, prog_bar=True, sync_dist=True)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._step(batch, "train_loss")
-
-    def validation_step(self, batch, batch_idx):
-        return self._step(batch, "val_loss")
-
     def configure_optimizers(self):
         lr = self.hparams.learning_rate
         scale = self.hparams.dispersion_lr_scale
@@ -830,40 +876,8 @@ class BackgroundModel(L.LightningModule):
             )
         return _with_lr_schedule(optimizer, self.hparams)
 
-    # -- inference ---------------------------------------------------------
 
-    @torch.no_grad()
-    def predict_profile(self, one_hot_seq: np.ndarray, mask: Optional[np.ndarray] = None):
-        """(4, L_in) one-hot -> dict with the null parameters for one tile.
-
-        Returns:
-            probs: (n_tracks, L_out) per-position probabilities (each track
-                sums to 1 over valid positions) — the profile *shape*.
-                Multiply by an observed N for expected counts.
-            log_dispersion: (n_tracks,) log gamma  [dirichlet_multinomial],
-                (n_tracks, W) log r per window     [nb_offset],
-                or None                            [multinomial].
-
-        mask: optional (L_out,) bool of valid positions.
-        """
-        self.eval()
-        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
-        shape_logits, dispersion_bp = self(x[None])
-        mask3 = None
-        if mask is not None:
-            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
-            mask3 = mask3[None, None, :]
-            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
-        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
-        log_dispersion = None
-        if dispersion_bp is not None:
-            log_dispersion = (
-                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
-            )
-        return {"probs": probs, "log_dispersion": log_dispersion}
-
-
-class BackgroundModelKEN(L.LightningModule):
+class BackgroundModelKEN(_BackgroundModelMixin, L.LightningModule):
     """K-mer Embedding Network for cfDNA fragment-endpoint background modeling.
 
     Replaces the CNN trunk with an explicit k-mer lookup table
@@ -1009,38 +1023,6 @@ class BackgroundModelKEN(L.LightningModule):
             return shape_logits, None
         return shape_logits, self.dispersion_head(h)
 
-    def _pooled_log_dispersion(self, dispersion_bp, mask):
-        L = dispersion_bp.shape[-1]
-        if self.hparams.loss == "dirichlet_multinomial":
-            out_size = 1
-        else:
-            w = self.hparams.dispersion_window_size
-            assert L % w == 0
-            out_size = L // w
-        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
-        pooled = pooled + self.hparams.log_dispersion_init
-        if self.hparams.loss == "dirichlet_multinomial":
-            pooled = pooled.squeeze(-1)
-        return pooled
-
-    def _step(self, batch, log_name):
-        x, y, mask = batch
-        mask3 = _prepare_mask(mask, y)
-        shape_logits, dispersion_bp = self(x)
-        if self.hparams.loss == "multinomial":
-            loss = self.loss_fn(shape_logits, y, mask3)
-        else:
-            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
-            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
-        self.log(log_name, loss, prog_bar=True, sync_dist=True)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._step(batch, "train_loss")
-
-    def validation_step(self, batch, batch_idx):
-        return self._step(batch, "val_loss")
-
     def configure_optimizers(self):
         lr = self.hparams.learning_rate
         wd = self.hparams.weight_decay
@@ -1068,27 +1050,8 @@ class BackgroundModelKEN(L.LightningModule):
             ])
         return _with_lr_schedule(optimizer, self.hparams)
 
-    @torch.no_grad()
-    def predict_profile(self, one_hot_seq: np.ndarray,
-                        mask: Optional[np.ndarray] = None):
-        self.eval()
-        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
-        shape_logits, dispersion_bp = self(x[None])
-        mask3 = None
-        if mask is not None:
-            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
-            mask3 = mask3[None, None, :]
-            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
-        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
-        log_dispersion = None
-        if dispersion_bp is not None:
-            log_dispersion = (
-                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
-            )
-        return {"probs": probs, "log_dispersion": log_dispersion}
 
-
-class BackgroundModelHybrid(L.LightningModule):
+class BackgroundModelHybrid(_BackgroundModelMixin, L.LightningModule):
     """K-mer embedding + one-hot conv stem, fused into a dilated ResNet trunk.
 
     Two parallel input representations are concatenated on the channel axis
@@ -1289,40 +1252,6 @@ class BackgroundModelHybrid(L.LightningModule):
             return shape_logits, None
         return shape_logits, self.dispersion_head(h)
 
-    def _pooled_log_dispersion(self, dispersion_bp, mask):
-        L = dispersion_bp.shape[-1]
-        if self.hparams.loss == "dirichlet_multinomial":
-            out_size = 1
-        else:
-            w = self.hparams.dispersion_window_size
-            assert L % w == 0, (
-                f"tile size {L} not divisible by dispersion_window_size {w}"
-            )
-            out_size = L // w
-        pooled = masked_mean_pool(dispersion_bp, mask, out_size)
-        pooled = pooled + self.hparams.log_dispersion_init
-        if self.hparams.loss == "dirichlet_multinomial":
-            pooled = pooled.squeeze(-1)
-        return pooled
-
-    def _step(self, batch, log_name):
-        x, y, mask = batch
-        mask3 = _prepare_mask(mask, y)
-        shape_logits, dispersion_bp = self(x)
-        if self.hparams.loss == "multinomial":
-            loss = self.loss_fn(shape_logits, y, mask3)
-        else:
-            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
-            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
-        self.log(log_name, loss, prog_bar=True, sync_dist=True)
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self._step(batch, "train_loss")
-
-    def validation_step(self, batch, batch_idx):
-        return self._step(batch, "val_loss")
-
     def configure_optimizers(self):
         lr = self.hparams.learning_rate
         wd = self.hparams.weight_decay
@@ -1354,25 +1283,6 @@ class BackgroundModelHybrid(L.LightningModule):
                 {"params": main_params, "lr": lr, "weight_decay": 0.0},
             ])
         return _with_lr_schedule(optimizer, self.hparams)
-
-    @torch.no_grad()
-    def predict_profile(self, one_hot_seq: np.ndarray,
-                        mask: Optional[np.ndarray] = None):
-        self.eval()
-        x = torch.as_tensor(one_hot_seq, dtype=torch.float32, device=self.device)
-        shape_logits, dispersion_bp = self(x[None])
-        mask3 = None
-        if mask is not None:
-            mask3 = torch.as_tensor(mask, dtype=torch.bool, device=self.device)
-            mask3 = mask3[None, None, :]
-            shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
-        probs = torch.softmax(shape_logits, dim=-1)[0].cpu().numpy()
-        log_dispersion = None
-        if dispersion_bp is not None:
-            log_dispersion = (
-                self._pooled_log_dispersion(dispersion_bp, mask3)[0].cpu().numpy()
-            )
-        return {"probs": probs, "log_dispersion": log_dispersion}
 
 
 # --------------------------------------------------------------------------
