@@ -586,3 +586,101 @@ the existing validation.
    across 45 cells. Check the per-cell GC-dSpark read counts before committing
    to the design; thin cells would make per-sample per-cell estimates unusable
    even though the unstratified version works fine.
+
+---
+
+## 12. Implemented, and what it showed (`scripts/spike_recovery.py`)
+
+Per-sample, per-(length, GC) recovery from spikes, built to compare against
+ZTNB. Runs on real data: `load_spikes_for_result` for SPANK reads/deduped and
+GC-dSpark counts, `load_spikes_df` for the metadata join (it owns the
+`v4-` -> `SPARK-v4-` name translation; do not re-derive it).
+
+### Check 1 PASSED — duplication is length-flat
+
+```
+     rid   d(52)   d(75)   ratio
+  200000   1.321   1.300   1.016
+  200001   1.315   1.296   1.015
+  200002   1.335   1.326   1.007
+  200005   1.346   1.313   1.025
+  200010   1.301   1.293   1.006
+  190000   1.021   1.017   1.004
+  180000   1.300   1.245   1.044
+
+  ratio d(52)/d(75): mean=1.0167 sd=0.0129 range=[1.004, 1.044]
+```
+
+Duplication agrees between 52 bp and 75 bp to ~1.7%. The transfer assumption
+holds over that span.
+
+It also confirms the per-sample rule empirically: `d` ranges 1.02 to 1.35
+BETWEEN samples while staying flat WITHIN each one. A cohort-level constant
+would have been wrong for every individual sample.
+
+### Depth is not a problem
+
+All 29 model cells populate, minimum 1580 (molarity-scaled), median 6190. The
+concern raised in §11 is withdrawn.
+
+### The absolute scale is NOT obtainable this way
+
+```
+P(seen | L,G) = molecules_observed / (MPM_input x V_uL)
+```
+
+SPANK supplies `molecules_observed` and `MPM_input`, leaving **one equation in
+two unknowns**: SPANK's own P(seen) and the effective volume V. Production's
+formula avoids this because it estimates an unknown input concentration for a
+pathogen; here the input is known and recovery is unknown — the opposite
+direction. Assuming 3 mL plasma yields P(seen) ~ 3e-6, which is not credible
+enough to build on.
+
+So the script reports recovery **normalised to the cell nearest the SPANK
+calibration point**. That is exactly what a shape-vs-shape comparison with ZTNB
+needs; the absolute scale stays open.
+
+### The finding that matters: the surface is reproducible but CONFOUNDED
+
+Cross-sample Spearman of the recovery surface is **0.82-0.95**, so it is a
+stable property, not noise. But it is not a smooth function of GC:
+
+```
+                200000  200001  200002  200005  190000
+v4-32-40-ss-02    4.02    3.17    3.68    4.15    1.97   <- high everywhere
+v4-32-50-ss-03    1.87    1.95    2.44    2.27    1.65   <- low everywhere
+v4-32-60-ss-02    4.31    3.20    3.36    3.87    1.59   <- high everywhere
+```
+
+A GC bias should be smooth in GC. This alternates high/low/high between
+adjacent GC cells, which is **oligo identity, not GC**. The panel carries
+exactly ONE oligo per (length, GC) cell, so sequence-specific recovery is
+**perfectly confounded** with the cell. There is no way, from this panel, to
+tell whether `v4-32-40-ss-02` recovers well because 32 bp / 40% GC is
+favourable or because that specific sequence is.
+
+(Some rows do look like clean bias — 24 bp declines monotonically 1.29 -> 0.33
+across GC — but those are equally reproducible, so "looks like bias" and "is
+bias" cannot be separated here.)
+
+### Consequence for the ZTNB comparison
+
+The two methods do not estimate the same quantity:
+
+| | measures |
+|---|---|
+| ZTNB | population-averaged (length, GC) recovery over thousands of NATIVE fragments per cell; sequence idiosyncrasy averages out |
+| Spikes | recovery of 29 specific SYNTHETIC sequences, reproducibly, with sequence effects inseparable from cell effects |
+
+Where they disagree, that is **not automatically ZTNB's error.** The spike
+surface carries per-sequence structure that native data does not.
+
+Escaping this needs multiple distinct oligos per cell, so sequence effects can
+be averaged within a cell — another panel-design change, and the same
+conclusion §6 reached by a different route.
+
+### Note
+
+Sample 190000 has `d ~ 1.02` against ~1.31 for the others and correlates least
+with them (0.44-0.72). A different duplication regime; treat separately or
+exclude.
