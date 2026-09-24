@@ -721,6 +721,33 @@ order. What cannot be determined from here is whether those outputs fed
 anything published, or how large the numerical effect was. That requires
 someone who knows the analyses.
 
+### Bounded, though — the path is dead on any current machine
+
+Overstating this in the other direction would be the same error again, so: the
+window is **historical, not live**. `predict_from_rdf` reads a module-level
+constant:
+
+```python
+# bias_correction/{data,model,predict}.py
+FASTA_PATH = "/home/nboley/src/Ravel/data/repo_data_manifest/reference/GRCh38/GRCh38.p12.genome.fa.gz"
+```
+
+`/home/nboley` does not exist on this machine. `set_fragment_array_weights` is
+a sequence model — it calls `rdf.get_one_hot_encoded_sequence(FASTA_PATH)` —
+so **it dies at the FASTA read before ever reaching the mask.** Re-running any
+of those five notebooks today fails loudly rather than producing quietly wrong
+numbers.
+
+Two consequences. Results computed when that path still resolved — i.e. on the
+original author's machine — are the suspect set, and nothing produced since.
+And it means the v1 entry points were not merely buggy but **non-functional**,
+which is why replacing them with a `NotImplementedError` (§11.8) costs nothing:
+it substitutes a useful crash for an obscure one.
+
+The hardcoded path is itself a known defect; `CLAUDE.md` lists the
+`/home/nboley/...` paths in `bias_correction/` among the reasons that package
+is marked superseded.
+
 What remains true: `_set_fragment_array_weights_from_pred_record` is dead
 behind an `assert False`, and both functions live in `bias_correction/`, which
 `CLAUDE.md` marks superseded. Superseded is not the same as unused.
@@ -735,3 +762,67 @@ Both copies were fixed, including the dead one, so the defect cannot return
 with it. `test/test_fragment_weight_mask.py` adds 5 tests; against the pre-fix
 code **4 fail and the strandless one passes**, which is the expected signature
 of a fix that touches only the strand clause.
+
+**Superseded the same day.** §11.8 deleted both functions outright, so the R5
+fix and its tests are gone from the tree. Fixing it first was still the right
+order — the fix is what established, by execution, what the code actually did,
+which is the evidence the deletion decision rested on.
+
+## 11.8 The weight interface, rebuilt (owner-directed)
+
+`FragmentArray` carried three per-fragment weight vectors, one per coverage
+getter. The owner's judgement was that the endpoint vectors were a hack: the
+replacement model will predict a single fragment weight, so they are removed
+and every getter now reads `weights`.
+
+The interface is now a callback, `weight_fn(fa) -> ndarray` of one weight per
+fragment, with `fragment_array/weights.py` as the documented catalogue
+(`UniformWeights`, `GCFlWeights`). `set_fragment_array_weights` keeps its name
+— making the migration a signature change rather than a concept change — and
+mutates IN PLACE, because these frames get large enough that returning a copy
+risks OOM.
+
+**209 insertions, 510 deletions.** Deleted with the v1 path: both
+`_set_fragment_array_weights_from_*` helpers, `set_fragment_array_gc_weights`,
+and `reset_fragment_array_weights`, whose docstring said it set weights to zero
+while it set them to ones. Passing a v1 model now raises `NotImplementedError`
+naming both the old and new call — which, per the section above, replaces a
+crash with a *useful* crash.
+
+Structurally this also retires a bug class: `reverse_strand` loses its
+first↔last swap, and subset/concat/validation each lose two per-fragment
+arrays — the same category that produced the `gc` misalignment in `54ebe6e`.
+
+### The part worth keeping
+
+The implementing agent added **zero tests**, and its `set_fragment_array_weights`
+was **non-functional on every path**. The callback returned a bare ndarray, so
+`parallel_apply` built an `(n_regions, n_fragments)` frame — each vector became
+a ROW — and `.iloc[:, 0]` then returned the first weight of each region as a
+scalar; `assign_weights` died on `len()` of a 0-d array. Ragged fragment counts
+would additionally have NaN-padded.
+
+It reported success. The defect surfaced only when the 18 missing tests were
+written afterwards, and its test numbers were wrong twice over besides — 48
+"pre-existing" failures that were really a missing PATH (actual: 2), and a
+passing `tests/` run in an env other than the one specified.
+
+This is §11.6's thesis recurring at one remove: the refactor that removed a
+whole class of silent-misalignment bug was itself shipped silently broken, and
+only a feedback loop caught it. An agent reporting success is not evidence of
+success.
+
+One test was initially hollow in the same spirit — it imported the real
+`GCFlDistModel` and then only asserted that an *unfitted* one raises, which
+would have passed against a `GCFlWeights` that computed nothing. It now fits a
+real model and cross-checks against `predict()`: lengths `[35, 45]`, gc
+`[0.35, 0.45]` → weights `[1.717, 2.367]`, real ZTNB output rather than a
+degenerate all-ones vector that a bounds assertion alone would have accepted.
+
+`background_model/correction.py` still emits 12 tracks, so
+`apply_fragment_weights` must pick one to source the fragment weight; it uses
+**midpoint**, matching what `weights` already drove. That choice is an artefact
+of the transition and disappears when the replacement model lands.
+
+`test/` 2 failed/283 passed · `tests/` 396 passed (under `biomarker_env`, which
+has lightning and zarr; the `fragtools-test` env does not).
