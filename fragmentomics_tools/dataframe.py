@@ -639,24 +639,25 @@ class RegionDataFrame(DataFrameBase):
 
         return self.apply(is_olap, axis=1)
 
-    def center_on_summit(self):
+    def center_on_summit(self, inplace=False):
         """Center regions on summit, resize the regions, and then drop the summit column."""
         if "summit" not in self.columns:
             raise TypeError("Must contain a 'summit' column to center on the summit.")
 
-        region_lengths = (self.stop - self.start).copy()
+        rdf = self if inplace else self.copy()
+        region_lengths = (rdf.stop - rdf.start).copy()
 
         # check if the summit is within start
-        if ((self.summit >= self.start) & (self.summit < self.stop)).all():
-            self["start"] = self.summit - region_lengths // 2
-        elif (self.summit <= self.region_lengths).all():
-            self["start"] = self.start + self.summit - region_lengths // 2
+        if ((rdf.summit >= rdf.start) & (rdf.summit < rdf.stop)).all():
+            rdf["start"] = rdf.summit - region_lengths // 2
+        elif (rdf.summit <= rdf.region_lengths).all():
+            rdf["start"] = rdf.start + rdf.summit - region_lengths // 2
         else:
             raise ValueError("summits must either be within the region interval or less than the length of the region.")
 
-        self["stop"] = self.start + region_lengths
+        rdf["stop"] = rdf.start + region_lengths
 
-        return self.drop(columns=["summit"])
+        return rdf.drop(columns=["summit"])
 
     def center_regions_on_tf_motif(
         self,

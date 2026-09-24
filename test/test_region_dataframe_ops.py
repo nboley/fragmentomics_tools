@@ -331,6 +331,22 @@ class TestCenterOnSummit:
         # region length preserved
         assert int(result.stop.iloc[0]) - int(result.start.iloc[0]) == 100
 
+    def test_does_not_mutate_self_by_default(self):
+        """I21: center_on_summit mutated self in place with no inplace param."""
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1"], "start": [100], "stop": [200], "summit": [120]
+            }),
+            ref="hg38",
+        )
+        original_start = int(rdf.start.iloc[0])
+        result = rdf.center_on_summit()
+        assert int(rdf.start.iloc[0]) == original_start, (
+            "center_on_summit mutated self without inplace=True"
+        )
+        # result should be different
+        assert int(result.start.iloc[0]) != original_start
+
 
 class TestOverlapsRdf:
     """I16: overlaps_rdf raised KeyError when self had a contig absent from
