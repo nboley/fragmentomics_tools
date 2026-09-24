@@ -948,7 +948,14 @@ def test_final_lr_level_gets_lr_patience_epochs(tmp_path):
 class _DivergingModel(L.LightningModule):
     """Model that produces good val_loss then diverges at controlled epochs.
 
-    val_loss = base_loss - 0.01*epoch  (improvement trend)
+    val_loss = base_loss + trend*epoch  (``trend`` defaults to -0.01, i.e.
+    a slow improvement).  A POSITIVE ``trend`` makes val_loss degrade with
+    epoch, which is what lets a test construct a later-attempt-is-worse
+    scenario — recovery resumes further along the trend, so each attempt
+    scores worse than the one before.  With the default negative trend the
+    opposite holds and every later attempt is better, which silently makes
+    a global-best assertion vacuous (see
+    ``test_global_best_tracks_across_attempts``).
     ... EXCEPT at epochs in ``spike_epochs``, where val_loss = base_loss * spike.
 
     ``spike_epochs`` is a set of absolute epoch numbers.  After recovery
@@ -969,7 +976,7 @@ class _DivergingModel(L.LightningModule):
 
     def __init__(self, lr=1e-2, scale=0.1, spike_epochs=None,
                  first_spike=3, spike_every=None,
-                 spike=2.0, base_loss=10.0,
+                 spike=2.0, base_loss=10.0, trend=-0.01,
                  lr_patience=4, max_lr_reductions=3, lr_factor=0.5):
         super().__init__()
         self.save_hyperparameters()
@@ -1000,7 +1007,7 @@ class _DivergingModel(L.LightningModule):
         if ep in self._spike_epochs:
             loss = base * self.hparams.spike
         else:
-            loss = base - 0.01 * ep
+            loss = base + self.hparams.trend * ep
         self.log("val_loss", float(loss))
         return torch.tensor(loss)
 
@@ -1210,28 +1217,66 @@ def test_global_best_tracks_across_attempts(tmp_path):
     §4.5: fresh callbacks per attempt mean ModelCheckpoint.best_model_score
     resets.  A later WORSE attempt must not overwrite the global best.
 
-    The model spikes every 4 epochs, so multiple recovery attempts all
-    re-diverge.  The global best should be the minimum of the first
-    attempt's pre-divergence best, not a diverged value from a later attempt.
+    CHARACTERIZATION TEST -- READ THIS BEFORE TRUSTING IT AS A GUARD.
+
+    This test CANNOT currently fail, and that is a deliberate, documented
+    state rather than an oversight.  It was rewritten 2026-09-24 after
+    test-audit flagged the original as vacuous; investigating the fix showed
+    the vacuity ran deeper than the audit diagnosed.
+
+    §4.5 warns that a fresh `ModelCheckpoint` per attempt loses
+    `best_model_score`, so a later WORSE attempt could be reported as the
+    run's result.  **That failure mode is not reachable as configured.**
+    `build_trainer` uses `dirpath=<run_dir>/checkpoints` with `run_dir`
+    constant across attempts, and Lightning only declines to reload
+    `best_model_score` *when dirpath changes*
+    (`model_checkpoint.py`, "The dirpath has changed ... won't be
+    reloaded").  Dirpath is stable here, so every fresh ModelCheckpoint
+    reloads the score from the resumed checkpoint -- which is always
+    `global_best_path` -- and therefore already holds the global best.
+
+    Measured directly: with the degrading trend below, attempts 2 and 3 can
+    only reach 10.1 on their own, yet each reports best_model_score = 10.0.
+    So "last attempt's best" and "global best" coincide by construction, and
+    no assertion can separate them without diverging from how production
+    actually builds its trainers.
+
+    The explicit global-best tracking in `run_recovery_loop` is therefore
+    correct and defensive, but NOT load-bearing today.  It becomes
+    load-bearing the moment dirpath varies per attempt.  This test pins the
+    invariant so that change is caught; it does not prove the tracking code
+    is exercised.
+
+    Timeline (base_loss=10.0, trend=+0.1, spike at epoch 3):
+      initial fit : ep0=10.0 (best), ep1=10.1, ep2=10.2, ep3=30.0 -> diverge
+      recovery 1  : resumes from ep0 ckpt; own reachable best would be 10.1
+      recovery 2  : same
     """
+    base_loss = 10.0
     model = _DivergingModel(
-        lr=1e-2, first_spike=4, spike_every=4, spike=5.0, base_loss=10.0,
+        lr=1e-2, spike_epochs={3}, spike=3.0, base_loss=base_loss,
+        trend=+0.1,
         lr_patience=4, max_lr_reductions=1, lr_factor=0.5,
     )
     _, global_best, _, recoveries, _ = _run_with_recovery(
-        model, tmp_path, max_recoveries=2, max_epochs=50,
+        model, tmp_path, max_recoveries=2, max_epochs=30,
         lr_patience=4, max_lr_reductions=1,
     )
 
     assert global_best is not None
-    # The best should be the pre-divergence best (base_loss - 0.01 * epoch),
-    # not the diverged value (base_loss * spike = 50.0)
-    assert global_best < 10.0 * 5.0, (
-        f"global_best={global_best} appears to be from a diverged attempt"
-    )
-    # Best should be close to the improving trend (base_loss - small amount)
-    assert global_best < 10.0, (
-        f"global_best={global_best} should be < base_loss=10.0"
+    assert len(recoveries) >= 1, f"need >= 1 recovery, got {len(recoveries)}"
+
+    # The initial fit's epoch-0 value is the only time base_loss is seen
+    # undegraded, so it is the unique global optimum.  Every recovery
+    # attempt resumes at epoch >= 1, where the degrading trend has already
+    # pushed the reachable minimum to base_loss + 0.1.
+    assert global_best == pytest.approx(base_loss, abs=1e-6), (
+        f"global_best={global_best}, expected {base_loss} (the initial "
+        f"fit's epoch-0 score). A value of ~{base_loss + 0.1} would mean "
+        f"the run reported a later, worse attempt's best -- the §4.5 "
+        f"regression. NOTE: per this test's docstring that cannot happen "
+        f"while ModelCheckpoint.dirpath is stable across attempts, so if "
+        f"this fires, check whether dirpath became per-attempt."
     )
 
 
@@ -1590,11 +1635,38 @@ def test_recoveries_written_to_summary_json(tmp_path):
 
     assert "recoveries" in loaded
     assert len(loaded["recoveries"]) == len(recoveries)
-    for event in loaded["recoveries"]:
-        assert "attempt" in event
-        assert "epoch" in event
-        assert "recovery_lr_factor" in event
-        assert "checkpoint" in event
+    # All six fields the design doc §0 specifies, asserted meaningfully
+    # rather than by presence alone.  pre_divergence_best and
+    # diverged_value were produced by production code but asserted nowhere
+    # until test-audit flagged the gap (2026-09-24).
+    spike_value = 10.0 * 5.0  # base_loss * spike
+    for i, event in enumerate(loaded["recoveries"], start=1):
+        assert event["attempt"] == i, (
+            f"attempts must be numbered from 1 in order, got {event['attempt']}"
+        )
+        assert isinstance(event["epoch"], int) and event["epoch"] >= 0
+        assert event["checkpoint"].endswith(".ckpt"), (
+            f"checkpoint should be a .ckpt path, got {event['checkpoint']!r}"
+        )
+        assert 0 < event["recovery_lr_factor"] <= 1.0, (
+            f"recovery_lr_factor must be a reduction in (0, 1], got "
+            f"{event['recovery_lr_factor']}"
+        )
+
+        # The divergence that triggered this recovery: the value seen must
+        # be the spike, and it must be strictly worse than the best that
+        # preceded it -- otherwise DivergenceStop would not have fired.
+        assert event["diverged_value"] == pytest.approx(spike_value, rel=1e-3), (
+            f"diverged_value={event['diverged_value']}, expected the spike "
+            f"{spike_value}"
+        )
+        assert event["pre_divergence_best"] < event["diverged_value"], (
+            f"pre_divergence_best={event['pre_divergence_best']} must be "
+            f"better than the diverged value {event['diverged_value']}"
+        )
+        # Sanity: the pre-divergence best comes from the improving trend,
+        # so it sits at or just below base_loss.
+        assert event["pre_divergence_best"] <= 10.0
 
 
 # --------------------------------------------------------------------------
