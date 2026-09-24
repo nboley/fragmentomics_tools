@@ -35,11 +35,9 @@ def _create_array(group, name, overwrite=False, **kwargs):
 
 def _get_version_info():
     """Collect version strings for store attrs."""
-    import subprocess
+    from background_model.train import _git_sha
     try:
-        git_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        git_sha = _git_sha()
     except Exception:
         git_sha = "unknown"
     try:

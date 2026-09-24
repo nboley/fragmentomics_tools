@@ -73,6 +73,24 @@ DEFAULT_RUNS_ROOT = "/efs/analytics/nathanboley/background_model/runs"
 _TRACK_TO_BAND = torch.tensor([0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1])
 
 
+def _per_element_multinomial_nll(shape_logits, target, mask3):
+    """Per-sample, per-track multinomial NLL — (B, C) without mean reduction.
+
+    This is ``MaskedMultinomialNLLLoss.forward()`` stopped before the final
+    ``.mean()``, needed by FL reweighting which applies per-sample-per-track
+    weights before aggregation.  Uses ``_prepare_mask`` from the frozen core
+    for masking logic.  Equivalence is asserted by
+    ``test_per_element_nll_matches_frozen_loss``.
+    """
+    if mask3 is not None:
+        shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+    logp = torch.log_softmax(shape_logits, dim=-1)
+    if mask3 is not None:
+        logp = logp.masked_fill(~mask3, 0.0)
+    totals = target.sum(dim=-1).clamp(min=1.0)
+    return -(target * logp).sum(dim=-1) / totals  # (B, C)
+
+
 def _apply_fl_reweighting(loss_unweighted, fl_fracs, shape_logits, y, mask3,
                            loss_fn, log_disp, loss_name):
     """Recompute loss with per-sample, per-track FL band weighting.
@@ -84,28 +102,20 @@ def _apply_fl_reweighting(loss_unweighted, fl_fracs, shape_logits, y, mask3,
     fl_fracs: (B, n_bands) — fraction of fragments in each FL band per sample
     Returns: scalar weighted loss (with gradients)
     """
+    if loss_name != "multinomial" and log_disp is not None:
+        # NB-offset FL reweighting is NOT IMPLEMENTED.  The multinomial
+        # component dominates shape learning, and per-sample NB loss with
+        # FL weighting requires owner-approved statistical design work.
+        # This bail-out is deliberate, not an oversight.
+        return loss_unweighted
+
     B, C, L = shape_logits.shape
     band_idx = _TRACK_TO_BAND.to(shape_logits.device)  # (C,)
     # Per-sample, per-track weights
     w = fl_fracs[:, band_idx]  # (B, C)
     w = w / w.sum(dim=1, keepdim=True) * C  # normalize per sample
 
-    # Compute per-sample, per-track multinomial NLL inline
-    sl = shape_logits
-    if mask3 is not None:
-        sl = sl.masked_fill(~mask3, float("-inf"))
-    logp = torch.log_softmax(sl, dim=-1)
-    if mask3 is not None:
-        logp = logp.masked_fill(~mask3, 0.0)
-    N = y.sum(dim=-1).clamp(min=1.0)  # (B, C)
-    nll = -(y * logp).sum(dim=-1) / N  # (B, C) per-sample per-track
-
-    if loss_name != "multinomial" and log_disp is not None:
-        # For NB-offset: use the full NB loss per sample per track.
-        # Fall back to the unweighted loss — FL reweighting is most
-        # important for shape learning (multinomial component).
-        # TODO: implement per-sample NB loss if needed.
-        return loss_unweighted
+    nll = _per_element_multinomial_nll(shape_logits, y, mask3)  # (B, C)
 
     # Weighted mean: each (sample, track) pair weighted by that sample's
     # FL band fraction for that track's band
@@ -117,11 +127,19 @@ def _apply_fl_reweighting(loss_unweighted, fl_fracs, shape_logits, y, mask3,
 # --------------------------------------------------------------------------
 
 
-class InstrumentedBackgroundModel(BackgroundModel):
-    """BackgroundModel + per-track loss, dispersion-trajectory and grad-norm
-    logging.  The training loss and gradients are byte-for-byte those of the
-    frozen ``BackgroundModel._step`` (same single forward, same ``loss_fn``);
-    all extra logging is ``detach``-ed and adds no gradient path.
+class _InstrumentationMixin:
+    """Per-track loss, dispersion-trajectory, multinomial-NLL and grad-norm
+    logging.  Architecture-agnostic: mix into any model exposing
+    ``self.hparams.loss``, ``self.loss_fn``, ``self.output_tracks``, and
+    ``self._pooled_log_dispersion``.
+
+    All extra logging is ``detach``-ed and adds no gradient path — the
+    training loss and gradients are byte-for-byte those of the underlying
+    model's ``_step``.
+
+    Previously two independent copies existed (one for the CNN, one for
+    KEN/Hybrid).  This mixin replaces both — a duplicated loop drifting
+    silently is the defect shape this codebase has the most receipts for.
     """
 
     def _step(self, batch, log_name):
@@ -208,95 +226,18 @@ class InstrumentedBackgroundModel(BackgroundModel):
             self.log("grad_2norm", total, prog_bar=False)
 
 
-class _EmbeddingModelInstrumentation:
-    """Per-track loss, dispersion-trajectory, multinomial-NLL and grad-norm
-    logging for the embedding-based architectures (KEN and Hybrid).
-
-    Mirrors InstrumentedBackgroundModel.  These methods touch only
-    ``self.hparams.loss``, ``self.loss_fn``, ``self.output_tracks`` and
-    ``self._pooled_log_dispersion``, so they are architecture-agnostic — mix
-    into any model exposing that interface.
-    """
-
-    def _step(self, batch, log_name):
-        if len(batch) == 4:
-            x, y, mask, fl_fracs = batch
-        else:
-            x, y, mask = batch
-            fl_fracs = None
-        mask3 = _prepare_mask(mask, y)
-        shape_logits, dispersion_bp = self(x)
-
-        if self.hparams.loss == "multinomial":
-            log_disp = None
-            loss = self.loss_fn(shape_logits, y, mask3)
-        else:
-            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
-            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
-
-        if fl_fracs is not None:
-            loss = _apply_fl_reweighting(loss, fl_fracs, shape_logits, y, mask3,
-                                         self.loss_fn, log_disp, self.hparams.loss)
-
-        self.log(log_name, loss, prog_bar=True, sync_dist=True)
-        self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
-        self._log_dispersion_trajectory(log_name, log_disp)
-        self._log_multinomial_nll(log_name, shape_logits, y, mask3)
-        return loss
-
-    @torch.no_grad()
-    def _log_multinomial_nll(self, log_name, shape_logits, y, mask3):
-        stage = log_name.split("_")[0]
-        sl = shape_logits.detach()
-        if mask3 is not None:
-            sl = sl.masked_fill(~mask3, float("-inf"))
-        logp = torch.log_softmax(sl, dim=-1)
-        if mask3 is not None:
-            logp = logp.masked_fill(~mask3, 0.0)
-        totals = y.detach().sum(dim=-1).clamp(min=1.0)
-        nll = -(y.detach() * logp).sum(dim=-1) / totals
-        self.log(f"{stage}_multinomial_nll", nll.mean(), sync_dist=True)
-
-    @torch.no_grad()
-    def _log_per_track(self, log_name, shape_logits, log_disp, y, mask3):
-        stage = log_name.split("_")[0]
-        sl_logits = shape_logits.detach()
-        sl_y = y.detach()
-        for c, name in enumerate(self.output_tracks):
-            ch = slice(c, c + 1)
-            if self.hparams.loss == "multinomial":
-                lt = self.loss_fn(sl_logits[:, ch], sl_y[:, ch], mask3)
-            else:
-                lt = self.loss_fn(
-                    sl_logits[:, ch], log_disp.detach()[:, ch], sl_y[:, ch], mask3
-                )
-            self.log(f"{stage}_track/{name}", lt, sync_dist=True)
-
-    @torch.no_grad()
-    def _log_dispersion_trajectory(self, log_name, log_disp):
-        if log_disp is None:
-            return
-        stage = log_name.split("_")[0]
-        flat = log_disp.detach().reshape(-1).float()
-        self.log(f"{stage}_logdisp/mean", flat.mean(), sync_dist=True)
-        self.log(f"{stage}_logdisp/p10", torch.quantile(flat, 0.10), sync_dist=True)
-        self.log(f"{stage}_logdisp/p90", torch.quantile(flat, 0.90), sync_dist=True)
-
-    def on_before_optimizer_step(self, optimizer):
-        norms = grad_norm(self, norm_type=2)
-        total = norms.get("grad_2.0_norm_total")
-        if total is not None:
-            self.log("grad_2norm", total, prog_bar=False)
+class InstrumentedBackgroundModel(_InstrumentationMixin, BackgroundModel):
+    """BackgroundModel + training instrumentation."""
 
 
 class InstrumentedBackgroundModelKEN(
-    _EmbeddingModelInstrumentation, BackgroundModelKEN
+    _InstrumentationMixin, BackgroundModelKEN
 ):
     """BackgroundModelKEN + training instrumentation."""
 
 
 class InstrumentedBackgroundModelHybrid(
-    _EmbeddingModelInstrumentation, BackgroundModelHybrid
+    _InstrumentationMixin, BackgroundModelHybrid
 ):
     """BackgroundModelHybrid + training instrumentation."""
 
@@ -816,14 +757,142 @@ def build_loaders(train_ds, val_ds, batch_size: int, num_workers: int):
 
 
 def _git_sha() -> str:
+    """Resolve the git SHA (and dirty flag) from the *package location*, not CWD.
+
+    Three traps this handles:
+    1. Batch jobs run ``cd /tmp`` with ``PYTHONPATH`` pointing at the repo,
+       so ``git rev-parse HEAD`` from CWD fails with "not a git repository".
+    2. git may not be on PATH in the container at all.
+    3. In a git worktree, ``.git`` is a *file* containing
+       ``gitdir: /path/to/main/.git/worktrees/<name>``, not a directory.
+
+    Strategy: walk from this file's directory toward the root looking for
+    ``.git`` (file or directory).  If found, read HEAD directly from the
+    filesystem — no ``git`` binary required.  Fall back to ``subprocess``
+    if the filesystem read fails.  Degrade to ``"unknown"`` rather than
+    killing a training run.
+    """
     try:
-        return (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+        return _resolve_git_info_from_package()
+    except Exception:
+        pass
+    # Fallback: try subprocess from this file's directory
+    try:
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        sha = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=pkg_dir,
+                stderr=subprocess.DEVNULL,
+            )
             .decode()
             .strip()
         )
+        dirty = _check_dirty_subprocess(pkg_dir)
+        return f"{sha}-dirty" if dirty else sha
     except Exception:
         return "unknown"
+
+
+def _resolve_git_info_from_package() -> str:
+    """Read HEAD sha and dirty status from the filesystem, no git binary needed."""
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    git_dir = _find_git_dir(pkg_dir)
+    if git_dir is None:
+        raise FileNotFoundError("no .git found in ancestors")
+
+    sha = _read_head_sha(git_dir)
+
+    # Check dirty: look for uncommitted changes via subprocess if available,
+    # otherwise skip (sha alone is still useful)
+    dirty = _check_dirty_subprocess(pkg_dir)
+    return f"{sha}-dirty" if dirty else sha
+
+
+def _find_git_dir(start: str) -> "str | None":
+    """Walk ancestors of *start* to find the git directory.
+
+    Handles both regular repos (``.git/`` is a directory) and worktrees
+    (``.git`` is a file containing ``gitdir: <path>``).
+    """
+    d = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(d, ".git")
+        if os.path.isdir(candidate):
+            return candidate
+        if os.path.isfile(candidate):
+            # Worktree: .git is a file with "gitdir: <path>"
+            with open(candidate) as f:
+                line = f.readline().strip()
+            if line.startswith("gitdir:"):
+                return line.split(":", 1)[1].strip()
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _read_head_sha(git_dir: str) -> str:
+    """Read the resolved HEAD sha from a git directory."""
+    head_path = os.path.join(git_dir, "HEAD")
+    with open(head_path) as f:
+        head = f.readline().strip()
+    if head.startswith("ref:"):
+        # Symbolic ref — resolve it
+        ref_path = head.split(":", 1)[1].strip()
+        # In a worktree the ref may be in the worktree's git dir or
+        # in the main repo's git dir (commondir).
+        for base in _git_search_paths(git_dir):
+            full = os.path.join(base, ref_path)
+            if os.path.isfile(full):
+                with open(full) as f:
+                    return f.readline().strip()
+        # packed-refs fallback
+        for base in _git_search_paths(git_dir):
+            packed = os.path.join(base, "packed-refs")
+            if os.path.isfile(packed):
+                with open(packed) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) == 2 and parts[1] == ref_path:
+                            return parts[0]
+        raise FileNotFoundError(f"cannot resolve ref {ref_path}")
+    # Detached HEAD — the content IS the sha
+    return head
+
+
+def _git_search_paths(git_dir: str) -> "list[str]":
+    """Return directories to search for refs: the git dir itself, then commondir.
+
+    In a worktree, ``commondir`` points to the main repo's ``.git/`` which
+    holds the shared refs.
+    """
+    paths = [git_dir]
+    commondir_file = os.path.join(git_dir, "commondir")
+    if os.path.isfile(commondir_file):
+        with open(commondir_file) as f:
+            rel = f.readline().strip()
+        common = os.path.normpath(os.path.join(git_dir, rel))
+        if common != git_dir:
+            paths.append(common)
+    return paths
+
+
+def _check_dirty_subprocess(repo_dir: str) -> bool:
+    """Check for uncommitted changes via ``git status``.  Returns False on any error."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=5,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
@@ -1165,6 +1234,52 @@ def run_training(cfg: TrainConfig):
     final_trainer = last_trainer if last_trainer is not None else trainer
 
     # ── persist final metrics summary ─────────────────────────────────
+    summary = build_run_summary(
+        global_best_path=global_best_path,
+        global_best_score=global_best_score,
+        final_trainer=final_trainer,
+        stop_reason=stop_reason,
+        recoveries=recoveries,
+    )
+    with open(os.path.join(run_dir, "summary.json"), "w") as f:
+        json.dump({**meta, **summary}, f, indent=2)
+    return final_trainer, model
+
+
+def build_run_summary(
+    global_best_path,
+    global_best_score,
+    final_trainer,
+    stop_reason,
+    recoveries,
+):
+    """Build the summary dict from training results.  Pure function — no I/O.
+
+    Extracted from ``run_training`` so the summary-dict construction can be
+    tested without a real zarr store or Lightning fit.  Mirrors the earlier
+    extraction of ``run_recovery_loop`` behind a callable seam, for the
+    same reason: a defect in the summary (reading ``global_step`` from the
+    wrong trainer) lived undetected because the code path was untestable.
+
+    Parameters
+    ----------
+    global_best_path : str
+        Path to the checkpoint with the best val_loss across all attempts.
+    global_best_score : float | None
+        Best val_loss achieved.
+    final_trainer : Lightning Trainer
+        The trainer from the LAST fit (recovery or initial).  Its
+        ``global_step`` and ``current_epoch`` describe the final state.
+    stop_reason : dict
+        Result of ``_determine_stop_reason``.
+    recoveries : list[dict]
+        Recovery event dicts from ``run_recovery_loop`` (empty if none fired).
+
+    Returns
+    -------
+    dict
+        Summary ready for JSON serialization (merged with run_meta upstream).
+    """
     summary = {
         "best_model_path": global_best_path,
         "best_val_loss": global_best_score,
@@ -1174,9 +1289,7 @@ def run_training(cfg: TrainConfig):
     }
     if recoveries:
         summary["recoveries"] = recoveries
-    with open(os.path.join(run_dir, "summary.json"), "w") as f:
-        json.dump({**meta, **summary}, f, indent=2)
-    return final_trainer, model
+    return summary
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

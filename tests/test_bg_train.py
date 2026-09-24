@@ -18,9 +18,15 @@ from background_model.train import (
     RECOVERABLE_REASONS,
     DivergenceStop,
     InstrumentedBackgroundModel,
+    InstrumentedBackgroundModelKEN,
+    InstrumentedBackgroundModelHybrid,
     TrainConfig,
+    _InstrumentationMixin,
     _determine_stop_reason,
+    _git_sha,
+    _per_element_multinomial_nll,
     build_arg_parser,
+    build_run_summary,
     build_trainer,
     cfg_from_args,
     run_recovery_loop,
@@ -2216,3 +2222,295 @@ def test_run_meta_contains_all_trainconfig_fields(tmp_path):
         f"run_meta.json is missing {len(missing)} TrainConfig field(s): "
         f"{sorted(missing)}"
     )
+
+
+# --------------------------------------------------------------------------
+# Task 1: All instrumented classes share one mixin implementation
+# --------------------------------------------------------------------------
+
+
+def test_instrumentation_shares_single_implementation():
+    """All three instrumented classes use the SAME _step, _log_multinomial_nll,
+    _log_per_track, _log_dispersion_trajectory and on_before_optimizer_step
+    methods from _InstrumentationMixin.  A second copy of any of these
+    methods is the defect shape this codebase has the most receipts for."""
+    methods = [
+        "_step",
+        "_log_multinomial_nll",
+        "_log_per_track",
+        "_log_dispersion_trajectory",
+        "on_before_optimizer_step",
+    ]
+    classes = [
+        InstrumentedBackgroundModel,
+        InstrumentedBackgroundModelKEN,
+        InstrumentedBackgroundModelHybrid,
+    ]
+    for method_name in methods:
+        mixin_method = getattr(_InstrumentationMixin, method_name)
+        for cls in classes:
+            cls_method = None
+            for klass in cls.__mro__:
+                if method_name in klass.__dict__:
+                    cls_method = klass.__dict__[method_name]
+                    break
+            assert cls_method is mixin_method, (
+                f"{cls.__name__}.{method_name} is NOT the mixin's method — "
+                f"found on {klass.__name__} instead of _InstrumentationMixin. "
+                f"The whole point of the mixin is one implementation."
+            )
+
+
+def test_instrumented_ken_loss_matches_frozen():
+    """KEN instrumented model loss byte-matches the base KEN _step."""
+    from background_model_core import BackgroundModelKEN
+    torch.manual_seed(0)
+    model = InstrumentedBackgroundModelKEN(
+        loss="multinomial", d_embed=8, d_context=8,
+    )
+    model.eval()
+    L_in = model.calc_input_region_size(L_OUT)
+    x = torch.randn(2, 4, L_in)
+    y = torch.randint(0, 5, (2, 12, L_OUT)).float()
+    mask = torch.ones(2, L_OUT, dtype=torch.bool)
+    batch = (x, y, mask)
+    child = model._step(batch, "train_loss")
+    parent = BackgroundModelKEN._step(model, batch, "train_loss")
+    assert torch.equal(child.detach(), parent.detach())
+
+
+def test_instrumented_hybrid_loss_matches_frozen():
+    """Hybrid instrumented model loss byte-matches the base Hybrid _step."""
+    from background_model_core import BackgroundModelHybrid
+    torch.manual_seed(0)
+    model = InstrumentedBackgroundModelHybrid(
+        loss="multinomial", n_kernels=8, d_embed=8,
+    )
+    model.eval()
+    L_in = model.calc_input_region_size(L_OUT)
+    x = torch.randn(2, 4, L_in)
+    y = torch.randint(0, 5, (2, 12, L_OUT)).float()
+    mask = torch.ones(2, L_OUT, dtype=torch.bool)
+    batch = (x, y, mask)
+    child = model._step(batch, "train_loss")
+    parent = BackgroundModelHybrid._step(model, batch, "train_loss")
+    assert torch.equal(child.detach(), parent.detach())
+
+
+# --------------------------------------------------------------------------
+# Task 2+5: _git_sha resolves from package location
+# --------------------------------------------------------------------------
+
+
+def test_git_sha_from_tmp_cwd():
+    """_git_sha works when CWD is /tmp (the batch container scenario).
+
+    The old subprocess-based implementation shelled ``git rev-parse HEAD``
+    against CWD, which fails with "not a git repository" when CWD is /tmp.
+    The new implementation resolves from the package file location.
+    """
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir("/tmp")
+        sha = _git_sha()
+        assert sha != "unknown", (
+            f"_git_sha() returned 'unknown' from /tmp — "
+            f"the package-location resolution is not working"
+        )
+        # SHA should be 40 hex chars, optionally with -dirty suffix
+        bare_sha = sha.replace("-dirty", "")
+        assert len(bare_sha) == 40 and all(c in "0123456789abcdef" for c in bare_sha), (
+            f"_git_sha() returned '{sha}' which is not a valid git SHA"
+        )
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_git_sha_does_not_raise():
+    """_git_sha degrades to 'unknown' rather than raising."""
+    sha = _git_sha()
+    assert isinstance(sha, str)
+
+
+def test_git_sha_dirty_flag():
+    """_git_sha reports dirty state when the tree has uncommitted changes.
+
+    This test verifies the format: either a bare 40-char hex sha or
+    a sha-dirty suffix.  We can't deterministically control the dirty
+    state in a test, but we CAN verify the format is correct.
+    """
+    sha = _git_sha()
+    if sha == "unknown":
+        pytest.skip("git not available")
+    if sha.endswith("-dirty"):
+        bare = sha[:-6]
+    else:
+        bare = sha
+    assert len(bare) == 40 and all(c in "0123456789abcdef" for c in bare)
+
+
+def test_git_sha_store_uses_train_implementation():
+    """store._get_version_info uses the same _git_sha as train.py."""
+    from background_model.store import _get_version_info
+    import inspect
+    source = inspect.getsource(_get_version_info)
+    assert "from background_model.train import _git_sha" in source, (
+        "store._get_version_info should import _git_sha from train, "
+        "not have its own implementation"
+    )
+
+
+# --------------------------------------------------------------------------
+# Task 3: _per_element_multinomial_nll matches frozen MaskedMultinomialNLLLoss
+# --------------------------------------------------------------------------
+
+
+def test_per_element_nll_matches_frozen_loss():
+    """_per_element_multinomial_nll().mean() must equal MaskedMultinomialNLLLoss().
+
+    This is the equivalence proof that Task 3 is a refactor, not a change.
+    The per-element helper is the frozen loss's computation stopped before
+    .mean(); they must produce numerically identical results.
+    """
+    from background_model_core import MaskedMultinomialNLLLoss, _prepare_mask
+    torch.manual_seed(42)
+    B, C, L = 4, 12, 512
+    shape_logits = torch.randn(B, C, L)
+    y = torch.randint(0, 10, (B, C, L)).float()
+    mask = torch.ones(B, L, dtype=torch.bool)
+    # Mask out some positions
+    mask[:, 100:120] = False
+    y[:, :, 100:120] = 0.0
+
+    mask3 = _prepare_mask(mask, y)
+    frozen_loss = MaskedMultinomialNLLLoss()
+    scalar = frozen_loss(shape_logits, y, mask3)
+
+    per_element = _per_element_multinomial_nll(shape_logits, y, mask3)
+    assert per_element.shape == (B, C)
+    reconstructed = per_element.mean()
+
+    assert torch.allclose(scalar, reconstructed, atol=1e-6), (
+        f"Frozen loss = {scalar.item():.8f}, "
+        f"per-element mean = {reconstructed.item():.8f}. "
+        f"These must be identical — the per-element helper IS the frozen "
+        f"loss without .mean()."
+    )
+
+
+def test_per_element_nll_matches_frozen_no_mask():
+    """Equivalence holds when mask is None."""
+    from background_model_core import MaskedMultinomialNLLLoss
+    torch.manual_seed(7)
+    B, C, L = 2, 12, 256
+    shape_logits = torch.randn(B, C, L)
+    y = torch.randint(0, 10, (B, C, L)).float()
+
+    frozen_loss = MaskedMultinomialNLLLoss()
+    scalar = frozen_loss(shape_logits, y, None)
+    per_element = _per_element_multinomial_nll(shape_logits, y, None)
+    assert torch.allclose(scalar, per_element.mean(), atol=1e-6)
+
+
+# --------------------------------------------------------------------------
+# Task 4: build_run_summary pure function
+# --------------------------------------------------------------------------
+
+
+class _FakeTrainerForSummary:
+    """Minimal trainer stand-in for testing build_run_summary."""
+
+    def __init__(self, global_step=100, current_epoch=9):
+        self.global_step = global_step
+        self.current_epoch = current_epoch
+
+
+def test_build_run_summary_step_epoch_track_final_trainer():
+    """global_step and current_epoch must come from the trainer passed in,
+    not from a stale reference.
+
+    This is the bug that motivated the extraction: the summary read these
+    from the initial-fit trainer instead of the recovery trainer.
+    """
+    initial = _FakeTrainerForSummary(global_step=50, current_epoch=4)
+    final = _FakeTrainerForSummary(global_step=200, current_epoch=19)
+
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=final,
+        stop_reason={"reason": "early_stopped", "epoch": 19},
+        recoveries=[],
+    )
+    assert summary["global_step"] == 200
+    assert summary["current_epoch"] == 19
+
+    # Now with the initial (wrong) trainer — values differ
+    summary_wrong = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=initial,
+        stop_reason={"reason": "early_stopped", "epoch": 19},
+        recoveries=[],
+    )
+    assert summary_wrong["global_step"] == 50, (
+        "This test proves the function uses the trainer it receives"
+    )
+
+
+def test_build_run_summary_recoveries_omitted_when_empty():
+    """recoveries key must NOT appear when the list is empty."""
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "completed", "epoch": 9},
+        recoveries=[],
+    )
+    assert "recoveries" not in summary
+
+
+def test_build_run_summary_recoveries_present_when_nonempty():
+    """recoveries key must appear when recoveries fired."""
+    recovery_event = {
+        "attempt": 1,
+        "epoch": 5,
+        "pre_divergence_best": 7.56,
+        "diverged_value": 8.73,
+        "recovery_lr_factor": 0.5,
+        "checkpoint": "/efs/best.ckpt",
+        "applied_lrs": [5e-3],
+    }
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "early_stopped", "epoch": 9},
+        recoveries=[recovery_event],
+    )
+    assert "recoveries" in summary
+    assert len(summary["recoveries"]) == 1
+    # All seven fields survive
+    for key in ["attempt", "epoch", "pre_divergence_best", "diverged_value",
+                "recovery_lr_factor", "checkpoint", "applied_lrs"]:
+        assert key in summary["recoveries"][0], f"recovery event missing {key}"
+
+
+def test_build_run_summary_json_serialisable():
+    """The summary dict must round-trip through json.dumps/loads."""
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "diverged_unrecovered", "epoch": 12,
+                     "recoveries_attempted": 3},
+        recoveries=[{
+            "attempt": 1, "epoch": 5, "pre_divergence_best": 7.56,
+            "diverged_value": 8.73, "recovery_lr_factor": 0.5,
+            "checkpoint": "/efs/best.ckpt", "applied_lrs": [5e-3],
+        }],
+    )
+    serialised = json.dumps(summary)
+    loaded = json.loads(serialised)
+    assert loaded == summary
