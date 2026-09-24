@@ -353,3 +353,61 @@ it fails. Only if both land favourably does implementation work become
 justified — and at that point the UMI panel redesign (§6) may still be the
 better investment, because it removes the assumptions rather than validating
 them.
+
+---
+
+## 9. The calibration design, and the ss/ds rule (SETTLED — do not relitigate)
+
+The comparison is **spike-to-spike at matched length**, not spike-to-native. At a
+length carried by both panels you have SPANK's UMI-measured duplication rate and
+the GC-dSpark's raw read count; that ratio calibrates reads -> molecules, and it
+propagates across the grid. This never touches native cfDNA, so the
+spike -> native question does not enter the calibration step.
+
+### Matched lengths (VERIFIED via `load_spikes`)
+
+| profile | SPANK | ss/ds | GC-dSpark ss/ds | matched lengths |
+|---|---|---|---|---|
+| SNMv3 | `spank-75B` | ds | ds (20) | 75 |
+| SNMv4 | `v4-Spank-ss-A` | ss | ss (29) | 52 |
+| SNMv4B | `SPANK-52C`, `spank-75B` | ds | ss (29) | 52, 75 |
+| SNMv4C | `SPANK-52C`, `SPANK-75B` | ds | ss (29) | 52, 75 |
+
+At each matched length there are **5 GC-dSpark peers** spanning ~30-70% GC, and
+SPANK lands almost exactly on one (52 bp: SPANK 50.0% vs peer 50.0%; 75 bp:
+SPANK 47.5% vs peer 49.3%). So the comparison can be made at matched length AND
+matched GC.
+
+Bonus: those 5 peers permit a test of whether duplication varies with **GC at
+fixed length**, using the spike panel alone and no native data.
+
+### The ss/ds rule — OWNER-CONFIRMED, TESTED
+
+**A ds spike contributes 2x the molecules its listed molarity implies, because
+the two strands are not grouped into one UMI family. The correction applies to
+the INPUT quantity.** This has been tested. It is settled; do not re-derive it
+from SAM semantics or reopen it.
+
+Effective input in ss terms, and the resulting gap at the matched lengths:
+
+| profile | SPANK listed | effective (ss) | vs GC-dSpark peer | gap |
+|---|---|---|---|---|
+| SNMv3 | 5.0e-11 ds | 1.0e-10 | 5.0e-12 | 20x |
+| SNMv4 | 5.0e-10 ss | 5.0e-10 | 5.0e-11 | 10x |
+| SNMv4B/C | 1.0e-12 ds | 2.0e-12 | 5.0e-13 | **4x** |
+
+**SNMv4B/C is the best vehicle**: the smallest effective gap, two matched
+lengths rather than one, near-exact GC matches at both, and the model panel
+spans 24-175 bp so the length extrapolation from the calibration points is
+measurable across the whole grid. The ds/ss difference is a scalar on input and
+does not disturb reads-per-observed-molecule.
+
+### What remains assumed
+
+- Duplication rate is roughly (length, GC)-independent. Testable — see
+  Experiment A (§8), and the 5-GC-peer check above.
+- Duplication is insensitive to concentration across the 4x gap. The failure
+  mode is saturation, whose signature is SPANK's duplicate distribution being
+  right-SHIFTED rather than merely scaled.
+- Spike -> native transfer, for applying a spike-derived surface to real
+  fragments. Unchanged by any of this, and the one worth quantifying separately.
