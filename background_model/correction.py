@@ -159,13 +159,18 @@ def apply_fragment_weights(
     clamp: WeightClampConfig,               # REQUIRED — no default (design §5.2)
     drop_uncorrectable: bool = True,
 ):
-    """Interface (a).  Set ``rfa.first_covered_base_weights``,
-    ``rfa.last_covered_base_weights``, ``rfa.weights`` to
-    ``1 / (probs·L_valid)`` at each fragment's (first/last/midpoint) endpoint,
-    indexed by the ``(strand, band, coverage)`` track that coverage getter
-    actually reads.  Uncorrectable endpoints (out-of-band, masked, or off-grid)
-    → weight 0; ``drop_uncorrectable`` drops fragments whose three weights are
-    all 0.  Returns a NEW ``RegionFragmentArray``.
+    """Interface (a).  Set ``rfa.weights`` to ``1 / (probs·L_valid)`` at each
+    fragment's midpoint position, indexed by the ``(strand, band, "midpoint")``
+    track.  The weight is used for all coverage types (first, last, midpoint).
+
+    The 12-track model output (2 strands x 2 fl_bands x 3 coverage_types) still
+    exists, but this function uses only the MIDPOINT coverage type for the
+    per-fragment weight, matching how ``weights`` feeds ``midpoint_counts`` and
+    the 2D fragment matrix.
+
+    Uncorrectable fragments (out-of-band, masked, or off-grid midpoints) →
+    weight 0; ``drop_uncorrectable`` drops fragments whose weight is 0.
+    Returns a NEW ``RegionFragmentArray``.
 
     ``clamp`` is REQUIRED (pass ``WeightClampConfig.identity()`` for no clamp);
     it is applied as the last step to the corrected (nonzero) weights only —
@@ -242,70 +247,59 @@ def apply_fragment_weights(
     # coverage type instead.
     strand_ok = (strands == "+") | (strands == "-")
 
-    cov_specs = [
-        ("first", np.asarray(rfa.first_covered_bases_0), "first_covered_base_weights"),
-        ("last", np.asarray(rfa.last_covered_bases_0), "last_covered_base_weights"),
-        ("midpoint", np.asarray(rfa.midpoints_0), "weights"),
-    ]
+    # Use only the midpoint coverage type for the single per-fragment weight
+    cov = "midpoint"
+    endpoint_coord_0 = np.asarray(rfa.midpoints_0)
 
-    new_weight_vectors = {}
-    for cov, endpoint_coord_0, attr in cov_specs:
-        gpos = start + endpoint_coord_0
-        in_grid = (gpos >= start) & (gpos < stop)
-        off = gpos - start
-        # F11 guard: compute the track index ONLY for in-band fragments; an
-        # out-of-band band_idx == -1 must NEVER index bands[-1] (which python
-        # negative-indexes to the LAST band).
-        trk_arr = np.full(n, -1, dtype=np.int64)
-        for b, band in enumerate(bands):
-            for s in ("+", "-"):
-                sel_sb = (band_idx == b) & (strands == s)
-                if sel_sb.any():
-                    trk_arr[sel_sb] = TRACK_INDEX[(s, band, cov)]
+    gpos = start + endpoint_coord_0
+    in_grid = (gpos >= start) & (gpos < stop)
+    off = gpos - start
+    # F11 guard: compute the track index ONLY for in-band fragments; an
+    # out-of-band band_idx == -1 must NEVER index bands[-1] (which python
+    # negative-indexes to the LAST band).
+    trk_arr = np.full(n, -1, dtype=np.int64)
+    for b, band in enumerate(bands):
+        for s in ("+", "-"):
+            sel_sb = (band_idx == b) & (strands == s)
+            if sel_sb.any():
+                trk_arr[sel_sb] = TRACK_INDEX[(s, band, cov)]
 
-        elig = in_grid & (band_idx >= 0) & strand_ok
-        w_out = np.zeros(n, dtype=np.float64)
-        valid = np.zeros(n, dtype=bool)
+    elig = in_grid & (band_idx >= 0) & strand_ok
+    w_out = np.zeros(n, dtype=np.float64)
+    valid = np.zeros(n, dtype=bool)
 
-        win_all = np.where(in_grid, off // tile_size, -1)
-        j_all = np.where(in_grid, off - win_all * tile_size, -1)
+    win_all = np.where(in_grid, off // tile_size, -1)
+    j_all = np.where(in_grid, off - win_all * tile_size, -1)
 
-        for w_idx, (probs_w, mask_w, l_valid) in windows.items():
-            if l_valid == 0:
-                continue
-            sel = elig & (win_all == w_idx)
-            idxs = np.nonzero(sel)[0]
-            if len(idxs) == 0:
-                continue
-            jj = j_all[idxs]
-            m_good = mask_w[jj]                     # endpoint on a valid position?
-            good = idxs[m_good]
-            if len(good) == 0:
-                continue
-            jg = j_all[good]
-            tg = trk_arr[good]
-            p = probs_w[tg, jg]
-            w_out[good] = 1.0 / (p * l_valid)
-            valid[good] = True
+    for w_idx, (probs_w, mask_w, l_valid) in windows.items():
+        if l_valid == 0:
+            continue
+        sel = elig & (win_all == w_idx)
+        idxs = np.nonzero(sel)[0]
+        if len(idxs) == 0:
+            continue
+        jj = j_all[idxs]
+        m_good = mask_w[jj]                     # endpoint on a valid position?
+        good = idxs[m_good]
+        if len(good) == 0:
+            continue
+        jg = j_all[good]
+        tg = trk_arr[good]
+        p = probs_w[tg, jg]
+        w_out[good] = 1.0 / (p * l_valid)
+        valid[good] = True
 
-        # clamp the corrected (nonzero) weights only; uncorrectable stay 0.
-        w_clamped = clamp.apply(w_out)
-        w_out = np.where(valid, w_clamped, 0.0)
-        new_weight_vectors[attr] = w_out
+    # clamp the corrected (nonzero) weights only; uncorrectable stay 0.
+    w_clamped = clamp.apply(w_out)
+    weights = np.where(valid, w_clamped, 0.0)
 
     new = rfa._replace(
-        first_covered_base_weights=new_weight_vectors["first_covered_base_weights"],
-        last_covered_base_weights=new_weight_vectors["last_covered_base_weights"],
-        weights=new_weight_vectors["weights"],
+        weights=weights,
         validate_data=False,
     )
 
     if drop_uncorrectable:
-        keep = (
-            (new_weight_vectors["weights"] > 1e-6)
-            | (new_weight_vectors["first_covered_base_weights"] > 1e-6)
-            | (new_weight_vectors["last_covered_base_weights"] > 1e-6)
-        )
+        keep = weights > 1e-6
         new = new.mask(keep, validate_data=False)
 
     return new

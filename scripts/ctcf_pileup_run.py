@@ -270,17 +270,15 @@ def main():
                         cM, strand, center_local, half, perm)
                     # weight distribution from identity clamp only
                     if cname == "identity":
-                        for attr in ("first_covered_base_weights",
-                                     "last_covered_base_weights", "weights"):
-                            w = getattr(cr, attr)
-                            w = w[w > 1e-12]
-                            if w.size:
-                                whist[m] += np.histogram(w, bins=WBINS)[0]
-                                wmin[m] = min(wmin[m], float(w.min()))
-                                wmax[m] = max(wmax[m], float(w.max()))
-                                wtot[m] += int(w.size)
-                                wlo[m] += int((w < CLIP_LO).sum())
-                                whi[m] += int((w > CLIP_HI).sum())
+                        w = cr.weights
+                        w = w[w > 1e-12]
+                        if w.size:
+                            whist[m] += np.histogram(w, bins=WBINS)[0]
+                            wmin[m] = min(wmin[m], float(w.min()))
+                            wmax[m] = max(wmax[m], float(w.max()))
+                            wtot[m] += int(w.size)
+                            wlo[m] += int((w < CLIP_LO).sum())
+                            whi[m] += int((w > CLIP_HI).sum())
         n_ok += 1
         _pw_cache.clear()  # bound memory: predictions reused within a site only
         if (i + 1) % 100 == 0:

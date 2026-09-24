@@ -191,13 +191,13 @@ class FragmentArray:
     You can add two FragmentArrays from identical regions (example, same region over two different BAMs)
     >>> fa2 = FragmentArray(starts_0=[3,4,4], stops_0=[6,7,8], length=5, max_frag_len=10)
     >>> fa + fa2
-    FragmentArray(n_frags=6, length=5, starts_0=[-1, 2, 3, 3, 4, 4], stops_0=[3, 4, 5, 6, 7, 8], weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], first_covered_base_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], last_covered_base_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], num_cpgs=[0, 0, 0, 0, 0, 0], num_meth_cpgs=[0, 0, 0, 0, 0, 0], max_frag_len=10)
+    FragmentArray(n_frags=6, length=5, starts_0=[-1, 2, 3, 3, 4, 4], stops_0=[3, 4, 5, 6, 7, 8], strand=None, weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], num_cpgs=[0, 0, 0, 0, 0, 0], num_converted_cpgs=[0, 0, 0, 0, 0, 0], num_cytosines=[0, 0, 0, 0, 0, 0], num_converted_cytosines=[0, 0, 0, 0, 0, 0], max_frag_len=10)
 
     You can add two FragmentArrays over different regions as long as the region lengths are the same.  It
     produces a fragment array with a "Pseudo-Region" (a region with "NA" for its chromosome, and a start of 0)
     >>> fa2 = FragmentArray(starts_0=[-1,2,3], stops_0=[3,4,5], length=5, max_frag_len=10)
     >>> fa + fa2
-    FragmentArray(n_frags=6, length=5, starts_0=[-1, 2, 3, -1, 2, 3], stops_0=[3, 4, 5, 3, 4, 5], weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], first_covered_base_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], last_covered_base_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], num_cpgs=[0, 0, 0, 0, 0, 0], num_meth_cpgs=[0, 0, 0, 0, 0, 0], max_frag_len=10)
+    FragmentArray(n_frags=6, length=5, starts_0=[-1, 2, 3, -1, 2, 3], stops_0=[3, 4, 5, 3, 4, 5], strand=None, weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], num_cpgs=[0, 0, 0, 0, 0, 0], num_converted_cpgs=[0, 0, 0, 0, 0, 0], num_cytosines=[0, 0, 0, 0, 0, 0], num_converted_cytosines=[0, 0, 0, 0, 0, 0], max_frag_len=10)
     """
 
     @property
@@ -228,8 +228,6 @@ class FragmentArray:
         validate_data: bool = True,
         fragment_strands: Union[numpy.ndarray, List, None] = None,
         weights: Union[numpy.ndarray, List, None] = None,
-        first_covered_base_weights: Union[numpy.ndarray, List, None] = None,
-        last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
         num_converted_cpgs: Union[numpy.ndarray, List, None] = None,
         num_cytosines: Union[numpy.ndarray, List, None] = None,
@@ -248,9 +246,7 @@ class FragmentArray:
         :param max_frag_len: maximum fragment length (ex 511). We usually use 511 because when converting to a dense
         array, this produces an array who's index 10 represents fragment length 10.
         :param length: length of the region these fragments intersect
-        :param weights: weight to be applied to each fragment
-        :param first_covered_base_weights: regularization weights for the first base
-        :param last_covered_base_weights: regularization weights for the last base
+        :param weights: weight to be applied to each fragment (used for all coverage types)
         :param num_cpgs: number of cpgs in the sequenced reads. Overlaps are only counted once.
         :param num_converted_cpgs: number of converted cpgs (e.g. from emseq)
         :param num_cytosines: number of cytosines in the entire fragment (not just the sequenced reads)
@@ -265,8 +261,6 @@ class FragmentArray:
             max_frag_len=max_frag_len,
             weights=weights,
             fragment_strands=fragment_strands,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
@@ -284,10 +278,6 @@ class FragmentArray:
         self._default_fields = set()
         if weights is None:
             self._default_fields.add('weights')
-        if first_covered_base_weights is None:
-            self._default_fields.add('first_covered_base_weights')
-        if last_covered_base_weights is None:
-            self._default_fields.add('last_covered_base_weights')
         if num_cpgs is None:
             self._default_fields.add('num_cpgs')
         if num_converted_cpgs is None:
@@ -302,8 +292,6 @@ class FragmentArray:
         self.stops_0 = numpy.asarray(stops_0, dtype=numpy.int32)
 
         self.weights = self._ones_if_none(weights)
-        self.first_covered_base_weights = self._ones_if_none(first_covered_base_weights)
-        self.last_covered_base_weights = self._ones_if_none(last_covered_base_weights)
 
         self.fragment_strands = fragment_strands
         if self.fragment_strands is not None:
@@ -330,14 +318,6 @@ class FragmentArray:
                 raise ValueError("The length of starts_0 must be the same as stops_0")
             if len(self.starts_0) != len(self.weights):
                 raise ValueError("Weights length should match data length")
-            if len(self.starts_0) != len(self.first_covered_base_weights):
-                raise ValueError(
-                    "First covered base weights length should match data length"
-                )
-            if len(self.starts_0) != len(self.last_covered_base_weights):
-                raise ValueError(
-                    "Last covered base weights length should match data length"
-                )
             if self.gc is not None and len(self.gc) != len(self.starts_0):
                 raise ValueError(
                     f"gc length ({len(self.gc)}) must match fragment count ({len(self.starts_0)})"
@@ -401,10 +381,25 @@ class FragmentArray:
             f"[{','.join(map(str, frags[:2]))}, ..., {','.join(map(str, frags[-2:]))}]"
         )
 
-    def reset_cutsite_bias_weights(self):
-        self.first_covered_base_weights = numpy.ones(self.starts_0.shape, dtype=float)
-        self.last_covered_base_weights = numpy.ones(self.starts_0.shape, dtype=float)
+    def reset_weights(self):
+        """Reset all per-fragment weights to one (the identity weight)."""
         self.weights = numpy.ones(self.starts_0.shape, dtype=float)
+
+    def assign_weights(self, weights: numpy.ndarray) -> None:
+        """Assign per-fragment weights with a length check.
+
+        Args:
+            weights: 1-D array of weights, one per fragment.
+
+        Raises:
+            ValueError: If the weights array length doesn't match n_fragments.
+        """
+        weights = numpy.asarray(weights, dtype=float)
+        if len(weights) != self.n_fragments:
+            raise ValueError(
+                f"weights length ({len(weights)}) must match fragment count ({self.n_fragments})"
+            )
+        self.weights = weights
 
     def _replace(self, validate_data: bool = True, **kwargs):
         """Reinitalize self, potentially replacing input args with entries from **kwargs"""
@@ -445,12 +440,6 @@ class FragmentArray:
         starts_0 = numpy.concatenate([self.starts_0, other.starts_0])
         stops_0 = numpy.concatenate([self.stops_0, other.stops_0])
         weights = numpy.concatenate([self.weights, other.weights])
-        first_covered_base_weights = numpy.concatenate(
-            [self.first_covered_base_weights, other.first_covered_base_weights]
-        )
-        last_covered_base_weights = numpy.concatenate(
-            [self.last_covered_base_weights, other.last_covered_base_weights]
-        )
         fragment_strands = _concat_fragment_strands(
             self.fragment_strands, other.fragment_strands
         )
@@ -475,8 +464,6 @@ class FragmentArray:
             starts_0=starts_0,
             stops_0=stops_0,
             weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
             num_converted_cpgs=num_converted_cpgs,
@@ -538,12 +525,6 @@ class FragmentArray:
             numpy.all(self.starts_0 == other.starts_0)
             and numpy.all(self.stops_0 == other.stops_0)
             and numpy.allclose(self.weights, other.weights)
-            and numpy.allclose(
-                self.first_covered_base_weights, other.first_covered_base_weights
-            )
-            and numpy.allclose(
-                self.last_covered_base_weights, other.last_covered_base_weights
-            )
             and _fragment_strands_are_equal(
                 self.fragment_strands, other.fragment_strands
             )
@@ -587,7 +568,7 @@ class FragmentArray:
         >>> fa.n_frags
         3
         >>> fa.downsampled(2, random_state=1)
-        FragmentArray(n_frags=2, length=5, starts_0=[-1, 3], stops_0=[3, 5], weights=[1.0, 1.0], first_covered_base_weights=[1.0, 1.0], last_covered_base_weights=[1.0, 1.0], num_cpgs=[0, 0], num_meth_cpgs=[0, 0], max_frag_len=10)
+        FragmentArray(n_frags=2, length=5, starts_0=[-1, 3], stops_0=[3, 5], strand=None, weights=[1.0, 1.0], num_cpgs=[0, 0], num_converted_cpgs=[0, 0], num_cytosines=[0, 0], num_converted_cytosines=[0, 0], max_frag_len=10)
         >>> fa.downsampled(4, random_state=1)
         Traceback (most recent call last):
         ...
@@ -764,8 +745,6 @@ class FragmentArray:
             stops_0=stops_0[::-1],
             weights=self.weights[::-1],
             fragment_strands=fragment_strands,
-            first_covered_base_weights=self.last_covered_base_weights[::-1],
-            last_covered_base_weights=self.first_covered_base_weights[::-1],
             num_cpgs=self.num_cpgs[::-1],
             num_converted_cpgs=self.num_converted_cpgs[::-1],
             num_cytosines=self.num_cytosines[::-1],
@@ -791,8 +770,6 @@ class FragmentArray:
             f"stops_0={self.frag_str(self.stops_0)}, "
             f"strand={self.frag_str(self.fragment_strands) if self.fragment_strands is not None else None}, "
             f"weights={self.frag_str(self.weights)}, "
-            f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
-            f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
             f"num_cpgs={self.frag_str(self.num_cpgs)}, "
             f"num_converted_cpgs={self.frag_str(self.num_converted_cpgs)}, "
             f"num_cytosines={self.frag_str(self.num_cytosines)}, "
@@ -880,7 +857,7 @@ class FragmentArray:
         >>> fa.first_covered_base_counts
         array([0., 0., 2., 0., 0.])
         """
-        return self._get_covered_base_array(positions_attr='first_covered_bases_0', weights_attr='first_covered_base_weights', return_sparse=return_sparse)
+        return self._get_covered_base_array(positions_attr='first_covered_bases_0', weights_attr='weights', return_sparse=return_sparse)
 
     @property
     def first_covered_base_counts(self) -> numpy.ndarray:
@@ -897,7 +874,7 @@ class FragmentArray:
         >>> fa.last_covered_base_counts
         array([0., 1., 0., 2., 0.])
         """
-        return self._get_covered_base_array(positions_attr='last_covered_bases_0', weights_attr='last_covered_base_weights', return_sparse=return_sparse)
+        return self._get_covered_base_array(positions_attr='last_covered_bases_0', weights_attr='weights', return_sparse=return_sparse)
 
     @property
     def last_covered_base_counts(self) -> numpy.ndarray:
@@ -1015,8 +992,6 @@ class FragmentArray:
             starts_0=self.starts_0[mask],
             stops_0=self.stops_0[mask],
             weights=None if 'weights' in df else self.weights[mask],
-            first_covered_base_weights=None if 'first_covered_base_weights' in df else self.first_covered_base_weights[mask],
-            last_covered_base_weights=None if 'last_covered_base_weights' in df else self.last_covered_base_weights[mask],
             fragment_strands=fragment_strands,
             num_cpgs=None if 'num_cpgs' in df else self.num_cpgs[mask],
             num_converted_cpgs=None if 'num_converted_cpgs' in df else self.num_converted_cpgs[mask],
@@ -1335,8 +1310,6 @@ class RegionFragmentArray(FragmentArray):
         validate_data: bool = True,
         fragment_strands: Union[numpy.ndarray, List, None] = None,
         weights: Union[numpy.ndarray, List] = None,
-        first_covered_base_weights: Union[numpy.ndarray, List, None] = None,
-        last_covered_base_weights: Union[numpy.ndarray, List, None] = None,
         num_cpgs: Union[numpy.ndarray, List, None] = None,
         num_converted_cpgs: Union[numpy.ndarray, List, None] = None,
         num_cytosines: Union[numpy.ndarray, List, None] = None,
@@ -1353,8 +1326,6 @@ class RegionFragmentArray(FragmentArray):
             fragment_strands=fragment_strands,
             weights=weights,
             region=region,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             num_cpgs=num_cpgs,
             num_converted_cpgs=num_converted_cpgs,
             num_cytosines=num_cytosines,
@@ -1490,8 +1461,6 @@ class RegionFragmentArray(FragmentArray):
             f"stops_0={self.frag_str(self.stops_0)}, "
             f"strand={self.frag_str(self.fragment_strands) if self.fragment_strands is not None else None}, "
             f"weights={self.frag_str(self.weights)}, "
-            f"first_covered_base_weights={self.frag_str(self.first_covered_base_weights)}, "
-            f"last_covered_base_weights={self.frag_str(self.last_covered_base_weights)}, "
             f"num_cpgs={self.frag_str(self.num_cpgs)}, "
             f"num_converted_cpgs={self.frag_str(self.num_converted_cpgs)}, "
             f"num_cytosines={self.frag_str(self.num_cytosines)}, "
@@ -1614,12 +1583,6 @@ class RegionFragmentArray(FragmentArray):
         stops_0 = numpy.concatenate([self.stops_0, other.stops_0])
         max_frag_len = min(self.max_frag_len, other.max_frag_len)
         weights = numpy.concatenate([self.weights, other.weights])
-        first_covered_base_weights = numpy.concatenate(
-            [self.first_covered_base_weights, other.first_covered_base_weights]
-        )
-        last_covered_base_weights = numpy.concatenate(
-            [self.last_covered_base_weights, other.last_covered_base_weights]
-        )
 
         fragment_strands = _concat_fragment_strands(
             self.fragment_strands, other.fragment_strands
@@ -1644,8 +1607,6 @@ class RegionFragmentArray(FragmentArray):
                 stops_0=stops_0,
                 length=self.length,
                 weights=weights,
-                first_covered_base_weights=first_covered_base_weights,
-                last_covered_base_weights=last_covered_base_weights,
                 fragment_strands=fragment_strands,
                 num_cpgs=num_cpgs,
                 num_converted_cpgs=num_converted_cpgs,
@@ -1660,8 +1621,6 @@ class RegionFragmentArray(FragmentArray):
             stops_0=stops_0,
             max_frag_len=self.max_frag_len,
             weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             fragment_strands=fragment_strands,
             num_cpgs=num_cpgs,
             num_converted_cpgs=num_converted_cpgs,
@@ -1696,12 +1655,6 @@ class RegionFragmentArray(FragmentArray):
             numpy.all(self.starts_0 == other.starts_0)
             and numpy.all(self.stops_0 == other.stops_0)
             and numpy.allclose(self.weights, other.weights)
-            and numpy.allclose(
-                self.first_covered_base_weights, other.first_covered_base_weights
-            )
-            and numpy.allclose(
-                self.last_covered_base_weights, other.last_covered_base_weights
-            )
             and _fragment_strands_are_equal(
                 self.fragment_strands, other.fragment_strands
             )
@@ -2045,12 +1998,6 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
         )
 
     weights = numpy.concatenate([ar.weights for ar in ars])
-    first_covered_base_weights = numpy.concatenate(
-        [ar.first_covered_base_weights for ar in ars]
-    )
-    last_covered_base_weights = numpy.concatenate(
-        [ar.last_covered_base_weights for ar in ars]
-    )
     num_cpgs = numpy.concatenate([ar.num_cpgs for ar in ars])
     num_converted_cpgs = numpy.concatenate([ar.num_converted_cpgs for ar in ars])
     num_cytosines = numpy.concatenate([ar.num_cytosines for ar in ars])
@@ -2063,8 +2010,6 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
             stops,
             fragment_strands=fragment_strands,
             weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             max_frag_len=ars[0].max_frag_len,
             region=region,
             num_cpgs=num_cpgs,
@@ -2078,8 +2023,6 @@ def merge_fragment_arrays(ars, make_data_direction_match_strand=True, force_frag
             stops,
             fragment_strands=fragment_strands,
             weights=weights,
-            first_covered_base_weights=first_covered_base_weights,
-            last_covered_base_weights=last_covered_base_weights,
             max_frag_len=ars[0].max_frag_len,
             length=ars[0].length,
             num_cpgs=num_cpgs,

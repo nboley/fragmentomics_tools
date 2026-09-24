@@ -61,8 +61,6 @@ def _save_fragment_array(fa):
         "length": fa.length,
         "max_frag_len": fa.max_frag_len,
         "weights": fa.weights,
-        "first_covered_base_weights": fa.first_covered_base_weights,
-        "last_covered_base_weights": fa.last_covered_base_weights,
         "fragment_strands": fa.fragment_strands,  # numpy array or None
         "num_cpgs": fa.num_cpgs,
         "num_converted_cpgs": fa.num_converted_cpgs,
@@ -89,8 +87,6 @@ def _restore_fragment_array(state):
         validate_data=False,
         fragment_strands=state["fragment_strands"],
         weights=state["weights"],
-        first_covered_base_weights=state["first_covered_base_weights"],
-        last_covered_base_weights=state["last_covered_base_weights"],
         num_cpgs=state["num_cpgs"],
         num_converted_cpgs=state["num_converted_cpgs"],
         num_cytosines=state["num_cytosines"],

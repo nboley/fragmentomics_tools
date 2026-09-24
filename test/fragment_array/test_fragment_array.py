@@ -121,8 +121,6 @@ def test_boundary_conditions(small_h5_path, region, expected_starts, expected_st
             starts_0=[-3, -2, 0, 1, 2, 3, 4],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
             weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
             region=Region("chr1", 0, 5, strand="+"),
             max_frag_len=100,
         ),
@@ -180,18 +178,6 @@ def test_sum(frag_arr):
     numpy.testing.assert_equal(merged_downcast.stops_0, summed.stops_0)
     numpy.testing.assert_equal(summed_downcast.weights, summed.weights)
     numpy.testing.assert_equal(merged_downcast.weights, summed.weights)
-    numpy.testing.assert_equal(
-        summed_downcast.first_covered_base_weights, summed.first_covered_base_weights
-    )
-    numpy.testing.assert_equal(
-        merged_downcast.first_covered_base_weights, summed.first_covered_base_weights
-    )
-    numpy.testing.assert_equal(
-        summed_downcast.last_covered_base_weights, summed.last_covered_base_weights
-    )
-    numpy.testing.assert_equal(
-        merged_downcast.last_covered_base_weights, summed.last_covered_base_weights
-    )
 
 
 @pytest.mark.parametrize(
@@ -225,13 +211,11 @@ def test_sum(frag_arr):
                 max_frag_len=100,
             ),
         ),
-        (  # Slice with no fragments is empty
+        (  # With explicit weights
             RegionFragmentArray(
                 starts_0=[-3, -2, 0, 1, 2, 3, 4],
                 stops_0=[1, 2, 2, 3, 4, 5, 6],
                 weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-                first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-                last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
                 region=Region("chr1", 0, 5),
                 max_frag_len=100,
             ),
@@ -239,8 +223,6 @@ def test_sum(frag_arr):
                 starts_0=[-1, 0, 1, 2, 3, 3, 4],
                 stops_0=[1, 2, 3, 4, 5, 7, 8],
                 weights=[1.0, 1.5, 1.0, 0.1, 1.0, 0.9, 1.0],
-                first_covered_base_weights=[1.0, 1.5, 2.0, 0.1, 1.0, 0.9, 1.0],
-                last_covered_base_weights=[1.0, 1.5, 1.0, 0.1, 1.0, 0.8, 1.0],
                 region=Region("chr1", 0, 5),
                 max_frag_len=100,
             ),
@@ -577,8 +559,6 @@ def test_data_validation():
             starts_0=[-3, -2, 0, 1, 2, 3, 4, 33],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
             weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
             region=Region("chr1", 0, 5),
             max_frag_len=100,
         )
@@ -587,34 +567,6 @@ def test_data_validation():
             starts_0=[-3, -2, 0, 1, 2, 3, 4],
             stops_0=[1, 2, 2, 3, 4, 5, 6],
             weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0, 33.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
-            region=Region("chr1", 0, 5),
-            max_frag_len=100,
-        )
-    with pytest.raises(
-        ValueError,
-        match=".*First covered base weights length should match data length.*",
-    ):
-        _ = RegionFragmentArray(
-            starts_0=[-3, -2, 0, 1, 2, 3, 4],
-            stops_0=[1, 2, 2, 3, 4, 5, 6],
-            weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0, 33.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
-            region=Region("chr1", 0, 5),
-            max_frag_len=100,
-        )
-    with pytest.raises(
-        ValueError,
-        match=".*Last covered base weights length should match data length.*",
-    ):
-        _ = RegionFragmentArray(
-            starts_0=[-3, -2, 0, 1, 2, 3, 4],
-            stops_0=[1, 2, 2, 3, 4, 5, 6],
-            weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0, 33.0],
             region=Region("chr1", 0, 5),
             max_frag_len=100,
         )
@@ -629,13 +581,11 @@ def test_data_validation():
             region=Region("chr1", 0, 5, strand="+"),
             max_frag_len=100,
         ),
-        # Slice with no fragments is empty
+        # With explicit weights
         RegionFragmentArray(
             starts_0=[-2, -3, 0, 1, 2, 3, 4],
             stops_0=[2, 1, 2, 3, 4, 5, 6],
             weights=[1.0, 0.9, 1.0, 0.1, 1.0, 1.5, 1.0],
-            first_covered_base_weights=[1.0, 0.8, 1.0, 0.1, 1.0, 1.5, 1.0],
-            last_covered_base_weights=[1.0, 0.9, 1.0, 0.1, 2.0, 1.5, 1.0],
             region=Region("chr1", 0, 5),
             max_frag_len=100,
         ),

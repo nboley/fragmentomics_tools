@@ -1882,79 +1882,6 @@ class RegionDataFrame(DataFrameBase):
     ###############################################################################################
 
 
-def _set_fragment_array_weights_from_pred_record(fragment_array, record, left_expansion):
-    assert False
-    # avoid circular import
-    from fragmentomics_tools.bias_correction.data import track_name_to_index_key, index_key_to_track_name
-
-    cov_type_to_weights_attr = {'first': 'first_covered_base_weights', 'last': 'last_covered_base_weights', 'midpoint': 'weights'}
-    cov_type_to_fragment_coord = {'first': 'starts_0', 'last': 'stops_0', 'midpoint': 'midpoints_0'}
-
-    pred_column_to_key = {c[10:]: track_name_to_index_key(c[10:]) for c in record.index if c.startswith("pred_dist.")}
-    strands = list(set(x[0] for x in pred_column_to_key.values()))
-    fl_bands = list(set(x[1] for x in pred_column_to_key.values()))
-    cov_types = list(set(x[2] for x in pred_column_to_key.values()))
-
-    # zero out all of the weights
-    for attr in cov_type_to_weights_attr.values():
-        getattr(fragment_array, attr)[:] = 0
-
-    # set all of the valid weights
-    for strand in strands:
-        assert strand in ".+-"
-        for fl_lb, fl_ub in [(40, 65), (120, 175)]:
-            for cov_type in ['first', 'last', 'midpoint']:
-                mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
-                mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
-                if strand in '-+':
-                    # AND, not OR: a fragment must be in this length band *and*
-                    # on this strand to receive this track's weights.
-                    mask = (mask & (fragment_array.fragment_strands == strand))
-                means = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
-                weights = means.mean()/means
-                count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
-                assert (count_indices >= 0).all()
-                getattr(fragment_array, cov_type_to_weights_attr[cov_type])[mask] = weights[count_indices[mask]]
-
-    # drop all fragments with 0 weights (this probably means that they were out of the fl bands)
-    return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
-
-
-def _set_fragment_array_weights_from_weights_record(fragment_array, record, left_expansion):
-    # avoid circular import
-    from fragmentomics_tools.bias_correction.data import track_name_to_index_key, index_key_to_track_name
-
-    cov_type_to_weights_attr = {'first': 'first_covered_base_weights', 'last': 'last_covered_base_weights', 'midpoint': 'weights'}
-    cov_type_to_fragment_coord = {'first': 'starts_0', 'last': 'stops_0', 'midpoint': 'midpoints_0'}
-
-    pred_column_to_key = {c[10:]: track_name_to_index_key(c[10:]) for c in record.index if c.startswith("pred_dist.")}
-    strands = list(set(x[0] for x in pred_column_to_key.values()))
-    fl_bands = list(set(x[1] for x in pred_column_to_key.values()))
-    cov_types = list(set(x[2] for x in pred_column_to_key.values()))
-
-    # zero out all of the weights
-    for attr in cov_type_to_weights_attr.values():
-        getattr(fragment_array, attr)[:] = 0
-
-    # set all of the valid weights
-    for strand in strands:
-        assert strand in ".+-"
-        for fl_lb, fl_ub in fl_bands:
-            for cov_type in cov_types:
-                mask = numpy.zeros(fragment_array.n_fragments).astype(bool)
-                mask = (mask | (fragment_array.fragment_lengths >= fl_lb) & (fragment_array.fragment_lengths <= fl_ub))
-                if strand in '-+':
-                    # AND, not OR: a fragment must be in this length band *and*
-                    # on this strand to receive this track's weights.
-                    mask = (mask & (fragment_array.fragment_strands == strand))
-                weights = record["pred_dist." + index_key_to_track_name((strand, (fl_lb, fl_ub), cov_type))]
-                count_indices = (getattr(fragment_array, cov_type_to_fragment_coord[cov_type]) + left_expansion)
-                assert (count_indices >= 0).all()
-                assert not np.isnan(weights[count_indices[mask]]).any()
-                getattr(fragment_array, cov_type_to_weights_attr[cov_type])[mask] = 1./weights[count_indices[mask]]
-
-    # drop all fragments with 0 weights (this probably means that they were out of the fl bands)
-    return fragment_array.mask((fragment_array.weights > 1e-6) | (fragment_array.first_covered_base_weights > 1e-6) | (fragment_array.last_covered_base_weights > 1e-6))
 
 
 def _detach_h5_inplace(df):
@@ -2175,60 +2102,73 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             rv = rv.drop(columns=["n_fragments", "min_fragments", "max_fragments"])
         return rv
 
-    def set_fragment_array_weights(self, model, n_workers=None):
-        # find the maximum fragment length so that we can ensure that we have enough context to set
-        # start and end wweights
-        expansion = 511 # self.fragment_array.apply(lambda x: x.max_frag_len)
-        # these are the columns that we use to produce fixed regions
-        columns = ['contig', 'strand', 'start', 'stop']
-        # predict on all of the unique regions
-        tmp_rdf = RegionDataFrame(self[columns].drop_duplicates(), ref=self.ref)
-        # join the model back
-        pred = tmp_rdf.join(model.predict_weights_from_rdf(tmp_rdf.expand_regions(left_amt=expansion, right_amt=expansion)))
-        pred = SampleAndRegionDataFrame(self.df.set_index(columns).join(pred.df.set_index(columns), how='inner').reset_index(), ref=self.ref)
-        assert pred.shape[0] == self.shape[0]
-        fas = pred.parallel_apply(
-            lambda record: _set_fragment_array_weights_from_weights_record(record.fragment_array, record, expansion),
-            n_workers=n_workers
-        ).iloc[:, 0].rename('fragment_array')
-        fas.index = self.index
-        self['fragment_array'] = fas
-        return
+    def set_fragment_array_weights(self, weight_fn, n_workers=None, verbose=True):
+        """Apply a weight callback to all fragment arrays in place.
 
-    def set_fragment_array_gc_weights(self, normalizer):
-        """Set per-fragment weights using a GC/FL bias model.
+        The callback protocol is::
+
+            weight_fn(fa) -> numpy.ndarray   # shape (n_fragments,)
+
+        The callback takes a FragmentArray and returns a 1-D array of
+        per-fragment weights. These weights are applied uniformly to all
+        coverage types (first, last, midpoint).
 
         Args:
-            normalizer: A model with a ``predict(length, gc)`` method (e.g.
-                ``karius_biomarker.flgc.GCFlDistModel``). GC is expected in
-                percent (0-100); fragment arrays store GC as fraction (0-1),
-                so conversion is handled here.
+            weight_fn: A callable that takes a FragmentArray and returns
+                a 1-D array of weights. See ``fragmentomics_tools.fragment_array.weights``
+                for available implementations.
+            n_workers: Number of parallel workers. None uses all CPUs,
+                1 runs single-threaded (useful for debugging).
 
-        Requires that fragment arrays were loaded with ``return_gc=True``
-        so that ``fragment_array.gc`` is available.
+        Returns:
+            self: The same SampleAndRegionDataFrame, for method chaining.
+
+        Raises:
+            NotImplementedError: If called with an old v1 bias_correction model
+                (detected via ``hasattr(weight_fn, "predict_weights_from_rdf")``).
+
+        Example::
+
+            from fragmentomics_tools.fragment_array.weights import UniformWeights, GCFlWeights
+
+            # Reset to uniform weights
+            srdf.set_fragment_array_weights(UniformWeights())
+
+            # Apply GC/FL correction
+            from flgc.model import GCFlDistModel
+            normalizer = GCFlDistModel.load(...)
+            srdf.set_fragment_array_weights(GCFlWeights(normalizer))
         """
-        def _apply_weights(record):
-            fa = record.fragment_array
-            if fa.gc is None:
-                raise ValueError(
-                    "Fragment array has no GC data. Reload with return_gc=True."
-                )
-            fls = fa.fragment_lengths
-            gc_percent = fa.gc * 100.0
-            weights = numpy.atleast_1d(normalizer.predict(fls, gc_percent))
-            fa.weights = weights
-            return fa
+        # Guard against old v1 usage
+        if hasattr(weight_fn, "predict_weights_from_rdf") or not callable(weight_fn):
+            raise NotImplementedError(
+                "set_fragment_array_weights now takes a callback returning one weight "
+                "per fragment, not a v1 bias_correction model.\n"
+                "  was:  srdf.set_fragment_array_weights(model)\n"
+                "  now:  srdf.set_fragment_array_weights(GCFlWeights(normalizer))\n"
+                "See fragmentomics_tools/fragment_array/weights.py for available "
+                "weight functions."
+            )
 
-        fas = self.parallel_apply(_apply_weights).iloc[:, 0].rename('fragment_array')
-        fas.index = self.index
-        self['fragment_array'] = fas
+        self._check_has_fragment_array()
 
-    def reset_fragment_array_weights(self):
-        """Set the fragment array weights to zero.
+        # The vector is wrapped in a dict so parallel_apply keeps each array in
+        # ONE cell. Returning a bare ndarray makes pandas treat it as a row of
+        # per-fragment columns, so the caller silently gets scalars instead of
+        # vectors -- and unequal fragment counts would NaN-pad on top of that.
+        def _compute(record):
+            return {"weights": weight_fn(record.fragment_array)}
 
-        """
-        self.progress_apply(lambda record: record.fragment_array.reset_cutsite_bias_weights(), axis=1)
-        return None
+        # Workers return only the weight vectors, which are cheap to ship. They
+        # must not assign: a forked worker mutating its own copy is discarded,
+        # so the parent does the assignment below.
+        computed = self.parallel_apply(_compute, n_workers=n_workers, verbose=verbose)
+
+        # Assign positionally -- parallel_apply preserves input order.
+        for fa, weights in zip(self["fragment_array"], computed["weights"]):
+            fa.assign_weights(weights)
+
+        return self
 
 
 class FlDist:

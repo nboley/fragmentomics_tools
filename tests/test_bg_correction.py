@@ -148,10 +148,8 @@ class TestUniformAnalytic:
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        for attr in ("first_covered_base_weights",
-                     "last_covered_base_weights", "weights"):
-            w = getattr(new, attr)
-            np.testing.assert_allclose(w, np.ones_like(w), atol=1e-6)
+        # Now we only have a single weights vector (midpoint-based)
+        np.testing.assert_allclose(new.weights, np.ones_like(new.weights), atol=1e-6)
 
     def test_expected_is_N_over_L_and_nan_at_masked(self):
         m = _uniform_model()
@@ -202,6 +200,7 @@ class TestS1Lock:
         m = _random_model(seed=7)
         fasta = _fasta()
         # (a) +len50 band0 @100; (b) +len200 out-of-band @50; (c) -len130 band1 @300
+        # midpoints: (a) 125, (b) 150, (c) 365
         rfa = _rfa([100, 50, 300], [150, 250, 430], ["+", "+", "-"])
         new = apply_fragment_weights(
             rfa, m, fasta, clamp=WeightClampConfig.identity(),
@@ -212,19 +211,19 @@ class TestS1Lock:
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
         b0, b1 = (40, 65), (120, 175)
-        # (a) +band0: 'first' weight from the (+, band0, first) track ONLY.
-        ref_a = _reference_weight(rp, "+", b0, "first", 100)
-        np.testing.assert_allclose(new.first_covered_base_weights[0], ref_a, rtol=1e-6)
+        # (a) +band0: weight from the (+, band0, midpoint) track.
+        # midpoint of 100-150 is 125
+        ref_a = _reference_weight(rp, "+", b0, "midpoint", 125)
+        np.testing.assert_allclose(new.weights[0], ref_a, rtol=1e-6)
         # NOT the wrong-strand track (v1's OR bug would let (-,band0) win).
-        wrong = _reference_weight(rp, "-", b0, "first", 100)
-        assert not np.isclose(new.first_covered_base_weights[0], wrong, rtol=1e-6)
-        # (b) out-of-band → all three coverage weights 0.
-        assert new.first_covered_base_weights[1] == 0.0
-        assert new.last_covered_base_weights[1] == 0.0
+        wrong = _reference_weight(rp, "-", b0, "midpoint", 125)
+        assert not np.isclose(new.weights[0], wrong, rtol=1e-6)
+        # (b) out-of-band → weight 0.
         assert new.weights[1] == 0.0
-        # (c) -band1 @300: 'first' from (-, band1, first).
-        ref_c = _reference_weight(rp, "-", b1, "first", 300)
-        np.testing.assert_allclose(new.first_covered_base_weights[2], ref_c, rtol=1e-6)
+        # (c) -band1 @300: weight from (-, band1, midpoint).
+        # midpoint of 300-430 is 365
+        ref_c = _reference_weight(rp, "-", b1, "midpoint", 365)
+        np.testing.assert_allclose(new.weights[2], ref_c, rtol=1e-6)
 
     def test_out_of_band_dropped(self):
         m = _uniform_model()
@@ -235,7 +234,7 @@ class TestS1Lock:
         )
         # only the in-band fragment survives.
         assert new.n_fragments == 1
-        np.testing.assert_allclose(new.first_covered_base_weights, [1.0], atol=1e-6)
+        np.testing.assert_allclose(new.weights, [1.0], atol=1e-6)
 
     @pytest.mark.parametrize("length", [39, 65, 100, 119, 175])
     def test_band_membership_no_track_lengths(self, length):
@@ -246,8 +245,6 @@ class TestS1Lock:
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        assert new.first_covered_base_weights[0] == 0.0
-        assert new.last_covered_base_weights[0] == 0.0
         assert new.weights[0] == 0.0
 
     @pytest.mark.parametrize("length", [40, 64, 120, 174])
@@ -259,7 +256,7 @@ class TestS1Lock:
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        np.testing.assert_allclose(new.first_covered_base_weights, [1.0], atol=1e-6)
+        np.testing.assert_allclose(new.weights, [1.0], atol=1e-6)
 
     def test_minus_strand_region_refused(self):
         m = _uniform_model()
@@ -307,7 +304,7 @@ class TestS1Lock:
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        np.testing.assert_allclose(new.first_covered_base_weights, [1.0], atol=1e-6)
+        np.testing.assert_allclose(new.weights, [1.0], atol=1e-6)
 
     def test_non_plus_minus_strand_fragment_zeroed(self):
         # Strand gate (correction.py `elig`): a fragment whose strand is neither
@@ -330,13 +327,9 @@ class TestS1Lock:
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        # bad-strand fragment: zero on all three coverage types.
-        assert new.first_covered_base_weights[1] == 0.0
-        assert new.last_covered_base_weights[1] == 0.0
+        # bad-strand fragment: weight zero (uncorrectable).
         assert new.weights[1] == 0.0
         # valid neighbour untouched.
-        np.testing.assert_allclose(new.first_covered_base_weights[0], 1.0, atol=1e-6)
-        np.testing.assert_allclose(new.last_covered_base_weights[0], 1.0, atol=1e-6)
         np.testing.assert_allclose(new.weights[0], 1.0, atol=1e-6)
 
     @pytest.mark.skipif(
@@ -367,7 +360,7 @@ class TestS1Lock:
 # ── T7: single-track reciprocal parity (numeric core) ─────────────────────
 
 class TestReciprocalParity:
-    def test_first_weight_equals_inline_reciprocal(self):
+    def test_midpoint_weight_equals_inline_reciprocal(self):
         m = _random_model(seed=11)
         fasta = _fasta()
         # all +band0 so strand/band selection is unambiguous (v1's OR collapses).
@@ -381,20 +374,34 @@ class TestReciprocalParity:
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
         b0 = (40, 65)
-        for f, first_off in enumerate([100, 130, 300]):
-            ref = _reference_weight(rp, "+", b0, "first", first_off)
-            np.testing.assert_allclose(
-                new.first_covered_base_weights[f], ref, rtol=1e-6
-            )
+        # midpoint offsets for fragments: (100+150)//2=125, (130+194)//2=162, (300+350)//2=325
+        for f, mid_off in enumerate([125, 162, 325]):
+            ref = _reference_weight(rp, "+", b0, "midpoint", mid_off)
+            np.testing.assert_allclose(new.weights[f], ref, rtol=1e-6)
 
 
 # ── T8 / masked-endpoint handling & expected interface ────────────────────
 
 class TestMaskedEndpoint:
-    def test_masked_endpoint_zeros_only_that_coverage(self):
+    def test_masked_midpoint_zeros_weight(self):
+        # Weights are now computed ONLY at the midpoint position. Masking the
+        # midpoint zeros the weight; masking first/last endpoints has no effect.
         m = _uniform_model()
-        # +len50 @100: first=100, last=149, mid=125. Mask ONLY position 100
-        # (expansion 0) so 'first' → weight 0 but last/mid survive.
+        # +len50 @100: first=100, last=149, mid=125. Mask ONLY position 125
+        # (expansion 0) so weight → 0.
+        bl = _bl_rdf([(_START + 125, _START + 126)])
+        rfa = _rfa([100], [150], ["+"])
+        new = apply_fragment_weights(
+            rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
+            drop_uncorrectable=False, blacklist_rdf=bl, blacklist_expansion=0,
+            contig_len=_CONTIG_LEN, tile_size=_TILE,
+        )
+        assert new.weights[0] == 0.0  # midpoint masked → weight 0
+
+    def test_masked_first_endpoint_does_not_zero_weight(self):
+        # With midpoint-only weights, masking the first endpoint (100) does NOT
+        # affect the weight, since we only query the midpoint position (125).
+        m = _uniform_model()
         bl = _bl_rdf([(_START + 100, _START + 101)])
         rfa = _rfa([100], [150], ["+"])
         new = apply_fragment_weights(
@@ -402,9 +409,7 @@ class TestMaskedEndpoint:
             drop_uncorrectable=False, blacklist_rdf=bl, blacklist_expansion=0,
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        assert new.first_covered_base_weights[0] == 0.0      # endpoint masked
-        assert new.last_covered_base_weights[0] > 0.0        # 149 still valid
-        assert new.weights[0] > 0.0                          # 125 still valid
+        assert new.weights[0] > 0.0  # midpoint (125) still valid
 
     def test_expected_wrong_shape_raises(self):
         m = _uniform_model()
@@ -434,11 +439,11 @@ class TestClamp:
         w_id = apply_fragment_weights(
             rfa, m, fasta, clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
-        ).first_covered_base_weights
+        ).weights
         w_cl = apply_fragment_weights(
             rfa, m, fasta, clamp=WeightClampConfig(0.5, 2.0),
             drop_uncorrectable=False, contig_len=_CONTIG_LEN, tile_size=_TILE,
-        ).first_covered_base_weights
+        ).weights
         # valid positions (w_id > 0) are clipped; uncorrectable (0) stay 0.
         expected = np.where(w_id > 0, np.clip(w_id, 0.5, 2.0), 0.0)
         np.testing.assert_allclose(w_cl, expected)
@@ -473,12 +478,6 @@ class TestTilingContract:
                   contig_len=_CONTIG_LEN, tile_size=_TILE)
         a = apply_fragment_weights(rfa, m, fasta, **kw)
         b = apply_fragment_weights(rfa, m, fasta, **kw)
-        np.testing.assert_array_equal(
-            a.first_covered_base_weights, b.first_covered_base_weights
-        )
-        np.testing.assert_array_equal(
-            a.last_covered_base_weights, b.last_covered_base_weights
-        )
         np.testing.assert_array_equal(a.weights, b.weights)
 
     def test_shifted_anchor_changes_weight_window_relative_limitation(self):
@@ -500,8 +499,8 @@ class TestTilingContract:
         rfa_b = _rfa([100 + shift], [150 + shift], ["+"],
                      region=_region(start=_START - shift,
                                     stop=_START - shift + 2 * _TILE))
-        wa = apply_fragment_weights(rfa_a, m, fasta, **kw).first_covered_base_weights
-        wb = apply_fragment_weights(rfa_b, m, fasta, **kw).first_covered_base_weights
+        wa = apply_fragment_weights(rfa_a, m, fasta, **kw).weights
+        wb = apply_fragment_weights(rfa_b, m, fasta, **kw).weights
         assert wa[0] > 0 and wb[0] > 0            # both corrected (nonzero)
         assert not np.allclose(wa, wb)            # window-relative ⇒ differ
 
@@ -519,8 +518,6 @@ class TestFailureModes:
             drop_uncorrectable=False, blacklist_rdf=bl,
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        assert np.all(new.first_covered_base_weights == 0.0)
-        assert np.all(new.last_covered_base_weights == 0.0)
         assert np.all(new.weights == 0.0)
 
         obs = np.ones((12, 2 * _TILE), dtype=np.float64)
@@ -566,26 +563,23 @@ class TestFailureModes:
 
     def test_contig_edge_region_runs_and_masks_right(self):
         # Force a right edge inside the region via a small contig_len; positions
-        # past it are masked, endpoints there → weight 0, but the call succeeds.
+        # past it are masked, midpoints there → weight 0, but the call succeeds.
         m = _uniform_model()
-        # window 0 fully in-contig; window 1 keeps only its first 40 positions,
-        # so fragment 1's first endpoint (local j=44) is past the contig end.
+        # window 0 fully in-contig; window 1 keeps only its first 40 positions.
+        # Fragment 0: midpoint = (100+150)//2 = 125, in window 0 → valid.
+        # Fragment 1: midpoint = (300+430)//2 = 365, local j = 365 - 256 = 109
+        #             which is past the valid 40 positions of window 1 → masked.
         clen = _START + _TILE + 40
         rfa = _rfa([100, 300], [150, 430], ["+", "-"])
         new = apply_fragment_weights(
             rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
             drop_uncorrectable=False, contig_len=clen, tile_size=_TILE,
         )
-        w = np.concatenate([
-            new.first_covered_base_weights,
-            new.last_covered_base_weights,
-            new.weights,
-        ])
-        assert np.all(np.isfinite(w))
-        # fragment 0 (window 0, in-contig) still corrected; fragment 1's first
-        # endpoint (local j=44 ≥ 40 valid) is past clen → masked → weight 0.
-        assert new.first_covered_base_weights[0] == 1.0
-        assert new.first_covered_base_weights[1] == 0.0
+        assert np.all(np.isfinite(new.weights))
+        # fragment 0 (window 0, in-contig) still corrected.
+        assert new.weights[0] == 1.0
+        # fragment 1's midpoint (local j=109 ≥ 40 valid) is past clen → masked.
+        assert new.weights[1] == 0.0
 
 
 # ── loss-type independence (design §5.2 — dispersion head unused) ─────────
