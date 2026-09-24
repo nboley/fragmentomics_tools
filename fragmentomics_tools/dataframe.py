@@ -504,12 +504,11 @@ class RegionDataFrame(DataFrameBase):
     @classmethod
     def from_bed(cls, in_bed_file, ref):
         """Convenience function to load from a bed file."""
-        with open(in_bed_file) as infile:
-            first_line_fields = infile.readline().split()
-            if first_line_fields[0] in ["chrom", "chr", "contig"]:
-                has_header = True
-            else:
-                has_header = False
+        with open(in_bed_file) as fh:
+            if not fh.readline().strip():
+                return cls(
+                    pd.DataFrame(columns=cls._critical_bed_columns), ref=ref
+                )
 
         df = BedReader.load_dataframe(in_bed_file)
         df = df.rename(columns=dict(chrom="contig"))

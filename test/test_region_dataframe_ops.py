@@ -420,3 +420,17 @@ class TestLiftOver:
         assert pd.isna(result.start.iloc[0]), (
             f"expected NA for failed liftover, got {result.start.iloc[0]}"
         )
+
+
+class TestFromBed:
+    """I6: from_bed crashed with IndexError on an empty file.
+    I22: dead has_header computation removed."""
+
+    def test_empty_bed_returns_empty_rdf(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "empty.bed")
+            with open(path, "w") as fh:
+                pass  # empty file
+            rdf = RegionDataFrame.from_bed(path, ref="hg38")
+            assert len(rdf) == 0
+            assert isinstance(rdf, RegionDataFrame)
