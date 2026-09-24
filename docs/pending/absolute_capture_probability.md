@@ -144,10 +144,22 @@ pi_mix = 1.0 - p0_mix              # absolute P(seen)
 c_mix  = 1.0 / max(pi_mix, 1e-15)  # Horvitz-Thompson factor
 ```
 
-Limits: SPANK exists at only **2 (length, GC) points** (52 bp, 75 bp, ~50% GC),
-at 10× the GC-dSpark concentration. It cannot be stratified across the grid,
-and using it as an anchor assumes recovery is linear in concentration across
-that gap.
+Limits: SPANK is tiny and profile-dependent. VERIFIED via `load_spikes`:
+
+| profile | SPANK spikes |
+|---|---|
+| SNMv3 | **1** (`spank-75B`) |
+| SNMv4 | **1** (`v4-Spank-ss-A`) |
+| SNMv4B / SNMv4C | 2 (`SPANK-52C`, `spank-75B`) |
+
+So on SNMv3 or SNMv4 there is a **single** anchor point, not two. It cannot be
+stratified across the grid, and using it as an anchor assumes recovery is
+linear in concentration across a 10× gap.
+
+(An earlier revision of this document said 2 rows for SNMv3. That came from a
+hand-rolled parse of the raw TSV which matched `Spank75A` — a row the file
+itself marks "NOT INCLUDED IN SNMv3". `load_spikes` excludes it correctly. The
+loader is the right entry point; the hand-rolled read was the error.)
 
 The native-cfDNA ZTNB path (`fit()`) also yields absolute `P(seen)` and is
 stratified by (length, GC). It is arguably the better instrument, since it
@@ -172,15 +184,24 @@ than either alone, and what it would cost.
 
 1. **Which spike profile is production actually using?** This determines
    whether molarity scaling is inert or active, and the available length range.
-2. **Can the two-tier v4 design be exploited?** The same (length, GC) cell
-   appears at two known concentrations. If recovery is concentration-independent,
-   molarity-scaled counts should agree between tiers; disagreement would expose
-   saturation or competition — and would invalidate any SPANK-anchoring scheme
-   that assumes linearity. INFERENCE: this looks like a test runnable on
-   existing data, but it has not been attempted.
-3. **Is the two-tier slope informative without UMIs?** Reads-per-input-molecule
-   still folds in amplification. Whether anything separable falls out is
-   unresolved.
+2. ~~**Can the two-tier v4 design be exploited?**~~ **RESOLVED: no.** This was
+   proposed on the assumption that the same (length, GC) cell appears at both
+   concentrations, making a linearity check possible on existing data. It does
+   not. VERIFIED across SNMv4, SNMv4B, SNMv4C:
+
+   ```
+   low tier :  25 spikes, lengths  24-75
+   high tier:   4 spikes, lengths 100-175
+   OVERLAPPING (length, gc) cells: 0
+   ```
+
+   The tiers are a **length split, not a dose series** — long fragments are
+   spiked at 5-10× to compensate for expected poorer recovery. No cell exists at
+   both concentrations, so concentration-dependence cannot be tested from this
+   panel, and `molarity_scale_factor` is doing necessary work putting a
+   deliberately non-uniform design onto a common basis.
+3. ~~**Is the two-tier slope informative without UMIs?**~~ **Moot**, per the
+   above — there is no slope to take.
 4. **Do synthetic spikes transfer to native cfDNA at all?** Spikes are blunt-
    ended oligos with no nucleosome context, no epigenetic modification, and
    different secondary structure. Even the *relative* surface may not transfer.
@@ -202,3 +223,43 @@ the blocker rather than working around it. The input quantity is already known;
 the molecule identity is what was never encoded. A plan should say clearly
 whether it is proposing a statistical workaround for a measurement that was not
 made, and what that workaround costs in assumptions.
+
+---
+
+## 7. Outcome of the planning pass (2026-09-24)
+
+A planning agent worked this problem and recommended, with high confidence,
+**not pursuing it as a code project.** The reasoning, which holds up:
+
+- The existing native-cfDNA ZTNB path **already produces absolute P(seen)**
+  stratified by (length, GC). Its weakness is that input is *inferred* from
+  duplicate structure rather than measured.
+- The SPANK-anchored alternative does not remove that weakness, it relocates
+  it: it trades ZTNB extrapolation for an assumption of linearity across a 10×
+  concentration gap plus interpolation from **one or two** points. Neither of
+  those is checkable from existing data, whereas the ZTNB assumptions partly
+  are (fit residuals, K_FIT sensitivity, MIN_CELL_SIZE sensitivity).
+- Estimated cost of the anchored path is ~2 weeks, producing an estimator that
+  is more complex, rests on uncheckable assumptions, and **still cannot be
+  validated against ground truth.**
+
+### The cheaper thing that captures most of the value
+
+Characterise the uncertainty of the estimator that already exists. The ZTNB fit
+yields `r_hat`, `p_hat`, `w_hat` and residuals alongside `pi_mix`, so per-cell
+confidence intervals on P(seen) are derivable and could be surfaced through
+`GCFlWeights`. A well-characterised uncertainty bound on the current estimator
+beats a point estimate from a more elaborate one with uncharacterised
+systematic error. Estimated 2-3 days.
+
+### On validation, stated plainly
+
+No available data can prove any of these estimates correct. Comparing two
+estimators establishes agreement, not accuracy. Genuine validation needs
+ground-truth molecule counts across the grid — which is the panel redesign
+again.
+
+**The recommendation therefore stands as §6 framed it:** if this matters
+enough to fund, fund the UMIs. The input quantity is already known; the
+molecule identity was never encoded, and no amount of statistics recovers a
+measurement that was not made.
