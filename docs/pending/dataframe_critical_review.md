@@ -6,7 +6,7 @@
 
 > **STATUS: much of this review has been acted on.** §1-§8 record the review *as originally written*, before anything could be executed. Do not read those tables as the current state of the code — see **§11 for the resolution ledger**, which maps every finding to what happened to it.
 >
-> Headline: suite went from **not importable** to **2 failed / 219 passed**. **17 defects fixed** (8 from this review, 9 found only by execution), 2 methods deleted as dead, 1 Critical downgraded after measurement, and 382 lines of dead code removed.
+> Headline: suite went from **not importable** to **2 failed / 289 passed**. **23 defects fixed** (8 from this review, 9 found only by execution, 5 `gc`-misalignment sites from an external report, 1 fragment-weight mask), 2 methods deleted as dead, 1 Critical downgraded after measurement, and 528 lines of dead code removed. Test count grew by 70: 21 for `parallel_apply` (§11.5), 29 for `gc` alignment (§11.9), 20 for the weight callbacks (§11.8).
 
 ### Branch context (read this first)
 
@@ -42,7 +42,7 @@ execution; one did not.
 
 1. ~~**The central invariant of the design — required columns — is not actually enforced.**~~ **OVERSTATED — see §10.** Measured across 30 operations, 22 are caught and 8 leak, all requiring a deliberate rename or in-place deletion of a required column. Downgraded Critical -> Low, closed as no-action.
 2. **Methods that are non-functional and fail on first call.** CONFIRMED and worse than stated: ten of them, not two. Seven repaired, two deleted as dead (§11).
-3. **The test suite cannot run in any environment on this machine.** CONFIRMED, and it was the root cause of the rest. **Now resolved** — §9 records the four `environment.yml` defects that had to be fixed first, and the suite now runs at 2 failed / 219 passed.
+3. **The test suite cannot run in any environment on this machine.** CONFIRMED, and it was the root cause of the rest. **Now resolved** — §9 records the four `environment.yml` defects that had to be fixed first, and the suite now runs at 2 failed / 289 passed.
 
 A fourth theme emerged only once the code could be executed, and is arguably
 the most important result here:
@@ -598,7 +598,7 @@ label-adjacent by name only.
 ## 11.4 Current state
 
 ```
-pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 240 passed
+pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 289 passed
 ```
 
 The 2 failures are missing data only: `test_slice_encode_big_wig` (encode
@@ -826,3 +826,72 @@ of the transition and disappears when the replacement model lands.
 
 `test/` 2 failed/283 passed · `tests/` 396 passed (under `biomarker_env`, which
 has lightning and zarr; the `fragtools-test` env does not).
+
+## 11.9 `FragmentArray.gc` — a defect class this review never looked at
+
+Arrived as an external bug report, not from this review. It is recorded here
+because it is the same *species* of defect as the rest of the document and
+because the way it was found says something about the method.
+
+### The defect
+
+`gc` (per-fragment GC fraction) was not carried through operations that change
+fragment count or order. It flowed through `_replace` unchanged while
+`starts_0`/`stops_0`/`weights` were subset alongside it, so `gc[i]` stopped
+corresponding to fragment `i`. Nothing raised. Reproduced before fixing: four
+fragments masked to two left `len(gc) == 4`, still holding all four original
+values.
+
+**Five construction sites, all confirmed defective by execution:**
+
+| Site | What it missed |
+|---|---|
+| `_subset_or_mask` | subset 10 per-fragment fields, omitted `gc`. Reached by `mask()`, `subset()`, `drop_duplicate_fragments()`, `subset_fragment_lengths()` |
+| `reverse_strand` | reversed 9 arrays, omitted `gc` -> order misaligned |
+| `FragmentArray.__add__` | concatenated 9 arrays, omitted `gc` |
+| `RegionFragmentArray.__add__` | same defect, found during testing rather than audit |
+| `merge_fragment_arrays` | the N-way helper the pileup/cache builders call |
+
+`__init__` validated lengths for `stops_0`, `weights` and the covered-base
+weights but never for `gc`, which is why it survived. Now validated.
+
+Fixed in `54ebe6e` (4 sites, 25 tests) and `79cb9b0` (`merge_fragment_arrays`,
+4 tests). **29 tests, all value-level** — a length-only assertion passes on a
+wrongly-ordered array, so each fragment is given a distinct `gc` value and the
+exact expected array is asserted after each operation. Verified to fail against
+the unfixed code in an isolated copy.
+
+### Why two audits missed sites
+
+The first fix was scoped from a bug report naming three sites and found a
+fourth. A second report then named a fifth. Both misses share a cause: the
+audit searched for `_replace(`, while `RegionFragmentArray.__add__` and
+`merge_fragment_arrays` build via **direct constructor calls** — one a method,
+one a module-level function. The search pattern silently bounded the answer,
+which is the same failure mode §11.6 records three times over.
+
+**If another per-fragment field is added, search for constructor calls and
+module-level builders, not just `_replace`.**
+
+### On the flip path
+
+`merge_fragment_arrays` flips member arrays *before* concatenating
+(`ar.make_data_direction_match_strand()`), and that routes through
+`reverse_strand`, which the first commit had already made `gc`-correct. So the
+per-member reversal was handled by construction. That is worth stating because
+it is only true while flip precedes concat — a future refactor that reorders
+them would reintroduce the bug silently. There is now a test pinning it.
+
+## 11.10 Recorded elsewhere
+
+The spike-based absolute capture probability investigation is **closed as a
+dead end** in `docs/pending/absolute_capture_probability.md`. It touched this
+module only through `GCFlWeights` (§11.8), and its conclusion — that a 22x
+spread in spike counts at constant input molarity cannot be a probability,
+because `P <= 1` would force `P_min <= 0.045` against a measured ZTNB range of
+0.34-0.79 — is an assay finding rather than a `dataframe.py` one.
+
+One result from it is worth carrying back here, because it validates a
+mechanism this module now depends on: the duplication rate measured from SPANK
+UMIs (d = 1.31) and from native cfDNA duplicate counting on the same sample
+(1.286) agreed to ~2%. Two independent populations, two independent code paths.
