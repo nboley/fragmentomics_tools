@@ -177,3 +177,6 @@ work/
 # EM per-worktree process state (never commit)
 COORDINATION.*.md
 STATUS.*.md
+
+# training run residue written into CWD by Lightning (belongs on EFS)
+lightning_logs/

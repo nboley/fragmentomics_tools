@@ -91,5 +91,15 @@ without a sign-off. Anything that changes computed results is not.
 
 - Never commit `COORDINATION.*.md` / `STATUS.*.md` (gitignored per-worktree
   process state) or stray `*.csi` index files.
-- Large artifacts (stores, checkpoints, pileup arrays, plots) live on EFS or
-  S3 and are never committed.
+- Large artifacts (stores, checkpoints, pileup arrays) live on EFS or S3 and
+  are never committed.
+- **Analysis figures ARE committed** (owner decision, 2026-09-24), narrowing
+  the rule above, which previously listed plots as never-committed.
+  `docs/pending/*.md` embed their figures by relative path, and an uncommitted
+  figure means every one of those image references is broken for anyone who
+  has only the repo — the analysis doc alone carries 11. Scale is modest:
+  `docs/pending/training_analysis_plots/` is ~2.7 MB for 18 PNGs.
+  Still never committed: training runs' own output (`lightning_logs/`,
+  `checkpoints/`, per-epoch metrics), which belongs on EFS under the run
+  directory. The distinction is *curated figure that a document references*
+  versus *raw artifact a run emitted*.
