@@ -1581,12 +1581,19 @@ class RegionDataFrame(DataFrameBase):
             if mode == "full":
                 return region.resize(int(stride * math.ceil(region.length / stride)))
             elif mode == "valid":
-                return region.resize(int(stride * math.floor(region.length / stride)))
+                new_len = int(stride * math.floor(region.length / stride))
+                if new_len == 0:
+                    raise ValueError(
+                        f"region {region.chrom}:{region.start}-{region.stop} "
+                        f"(length {region.length}) is shorter than stride "
+                        f"({stride}); no valid windows can be produced"
+                    )
+                return region.resize(new_len)
             elif mode == "exact":
                 assert window_size % stride == 0
                 if region.length % stride != 0:
                     raise ValueError(
-                        "region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
+                        f"region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
                     )
                 return region
             else:

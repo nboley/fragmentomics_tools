@@ -542,3 +542,15 @@ class TestResizeBoundaryConditions:
         )
         with pytest.raises(ValueError, match="truncation amounts exceed"):
             rdf.truncate_regions(left_amt=60, right_amt=60)
+
+
+class TestBinRegionsIntoWindows:
+    """R10: region shorter than stride in valid mode gave an opaque error."""
+
+    def test_short_region_valid_mode_gives_clear_error(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [1020]}),
+            ref="hg38",
+        )
+        with pytest.raises(ValueError, match="shorter than stride"):
+            rdf.bin_regions_into_windows(window_size=100, mode="valid", stride=50)
