@@ -5,6 +5,13 @@ data/
 !tests/data/
 !tests/data/**
 
+# ...and the library suite's fragment_array fixtures, for the same reason: they
+# are gitignored by the blanket `data/` above, so a clean checkout errored 20
+# tests in test/fragment_array/ with FileNotFoundError. 624 KB total, byte-identical
+# to fragments_h5/tests/data (md5-verified), which is where they were recovered from.
+!test/fragment_array/data/
+!test/fragment_array/data/**
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
