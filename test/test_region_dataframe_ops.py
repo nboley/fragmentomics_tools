@@ -302,3 +302,31 @@ class TestEqSemantics:
         )
         assert rdf1.equals_rdf(rdf2)
         assert not rdf1.equals_rdf(rdf3)
+
+
+class TestCenterOnSummit:
+    """I11: center_on_summit used summit <= stop, but half-open [start, stop)
+    means a summit equal to stop is outside the region."""
+
+    def test_summit_at_stop_is_rejected(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1"], "start": [100], "stop": [200], "summit": [200]
+            }),
+            ref="hg38",
+        )
+        # summit == stop is outside the half-open interval
+        with pytest.raises(ValueError, match="summits must either be within"):
+            rdf.center_on_summit()
+
+    def test_summit_inside_region_works(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1"], "start": [100], "stop": [200], "summit": [150]
+            }),
+            ref="hg38",
+        )
+        result = rdf.center_on_summit()
+        assert "summit" not in result.columns
+        # region length preserved
+        assert int(result.stop.iloc[0]) - int(result.start.iloc[0]) == 100

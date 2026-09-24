@@ -643,7 +643,7 @@ class RegionDataFrame(DataFrameBase):
         region_lengths = (self.stop - self.start).copy()
 
         # check if the summit is within start
-        if ((self.summit >= self.start) & (self.summit <= self.stop)).all():
+        if ((self.summit >= self.start) & (self.summit < self.stop)).all():
             self["start"] = self.summit - region_lengths // 2
         elif (self.summit <= self.region_lengths).all():
             self["start"] = self.start + self.summit - region_lengths // 2
