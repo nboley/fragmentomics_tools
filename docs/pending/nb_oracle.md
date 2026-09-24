@@ -372,3 +372,38 @@ mathematically correct:
 - **Step 0 before implementation**: the cheapest possible falsification test
   (25 loss evaluations on 1600 pairs). Correct design choice — a wrong
   diagnosis caught at step 0 costs an hour, not a week.
+
+---
+
+## 9. Results addendum (post-implementation)
+
+### 9.1 The fitted r is not identified
+
+The step-0 sweep shows the loss descending steeply from r=1 to r≈20, then
+entering a flat plateau. The fitted r (via scipy or grid minimum) lands
+somewhere on this plateau, but the plateau's non-monotonicity — numerical noise
+from the softmax/lgamma/clamp pipeline in the deterministic objective — exceeds
+the loss difference between adjacent grid points by a factor that makes the
+specific fitted r meaningless.
+
+Measured: the objective IS deterministic (bitwise identical on re-evaluation),
+so the non-monotonicity is real numerical noise in the loss computation, not
+stochastic evaluation. The `noise_floor` field in `oracle_nb_v2.json` records
+the measured magnitude.
+
+The defensible conclusion is: **the offset conditioning absorbs the
+overdispersion above r≈20, and the loss plateau is flat to within numerical
+noise, so r is not identified.** This answers open question §7.1 in the
+negative: the `nb_offset` objective effectively cannot see the overdispersion
+this store injected.
+
+The earlier claim that fitted r=21 vs true r=7.18 demonstrates "partial
+sensitivity" rested on a loss difference (1.4e-4) smaller than the plateau's
+own non-monotonicity (~1.8e-4). That claim is withdrawn.
+
+### 9.2 Min-over-union anchor selection
+
+The scipy optimizer returned a point that was NOT the minimum of the sweep
+curve stored in the same JSON — the sweep contained a lower-loss point. The
+oracle and uniform anchors are now selected as the minimum over the union of
+(swept grid points, scipy result), eliminating this inconsistency.

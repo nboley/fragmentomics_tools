@@ -10,7 +10,8 @@ clamp_margin=1.0, dispersion_window_size=1).
 
 Three outcomes (per §4 of the design):
   - r far above 7.18 (>500), minimum below untrained models → premise confirmed
-  - r intermediate (20–500) → partial sensitivity, proceed and report
+  - r intermediate (20–500) → plateau begins; r not identified if loss is flat
+    to within numerical noise (see §9.1 of the design doc)
   - r at or near 7.18 → premise FALSE, STOP
 
 Reference values:
@@ -199,9 +200,10 @@ def main():
         else:
             detail += " → minimum NOT below untrained models. INVESTIGATE."
     elif best_r > 20:
-        verdict = "PARTIAL"
-        detail = (f"r={best_r:.1f} is intermediate (20–500). Partial sensitivity "
-                  f"to overdispersion. Proceed with anchor A.")
+        verdict = "PLATEAU"
+        detail = (f"r={best_r:.1f} is on the plateau (>20). The offset conditioning "
+                  f"absorbs the overdispersion; r is not identified. "
+                  f"Proceed with anchor A.")
     else:
         verdict = "REFUTED"
         detail = (f"r={best_r:.1f} is near true r ≈ 7.18. §2.3 is FALSE. "

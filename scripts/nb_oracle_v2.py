@@ -117,11 +117,10 @@ def score_model_nb(model, ds, device="cpu"):
     The model's forward returns (shape_logits, dispersion_bp) where
     dispersion_bp is the RAW per-position delta. The training loop applies
     _pooled_log_dispersion which: (1) mean-pools to the window level, and
-    (2) adds log_dispersion_init. We must replicate that here.
+    (2) adds log_dispersion_init. We call that method directly.
     """
     from background_model_core import (
         MaskedNegativeBinomialOffsetNLLLoss,
-        masked_mean_pool,
         _prepare_mask,
     )
     loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
@@ -139,12 +138,7 @@ def score_model_nb(model, ds, device="cpu"):
             y_t = y.unsqueeze(0)
             mask3 = _prepare_mask(mask.unsqueeze(0), y_t)
 
-            # Replicate _pooled_log_dispersion: pool + add offset
-            w = model.hparams.dispersion_window_size
-            L = dispersion_bp.shape[-1]
-            out_size = L // w
-            log_disp = masked_mean_pool(dispersion_bp, mask3, out_size)
-            log_disp = log_disp + model.hparams.log_dispersion_init
+            log_disp = model._pooled_log_dispersion(dispersion_bp, mask3)
 
             nll = loss_fn(shape_logits, log_disp, y_t, mask3).item()
             nlls.append(nll)
@@ -276,6 +270,56 @@ def main():
             note = " <-- frozen init"
         print(f"{lr:10.4f} {np.exp(lr):12.4f} {loss:12.6f}{note}")
 
+    # ── Noise floor measurement ───────────────────────────────────────────
+    # The objective should be deterministic given cached pairs. Verify by
+    # re-evaluating several r values and comparing bitwise.
+    print("\n" + "=" * 70)
+    print("NOISE FLOOR MEASUREMENT")
+    print("=" * 70)
+
+    test_log_rs = [np.log(7.179), np.log(21.0), np.log(1096.0), np.log(500.0)]
+    determinism_ok = True
+    for test_lr in test_log_rs:
+        v1 = eval_loss_at_log_r(test_lr, use_oracle=True)
+        v2 = eval_loss_at_log_r(test_lr, use_oracle=True)
+        match = (v1 == v2)
+        if not match:
+            determinism_ok = False
+        print(f"  r={np.exp(test_lr):10.4f}: eval1={v1:.15f} eval2={v2:.15f} "
+              f"bitwise_equal={match}")
+
+    # Characterise non-monotonicity in the sweep's plateau region (r > 20)
+    plateau_entries = [(s["r"], s["loss"]) for s in sweep_results if s["r"] > 20]
+    if len(plateau_entries) >= 2:
+        plateau_losses = [l for _, l in plateau_entries]
+        plateau_max = max(plateau_losses)
+        plateau_min = min(plateau_losses)
+        non_monotonicity = plateau_max - plateau_min
+    else:
+        non_monotonicity = 0.0
+
+    noise_floor_info = {
+        "deterministic": determinism_ok,
+        "plateau_non_monotonicity": non_monotonicity,
+        "plateau_range_r_gt_20": {
+            "min_loss": float(plateau_min) if len(plateau_entries) >= 2 else None,
+            "max_loss": float(plateau_max) if len(plateau_entries) >= 2 else None,
+            "n_points": len(plateau_entries),
+        },
+        "_note": (
+            "The objective is deterministic given cached logits/counts, so "
+            "non-monotonicity across the plateau is real numerical noise from "
+            "the softmax/lgamma/clamp pipeline, not stochastic evaluation. "
+            "Any claim about fitted r must exceed this noise floor to be "
+            "meaningful."
+        ),
+    }
+    print(f"\n  Deterministic: {determinism_ok}")
+    print(f"  Plateau non-monotonicity (r>20): {non_monotonicity:.2e}")
+    if len(plateau_entries) >= 2:
+        print(f"    min={plateau_min:.9f}  max={plateau_max:.9f}  "
+              f"over {len(plateau_entries)} points")
+
     # ── Step 2: fit r for oracle propensity ────────────────────────────────
     print("\n" + "=" * 70)
     print("STEP 2: Fitting scalar r for oracle propensity")
@@ -289,23 +333,48 @@ def main():
         method="bounded",
         options={"xatol": 0.01},
     )
-    fitted_log_r_oracle = result_oracle.x
+    scipy_log_r_oracle = result_oracle.x
+    scipy_r_oracle = np.exp(scipy_log_r_oracle)
+    scipy_loss_oracle = result_oracle.fun
+
+    print(f"  Scipy log_r: {scipy_log_r_oracle:.4f}")
+    print(f"  Scipy r:     {scipy_r_oracle:.4f}")
+    print(f"  Scipy loss:  {scipy_loss_oracle:.9f}")
+
+    # Select oracle = min over union of (swept grid, scipy result)
+    sweep_losses = [s["loss"] for s in sweep_results]
+    sweep_best_idx = int(np.argmin(sweep_losses))
+    sweep_best_loss = sweep_losses[sweep_best_idx]
+    sweep_best_log_r = sweep_results[sweep_best_idx]["log_r"]
+    print(f"  Sweep best:  {sweep_best_loss:.9f} at r={sweep_results[sweep_best_idx]['r']:.4f}")
+
+    if sweep_best_loss < scipy_loss_oracle:
+        oracle_loss = sweep_best_loss
+        fitted_log_r_oracle = sweep_best_log_r
+        oracle_source = "sweep"
+        print(f"  -> Sweep beats scipy by {scipy_loss_oracle - sweep_best_loss:.2e}; "
+              f"using sweep minimum")
+    else:
+        oracle_loss = scipy_loss_oracle
+        fitted_log_r_oracle = scipy_log_r_oracle
+        oracle_source = "scipy"
+        print(f"  -> Scipy beats sweep by {sweep_best_loss - scipy_loss_oracle:.2e}; "
+              f"using scipy result")
     fitted_r_oracle = np.exp(fitted_log_r_oracle)
-    oracle_loss = result_oracle.fun
-
-    print(f"  Fitted log_r: {fitted_log_r_oracle:.4f}")
-    print(f"  Fitted r:     {fitted_r_oracle:.4f}")
-    print(f"  Oracle loss:  {oracle_loss:.6f}")
-    print(f"  Optimizer converged: {result_oracle.success if hasattr(result_oracle, 'success') else 'N/A'}")
-
-    # Verify: evaluate at the exact fitted value
-    oracle_loss_verify = eval_loss_at_log_r(fitted_log_r_oracle, use_oracle=True)
-    print(f"  Verification: {oracle_loss_verify:.6f} (should match)")
+    print(f"  Final oracle loss: {oracle_loss:.9f} (r={fitted_r_oracle:.4f}, "
+          f"source={oracle_source})")
 
     # ── Step 3: fit r for uniform propensity (SEPARATE fit) ────────────────
     print("\n" + "=" * 70)
     print("STEP 3: Fitting scalar r for uniform propensity (separate fit)")
     print("=" * 70)
+
+    # Sweep for uniform too
+    uniform_sweep_results = []
+    for lr in coarse_log_r:
+        loss = eval_loss_at_log_r(lr, use_oracle=False)
+        uniform_sweep_results.append({"log_r": float(lr), "r": float(np.exp(lr)),
+                                      "loss": loss})
 
     result_uniform = minimize_scalar(
         lambda lr: eval_loss_at_log_r(lr, use_oracle=False),
@@ -313,18 +382,41 @@ def main():
         method="bounded",
         options={"xatol": 0.01},
     )
-    fitted_log_r_uniform = result_uniform.x
-    fitted_r_uniform = np.exp(fitted_log_r_uniform)
-    uniform_loss = result_uniform.fun
+    scipy_log_r_uniform = result_uniform.x
+    scipy_r_uniform = np.exp(scipy_log_r_uniform)
+    scipy_loss_uniform = result_uniform.fun
 
-    print(f"  Fitted log_r: {fitted_log_r_uniform:.4f}")
-    print(f"  Fitted r:     {fitted_r_uniform:.4f}")
-    print(f"  Uniform loss: {uniform_loss:.6f}")
+    print(f"  Scipy log_r: {scipy_log_r_uniform:.4f}")
+    print(f"  Scipy r:     {scipy_r_uniform:.4f}")
+    print(f"  Scipy loss:  {scipy_loss_uniform:.9f}")
+
+    # Select uniform = min over union of (swept grid, scipy result)
+    u_sweep_losses = [s["loss"] for s in uniform_sweep_results]
+    u_sweep_best_idx = int(np.argmin(u_sweep_losses))
+    u_sweep_best_loss = u_sweep_losses[u_sweep_best_idx]
+    u_sweep_best_log_r = uniform_sweep_results[u_sweep_best_idx]["log_r"]
+    print(f"  Sweep best:  {u_sweep_best_loss:.9f} at r={uniform_sweep_results[u_sweep_best_idx]['r']:.4f}")
+
+    if u_sweep_best_loss < scipy_loss_uniform:
+        uniform_loss = u_sweep_best_loss
+        fitted_log_r_uniform = u_sweep_best_log_r
+        uniform_source = "sweep"
+        print(f"  -> Sweep beats scipy by {scipy_loss_uniform - u_sweep_best_loss:.2e}; "
+              f"using sweep minimum")
+    else:
+        uniform_loss = scipy_loss_uniform
+        fitted_log_r_uniform = scipy_log_r_uniform
+        uniform_source = "scipy"
+        print(f"  -> Scipy beats sweep by {u_sweep_best_loss - scipy_loss_uniform:.2e}; "
+              f"using scipy result")
+    fitted_r_uniform = np.exp(fitted_log_r_uniform)
+    print(f"  Final uniform loss: {uniform_loss:.9f} (r={fitted_r_uniform:.4f}, "
+          f"source={uniform_source})")
 
     gap = uniform_loss - oracle_loss
-    print(f"\n  Oracle:  {oracle_loss:.6f}")
-    print(f"  Uniform: {uniform_loss:.6f}")
-    print(f"  Gap:     {gap:.6f}")
+    print(f"\n  Oracle:  {oracle_loss:.9f}")
+    print(f"  Uniform: {uniform_loss:.9f}")
+    print(f"  Gap:     {gap:.9f}")
 
     # ── Alignment verification ─────────────────────────────────────────────
     print("\n" + "=" * 70)
@@ -556,7 +648,10 @@ def main():
         "_what": (
             "Anchor A for the v3nb overdispersed simulation store: true "
             "propensity with a FITTED scalar dispersion r, minimising the "
-            "frozen-core NB-offset loss. This SUPERSEDES oracle_nb.json, "
+            "frozen-core NB-offset loss. The offset conditioning absorbs the "
+            "overdispersion above r~20, and the loss plateau is flat to within "
+            "numerical noise so the fitted r is not identified — do not read "
+            "an effective-r value from it. This SUPERSEDES oracle_nb.json, "
             "which plugged in the true per-position r and produced a value "
             "ABOVE untrained models (not a floor). See docs/pending/nb_oracle.md "
             "for the full diagnosis."
@@ -568,10 +663,12 @@ def main():
             "oracle": {
                 "r": fitted_r_oracle,
                 "log_r": fitted_log_r_oracle,
+                "source": oracle_source,
             },
             "uniform": {
                 "r": fitted_r_uniform,
                 "log_r": fitted_log_r_uniform,
+                "source": uniform_source,
                 "_note": "Separately fitted (not reusing oracle's r)",
             },
             "reference": {
@@ -579,7 +676,15 @@ def main():
                 "frozen_model_init_r": 1096.0,
                 "frozen_model_log_dispersion_init": 7.0,
             },
+            "_note": (
+                "The fitted r is NOT identified on the plateau — the loss is "
+                "flat to within numerical noise above r~20. The specific "
+                "value is an artefact of which grid/optimizer point happened "
+                "to land lowest in the noise. Do not interpret it as an "
+                "effective dispersion."
+            ),
         },
+        "noise_floor": noise_floor_info,
         "sweep_curve": sweep_results,
         "models": {
             "trained_ken": {
