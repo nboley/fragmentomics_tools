@@ -1109,9 +1109,13 @@ class RegionDataFrame(DataFrameBase):
             if lifted_coord is not None:
                 return lifted_coord
             else:
-                return (None, -1, -1, None)
+                return (None, pd.NA, pd.NA, None)
 
         res = [_liftover(record) for record in tqdm(self.itertuples(), total=self.nrow)]
+        if len(res) == 0:
+            rv = self.copy()
+            rv.ref = new_ref
+            return rv
         contigs, starts, stops, strands = zip(*res)
 
         rv = self.copy()

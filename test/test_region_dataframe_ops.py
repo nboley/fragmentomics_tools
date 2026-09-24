@@ -374,3 +374,33 @@ class TestAndAndConcat:
         result = RegionDataFrame.concat([rdf1, rdf2])
         assert len(result) == 2
         assert isinstance(result, RegionDataFrame)
+
+
+class TestLiftOver:
+    """I18: lift_over crashed on empty RDF (zip(*[]) can't unpack).
+    I20: failed liftover regions got -1 coordinates instead of NA."""
+
+    def test_empty_rdf_does_not_crash(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": [], "start": [], "stop": []}),
+            ref="hg38",
+        )
+        result = rdf.lift_over("hg19")
+        assert len(result) == 0
+        assert isinstance(result, RegionDataFrame)
+        assert result.ref == "hg19"
+
+    def test_failed_liftover_uses_na_not_minus_one(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chrX_FAKE"],
+                "start": [100],
+                "stop": [200],
+                "strand": ["."],
+            }),
+            ref="hg38",
+        )
+        result = rdf.lift_over("hg19", remove_non_liftoverable_regions=False)
+        assert pd.isna(result.start.iloc[0]), (
+            f"expected NA for failed liftover, got {result.start.iloc[0]}"
+        )
