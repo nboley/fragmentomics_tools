@@ -515,7 +515,13 @@ class TestResizeBoundaryConditions:
             ref="hg38",
         )
         original_starts = list(rdf.start)
-        rdf._resize_region_boundaries(left=-50, discard_invalid_resizes=True)
+        # inplace=True is the path that corrupted self: the old code set
+        # rdf = self and wrote the new (possibly invalid) coordinates into it
+        # before filtering. Without inplace=True both old and new code take a
+        # copy, so the assertion cannot fail and the test proves nothing.
+        rdf._resize_region_boundaries(
+            left=-50, inplace=True, discard_invalid_resizes=True
+        )
         assert list(rdf.start) == original_starts, (
             "self was corrupted by discard_invalid_resizes"
         )

@@ -423,6 +423,12 @@ class RegionDataFrame(DataFrameBase):
     }
     _optional_bed_columns = ["id", "score", "strand"]
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
+    # These MUST stay lists, not tuples. `_required_columns` below concatenates
+    # them with `_critical_bed_columns`, and `reorder_columns` concatenates that
+    # result with another list -- `tuple + list` is a TypeError. Converting them
+    # to tuples "for consistency" with the immutable defaults on DataFrameBase
+    # broke 69 library and 25 background_model tests. The B8 mutable-default
+    # protection applies to the base class only, which has no such concatenation.
     _additional_required_columns = []
 
     @property
@@ -1100,7 +1106,9 @@ class RegionDataFrame(DataFrameBase):
         :param new_ref: str of new reference name ("hg18", "hg19", "hg38")
         :param transfer_columns: transfer additional columns found in dataframe, such as id, etc
         :parm remove_non_liftoverable_regions: If true, don't return regions that don't have unique mappings.
-                If False, report un-liftoverer regions as (None, -1, -1, None)
+                If False, report un-liftoverable regions as (None, pd.NA, pd.NA, None).
+                Was (None, -1, -1, None); -1 is a legal-looking coordinate that
+                silently survives arithmetic, so pd.NA is used instead (I20).
         :return: lifted over RegionDataFrame of the same subclass as self
         """
         liftoverer = RegionLiftOver(self.ref, new_ref)
@@ -1444,6 +1452,14 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
+        """Resize region boundaries by `left`/`right`.
+
+        Note: `inplace` is ignored when `discard_invalid_resizes=True`. That
+        path has to decide which rows survive *before* writing coordinates, so
+        it always returns a filtered copy and leaves `self` untouched. Writing
+        first and filtering afterwards is exactly what corrupted `self` with
+        invalid (including negative) coordinates (R8).
+        """
         if strand_aware:
             neg_mask = self.strand == "-"
 
