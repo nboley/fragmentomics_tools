@@ -717,3 +717,89 @@ samples across mismatched bins including clamped cells. **It is not a finding.**
 aggregated UP to ZTNB's bins rather than pretending ZTNB resolves 9 lengths;
 and exclusion of cells where `p_seen < 1/MAX_WEIGHT`, which are clamp defaults
 rather than estimates.
+
+---
+
+## 13. Same-sample comparison — the two surfaces disagree
+
+Figure: `docs/pending/spike_vs_ztnb_plots/spike_vs_ztnb_RD-56670.png`
+Scripts: `scripts/ztnb_from_duphist.py`, `scripts/compare_spike_vs_ztnb.py`
+
+### Getting a real pairing
+
+`RD-56670` -> **result 318863**, from the IBD manifest
+(`tf_binding_site_classification/projects/ibd/manifests/*_samples.tsv`, which
+carries a `result_id` column). The result lives in the **dev** results bucket,
+not prod.
+
+ZTNB is fitted from the precomputed PE duplicate histograms at
+`/efs/analytics/nathanboley/ctcf_fa_cache/duphist_merged/`. This matters:
+
+**The per-result BAMs are SINGLE-END.** Checked on result 200000 — `0 paired in
+sequencing`, `tlen=0`, read length capped at 64 bp. For SE data the observable
+is READ length, not fragment length, so it cannot share a length axis with the
+spike panel's true oligo lengths. The duphist data is paired-end and its
+mononucleosome mode sits at exactly 166 bp, which confirms it.
+
+Bins were centred on the spike grid points, so both surfaces land on the same
+grid and the §12 binning mismatch does not apply.
+
+### Result
+
+| | dynamic range | structure |
+|---|---|---|
+| ZTNB | **0.49 - 1.13** (2.3x) | smooth; rises 24->100bp, plateaus, falls by 175bp |
+| spike | **0.55 - 12.31** (22x) | erratic; 12.31 at 75bp/40%GC beside 2.02 at 75bp/60%GC |
+
+```
+Spearman(spike, ZTNB) = 0.536   (n = 29 cells)
+log2 ratio: mean +1.70  sd 1.164  range [-0.35, +3.61]
+ZTNB: 45/45 cells fitted, NONE clamped, 10.1M molecules
+```
+
+The disagreement is not an offset — the sd of the log2 ratio is as large as its
+mean. **The two are not measuring the same quantity**, exactly as §12 predicted
+from the panel design before any of this data was examined.
+
+A 22x dynamic range is far too large for fragment-recovery bias and is
+consistent with sequence-specific effects dominating the spike surface. ZTNB's
+surface is the more credible one on structure alone: neighbouring cells
+resemble each other and the length trend is physically sensible. Its one
+suspect cell is 175bp/70%GC at 0.49, which breaks an otherwise smooth row.
+
+### Duplication is ABUNDANCE-DEPENDENT — a correction
+
+An earlier note treated SPANK `d = 1.31` matching native `1.286` on result
+200000 as independent corroboration. **Retracted.** On RD-56670 SPANK gives
+`d = 3.76` while the native population gives `1.70`, a 2.2x disagreement.
+
+The explanation is that one SPANK oligo at 6e5 molecules/uL is far more
+abundant than any individual genomic position and so receives many more reads
+per molecule. Duplication is a function of abundance, not a property of the
+library prep.
+
+Consequences:
+
+| transfer | abundances | valid? |
+|---|---|---|
+| SPANK -> GC-dSpark | 6e5 vs 3e5-1.5e6 MPM | plausible, comparable |
+| SPANK -> native fragments | orders apart | **no** |
+
+The §10 calibration only ever proposed the first, so it survives. But `d` is not
+a library constant, and the earlier agreement was coincidence.
+
+### Caveats on this sample
+
+- **`SPANK-52C` is absent** (0 reads), so `d` rests on a single length and the
+  `d(52)` vs `d(75)` check cannot run here.
+- The sample carries **both v3 and v4 panels** (`SNM.v3, SNM.v4` in the
+  manifest), so the SNMv4C molarity assumption may be wrong for some cells.
+- Neither panel is an absolute P(seen).
+
+### Next test
+
+Seven more samples have duphist data (`RD-56163`, `RD-56166`, `RD-56421`,
+`RD-56686`, `RD-56806`, `RD-57069`, `RD-57083`). If the spike surface's
+patchiness REPRODUCES across them, oligo identity is confirmed as the cause and
+the spike panel cannot serve as a (length, GC) bias surface without several
+oligos per cell. If it moves, it is noise and this conclusion weakens.
