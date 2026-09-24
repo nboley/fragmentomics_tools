@@ -330,3 +330,25 @@ class TestCenterOnSummit:
         assert "summit" not in result.columns
         # region length preserved
         assert int(result.stop.iloc[0]) - int(result.start.iloc[0]) == 100
+
+
+class TestOverlapsRdf:
+    """I16: overlaps_rdf raised KeyError when self had a contig absent from
+    the query's interval dict."""
+
+    def test_missing_contig_returns_false(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1", "chr2"],
+                "start": [100, 200],
+                "stop": [200, 300],
+            }),
+            ref="hg38",
+        )
+        query = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
+            ref="hg38",
+        )
+        result = rdf.overlaps_rdf(query)
+        # chr1 overlaps, chr2 does not (contig absent from query)
+        assert list(result) == [True, False]

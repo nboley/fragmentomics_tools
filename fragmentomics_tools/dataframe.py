@@ -631,7 +631,10 @@ class RegionDataFrame(DataFrameBase):
             contig = row["contig"]
             start = row["start"]
             stop = row["stop"]
-            return len(query_intervals[contig][start:stop]) > 0
+            tree = query_intervals.get(contig)
+            if tree is None:
+                return False
+            return len(tree[start:stop]) > 0
 
         return self.apply(is_olap, axis=1)
 
