@@ -92,6 +92,7 @@ class BackgroundTileDataset(Dataset):
         jitter: Optional[int] = None,
         seed: Optional[int] = None,
         preload: bool = True,
+        fl_band_fracs: Optional[np.ndarray] = None,
     ):
         if split not in _SPLIT_CODES:
             raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)} (got {split!r})")
@@ -176,6 +177,12 @@ class BackgroundTileDataset(Dataset):
                 if n_min[s, t] >= self.min_N:
                     index.append((int(s), int(t)))
         self.index = index
+
+        # ── per-sample FL band fractions (optional) ─────────────────────
+        # fl_band_fracs shape: (n_samples, n_bands) where n_bands = len(FL_BANDS).
+        # When provided, __getitem__ returns a 4th tensor with the sample's
+        # band fractions for FL-conditioned loss weighting.
+        self._fl_band_fracs = fl_band_fracs  # None or (S, n_bands) float32
 
         # per-PID lazy zarr handle (worker safety); NOT set from __init__.
         self._root = None
@@ -316,6 +323,16 @@ class BackgroundTileDataset(Dataset):
             do_rc = False
 
         x, y, m = self._transform(y_full, mask_full, seq_full, j, do_rc)
+        if self._fl_band_fracs is not None:
+            fl = torch.from_numpy(
+                self._fl_band_fracs[s].astype(np.float32)
+            )  # (n_bands,)
+            return (
+                torch.from_numpy(x),
+                torch.from_numpy(y),
+                torch.from_numpy(m),
+                fl,
+            )
         return (
             torch.from_numpy(x),
             torch.from_numpy(y),
