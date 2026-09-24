@@ -434,3 +434,22 @@ class TestFromBed:
             rdf = RegionDataFrame.from_bed(path, ref="hg38")
             assert len(rdf) == 0
             assert isinstance(rdf, RegionDataFrame)
+
+
+class TestUniqueRegions:
+    """I23: unique_regions sorted coordinates descending, which is unusual
+    and changes which duplicate survives in edge cases."""
+
+    def test_output_is_ascending_by_default(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr2", "chr1", "chr1"],
+                "start": [200, 300, 100],
+                "stop": [250, 350, 150],
+            }),
+            ref="hg38",
+        )
+        result = rdf.unique_regions()
+        # should be ascending coordinate order
+        assert list(result.contig) == ["chr1", "chr1", "chr2"]
+        assert list(result.start) == [100, 300, 200]

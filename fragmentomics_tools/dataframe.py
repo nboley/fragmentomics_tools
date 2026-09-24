@@ -921,7 +921,7 @@ class RegionDataFrame(DataFrameBase):
         :return:
         """
         sort_cols = by
-        ascending = [False, False, False]
+        ascending = [True] * len(by)
         if best_by is not None:
             if best_by in self.columns:
                 sort_cols = sort_cols + [best_by]
