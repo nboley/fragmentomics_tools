@@ -803,3 +803,55 @@ Seven more samples have duphist data (`RD-56163`, `RD-56166`, `RD-56421`,
 patchiness REPRODUCES across them, oligo identity is confirmed as the cause and
 the spike panel cannot serve as a (length, GC) bias surface without several
 oligos per cell. If it moves, it is noise and this conclusion weakens.
+
+---
+
+## 13. DECISION: stick with ZTNB (owner, closing this line of work)
+
+The spike-based route is **abandoned**. ZTNB remains the estimator for
+P(seen | length, GC).
+
+### Why, in one line
+
+A 22x spread in raw reads at constant input molarity cannot be a probability.
+
+### The measurement that settled it
+
+On result 318863, at a single input concentration (5e-13 M), raw counts ran
+from 8,492 (`v4-24-70`) to 189,916 (`v4-75-40`). Same sample, same library,
+same input. If that spread were recovery, `P <= 1` forces `P_min <= 0.045`;
+ZTNB puts the true range on the same sample at **0.34 - 0.79**. Both cannot be
+true, so the spike signal is dominated by something other than recovery —
+sequence-specific capture, amplification, and mapping efficiency of 29
+individual oligos (the confounding of section 12, now with a physical bound
+rather than an appeal to smoothness).
+
+### What was salvaged
+
+**The duplication rate transfers, and that part worked.** SPANK UMIs gave
+d = 1.31 for result 200000; native cfDNA duplicate counting on the same sample
+gave 51208/39815 = **1.286**. Two independent populations, ~2% apart. The
+length-flatness check also passed (d(52)/d(75) = 1.0167 +/- 0.0129 over 7
+samples). So the mechanism is sound; it is the per-cell *surface* that the
+panel cannot support.
+
+### Why ZTNB is the better instrument anyway
+
+It measures the molecules of interest. It fits native cfDNA, whose fragments
+carry real endpoints, nucleosome context and methylation, and whose length axis
+is a true fragment length when the data is paired-end. The spike panel measures
+29 synthetic blunt-ended oligos and cannot separate cell effects from oligo
+identity at n=1 per cell.
+
+### Do not reopen without
+
+A spike panel carrying **multiple distinct sequences per (length, GC) cell** —
+that is what would let sequence effects average out and make a per-cell
+recovery surface identifiable. That is a panel design change, not an analysis
+change. Adding UMIs alone (section 8) would fix the molecule-counting problem
+but not this one.
+
+### Retained
+
+`scripts/spike_recovery.py` and `scripts/compare_spike_vs_ztnb.py` remain as the
+record of what was measured. They are not part of any pipeline.
