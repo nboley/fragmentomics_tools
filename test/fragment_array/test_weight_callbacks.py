@@ -24,6 +24,37 @@ from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
 BIOMARKER_SRC = "/home/nathanboley/src/biomarker"
 
 
+def _fitted_gcfl_model(fit=True):
+    """A REAL GCFlDistModel, optionally fitted on a small synthetic cell map.
+
+    Skips rather than silently passing when the biomarker source is absent, so
+    this never degrades into a test that proves nothing.
+    """
+    if not os.path.isdir(BIOMARKER_SRC):
+        pytest.skip("biomarker source not available")
+    if BIOMARKER_SRC not in sys.path:
+        sys.path.insert(0, BIOMARKER_SRC)
+    pytest.importorskip("flgc.model")
+    from flgc.model import GCFlDistModel
+
+    model = GCFlDistModel()
+    if not fit:
+        return model
+
+    # (length, gc%) -> (duplicate counts k, observations at each k, kmax, seen)
+    cell_map = {
+        (35, 35.0): (numpy.array([1, 2, 3]), numpy.array([60, 30, 10]), 3, 100),
+        (45, 45.0): (numpy.array([1, 2]), numpy.array([70, 30]), 2, 100),
+    }
+    model.fit(
+        cell_map,
+        length_bins=[(20, 40), (41, 60)],
+        gc_bins=[(30, 40), (41, 50)],
+        min_cell_size=10,
+    )
+    return model
+
+
 def _fragment_array(n=4, gc=None):
     return FragmentArray(
         starts_0=[10, 20, 30, 40][:n],
@@ -114,20 +145,72 @@ class TestGCFlWeights:
         GCFlWeights(_Normalizer())(fa)
         assert seen["gc"] == pytest.approx([10.0, 25.0, 50.0, 75.0])
 
-    def test_real_gcfldistmodel(self):
-        """End-to-end against the real model, not a stub."""
-        if not os.path.isdir(BIOMARKER_SRC):
-            pytest.skip("biomarker source not available")
-        if BIOMARKER_SRC not in sys.path:
-            sys.path.insert(0, BIOMARKER_SRC)
-        pytest.importorskip("flgc.model")
-        from flgc.model import GCFlDistModel
-
-        model = GCFlDistModel()
+    def test_unfitted_real_model_refuses(self):
+        """An unfitted model must raise rather than return silent garbage."""
+        model = _fitted_gcfl_model(fit=False)
         fa = _fragment_array(gc=numpy.array([0.3, 0.4, 0.5, 0.6]))
-        # unfitted models must refuse rather than return silent garbage
         with pytest.raises(RuntimeError, match="not fitted"):
             GCFlWeights(model)(fa)
+
+    def test_real_fitted_model_end_to_end(self):
+        """A genuinely fitted GCFlDistModel, real weights, nothing stubbed.
+
+        Cross-checked against the model's own predict() so the fraction ->
+        percent conversion and the array plumbing are both verified, rather
+        than merely asserting the result looks plausible.
+        """
+        model = _fitted_gcfl_model()
+
+        # lengths 35 and 45 land in the two fitted length bins;
+        # gc fractions 0.35/0.45 are 35%/45%, inside the two gc bins
+        fa = FragmentArray(
+            starts_0=[10, 100],
+            stops_0=[45, 145],
+            length=1000,
+            max_frag_len=511,
+            gc=numpy.array([0.35, 0.45]),
+        )
+        assert list(fa.fragment_lengths) == [35, 45]
+
+        got = GCFlWeights(model)(fa)
+
+        expected = numpy.array([model.predict(35, 35.0), model.predict(45, 45.0)])
+        assert got == pytest.approx(expected)
+        # real correction weights, not a degenerate all-ones vector
+        assert ((got >= 1.0) & (got <= model.max_weight)).all()
+
+    def test_real_model_through_the_srdf_entry_point(self):
+        """The whole path: SRDF -> callback -> fitted model -> weights in place."""
+        model = _fitted_gcfl_model()
+
+        def _fa():
+            return FragmentArray(
+                starts_0=[10, 100],
+                stops_0=[45, 145],
+                length=1000,
+                max_frag_len=511,
+                gc=numpy.array([0.35, 0.45]),
+            )
+
+        srdf = SampleAndRegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr1"],
+                    "start": [0, 1000],
+                    "stop": [1000, 2000],
+                    "sample_id": ["s1", "s1"],
+                    "frag_h5": ["/nonexistent.h5", "/nonexistent.h5"],
+                    "fragment_array": [_fa(), _fa()],
+                }
+            ),
+            ref="hg38",
+        )
+
+        srdf.set_fragment_array_weights(GCFlWeights(model), n_workers=1, verbose=False)
+
+        expected = numpy.array([model.predict(35, 35.0), model.predict(45, 45.0)])
+        for fa in srdf["fragment_array"]:
+            assert fa.weights == pytest.approx(expected)
 
 
 class TestSetFragmentArrayWeights:
