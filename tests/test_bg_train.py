@@ -6,6 +6,7 @@ BackgroundModel._step loss.  Also covers CLI arg parsing.
 """
 import json
 import os
+import subprocess
 
 import lightning as L
 import torch
@@ -24,6 +25,7 @@ from background_model.train import (
     _InstrumentationMixin,
     _determine_stop_reason,
     _git_sha,
+    _check_dirty_subprocess,
     _per_element_multinomial_nll,
     build_arg_parser,
     build_run_summary,
@@ -2318,8 +2320,7 @@ def test_git_sha_from_tmp_cwd():
             f"_git_sha() returned 'unknown' from /tmp — "
             f"the package-location resolution is not working"
         )
-        # SHA should be 40 hex chars, optionally with -dirty suffix
-        bare_sha = sha.replace("-dirty", "")
+        bare_sha = _bare_sha(sha)
         assert len(bare_sha) == 40 and all(c in "0123456789abcdef" for c in bare_sha), (
             f"_git_sha() returned '{sha}' which is not a valid git SHA"
         )
@@ -2333,21 +2334,71 @@ def test_git_sha_does_not_raise():
     assert isinstance(sha, str)
 
 
-def test_git_sha_dirty_flag():
-    """_git_sha reports dirty state when the tree has uncommitted changes.
+_SHA_SUFFIXES = ("-dirty-untracked", "-dirtyunknown", "-dirty", "-untracked")
 
-    This test verifies the format: either a bare 40-char hex sha or
-    a sha-dirty suffix.  We can't deterministically control the dirty
-    state in a test, but we CAN verify the format is correct.
+
+def _bare_sha(sha: str) -> str:
+    """Strip any working-tree-state suffix, leaving the bare hex sha."""
+    for suffix in _SHA_SUFFIXES:          # longest-first; -dirty is a prefix of two others
+        if sha.endswith(suffix):
+            return sha[: -len(suffix)]
+    return sha
+
+
+def test_git_sha_dirty_flag():
+    """_git_sha reports working-tree state as a recognised suffix.
+
+    The dirty state cannot be controlled deterministically here, so this pins
+    the *format*: a 40-char hex sha plus at most one recognised suffix.
     """
     sha = _git_sha()
     if sha == "unknown":
         pytest.skip("git not available")
-    if sha.endswith("-dirty"):
-        bare = sha[:-6]
-    else:
-        bare = sha
-    assert len(bare) == 40 and all(c in "0123456789abcdef" for c in bare)
+    bare = _bare_sha(sha)
+    assert len(bare) == 40 and all(c in "0123456789abcdef" for c in bare), (
+        f"_git_sha() returned {sha!r}; suffix is not one of {_SHA_SUFFIXES}"
+    )
+
+
+def test_dirty_check_reports_untracked_files(tmp_path):
+    """Untracked files must be reported, not ignored.
+
+    Regression guard for a real incident: `scripts/sim_oracle.py` was untracked
+    while two *committed* scripts imported it, so a fresh clone could not run.
+    Throughout that window every run was stamped with a clean sha, because the
+    check passed ``--untracked-files=no``.  An untracked file is not always a
+    problem, but it is never something the provenance record should hide.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("hello\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+
+    assert _check_dirty_subprocess(str(tmp_path)) == "", "clean tree must have no suffix"
+
+    (tmp_path / "stray.py").write_text("x = 1\n")
+    assert _check_dirty_subprocess(str(tmp_path)) == "-untracked"
+
+    (tmp_path / "a.txt").write_text("modified\n")
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirty-untracked"
+
+    (tmp_path / "stray.py").unlink()
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirty"
+
+
+def test_dirty_check_never_claims_clean_when_it_cannot_tell(tmp_path):
+    """When git cannot answer, the result must NOT look clean.
+
+    The sha is resolved from the filesystem precisely because the batch
+    container has no ``git`` binary.  The dirty check still shells out, and it
+    used to return False on failure — so every containerised run was stamped
+    clean regardless of the truth.  A record that admits ignorance is useful;
+    one that silently asserts cleanliness is worse than none.
+    """
+    # tmp_path is a real directory but not a git repository
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirtyunknown"
 
 
 def test_git_sha_store_uses_train_implementation():

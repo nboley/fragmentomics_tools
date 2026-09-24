@@ -788,8 +788,7 @@ def _git_sha() -> str:
             .decode()
             .strip()
         )
-        dirty = _check_dirty_subprocess(pkg_dir)
-        return f"{sha}-dirty" if dirty else sha
+        return sha + _check_dirty_subprocess(pkg_dir)
     except Exception:
         return "unknown"
 
@@ -803,10 +802,10 @@ def _resolve_git_info_from_package() -> str:
 
     sha = _read_head_sha(git_dir)
 
-    # Check dirty: look for uncommitted changes via subprocess if available,
-    # otherwise skip (sha alone is still useful)
-    dirty = _check_dirty_subprocess(pkg_dir)
-    return f"{sha}-dirty" if dirty else sha
+    # Classify the working tree.  Note this yields "-dirtyunknown" rather than
+    # a bare sha when git is unavailable: a sha that silently claims clean is
+    # worse than one that admits it does not know.
+    return sha + _check_dirty_subprocess(pkg_dir)
 
 
 def _find_git_dir(start: str) -> "str | None":
@@ -881,18 +880,46 @@ def _git_search_paths(git_dir: str) -> "list[str]":
     return paths
 
 
-def _check_dirty_subprocess(repo_dir: str) -> bool:
-    """Check for uncommitted changes via ``git status``.  Returns False on any error."""
+def _check_dirty_subprocess(repo_dir: str) -> str:
+    """Classify the working tree, as a sha suffix.
+
+    Returns ``""`` (clean), ``"-dirty"``, ``"-untracked"``,
+    ``"-dirty-untracked"``, or ``"-dirtyunknown"``.
+
+    Two things this deliberately does NOT do, both learned from real incidents:
+
+    1. **It does not exclude untracked files.**  It used to pass
+       ``--untracked-files=no``.  But the incident that motivated recording
+       dirty state at all was an *untracked* file (``scripts/sim_oracle.py``)
+       that committed code imported: a fresh clone could not run it, while
+       every run here was stamped with a clean sha.  Untracked files are
+       reported *separately* rather than folded into ``-dirty``, because an
+       untracked scratch file is usually harmless and an untracked *imported*
+       file is not — and only a human reading the record can tell which.
+
+    2. **It never reports "clean" when it cannot tell.**  This check needs the
+       ``git`` binary, which is NOT on PATH in the batch container — the same
+       reason the sha itself is resolved from the filesystem rather than by
+       shelling out.  Returning ``False`` on failure meant every containerised
+       run was stamped clean regardless of the truth, which is exactly the
+       false assurance the dirty flag exists to prevent.
+    """
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
+            ["git", "status", "--porcelain"],
             cwd=repo_dir,
             capture_output=True,
             timeout=5,
         )
-        return bool(result.stdout.strip())
+        if result.returncode != 0:
+            return "-dirtyunknown"
+        lines = [ln for ln in result.stdout.decode(errors="replace").splitlines() if ln.strip()]
     except Exception:
-        return False
+        return "-dirtyunknown"
+
+    tracked = any(not ln.startswith("??") for ln in lines)
+    untracked = any(ln.startswith("??") for ln in lines)
+    return ("-dirty" if tracked else "") + ("-untracked" if untracked else "")
 
 
 def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):

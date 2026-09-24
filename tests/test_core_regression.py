@@ -5,6 +5,8 @@ tests/data/core_regression_golden.pt.  On subsequent runs, values are
 recomputed and compared for EXACT equality — any drift means the refactor
 changed semantics and must be investigated, not accommodated.
 """
+import os
+
 import pytest
 import torch
 import numpy as np
@@ -129,9 +131,43 @@ def _capture(model, x, y, mask):
     }
 
 
+_REGEN_ENV = "BG_REGEN_CORE_GOLDEN"
+
+_REGEN_REFUSED = f"""
+Golden fixture missing: {{path}}
+
+REFUSING to regenerate it automatically, deliberately.
+
+These values were captured from `background_model_core.py` BEFORE it was
+refactored, and their only purpose is to prove the refactor changed nothing.
+Regenerating them from the current code destroys that proof: the fixture would
+be rebuilt from whatever the code does *now*, every assertion would compare the
+code against itself, and the whole file would pass while guarding nothing.
+
+That is not hypothetical.  The likely path to here is: someone changed the
+core, these tests failed, and deleting the .pt "to refresh it" made the failure
+go away.  **A moved golden value is a finding, not a stale fixture.**  It means
+the change altered a computed result -- which in this file is the entire thing
+being tested, and which per CLAUDE.md requires explicit owner approval.
+
+If a value legitimately moved:
+  1. Establish WHY, and confirm the new behaviour is intended.
+  2. Get owner sign-off -- this is the frozen statistical core.
+  3. Only then regenerate:  {_REGEN_ENV}=1 pytest {{testfile}}
+  4. Commit the new fixture in its own commit, saying what moved and why.
+
+If you are here because the fixture was simply never committed, restore it from
+git rather than regenerating:  git checkout -- {{path}}
+""".strip()
+
+
 def _load_or_generate_golden():
     if GOLDEN_PATH.exists():
         return torch.load(GOLDEN_PATH, weights_only=False)
+    if os.environ.get(_REGEN_ENV) != "1":
+        raise RuntimeError(
+            _REGEN_REFUSED.format(path=GOLDEN_PATH, testfile=__file__)
+        )
     data = {}
     for name in _MODELS:
         for loss in LOSSES:
