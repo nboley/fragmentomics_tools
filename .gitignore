@@ -12,6 +12,10 @@ data/
 !test/fragment_array/data/
 !test/fragment_array/data/**
 
+# ...and test/data/ for the synthetic TSS fixture and motif test data.
+!test/data/
+!test/data/**
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
