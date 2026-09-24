@@ -1446,34 +1446,33 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        if not inplace:
-            rdf = self.copy()
-        else:
-            rdf = self
-
         if strand_aware:
             neg_mask = self.strand == "-"
 
-        new_starts = rdf.start + left
+        new_starts = self.start + left
         if strand_aware:
-            new_starts[neg_mask] = rdf.loc[neg_mask, "start"] - right
-        # assert (new_starts > 0).all(), pd.DataFrame(dict(right=right, length=self.region_lengths, total=self.region_lengths+right)).total.value_counts()
+            new_starts[neg_mask] = self.loc[neg_mask, "start"] - right
 
-        new_stops = rdf.stop + right
+        new_stops = self.stop + right
         if strand_aware:
-            new_stops[neg_mask] = rdf.loc[neg_mask, "stop"] - left
+            new_stops[neg_mask] = self.loc[neg_mask, "stop"] - left
 
-        valid_regions_mask = self._valid_regions_mask(
-            new_starts, new_stops, discard_buffer_bp=0
-        )
-
-        rdf["start"] = new_starts
-        rdf["stop"] = new_stops
         if discard_invalid_resizes:
-            rdf = rdf.loc[valid_regions_mask, :]
+            valid_regions_mask = self._valid_regions_mask(
+                new_starts, new_stops, discard_buffer_bp=0
+            )
+            rdf = self.loc[valid_regions_mask, :].copy()
+            rdf["start"] = new_starts[valid_regions_mask]
+            rdf["stop"] = new_stops[valid_regions_mask]
         else:
             self._error_on_invalid_new_starts(new_starts)
             self._error_on_invalid_new_stops(self, new_stops)
+            if inplace:
+                rdf = self
+            else:
+                rdf = self.copy()
+            rdf["start"] = new_starts
+            rdf["stop"] = new_stops
 
         return rdf
 
@@ -1503,6 +1502,11 @@ class RegionDataFrame(DataFrameBase):
     ):
         assert (np.array(left_amt) >= 0).all()
         assert (np.array(right_amt) >= 0).all()
+        total_truncation = np.array(left_amt) + np.array(right_amt)
+        if (total_truncation >= self.region_lengths).any():
+            raise ValueError(
+                "truncation amounts exceed region length for at least one region"
+            )
         return self._resize_region_boundaries(
             left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes
         )
@@ -1542,9 +1546,11 @@ class RegionDataFrame(DataFrameBase):
             rdf = rdf.loc[ok, :]
             new_start = new_start[ok]
             new_stop = new_stop[ok]
-            logger.warning(
-                f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize."
-            )
+            n_discarded = np.sum(~ok)
+            if n_discarded > 0:
+                logger.warning(
+                    f"Discarded {n_discarded} of {len(ok)} regions due to invalid resize."
+                )
 
         self._error_on_invalid_new_starts(new_start)
         self._error_on_invalid_new_stops(rdf, new_stop)

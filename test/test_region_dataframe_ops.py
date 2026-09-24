@@ -497,3 +497,48 @@ class TestDropOverlappingRegions:
         # chr1:100-200 overlaps blacklist, chr1:500-600 does not
         assert len(result) == 1
         assert int(result.start.iloc[0]) == 500
+
+
+class TestResizeBoundaryConditions:
+    """R8: _resize_region_boundaries with inplace+discard corrupted self.
+    R11: resize_regions warned even when 0 regions were discarded.
+    R14: truncate_regions allowed start >= stop."""
+
+    def test_discard_does_not_corrupt_self(self):
+        """R8: invalid coordinates were written to self before filtering."""
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "contig": ["chr1", "chr1"],
+                "start": [10, 1000],
+                "stop": [100, 2000],
+            }),
+            ref="hg38",
+        )
+        original_starts = list(rdf.start)
+        rdf._resize_region_boundaries(left=-50, discard_invalid_resizes=True)
+        assert list(rdf.start) == original_starts, (
+            "self was corrupted by discard_invalid_resizes"
+        )
+
+    def test_no_warning_when_zero_discarded(self, caplog):
+        """R11: warning logged even when nothing was discarded."""
+        import logging
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [2000]}),
+            ref="hg38",
+        )
+        with caplog.at_level(logging.WARNING, logger="fragmentomics_tools.dataframe"):
+            rdf.resize_regions(500, discard_invalid_resizes=True)
+        discard_msgs = [r for r in caplog.records if "Discarded" in r.message]
+        assert len(discard_msgs) == 0, (
+            f"spurious discard warning: {discard_msgs[0].message}"
+        )
+
+    def test_truncate_beyond_region_length_raises(self):
+        """R14: truncation producing start >= stop was silently accepted."""
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [1100]}),
+            ref="hg38",
+        )
+        with pytest.raises(ValueError, match="truncation amounts exceed"):
+            rdf.truncate_regions(left_amt=60, right_amt=60)
