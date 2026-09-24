@@ -494,12 +494,16 @@ because knowing the input removes the need to infer anything on the spike side.
 
 ### Outstanding before this can run
 
-1. **Plasma volume** — fixed assay constant or per-sample field. Step 2 does not
-   run without it, and a guessed value silently scales every downstream number.
-2. **The input-quantity column for SNMv4B/C.** `MPM in plasma = 1x` = 3.00e+04
-   is VERIFIED for SNMv3 only; the v4 headers and column positions differ.
-3. **Result IDs on a v4B/C profile** carrying both SPANK UMI output and
-   GC-dSpark counts.
+**SUPERSEDED — see §11 for the current list.** Items 1 and 2 below have since
+been withdrawn: plasma volume is not needed (the ratio cancels it) and the
+input quantities are tabulated in the SNMv4C component table. Retained only to
+show what was blocking and why it stopped.
+
+1. ~~**Plasma volume**~~ — withdrawn (§11).
+2. ~~**The input-quantity column for SNMv4B/C**~~ — resolved (§11). Note the
+   v4 panels record **molarity**, not MPM, unlike SNMv3; the component table
+   supplies MPM directly for both.
+3. **Result IDs on a v4B/C profile** — a cohort was found (§11).
 
 ---
 
