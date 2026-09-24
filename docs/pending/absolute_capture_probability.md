@@ -1,6 +1,25 @@
 # Estimating absolute capture probability by (length, GC)
 
-**Status:** problem statement. No implementation, no chosen approach.
+> ## CLOSED — 2026-09-24. Verdict: keep ZTNB. See §13.
+>
+> The spike-based route is a **dead end** and was abandoned. A 22x spread in
+> raw reads at constant input molarity cannot be a probability: `P <= 1` forces
+> `P_min <= 0.045`, while ZTNB puts the true range on the same sample at
+> 0.34-0.79. The panel carries **one oligo per (length, GC) cell**, so
+> sequence-specific capture cannot be separated from the cell effect.
+>
+> **What did work, and is worth remembering:** the duplication-rate transfer.
+> SPANK UMIs gave d = 1.31 on result 200000; native cfDNA duplicate counting on
+> the same sample gave 1.286 — two independent populations, ~2% apart. The
+> mechanism was sound; the panel could not support a per-cell surface.
+>
+> **Reopening requires a panel with multiple distinct sequences per cell**, so
+> oligo identity averages out. That is a wet-lab design change; UMIs alone
+> would not fix it.
+>
+> §1–§12 are kept as the reasoning trail, including several claims that turned
+> out to be wrong and are marked as such. Read §13 first.
+
 **Scope:** the model lives in `~/src/biomarker/flgc/`; the consumer lives in
 `fragmentomics_tools` (`fragment_array/weights.py`, `GCFlWeights`).
 
