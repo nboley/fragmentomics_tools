@@ -450,8 +450,15 @@ SPANK's UMIs are needed for.
 ### Step 2 — known input, with the settled ss/ds correction (§9)
 
 ```
-N_input(spike) = MPM_per_mL x volume_mL x (2 if ds else 1)
+N_input(spike) ∝ MPM_per_uL x (2 if ds else 1)
 ```
+
+**Units: per µL, not per mL** (§11). An earlier revision of this step said
+`volume_mL`, a 1000x error of exactly the kind that yields a plausible wrong
+answer rather than an obvious one.
+
+**Plasma volume is not required** — see §11. Working in concentration space,
+as production already does, cancels it.
 
 ### Step 3 — P(seen) for SPANK, directly
 
@@ -493,3 +500,85 @@ because knowing the input removes the need to infer anything on the spike side.
    is VERIFIED for SNMv3 only; the v4 headers and column positions differ.
 3. **Result IDs on a v4B/C profile** carrying both SPANK UMI output and
    GC-dSpark counts.
+
+---
+
+## 11. Production already does the unstratified version of this
+
+Source: `biomarker-projects/mtdna_chimerism/projects/transplant_poc/docs/methods/spikein_normalization.md`,
+and `bin/crr-caller`. VERIFIED by reading both.
+
+```python
+def compute_mpm(edr, ddspank, spanks_per_ul):
+    return (edr / ddspank) * spanks_per_ul        # SPANKS_PER_UL = 1.2e6
+```
+
+> "Reproduces 10 reported pathogen MPMs at ratio 0.9915-1.0027"
+> "All 184 nuclear-cohort samples have ddspank_source = 52C (SNMv4B/C) ...
+>  SPANKS_PER_UL = 1.2e6 is correct"
+
+This is *pathogen-signal / spike-signal x known-spike-concentration* — the same
+ratio calibration proposed here, running in production and validated to ~1%.
+
+### The SNMv4C input table (resolves the input-quantity blocker)
+
+| Component | Type | Length | Molarity (plasma) | MPM (1x) |
+|---|---|---|---|---|
+| SPANK-52C | ds | 52 bp | 1e-12 M | **6e5** |
+| SPANK-75B | ds | 75 bp | 1e-12 M | **6e5** |
+| SPARK-032..075 | ds | 32-75 bp | 5e-14 M | 3e4 |
+| SPARK-125, 150 | ds | 125-150 bp | 5e-13 M | 3e5 |
+| **SPARK-v4-\*** (56) | **ss** | 24-175 bp | 5e-13 to 2.5e-12 M | **3e5 to 1.5e6** |
+| ID spikes (200) | ss | 50 bp | 4e-11 M | 2.4e7 |
+
+`SPANKS_PER_UL = 1.2e6` is simply the **sum of the two SPANKs** at 6e5 each —
+not a fitted constant. That is why it reproduces production MPMs so closely.
+
+Input quantities are tabulated for every component including the v4 grid, so no
+Avogadro conversion is needed.
+
+### Plasma volume is NOT required
+
+The formula works in concentration space: numerator and denominator come from
+the same aliquot, so volume cancels. The answer is expressed per µL rather than
+as an absolute count, which is the natural unit anyway. **Blocker 1 (§10) is
+withdrawn.**
+
+### MUST be computed per sample — the variance is pooling
+
+`ddspank` varies 191x across the cohort (448 to 85,509), with 74.5% of that
+variation WITHIN run. **OWNER-CONFIRMED: this reflects pooling differences
+between samples, not measurement noise.**
+
+The consequence is a hard design constraint: **the calibration must be run
+per sample.** A cohort-level or run-level `d` would average over genuine
+per-sample differences in how much of each library was loaded, and would be
+wrong for every individual sample. Production already respects this — `ddspank`
+enters `compute_mpm` per sample.
+
+So `d(L) = accepted_reads(L) / unique_umis(L)` (§10 Step 1) is a **per-sample**
+quantity throughout. It is not a constant to be fitted once and reused, and
+`d(52)` vs `d(75)` (§10 Check 1) is a within-sample comparison, aggregated
+across samples only afterwards to assess consistency.
+
+### What this reframes
+
+Production does the **(length, GC)-agnostic** version: one global `ddspank`, one
+global constant, per sample. The GC-dSpark grid is what makes it **stratified**
+— the same ratio calibration computed per (length, GC) cell rather than once.
+
+That changes the work from "build a new estimator" to "extend a validated one
+into a second dimension", which is a far better starting position and inherits
+the existing validation.
+
+### Remaining outstanding
+
+1. ~~Plasma volume~~ — **withdrawn**, not needed (above).
+2. ~~Input-quantity column for v4B/C~~ — **resolved** by the table above.
+3. **Result IDs** — a cohort exists: 876 samples, result IDs 166k-228k, carrying
+   both `ddspank` and GC-dSpark counts, with scripts already written
+   (`stage0_spikein_variance.py`, `compute_mpm_donor_full_cohort.py`).
+4. **NEW — per-cell depth.** Stratifying divides an already-variable denominator
+   across 45 cells. Check the per-cell GC-dSpark read counts before committing
+   to the design; thin cells would make per-sample per-cell estimates unusable
+   even though the unstratified version works fine.
