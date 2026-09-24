@@ -229,3 +229,44 @@ class TestGetFragmentCoverageSum:
             f"expected length {len(rdf)}, got {len(result)}"
         )
         assert (result == 0).all()
+
+
+class TestIntersectWithRdfReturnType:
+    """I4: intersect_with_rdf returned a plain DataFrame when the intersection
+    was empty, but a RegionDataFrame otherwise. Callers chaining RDF methods
+    hit AttributeError only on the empty path."""
+
+    def test_empty_intersection_returns_subclass(self):
+        rdf1 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        rdf2 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
+            ref="hg38",
+        )
+        result = rdf1.intersect_with_rdf(rdf2)
+        assert isinstance(result, RegionDataFrame), (
+            f"expected RegionDataFrame, got {type(result).__name__}"
+        )
+
+    def test_empty_and_nonempty_have_same_columns(self):
+        rdf1 = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        # non-overlapping
+        rdf_far = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
+            ref="hg38",
+        )
+        empty = rdf1.intersect_with_rdf(rdf_far)
+
+        # overlapping
+        rdf_near = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
+            ref="hg38",
+        )
+        nonempty = rdf1.intersect_with_rdf(rdf_near)
+
+        assert set(empty.columns) == set(nonempty.columns)

@@ -1048,14 +1048,13 @@ class RegionDataFrame(DataFrameBase):
             ).to_dataframe(names=names),
         )
         if len(intersection_rdf) == 0:
-            return pd.DataFrame(
-                columns=[c[: -(1 + len(rsuff))] for c in other_column_names]
+            return type(self)(
+                pd.DataFrame(columns=names).drop(columns=["index"]),
+                ref=self.ref,
             )
 
         intersection_rdf = intersection_rdf.set_index("index")
-        # intersection_rdf = intersection_rdf[other_column_names]
-        # intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
-        return RegionDataFrame(intersection_rdf, ref=self.ref)
+        return type(self)(intersection_rdf, ref=self.ref)
 
     def intersect_with_bed(
         self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
