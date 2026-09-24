@@ -306,6 +306,23 @@ class InstrumentedBackgroundModelHybrid(
 # --------------------------------------------------------------------------
 
 
+#: Stop reasons that divergence recovery will retry from.  Defined once and
+#: consumed by both the recovery loop and its exhaustion check — two literals
+#: compared in two places is the defect shape that produced the LR-ladder and
+#: floor-clamp bugs, so the membership test has exactly one definition.
+#:
+#: ``non_finite`` is included because NaN/Inf is the most severe divergence
+#: there is, and restoring the best checkpoint at a reduced LR is the right
+#: response to it.  Excluding it cost a real run: sim_v3_A_hybrid_nb_frozen_lr5e-3
+#: hit NaN at epoch 7 and discarded its best checkpoint (4.0454 @ ep6) rather
+#: than retrying at a halved LR.
+#:
+#: NOT recoverable, deliberately: ``stalled`` (a collapsed constant-output model
+#: will re-collapse from the same weights — recovery cannot help), and
+#: ``early_stopped`` / ``completed`` (normal termination).
+RECOVERABLE_REASONS = frozenset({"diverged", "non_finite"})
+
+
 class DivergenceStop(Callback):
     """Stop training on divergence or metric stall.
 
@@ -323,13 +340,32 @@ class DivergenceStop(Callback):
     run                                     max val/best
     ======================================  =================
     KEN, CNN multinomial, CNN frozen-NB     1.0001 - 1.0002
+    hybrid lr1e-3 (healthy)                 1.00056
+    cnn frozen-NB lr5e-3, 117 ep (healthy)  1.00023
+    **phase4 hybrid lr2e-3 (DEGRADED)**     **1.0079**
     CNN multinomial lr=1e-2 (diverged)      380
     Hybrid lr=5e-3 (diverged)               1.9e9
     ======================================  =================
 
-    The default 1.10 sits ~500x above the healthy noise floor and ~3400x
-    below the smallest real divergence, so it cannot plausibly fire on a
-    healthy run.
+    **The default was 1.10 and is now 1.005 (owner-approved 2026-09-24).**
+    The original 1.10 was chosen against the two *explosion* rows — it sits
+    far above the noise floor and far below 380 — and on that evidence it was
+    correct.  What the evidence did not contain was a third regime, since
+    observed by ``phase4_hybrid_lr2e-3_recovery``: the model fell out of a
+    good basin at epoch 10 to **1.0079x** its best and never returned,
+    plateauing ~0.027 nats worse for the rest of the run.  That is ~14x the
+    worst healthy excursion but ~48000x below the smallest explosion, so
+    **1.10 could not fire on it** and the run wasted its remaining epochs.
+
+    1.005 sits ~8x above the worst healthy excursion (1.0006) and below the
+    degradation (1.0079).  Re-checked against every run available: no healthy
+    run exceeds 1.0006, including the one documented as having "noisy val
+    loss" (1.00023 over 117 epochs), so the tighter bound does not thrash.
+
+    Consequence to be aware of: ``reason="diverged"`` now covers both
+    explosions and basin-loss degradations.  A ``summary.json`` reporting
+    "diverged" may mean a 0.8% regression, not a blow-up — read ``value``
+    against ``best``, do not assume magnitude from the label.
 
     **Stall** (``stall_patience``): stop when ``stall_patience`` consecutive
     validation epochs produce a *bitwise identical* metric value — the
@@ -565,7 +601,7 @@ class TrainConfig:
     context_kernel_size: int = 15
     weight_decay: float = 0.0
     fl_dist_npz: str | None = None
-    divergence_factor: float = 1.10
+    divergence_factor: float = 1.005
     stall_patience: int = 5
     lr_patience: int = 4
     max_lr_reductions: int = 3
@@ -926,7 +962,7 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
     best_recovery_level = 0
 
     while (
-        stop_reason.get("reason") == "diverged"
+        stop_reason.get("reason") in RECOVERABLE_REASONS
         and recovery_count < max_recoveries
     ):
         resume_ckpt = global_best_path
@@ -1000,7 +1036,7 @@ def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
 
     # If we exhausted recoveries and still diverged, mark it.
     if (
-        stop_reason.get("reason") == "diverged"
+        stop_reason.get("reason") in RECOVERABLE_REASONS
         and recovery_count > 0
         and recovery_count >= max_recoveries
     ):
@@ -1118,11 +1154,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-lr-reductions", type=int, default=3,
                    help="max number of LR halvings; EarlyStopping patience is "
                         "derived as (lr_patience+1)*max_lr_reductions + lr_patience")
-    p.add_argument("--divergence-factor", type=float, default=1.10,
+    p.add_argument("--divergence-factor", type=float, default=1.005,
                    help="stop if val_loss exceeds this multiple of its own "
-                        "best (0 disables the ratio check; non-finite "
-                        "detection is always active). Healthy v3 runs peak "
-                        "at 1.0002x; diverged ones reach 380x+.")
+                        "best, and hand the run to divergence recovery "
+                        "(0 disables the ratio check; non-finite detection "
+                        "is always active). Healthy v3 runs peak at 1.0006x, "
+                        "a real basin-loss degradation reached 1.0079x, and "
+                        "explosions reach 380x+.")
     p.add_argument("--stall-patience", type=int, default=5,
                    help="stop if val_loss is bitwise identical for this many "
                         "consecutive epochs (0 disables). Healthy v3 runs "

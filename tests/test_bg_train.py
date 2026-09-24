@@ -143,7 +143,10 @@ def test_divergence_stop_skips_sanity_check():
 def test_divergence_factor_cli_default_and_override():
     p = build_arg_parser()
     required = ["--loss", "multinomial", "--run-name", "t"]
-    assert cfg_from_args(p.parse_args(required)).divergence_factor == 1.10
+    # 1.005, lowered from 1.10 on 2026-09-24: 1.10 was tuned against
+    # explosions (380x, 1.9e9x) and could not fire on the basin-loss
+    # degradation actually observed in phase4 (1.0079x).
+    assert cfg_from_args(p.parse_args(required)).divergence_factor == 1.005
     cfg = cfg_from_args(p.parse_args(required + ["--divergence-factor", "2.5"]))
     assert cfg.divergence_factor == 2.5
 
