@@ -12,9 +12,20 @@ data/
 !test/fragment_array/data/
 !test/fragment_array/data/**
 
-# ...and test/data/ for the synthetic TSS fixture and motif test data.
+# ...and the specific fixtures in test/data/. Deliberately an explicit whitelist
+# rather than `!test/data/**`, unlike the two blocks above: those directories
+# hold nothing but fixtures, whereas test/data/ is ALSO where the suite writes
+# its own residue — reader-cache artifacts named `<md5>_test.bb_chr1:200-302.bed.gz`
+# plus random-named tempfiles. A `**` exception un-ignores that residue too, so
+# it starts showing up in `git status` and one `git add -A` commits it.
+# Note the idiom: un-ignore the directory so git will descend into it, then
+# re-ignore its contents, then whitelist the fixtures by name. `!test/data/`
+# alone is NOT enough — the blanket `data/` above matches only the directory,
+# so negating it un-ignores everything inside.
 !test/data/
-!test/data/**
+test/data/*
+!test/data/*.txt
+!test/data/tss.synthetic.hg19.bed.gz
 
 
 # Byte-compiled / optimized / DLL files
