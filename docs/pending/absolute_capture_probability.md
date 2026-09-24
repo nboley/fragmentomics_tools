@@ -378,8 +378,18 @@ SPANK lands almost exactly on one (52 bp: SPANK 50.0% vs peer 50.0%; 75 bp:
 SPANK 47.5% vs peer 49.3%). So the comparison can be made at matched length AND
 matched GC.
 
-Bonus: those 5 peers permit a test of whether duplication varies with **GC at
-fixed length**, using the spike panel alone and no native data.
+~~Bonus: those 5 peers permit a test of whether duplication varies with GC at
+fixed length, using the spike panel alone.~~ **WRONG — retracted.** Duplication
+is only measurable where there is a UMI, and the GC-dSpark peers have none
+(§3.3). The peers give *read counts* across GC, which informs the shape of the
+recovery surface, not the duplication rate.
+
+**The only duplication-variance check available from the spikes is `d(52)` vs
+`d(75)`** — two points, a LENGTH check, with no GC check at all.
+GC-independence of duplication is assumed and is NOT testable within the spike
+panel. It can only be approached through the per-cell `r_hat`/`p_hat` of native
+ZTNB fits (Experiment A, §8) — a different population, but one that does vary
+in GC.
 
 ### The ss/ds rule — OWNER-CONFIRMED, TESTED
 
@@ -411,3 +421,72 @@ does not disturb reads-per-observed-molecule.
   right-SHIFTED rather than merely scaled.
 - Spike -> native transfer, for applying a spike-derived surface to real
   fragments. Unchanged by any of this, and the one worth quantifying separately.
+
+---
+
+## 10. The calibration, stated exactly
+
+### Inputs per sample
+
+| source | quantity | where |
+|---|---|---|
+| SPANK (52 bp ds, 75 bp ds) | `accepted_reads`, `unique_umis` | `spank_pipeline_b.py` summary rows |
+| GC-dSpark (9 lengths x 5 GC) | raw read counts | `metrics.json` via `load_spike_counts` |
+| both | molarity, length, gc, ss/ds | `load_spikes(profile)` |
+| assay | plasma volume | **NOT in the data — outstanding** |
+
+### Step 1 — measure duplication at the calibration points
+
+```
+d(L) = accepted_reads(L) / unique_umis(L)          for L in {52, 75}
+```
+
+Reads per observed molecule. Measured, not modelled. This is the only thing
+SPANK's UMIs are needed for.
+
+### Step 2 — known input, with the settled ss/ds correction (§9)
+
+```
+N_input(spike) = MPM_per_mL x volume_mL x (2 if ds else 1)
+```
+
+### Step 3 — P(seen) for SPANK, directly
+
+```
+P_seen_SPANK(L) = unique_umis(L) / N_input(SPANK, L)
+```
+
+Note what this is: with input known AND molecules countable, this is P(seen)
+**by definition** — no extrapolation, no NB assumption, no zero-class inference.
+It is the ground truth this document was originally written for want of.
+
+### Step 4 — transfer to the GC-dSparks
+
+```
+molecules_seen(L,G) = reads(L,G) / d(L*)           L* = nearer of {52, 75}
+P_seen(L,G)         = molecules_seen(L,G) / N_input(L,G)
+weight(L,G)         = 1 / P_seen(L,G)              clamped as now
+```
+
+### Two checks that fall out at no extra cost
+
+**Check 1 — `d(52)` vs `d(75)`.** Two independent measurements of the
+duplication rate at different lengths. Agreement supports length-flatness and
+licenses the extrapolation to 24 bp and 175 bp; divergence kills the transfer
+and quantifies by how much. **Run this first** — it is a handful of numbers and
+can end the project before any surface is built.
+
+**Check 2 — measured vs inferred P(seen) at 52 and 75.** Step 3 gives a
+*measured* P(seen); the native ZTNB fit gives an *extrapolated* `pi_mix` at the
+same cells. Comparing them validates the ZTNB extrapolation that is already
+shipping. This is Experiment B (§8), and it is cleaner than described there,
+because knowing the input removes the need to infer anything on the spike side.
+
+### Outstanding before this can run
+
+1. **Plasma volume** — fixed assay constant or per-sample field. Step 2 does not
+   run without it, and a guessed value silently scales every downstream number.
+2. **The input-quantity column for SNMv4B/C.** `MPM in plasma = 1x` = 3.00e+04
+   is VERIFIED for SNMv3 only; the v4 headers and column positions differ.
+3. **Result IDs on a v4B/C profile** carrying both SPANK UMI output and
+   GC-dSpark counts.
