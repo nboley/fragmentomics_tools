@@ -140,7 +140,14 @@ Two functions and a file per script. The scripts are research code whose
 output is cited in documents; the goal is that a correction is cheap and a
 copy cannot go stale, nothing more.
 
-## 4. The frozen-core question — OWNER DECISION REQUIRED
+## 4. The frozen-core question — DECIDED 2026-09-25
+
+> **OWNER RULING: `scripts/_oracle_scoring.py`.** The recommendation below was
+> accepted. The helper does NOT go in the frozen core, and this refactor
+> therefore requires no frozen-core approval. The 2026-09-24 approval that
+> said "helper in the FROZEN core" is superseded for this widened scope.
+> A reviewer should still challenge the *reasoning* — but the decision is
+> made, not open.
 
 The shared scoring helper is a candidate for `background_model_core.py`.
 
