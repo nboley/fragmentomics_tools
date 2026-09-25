@@ -8,13 +8,25 @@ those, but treat the *rules* as binding unless the owner says otherwise.
 
 - Test/run env: `/home/nathanboley/miniconda3/envs/biomarker_env/bin/python`
   (torch 2.5.1 CUDA-12.4 build, lightning, zarr 2.18.3, numcodecs 0.13.1).
-- Run the suite from the repo root: `python -m pytest tests/ -q`.
-  Baseline **447 passed, 0 skipped** (measured 2026-09-25 @ f6c5246). A few
-  `self.log()`-without-Trainer warnings are expected and harmless.
-  This number moves with almost every commit, so **measure it yourself before
-  and after your change** rather than quoting this line — it said 196 for long
-  enough that the gap to reality reached 251 tests, which makes it useless as
-  the regression check it exists to be.
+- **Run the suite via `make test`, never bare `pytest`.** It wraps the run in
+  `timeout --signal=KILL 3600`. This suite can *wedge* rather than fail: a
+  fork deadlock in `parallel_apply` once ran 12 hours unnoticed, emitting
+  nothing at all, because `pytest -q | tail` never reaches EOF if the process
+  never exits. Override with `make test TEST_TIMEOUT=7200`, and select a
+  different suite with `make test PYTEST_ARGS="tests/ -q"`.
+  A kill shows as exit 137 and means it HUNG — that is a finding to diagnose
+  (`py-spy dump --pid <pid>`), not a flake to re-run.
+- Two suites exist and are easy to confuse: `test/` is the library suite
+  (the `make test` default) and `tests/` is `background_model`.
+  Baselines as of the last update: `test/` **2 failed / 331 passed** (both
+  failures are missing data, not defects: `test_slice_encode_big_wig` needs an
+  ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the in-package
+  GRCh38 reference); `tests/` **494 passed, 0 skipped** (measured 2026-09-25),
+  where a few `self.log()`-without-Trainer warnings are expected and harmless.
+  These numbers move with almost every commit, so **measure them yourself
+  before and after your change** rather than quoting this line — the `tests/`
+  figure sat at 196 long enough that the gap to reality reached 298 tests,
+  which makes a stale baseline useless as the regression check it exists to be.
 - Run the suite **before and after** any change. A new test that fails against
   production code is a *finding to report*, not something to patch away.
 
@@ -33,7 +45,7 @@ Sanctioned entry points:
 | Load a BED | `RegionDataFrame.from_bed(path, ref=...)` — `ref` is **required** |
 | Merge several BEDs | `RegionDataFrame.from_beds_merged(...)` |
 | Blacklist / exclusion filtering | `.drop_overlapping_regions(other_rdf)` |
-| Intersections | `.intersect_with_rdf(other)` |
+| Join on overlap | `.join_on_overlap(other)` — returns whole A intervals, NOT geometric intersections |
 | Resize / pad regions | `.expand_regions(...)`, `.resize_regions(...)` |
 | Attach fragments to regions | `SampleAndRegionDataFrame.attach_fragment_arrays(...)` |
 | Per-region fragment loading | `RegionFragmentArray.from_fragments_h5(...)` |

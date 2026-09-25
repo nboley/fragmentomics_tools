@@ -26,6 +26,7 @@ tqdm.pandas()
 from joblib import delayed, Parallel
 
 import multiprocessing
+import threading
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 import traceback
@@ -70,18 +71,15 @@ DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
 
 
-# Per-worker state. This global is only ever written inside a worker process,
-# by _init_parallel_apply_worker, which the executor runs once per worker at
-# startup. It is deliberately NOT set in the parent: doing so shares one
-# mutable slot across every concurrent caller, and two threads calling
-# parallel_apply at once then silently compute each other's data. Each
-# executor forks its own workers, so per-worker state keeps concurrent calls
-# isolated.
+# Per-worker state, written only inside a worker by
+# _init_parallel_apply_worker. It is deliberately NOT set in the parent: one
+# mutable slot shared by nested calls would have an inner call overwrite the
+# outer one's frame, producing confident wrong numbers rather than an error.
 #
-# The frame and callable reach the workers through the executor's `initargs`
-# rather than through the task queue. Under a "fork" context initargs are
-# inherited rather than pickled, so the DataFrame is never serialized and `fn`
-# may be a lambda. Sending them per task would pickle both on every row.
+# The frame and callable reach workers via the executor's `initargs`, not the
+# task queue. Under "fork" those are inherited rather than pickled, so the
+# DataFrame is never serialized and `fn` may be a lambda; sending them per
+# task would pickle both on every row.
 _PARALLEL_APPLY_STATE = {}
 
 
@@ -96,6 +94,50 @@ def _apply_fn(idx):
     df = _PARALLEL_APPLY_STATE["df"]
     fn = _PARALLEL_APPLY_STATE["fn"]
     return idx, fn(df.iloc[idx])
+
+
+def _stop_tqdm_monitors():
+    """Stop every live tqdm monitor thread, on subclasses too.
+
+    tqdm starts its monitor in ``__new__`` and stores it on the *actual*
+    class, so `tqdm.auto` and `tqdm.notebook` keep their own rather than
+    sharing `tqdm.std.tqdm`'s. Checking only the base class therefore misses
+    the notebook case, which is the common one. Walk the subclass tree.
+    """
+    seen = set()
+    pending = [tqdm]
+    while pending:
+        cls = pending.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        pending.extend(cls.__subclasses__())
+        monitor = cls.__dict__.get("monitor")
+        if monitor is not None:
+            monitor.exit()
+            cls.monitor = None
+
+
+def _error_if_not_main_thread():
+    """Refuse to fork worker processes from anything but the main thread.
+
+    `concurrent.futures.process` keeps executor bookkeeping in module-level
+    state whose entries carry locks. Forking while another thread holds one
+    gives the child a lock nothing can release; it then hangs forever at
+    interpreter shutdown and the parent waits on it forever. Failing loudly
+    beats hanging.
+
+    Nesting is unaffected -- a forked child's surviving thread is
+    re-designated as that process's main thread.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError(
+            "parallel_apply() must be called from the main thread; it was "
+            f"called from {threading.current_thread().name!r}. Forking worker "
+            "processes from a non-main thread can deadlock the workers. Run "
+            "the calls sequentially from the main thread, or pass n_workers=1 "
+            "to stay in-process."
+        )
 
 
 def get_indices_of_balanced_labels(labels, random_state=None):
@@ -157,11 +199,9 @@ def _bytes_to_float(b):
 
 
 class DataFrameBase(pandas.DataFrame):
-    _metadata = []  # Metadata is optional, you can pass it in
-    _required_metadata = (
-        []
-    )  # This must be a subset of metadata, but it is required for init
-    _required_columns = []  # These columns will be checked for existence during init.
+    _metadata = ()  # Metadata is optional, you can pass it in
+    _required_metadata = ()  # This must be a subset of metadata, but it is required for init
+    _required_columns = ()  # These columns will be checked for existence during init.
     _potentially_confused_columns = {}
 
     @property
@@ -247,28 +287,11 @@ class DataFrameBase(pandas.DataFrame):
     def _parallel_apply(self, fn, n_workers, verbose):
         # Use a fork context so the frame is inherited copy-on-write rather
         # than serialized into each worker. Only the row index is sent through
-        # the task queue.
-        #
-        # NOTE: "fork" is load-bearing here -- it is what avoids serializing
+        # the task queue. "fork" is load-bearing: it is what avoids serializing
         # the frame and what allows `fn` to be unpicklable (e.g. a lambda).
-        # Python 3.12+ warns that forking a multi-threaded process may deadlock
-        # (tqdm's monitor thread alone is enough to trigger that warning), and
-        # the default start method changes in later versions. Moving to "spawn"
-        # would require pickling both the frame and `fn` on every call, so it is
-        # not a drop-in substitution; it would need a different design.
-        #
-        # This previously hand-rolled a shared counter, a pipe, a lock and a
-        # polling loop. That loop waited for exactly shape[0] results with no
-        # liveness check, so a worker dying (OOM kill, segfault, an
-        # unpicklable result or exception) hung the parent forever -- verified
-        # by execution before this change. ProcessPoolExecutor supervises its
-        # workers and raises BrokenProcessPool instead.
-        #
-        # `self` and `fn` are handed over via initargs, which the executor
-        # applies once per worker. Under fork those are inherited, not pickled,
-        # so the frame is not serialized and `fn` may be a lambda. Keeping the
-        # state per-worker (rather than in a module global in the parent) is
-        # what makes concurrent calls from different threads independent.
+        # Moving to "spawn" would require pickling both on every call.
+        _error_if_not_main_thread()
+
         ctx = multiprocessing.get_context("fork")
 
         # clear any cache -- works around a jupyter display bug
@@ -276,18 +299,28 @@ class DataFrameBase(pandas.DataFrame):
 
         indices = []
         records = []
-        with ProcessPoolExecutor(
-            max_workers=n_workers,
-            mp_context=ctx,
-            initializer=_init_parallel_apply_worker,
-            initargs=(self, fn),
-        ) as executor:
-            results = executor.map(_apply_fn, range(self.shape[0]))
-            for idx, record in tqdm(
-                results, total=self.shape[0], disable=(not verbose)
-            ):
-                indices.append(idx)
-                records.append(record)
+        # Keep tqdm from starting its monitor thread: it outlives the call and
+        # would make every later fork in this process a multi-threaded one.
+        # Setting the interval only prevents a NEW monitor, so existing ones
+        # have to be stopped too. tqdm restarts it on the next bar elsewhere.
+        prev_monitor_interval = tqdm.monitor_interval
+        try:
+            tqdm.monitor_interval = 0
+            _stop_tqdm_monitors()
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=ctx,
+                initializer=_init_parallel_apply_worker,
+                initargs=(self, fn),
+            ) as executor:
+                results = executor.map(_apply_fn, range(self.shape[0]))
+                for idx, record in tqdm(
+                    results, total=self.shape[0], disable=(not verbose)
+                ):
+                    indices.append(idx)
+                    records.append(record)
+        finally:
+            tqdm.monitor_interval = prev_monitor_interval
 
         return indices, records
 
@@ -324,8 +357,18 @@ class DataFrameBase(pandas.DataFrame):
         pickled (one holding a lambda or a lock, say) reaches the caller as a
         pickling error instead of itself, losing the original message.
 
-        Concurrent calls from different threads are independent. Calls may also
-        nest: `fn` may itself call ``parallel_apply``.
+        **Must be called from the main thread**, and raises ``RuntimeError``
+        if it is not. Forking workers from a non-main thread can deadlock them
+        permanently -- see ``_error_if_not_main_thread``. Use ``n_workers=1``
+        to run in-process from a thread.
+
+        That guard covers threads this function would otherwise create, not
+        threads that already exist. A lock held by *any* live thread at fork
+        time can still deadlock a worker, so a caller that has started its own
+        thread pool remains exposed. Avoiding that entirely would mean giving
+        up ``fork``, and with it lambda support and copy-on-write frames.
+
+        Calls may nest: `fn` may itself call ``parallel_apply``.
         """
         # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
         if n_workers == 1:
@@ -425,6 +468,12 @@ class RegionDataFrame(DataFrameBase):
     }
     _optional_bed_columns = ["id", "score", "strand"]
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
+    # These MUST stay lists, not tuples. `_required_columns` below concatenates
+    # them with `_critical_bed_columns`, and `reorder_columns` concatenates that
+    # result with another list -- `tuple + list` is a TypeError. Converting them
+    # to tuples "for consistency" with the immutable defaults on DataFrameBase
+    # broke 69 library and 25 background_model tests. The B8 mutable-default
+    # protection applies to the base class only, which has no such concatenation.
     _additional_required_columns = []
 
     @property
@@ -472,20 +521,23 @@ class RegionDataFrame(DataFrameBase):
                     f"{self} and {other} have different metadata for {metadata_key}: "
                     f"{self.__dict__[metadata_key]} and {other.__dict__[metadata_key]}"
                 )
-        return RegionDataFrame(pandas.concat([self, other]), ref=self.ref)
+        return type(self)(pandas.concat([self, other]), ref=self.ref)
 
-    @staticmethod
-    def concat(rdfs):
-        # copy the references so that I can pop
+    @classmethod
+    def concat(cls, rdfs):
         rdfs = list(rdfs)
-        merged_rdf = rdfs.pop().copy()
-        for rdf in rdfs:
+        if len(rdfs) == 0:
+            raise ValueError("concat requires at least one RegionDataFrame")
+        merged_rdf = rdfs[0].copy()
+        for rdf in rdfs[1:]:
             merged_rdf = merged_rdf & rdf
         return merged_rdf
 
-    def __eq__(self, other):
-        """
-        Checks if two region dataframes have identical regions, in the same order
+    def equals_rdf(self, other):
+        """Check if two region dataframes have identical regions, in the same order.
+
+        This was previously ``__eq__``, which broke the pandas contract
+        (element-wise comparison) and made instances unhashable.
         """
         if len(self) != len(other):
             return False
@@ -501,12 +553,11 @@ class RegionDataFrame(DataFrameBase):
     @classmethod
     def from_bed(cls, in_bed_file, ref):
         """Convenience function to load from a bed file."""
-        with open(in_bed_file) as infile:
-            first_line_fields = infile.readline().split()
-            if first_line_fields[0] in ["chrom", "chr", "contig"]:
-                has_header = True
-            else:
-                has_header = False
+        with open(in_bed_file) as fh:
+            if not fh.readline().strip():
+                return cls(
+                    pd.DataFrame(columns=cls._critical_bed_columns), ref=ref
+                )
 
         df = BedReader.load_dataframe(in_bed_file)
         df = df.rename(columns=dict(chrom="contig"))
@@ -594,13 +645,18 @@ class RegionDataFrame(DataFrameBase):
             else:
                 data = tuple(row.loc[data_cols].tolist())
             if expand_upstream != 0 or expand_downstream != 0:
-                assert row["strand"] in {"-", "+"}
-                if row["strand"] == "+":
+                strand = row["strand"]
+                if strand == "+":
                     start = row["start"] - expand_upstream
                     stop = row["stop"] + expand_downstream
-                elif row["strand"] == "-":
+                elif strand == "-":
                     start = row["start"] - expand_downstream
                     stop = row["stop"] + expand_upstream
+                else:
+                    # Unstranded: expand symmetrically in both directions
+                    expand = max(expand_upstream, expand_downstream)
+                    start = row["start"] - expand
+                    stop = row["stop"] + expand
             else:
                 start = row["start"]
                 stop = row["stop"]
@@ -629,63 +685,32 @@ class RegionDataFrame(DataFrameBase):
             contig = row["contig"]
             start = row["start"]
             stop = row["stop"]
-            return len(query_intervals[contig][start:stop]) > 0
+            tree = query_intervals.get(contig)
+            if tree is None:
+                return False
+            return len(tree[start:stop]) > 0
 
         return self.apply(is_olap, axis=1)
 
-    def attach_num_tss_overlaps(
-        self,
-        tss_intervals=None,
-        from_midpoint: bool = True,
-        expand_upstream: int = 4000,
-        expand_downstream: int = 0,
-        conservative: bool = False,
-    ) -> "RegionDataFrame":
-        """
-        :param tss_intervals: If provided, will skip re-querying the TSS intervals
-        :param from_midpoint: If true, regions are resized to 1bp so the overalps are calculated relative to the center.
-        # The following options are only used if tss_intervals is None for re-querying it.
-        :param expand_upstream: How far upstream of the TSS to look for an overlap
-        :param expand_downstream: How far downstream of the TSS to look for an overlap
-        :param conservative: If the conservative set should be used
-        :return:
-        """
-        if tss_intervals is None:
-            tss_intervals = self.get_tss_intervals(
-                expand_upstream=expand_upstream,
-                expand_downstream=expand_downstream,
-                conservative=conservative,
-            )
-        n_tss = np.zeros(len(self), dtype=int)
-
-        if from_midpoint:
-            rdf = self.resize_regions(1)
-        else:
-            rdf = self
-
-        for i, (_, row) in enumerate(rdf.iterrows()):
-            n_tss[i] = len(tss_intervals[row["contig"]][row["start"] : row["stop"]])
-        self.loc[:, "num_tss_overlaps"] = n_tss
-        return self
-
-    def center_on_summit(self):
+    def center_on_summit(self, inplace=False):
         """Center regions on summit, resize the regions, and then drop the summit column."""
         if "summit" not in self.columns:
             raise TypeError("Must contain a 'summit' column to center on the summit.")
 
-        region_lengths = (self.stop - self.start).copy()
+        rdf = self if inplace else self.copy()
+        region_lengths = (rdf.stop - rdf.start).copy()
 
         # check if the summit is within start
-        if ((self.summit >= self.start) & (self.summit <= self.stop)).all():
-            self["start"] = self.summit - region_lengths // 2
-        elif (self.summit <= self.region_lengths).all():
-            self["start"] = self.start + self.summit - region_lengths // 2
+        if ((rdf.summit >= rdf.start) & (rdf.summit < rdf.stop)).all():
+            rdf["start"] = rdf.summit - region_lengths // 2
+        elif (rdf.summit <= rdf.region_lengths).all():
+            rdf["start"] = rdf.start + rdf.summit - region_lengths // 2
         else:
             raise ValueError("summits must either be within the region interval or less than the length of the region.")
 
-        self["stop"] = self.start + region_lengths
+        rdf["stop"] = rdf.start + region_lengths
 
-        return self.drop(columns=["summit"])
+        return rdf.drop(columns=["summit"])
 
     def center_regions_on_tf_motif(
         self,
@@ -950,7 +975,7 @@ class RegionDataFrame(DataFrameBase):
         :return:
         """
         sort_cols = by
-        ascending = [False, False, False]
+        ascending = [True] * len(by)
         if best_by is not None:
             if best_by in self.columns:
                 sort_cols = sort_cols + [best_by]
@@ -1033,15 +1058,21 @@ class RegionDataFrame(DataFrameBase):
         merged_df.columns = ["contig", "start", "stop"] + list(merged_df.columns[3:])
         return type(self)(merged_df, ref=self.ref)
 
-    def intersect_with_rdf(self, other, sorted=False, rsuff="other", **intersect_kwargs):
-        """
-        Creates the intersection of RegionDataFrames
+    def join_on_overlap(self, other, sorted=False, rsuff="other", **intersect_kwargs):
+        """Join two RegionDataFrames on genomic overlap, returning whole intervals.
+
+        This is NOT a geometric intersection.  By default (wa=True, wb=True) it
+        returns the entire A interval for each A/B overlap, plus B's columns
+        suffixed with ``rsuff``.  For example, A=[1000,1500) overlapping
+        B=[1300,2100) returns A's full interval chr1:1000-1500, not the
+        geometric clip chr1:1300-1500.
+
         :param other: other RegionDataFrame
         :param sorted: RegionDataFrames are both sorted -- use Bedtools chromsweep algorithm
         :param rsuff: Suffix to append to other dataframe
         :param intersect_kwargs: Bedtools intersect kwargs, such as wa, wo, etc. For more info, consult
             https://daler.github.io/pybedtools/autodocs/pybedtools.bedtool.BedTool.intersect.html
-        :return: RegionDataFrame that is the intersection of two RegionDataFrames
+        :return: RegionDataFrame with one row per A/B overlap pair
         """
 
         def reordered_columns(rdf):
@@ -1083,14 +1114,26 @@ class RegionDataFrame(DataFrameBase):
             ).to_dataframe(names=names),
         )
         if len(intersection_rdf) == 0:
-            return pd.DataFrame(
-                columns=[c[: -(1 + len(rsuff))] for c in other_column_names]
+            return type(self)(
+                pd.DataFrame(columns=names).drop(columns=["index"]),
+                ref=self.ref,
             )
 
         intersection_rdf = intersection_rdf.set_index("index")
-        # intersection_rdf = intersection_rdf[other_column_names]
-        # intersection_rdf.columns = [c[: -(1 + len(rsuff))] for c in other_column_names]
-        return RegionDataFrame(intersection_rdf, ref=self.ref)
+        return type(self)(intersection_rdf, ref=self.ref)
+
+    def intersect_with_rdf(self, *args, **kwargs):
+        """Removed: this method never returned geometric intersections.
+
+        Use ``join_on_overlap`` instead — it has the same signature and
+        behaviour, but the name accurately reflects what it does: a join
+        of whole A intervals against B, keyed on overlap.
+        """
+        raise AttributeError(
+            "intersect_with_rdf has been renamed to join_on_overlap.  "
+            "The old name was misleading: the method never returned "
+            "geometric intersections.  Update your call site."
+        )
 
     def intersect_with_bed(
         self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
@@ -1103,7 +1146,7 @@ class RegionDataFrame(DataFrameBase):
         :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
         """
         other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
-        overlap_rdf = self.intersect_with_rdf(
+        overlap_rdf = self.join_on_overlap(
             other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
         )
 
@@ -1127,7 +1170,9 @@ class RegionDataFrame(DataFrameBase):
         :param new_ref: str of new reference name ("hg18", "hg19", "hg38")
         :param transfer_columns: transfer additional columns found in dataframe, such as id, etc
         :parm remove_non_liftoverable_regions: If true, don't return regions that don't have unique mappings.
-                If False, report un-liftoverer regions as (None, -1, -1, None)
+                If False, report un-liftoverable regions as (None, pd.NA, pd.NA, None).
+                Was (None, -1, -1, None); -1 is a legal-looking coordinate that
+                silently survives arithmetic, so pd.NA is used instead (I20).
         :return: lifted over RegionDataFrame of the same subclass as self
         """
         liftoverer = RegionLiftOver(self.ref, new_ref)
@@ -1139,9 +1184,13 @@ class RegionDataFrame(DataFrameBase):
             if lifted_coord is not None:
                 return lifted_coord
             else:
-                return (None, -1, -1, None)
+                return (None, pd.NA, pd.NA, None)
 
         res = [_liftover(record) for record in tqdm(self.itertuples(), total=self.nrow)]
+        if len(res) == 0:
+            rv = self.copy()
+            rv.ref = new_ref
+            return rv
         contigs, starts, stops, strands = zip(*res)
 
         rv = self.copy()
@@ -1238,18 +1287,12 @@ class RegionDataFrame(DataFrameBase):
         return bases_overlap_per_bed
 
     def drop_overlapping_regions(self, other_rdf):
-        """
-        Masks blacklist regions, returning a new dataframe with regions that don't overlap blacklist regions.
-        OPTIONALLY, also masks repeat regions. To do this, must provide a max repeat size allowed
-        """
-        assert (
-            self.ref == "hg38"
-        ), "Must use hg38 reference if excluding blacklist regions"
-        tmp = self.intersect_with_rdf(other_rdf)
+        """Return a copy with regions that overlap other_rdf removed."""
+        tmp = self.join_on_overlap(other_rdf)
         return self.loc[self.index.difference(tmp.index), :]
 
     def attach_blacklist_regions(self, bed_fname, rsuff="other"):
-        tmp = self.intersect_with_rdf(
+        tmp = self.join_on_overlap(
             RegionDataFrame.from_bed(bed_fname, ref=self.ref), rsuff=rsuff
         )
         if len(tmp) == 0:
@@ -1261,7 +1304,7 @@ class RegionDataFrame(DataFrameBase):
         # it here attached each query region to itself instead of the
         # overlapping blacklist interval -- silently, with no error. The
         # blacklist coordinates live in the `_{rsuff}`-suffixed columns that
-        # intersect_with_rdf produces.
+        # join_on_overlap produces.
         def _blacklist_regions_for(group):
             return [
                 Region(
@@ -1394,7 +1437,7 @@ class RegionDataFrame(DataFrameBase):
 
             counts_vect = numpy.zeros(len(self))
             if intersect_df.shape[0] == 0:
-                return numpy.array([])
+                return counts_vect
             for peak, group in intersect_df.groupby("id_2"):
                 counts_vect[peak2idx[peak]] = len(group)
             return counts_vect
@@ -1473,34 +1516,41 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        if not inplace:
-            rdf = self.copy()
-        else:
-            rdf = self
+        """Resize region boundaries by `left`/`right`.
 
+        Note: `inplace` is ignored when `discard_invalid_resizes=True`. That
+        path has to decide which rows survive *before* writing coordinates, so
+        it always returns a filtered copy and leaves `self` untouched. Writing
+        first and filtering afterwards is exactly what corrupted `self` with
+        invalid (including negative) coordinates (R8).
+        """
         if strand_aware:
             neg_mask = self.strand == "-"
 
-        new_starts = rdf.start + left
+        new_starts = self.start + left
         if strand_aware:
-            new_starts[neg_mask] = rdf.loc[neg_mask, "start"] - right
-        # assert (new_starts > 0).all(), pd.DataFrame(dict(right=right, length=self.region_lengths, total=self.region_lengths+right)).total.value_counts()
+            new_starts[neg_mask] = self.loc[neg_mask, "start"] - right
 
-        new_stops = rdf.stop + right
+        new_stops = self.stop + right
         if strand_aware:
-            new_stops[neg_mask] = rdf.loc[neg_mask, "stop"] - left
+            new_stops[neg_mask] = self.loc[neg_mask, "stop"] - left
 
-        valid_regions_mask = self._valid_regions_mask(
-            new_starts, new_stops, discard_buffer_bp=0
-        )
-
-        rdf["start"] = new_starts
-        rdf["stop"] = new_stops
         if discard_invalid_resizes:
-            rdf = rdf.loc[valid_regions_mask, :]
+            valid_regions_mask = self._valid_regions_mask(
+                new_starts, new_stops, discard_buffer_bp=0
+            )
+            rdf = self.loc[valid_regions_mask, :].copy()
+            rdf["start"] = new_starts[valid_regions_mask]
+            rdf["stop"] = new_stops[valid_regions_mask]
         else:
             self._error_on_invalid_new_starts(new_starts)
             self._error_on_invalid_new_stops(self, new_stops)
+            if inplace:
+                rdf = self
+            else:
+                rdf = self.copy()
+            rdf["start"] = new_starts
+            rdf["stop"] = new_stops
 
         return rdf
 
@@ -1530,6 +1580,11 @@ class RegionDataFrame(DataFrameBase):
     ):
         assert (np.array(left_amt) >= 0).all()
         assert (np.array(right_amt) >= 0).all()
+        total_truncation = np.array(left_amt) + np.array(right_amt)
+        if (total_truncation >= self.region_lengths).any():
+            raise ValueError(
+                "truncation amounts exceed region length for at least one region"
+            )
         return self._resize_region_boundaries(
             left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes
         )
@@ -1569,9 +1624,11 @@ class RegionDataFrame(DataFrameBase):
             rdf = rdf.loc[ok, :]
             new_start = new_start[ok]
             new_stop = new_stop[ok]
-            logger.warning(
-                f"Discarded {np.sum(~ok)} of {len(ok)} regions due to invalid resize."
-            )
+            n_discarded = np.sum(~ok)
+            if n_discarded > 0:
+                logger.warning(
+                    f"Discarded {n_discarded} of {len(ok)} regions due to invalid resize."
+                )
 
         self._error_on_invalid_new_starts(new_start)
         self._error_on_invalid_new_stops(rdf, new_stop)
@@ -1602,12 +1659,44 @@ class RegionDataFrame(DataFrameBase):
             if mode == "full":
                 return region.resize(int(stride * math.ceil(region.length / stride)))
             elif mode == "valid":
-                return region.resize(int(stride * math.floor(region.length / stride)))
+                if region.length < window_size:
+                    raise ValueError(
+                        f"region {region.chrom}:{region.start}-{region.stop} "
+                        f"(length {region.length}) is shorter than window_size "
+                        f"({window_size}); no valid windows can be produced"
+                    )
+                n_windows = (region.length - window_size) // stride + 1
+                # `extent` is the span the windows actually occupy once the
+                # widening step below has extended each one rightward by
+                # (window_size - stride). By construction extent <= length, so
+                # centring it keeps every window inside the original region --
+                # which is what 'valid' mode promises and previously broke.
+                extent = (n_windows - 1) * stride + window_size
+                # Centred, NOT start-anchored. The remainder must be dropped
+                # equally from both ends, because callers centre regions on a
+                # feature first (center_on_summit().resize_regions(...)) and
+                # then bin. Start-anchoring drops the whole remainder off the
+                # right, shifting every window and silently decentring the
+                # profile relative to the feature. When stride == window_size
+                # (the default, and what every production caller uses) this
+                # reduces to the original centred resize for even window_size.
+                # For ODD window_size the two can differ by 1bp, because
+                # (a - b) // 2 != a // 2 - b // 2 when b is odd -- this form
+                # floors the combined remainder, Region.resize() floors each
+                # term separately. No caller anywhere uses an odd window_size
+                # (checked across 4 repos: 64, 8 and 10000 in .py, none in any
+                # notebook), so nothing computed is affected today.
+                offset = (region.length - extent) // 2
+                tiled_start = region.start + offset
+                return Region(
+                    region.chrom, tiled_start, tiled_start + n_windows * stride,
+                    region.strand, region.ref, region.data,
+                )
             elif mode == "exact":
                 assert window_size % stride == 0
                 if region.length % stride != 0:
                     raise ValueError(
-                        "region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
+                        f"region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
                     )
                 return region
             else:
@@ -2314,5 +2403,5 @@ def intersect_region_dataframes(region_dataframes, sort=False):
         region_dataframes = [rdf.sort() for rdf in region_dataframes]
     intersected_rdf = region_dataframes[0]
     for rdf in region_dataframes[1:]:
-        intersected_rdf = intersected_rdf.intersect_with_rdf(rdf, sorted=sort)
+        intersected_rdf = intersected_rdf.join_on_overlap(rdf, sorted=sort)
     return intersected_rdf

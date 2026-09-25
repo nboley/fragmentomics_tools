@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from fragmentomics_tools import FragmentArray, RegionFragmentArray
+from fragmentomics_tools.fragment_array.fragment_array import merge_fragment_arrays
 from fragmentomics_tools.region import Region
 
 
@@ -412,3 +413,99 @@ class TestGcChainedOperations:
         # Then reverse
         reversed_fa = filtered.reverse_strand()
         np.testing.assert_array_almost_equal(reversed_fa.gc, [0.4, 0.2])
+
+
+class TestGcMergeFragmentArrays:
+    """merge_fragment_arrays is the N-way helper the pileup/cache builders use.
+
+    The original gc fix covered the pairwise __add__ paths but not this one, so
+    every merged array silently came back with gc=None -- which blocked all
+    GC-weighted work downstream.
+    """
+
+    @staticmethod
+    def _rfa(contig, start, strand, gc_values):
+        return RegionFragmentArray(
+            starts_0=np.array([10, 20], dtype=np.int32),
+            stops_0=np.array([60, 90], dtype=np.int32),
+            region=Region(contig, start, start + 1000, strand),
+            max_frag_len=511,
+            gc=np.array(gc_values, dtype=np.float64),
+        )
+
+    def test_merge_concatenates_gc_in_input_order(self):
+        """Value-level, not length-level: a shuffled result must fail."""
+        ars = [
+            self._rfa("chr1", 0, "+", [0.1, 0.2]),
+            self._rfa("chr1", 1000, "+", [0.3, 0.4]),
+            self._rfa("chr1", 2000, "+", [0.5, 0.6]),
+        ]
+        merged = merge_fragment_arrays(ars, make_data_direction_match_strand=False)
+
+        assert merged.gc is not None, "gc dropped by merge_fragment_arrays"
+        assert len(merged.gc) == merged.n_fragments
+        np.testing.assert_array_almost_equal(
+            merged.gc, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+        )
+
+    def test_merge_with_any_gc_none_yields_none(self):
+        """Same rule as the pairwise paths: partial gc must never be produced."""
+        with_gc = self._rfa("chr1", 0, "+", [0.1, 0.2])
+        without = RegionFragmentArray(
+            starts_0=np.array([10, 20], dtype=np.int32),
+            stops_0=np.array([60, 90], dtype=np.int32),
+            region=Region("chr1", 1000, 2000, "+"),
+            max_frag_len=511,
+            gc=None,
+        )
+        merged = merge_fragment_arrays(
+            [with_gc, without], make_data_direction_match_strand=False
+        )
+        assert merged.gc is None
+        assert merged.n_fragments == 4
+
+    def test_merge_gc_flipped(self):
+        """The flip path -- the one a length-only assertion cannot catch.
+
+        With make_data_direction_match_strand=True, minus-strand members are
+        reversed BEFORE concatenation. Their gc must be reversed with them, so
+        the minus member contributes its values backwards while the plus member
+        does not. Both orderings have the same length, so only a value-level
+        assertion distinguishes them.
+        """
+        plus = self._rfa("chr1", 0, "+", [0.1, 0.2])
+        minus = self._rfa("chr1", 1000, "-", [0.3, 0.4])
+
+        merged = merge_fragment_arrays(
+            [plus, minus], make_data_direction_match_strand=True
+        )
+
+        assert merged.gc is not None
+        assert len(merged.gc) == merged.n_fragments
+
+        # built from the post-flip members, so this is the ground truth
+        expected = np.concatenate(
+            [
+                plus.make_data_direction_match_strand().gc,
+                minus.make_data_direction_match_strand().gc,
+            ]
+        )
+        np.testing.assert_array_almost_equal(merged.gc, expected)
+
+        # and prove the flip actually reversed something, so this test would
+        # fail if gc were concatenated pre-flip instead
+        assert list(minus.make_data_direction_match_strand().gc) == [0.4, 0.3]
+        np.testing.assert_array_almost_equal(merged.gc, [0.1, 0.2, 0.4, 0.3])
+
+    def test_merge_many_arrays(self):
+        """The reported case: many regions merged at once."""
+        ars = [
+            self._rfa("chr1", i * 1000, "+", [i / 100.0, (i + 0.5) / 100.0])
+            for i in range(40)
+        ]
+        merged = merge_fragment_arrays(ars, make_data_direction_match_strand=False)
+
+        assert merged.gc is not None
+        assert len(merged.gc) == merged.n_fragments == 80
+        assert merged.gc[0] == pytest.approx(0.0)
+        assert merged.gc[-1] == pytest.approx(0.395)

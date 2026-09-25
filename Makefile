@@ -8,7 +8,13 @@ IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
 IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 
-.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help
+.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test
+
+# Wall-clock bound on a test run. This is a hang detector, not a perf budget:
+# the library suite finishes in well under a minute. Override for slow hosts
+# or a bigger suite: make test TEST_TIMEOUT=7200
+TEST_TIMEOUT ?= 3600
+PYTEST_ARGS ?= test/ -q
 
 help:
 	@echo "Usage: make [target]"
@@ -25,6 +31,7 @@ help:
 	@echo "  docker        Build and push Docker image"
 	@echo "  tag           Create and push git tag v$$VERSION"
 	@echo "  all           Build/upload conda, tag repo, build/push docker"
+	@echo "  test          Run the test suite under a $(TEST_TIMEOUT)s timeout"
 	@echo "  clean         Remove build artifacts"
 	@echo ""
 	@echo "Configuration:"
@@ -163,6 +170,26 @@ docker-push:
 	docker push $(IMAGE_TAG)
 	docker push $(IMAGE_LATEST)
 	@echo "✓ Docker image pushed: $(IMAGE_TAG)"
+
+# Run the tests under a wall-clock bound.
+#
+# Always run the suite this way rather than invoking pytest bare. This suite
+# can wedge rather than fail -- a fork deadlock in parallel_apply once ran for
+# 12 hours before anyone looked, producing no output at all, because a bare
+# `pytest -q | tail` never reaches EOF when the process never exits.
+# SIGKILL rather than SIGTERM: a process stuck in an uninterruptible futex
+# wait will not act on a catchable signal.
+test:
+	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest $(PYTEST_ARGS); \
+	rc=$$?; \
+	if [ $$rc -eq 137 ]; then \
+		echo ""; \
+		echo "❌ Suite KILLED after $(TEST_TIMEOUT)s. It HUNG -- it did not fail."; \
+		echo "   A hang is a finding, not a flake. To find out where:"; \
+		echo "     py-spy dump --pid <the pytest pid>"; \
+		echo "   Check child processes too; a stuck fork child shows 0s CPU."; \
+	fi; \
+	exit $$rc
 
 # Clean build artifacts
 clean:
