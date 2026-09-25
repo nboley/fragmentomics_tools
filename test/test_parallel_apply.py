@@ -265,22 +265,25 @@ class TestCallerStateIsNotMutated:
 
 
 class TestConcurrentCallers:
-    """Two callers must not see each other's data.
+    """Callers must not see each other's data, and must not fork from threads.
 
     A previous implementation stashed the frame and callable in a module
     global in the parent process. Concurrent calls from threads overwrote that
     slot, and workers silently computed against whichever frame happened to be
-    installed -- returning confident, wrong numbers rather than failing. These
-    tests fail against that version.
+    installed -- returning confident, wrong numbers rather than failing.
+    State now lives per-worker, so callers are isolated.
+
+    Forking from a thread is refused outright: it can deadlock the workers
+    permanently, and these tests used to hang the whole suite rather than
+    fail.
     """
 
-    def test_threads_do_not_corrupt_each_other(self):
-        import threading
-
-        results = {}
-        errors = {}
-
-        def run(tid):
+    def test_worker_state_is_per_call_not_global(self):
+        # Two sequential calls with different frames must not bleed into each
+        # other. Against the module-global version the second call's workers
+        # could still see the first call's frame.
+        outs = []
+        for tid in range(3):
             rdf = RegionDataFrame(
                 pd.DataFrame(
                     {
@@ -291,26 +294,58 @@ class TestConcurrentCallers:
                 ),
                 ref="hg38",
             )
-            try:
-                out = rdf.parallel_apply(_identity_start, n_workers=2,
-                                         verbose=False)
-                results[tid] = list(out["v"])
-            except Exception as exc:  # pragma: no cover - diagnostic only
-                errors[tid] = f"{type(exc).__name__}: {exc}"
-
-        threads = [threading.Thread(target=run, args=(t,)) for t in range(3)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert errors == {}, f"threads raised: {errors}"
+            outs.append(list(rdf.parallel_apply(_identity_start, n_workers=2,
+                                                verbose=False)["v"]))
         for tid in range(3):
-            expected = [tid * 1000 + i * 10 for i in range(6)]
-            assert results[tid] == expected, (
-                f"thread {tid} got another thread's data: "
-                f"{results[tid]} != {expected}"
-            )
+            assert outs[tid] == [tid * 1000 + i * 10 for i in range(6)]
+
+    def test_calling_from_a_thread_raises(self):
+        # Must fail fast rather than hang. Forking from a non-main thread can
+        # leave a worker blocked forever on a lock no living thread holds.
+        import threading
+
+        captured = {}
+
+        def run():
+            rdf = make_rdf(4)
+            try:
+                rdf.parallel_apply(_identity_start, n_workers=2, verbose=False)
+                captured["result"] = "returned normally"
+            except BaseException as exc:
+                captured["exc"] = exc
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(30)
+
+        assert not t.is_alive(), "parallel_apply hung when called from a thread"
+        assert "exc" in captured, f"expected a raise, got {captured!r}"
+        assert isinstance(captured["exc"], RuntimeError)
+        assert "main thread" in str(captured["exc"])
+
+    def test_n_workers_1_is_allowed_from_a_thread(self):
+        # The in-process path never forks, so the restriction must not apply.
+        import threading
+
+        captured = {}
+
+        def run():
+            try:
+                captured["out"] = list(
+                    make_rdf(4).parallel_apply(
+                        _identity_start, n_workers=1, verbose=False
+                    )["v"]
+                )
+            except BaseException as exc:  # pragma: no cover - diagnostic
+                captured["exc"] = exc
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join(30)
+
+        assert not t.is_alive()
+        assert "exc" not in captured, f"unexpectedly raised: {captured.get('exc')}"
+        assert captured["out"] == [0, 10, 20, 30]
 
     def test_nested_calls_work(self):
         # a callable that itself runs parallel_apply, from inside a worker.

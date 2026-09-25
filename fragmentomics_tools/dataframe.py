@@ -26,6 +26,7 @@ tqdm.pandas()
 from joblib import delayed, Parallel
 
 import multiprocessing
+import threading
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 import traceback
@@ -70,18 +71,15 @@ DEFAULT_MIN_MAPQ = 10
 DEFAULT_MAX_FRAG_LEN = 511
 
 
-# Per-worker state. This global is only ever written inside a worker process,
-# by _init_parallel_apply_worker, which the executor runs once per worker at
-# startup. It is deliberately NOT set in the parent: doing so shares one
-# mutable slot across every concurrent caller, and two threads calling
-# parallel_apply at once then silently compute each other's data. Each
-# executor forks its own workers, so per-worker state keeps concurrent calls
-# isolated.
+# Per-worker state, written only inside a worker by
+# _init_parallel_apply_worker. It is deliberately NOT set in the parent: one
+# mutable slot shared by nested calls would have an inner call overwrite the
+# outer one's frame, producing confident wrong numbers rather than an error.
 #
-# The frame and callable reach the workers through the executor's `initargs`
-# rather than through the task queue. Under a "fork" context initargs are
-# inherited rather than pickled, so the DataFrame is never serialized and `fn`
-# may be a lambda. Sending them per task would pickle both on every row.
+# The frame and callable reach workers via the executor's `initargs`, not the
+# task queue. Under "fork" those are inherited rather than pickled, so the
+# DataFrame is never serialized and `fn` may be a lambda; sending them per
+# task would pickle both on every row.
 _PARALLEL_APPLY_STATE = {}
 
 
@@ -96,6 +94,28 @@ def _apply_fn(idx):
     df = _PARALLEL_APPLY_STATE["df"]
     fn = _PARALLEL_APPLY_STATE["fn"]
     return idx, fn(df.iloc[idx])
+
+
+def _error_if_not_main_thread():
+    """Refuse to fork worker processes from anything but the main thread.
+
+    `concurrent.futures.process` keeps executor bookkeeping in module-level
+    state whose entries carry locks. Forking while another thread holds one
+    gives the child a lock nothing can release; it then hangs forever at
+    interpreter shutdown and the parent waits on it forever. Failing loudly
+    beats hanging.
+
+    Nesting is unaffected -- a forked child's surviving thread is
+    re-designated as that process's main thread.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError(
+            "parallel_apply() must be called from the main thread; it was "
+            f"called from {threading.current_thread().name!r}. Forking worker "
+            "processes from a non-main thread can deadlock the workers. Run "
+            "the calls sequentially from the main thread, or pass n_workers=1 "
+            "to stay in-process."
+        )
 
 
 def get_indices_of_balanced_labels(labels, random_state=None):
@@ -245,28 +265,11 @@ class DataFrameBase(pandas.DataFrame):
     def _parallel_apply(self, fn, n_workers, verbose):
         # Use a fork context so the frame is inherited copy-on-write rather
         # than serialized into each worker. Only the row index is sent through
-        # the task queue.
-        #
-        # NOTE: "fork" is load-bearing here -- it is what avoids serializing
+        # the task queue. "fork" is load-bearing: it is what avoids serializing
         # the frame and what allows `fn` to be unpicklable (e.g. a lambda).
-        # Python 3.12+ warns that forking a multi-threaded process may deadlock
-        # (tqdm's monitor thread alone is enough to trigger that warning), and
-        # the default start method changes in later versions. Moving to "spawn"
-        # would require pickling both the frame and `fn` on every call, so it is
-        # not a drop-in substitution; it would need a different design.
-        #
-        # This previously hand-rolled a shared counter, a pipe, a lock and a
-        # polling loop. That loop waited for exactly shape[0] results with no
-        # liveness check, so a worker dying (OOM kill, segfault, an
-        # unpicklable result or exception) hung the parent forever -- verified
-        # by execution before this change. ProcessPoolExecutor supervises its
-        # workers and raises BrokenProcessPool instead.
-        #
-        # `self` and `fn` are handed over via initargs, which the executor
-        # applies once per worker. Under fork those are inherited, not pickled,
-        # so the frame is not serialized and `fn` may be a lambda. Keeping the
-        # state per-worker (rather than in a module global in the parent) is
-        # what makes concurrent calls from different threads independent.
+        # Moving to "spawn" would require pickling both on every call.
+        _error_if_not_main_thread()
+
         ctx = multiprocessing.get_context("fork")
 
         # clear any cache -- works around a jupyter display bug
@@ -274,18 +277,30 @@ class DataFrameBase(pandas.DataFrame):
 
         indices = []
         records = []
-        with ProcessPoolExecutor(
-            max_workers=n_workers,
-            mp_context=ctx,
-            initializer=_init_parallel_apply_worker,
-            initargs=(self, fn),
-        ) as executor:
-            results = executor.map(_apply_fn, range(self.shape[0]))
-            for idx, record in tqdm(
-                results, total=self.shape[0], disable=(not verbose)
-            ):
-                indices.append(idx)
-                records.append(record)
+        # Keep tqdm from starting its monitor thread: it outlives the call and
+        # would make every later fork in this process a multi-threaded one.
+        # Setting the interval only prevents a NEW monitor, so an existing one
+        # has to be stopped too. tqdm restarts it on the next bar elsewhere.
+        prev_monitor_interval = tqdm.monitor_interval
+        tqdm.monitor_interval = 0
+        if tqdm.monitor is not None:
+            tqdm.monitor.exit()
+            tqdm.monitor = None
+        try:
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=ctx,
+                initializer=_init_parallel_apply_worker,
+                initargs=(self, fn),
+            ) as executor:
+                results = executor.map(_apply_fn, range(self.shape[0]))
+                for idx, record in tqdm(
+                    results, total=self.shape[0], disable=(not verbose)
+                ):
+                    indices.append(idx)
+                    records.append(record)
+        finally:
+            tqdm.monitor_interval = prev_monitor_interval
 
         return indices, records
 
@@ -322,40 +337,12 @@ class DataFrameBase(pandas.DataFrame):
         pickled (one holding a lambda or a lock, say) reaches the caller as a
         pickling error instead of itself, losing the original message.
 
-        Concurrent calls from different threads see independent DATA -- each
-        call's workers get their own frame and `fn`, so callers cannot
-        overwrite each other's inputs. That is a statement about correctness,
-        NOT about liveness.
+        **Must be called from the main thread**, and raises ``RuntimeError``
+        if it is not. Forking workers from a non-main thread can deadlock them
+        permanently -- see ``_error_if_not_main_thread``. Use ``n_workers=1``
+        to run in-process from a thread.
 
-        **Calling this concurrently from several threads can deadlock.**
-        Workers are created with ``fork``. ``fork`` duplicates the memory
-        image but keeps only the calling thread, so any lock another thread
-        held at that instant stays locked forever in the child, with no thread
-        left to release it. Observed: two workers stuck at 0s CPU while the
-        parent blocked in ``ProcessPoolExecutor.shutdown``, hanging a test run
-        for 12 hours.
-
-        The lock is CPython's own, captured live from a hung run.
-        ``concurrent.futures.process`` keeps a module-level ``_threads_wakeups``
-        dict whose entries carry locks. Forking from inside ``submit`` while a
-        sibling thread holds one gives the child a dict describing threads
-        that do not exist in it; at interpreter shutdown ``_python_exit()``
-        walks that dict calling ``wakeup()``, blocks on the orphaned lock, and
-        never exits. The parent then waits forever on that child. CPython's
-        own source marks the call ``# not protected by
-        ProcessPoolExecutor._shutdown_lock``.
-
-        It is a race -- the lock has to be held at the exact moment of the
-        fork -- so it fires rarely and unpredictably. The same commit hung for
-        12 hours, then passed in 82 seconds on re-run.
-
-        Things that are NOT the cause, each checked because each is the
-        obvious suspect: the allocator (modern glibc reinitialises its arena
-        locks across ``fork``; 60 forks under deliberate malloc contention,
-        zero hangs), and native BLAS worker threads (120 forks with the pool
-        idle and actively computing, zero hangs).
-
-        Calls may also nest: `fn` may itself call ``parallel_apply``.
+        Calls may nest: `fn` may itself call ``parallel_apply``.
         """
         # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
         if n_workers == 1:
