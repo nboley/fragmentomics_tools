@@ -34,25 +34,16 @@ class MockFragmentsH5:
         self._closed = True
 
 
-# ── S5: get_sample_count_bounds names the median correctly ───────────
-
-class TestS5MedianRename:
-    def test_source_says_median_not_mean(self):
-        """The .rename() label inside get_sample_count_bounds must say
-        'median_fragment_counts', not 'mean_fragment_counts'.
-
-        The name lives on an intermediate Series and does not surface in
-        the returned DataFrame, so the only reliable discriminator is the
-        source text itself.
-        """
-        import inspect
-        src = inspect.getsource(SampleAndRegionDataFrame.get_sample_count_bounds)
-        assert "median_fragment_counts" in src, (
-            "get_sample_count_bounds still labels the median as 'mean_fragment_counts'"
-        )
-        assert "mean_fragment_counts" not in src, (
-            "get_sample_count_bounds still contains the misleading name 'mean_fragment_counts'"
-        )
+# S5 (get_sample_count_bounds labelling a median "mean") has no test here,
+# deliberately. Tracing it showed the name lives only on an intermediate
+# Series: it never reaches the returned DataFrame, which carries just
+# min_fragments and max_fragments. So the rename has no observable effect
+# and nothing a test can assert. The only discriminator would be grepping
+# the source, which is a lint rule wearing a test's clothes -- it breaks on
+# any reformat while guarding nothing a caller can see.
+#
+# This also narrows the original finding, which claimed the name misled
+# "every downstream consumer of the column". There is no such consumer.
 
 
 # ── S4: FlDist.init_from_sdf raises on duplicate sample_ids ─────────
