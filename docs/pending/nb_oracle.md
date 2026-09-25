@@ -387,8 +387,26 @@ objective is bitwise deterministic) — makes the specific value meaningless.
 The JSON field is `profiled_nuisance_r` with `not_identified: true`.
 
 The `noise_floor` field in `oracle_nb_v2.json` reports `plateau_loss_span`
-(scoped to the actual plateau r∈[15, 3000], excluding the rising tail above
-r~3000 which is genuine signal) and `max_adjacent_non_monotonicity`.
+and `max_adjacent_non_monotonicity`, both computed over a fixed analysis
+window r∈[15, 3000].
+
+That window is a reporting convention, not a measured boundary, and it is
+deliberately *not* the same thing as `profiled_nuisance_r.plateau_interval`,
+which is data-driven (`loss < min + 1e-3`) and returns r∈[4.1, 3506.3]. An
+earlier version of this section justified the narrower window as "excluding
+the rising tail above r~3000, which is genuine signal". **That justification
+was wrong.** The point just above the boundary, r=3506.3, has loss 4.026652 —
+*lower* than the highest point inside the window (4.027178 at r=2458.8). The
+tail does not rise monotonically out of the plateau; it dips back down first.
+Only r=5000 (4.027832) rises clear of the plateau threshold, and both the
+fixed window and the data-driven interval already exclude it.
+
+The choice of window does not affect the published statistic. Measured over
+both: `plateau_loss_span` is 8.2619e-4 either way (16 points in the fixed
+window, 22 in the data-driven interval), because the minimum (r=1096) and the
+maximum (r=2458.8) both fall inside the narrower one. The window is therefore
+safe to keep, but it should be read as an arbitrary convention rather than as
+a claim about where the plateau ends.
 
 The defensible conclusion is: **the offset conditioning absorbs the
 overdispersion above r≈15–20, and the loss plateau is flat, so r is not
@@ -423,8 +441,11 @@ Applied in the second pass to fix misstatements in the initial oracle_nb_v2.json
 - **`noise_floor._note`**: no longer calls deterministic structure "numerical
   noise". The objective is bitwise deterministic; what varies across the plateau
   is reproducible structure in the loss computation. The statistic is rescoped
-  from r>20 (which included the rising tail) to r∈[15, 3000] (the actual
-  plateau) and renamed from `plateau_non_monotonicity` to `plateau_loss_span`.
+  from r>20 to a fixed analysis window r∈[15, 3000], and renamed from
+  `plateau_non_monotonicity` to `plateau_loss_span`. See §9.1 for why that
+  window is a reporting convention rather than a measured plateau boundary —
+  an earlier draft described it as excluding a "rising tail", which the sweep
+  data contradicts.
 
 - **Sweep raggedness gate split**: the sweep's 11 sign changes (vs threshold 5)
   previously set `sanity_gate_all_pass = false`, making the overall gate
