@@ -347,6 +347,53 @@ class TestConcurrentCallers:
         assert "exc" not in captured, f"unexpectedly raised: {captured.get('exc')}"
         assert captured["out"] == [0, 10, 20, 30]
 
+    def test_monitor_thread_is_gone_after_the_call(self):
+        # The monitor outlives the bar that started it, so without this every
+        # later call in the process forks a multi-threaded parent.
+        import threading
+
+        from tqdm import tqdm as std_tqdm
+
+        list(std_tqdm(range(2), disable=True))
+        assert any(t.name == "tqdm_monitor" for t in threading.enumerate()), (
+            "expected a monitor to exist before the call"
+        )
+
+        make_rdf(4).parallel_apply(_identity_start, n_workers=2, verbose=False)
+
+        assert not any(t.name == "tqdm_monitor" for t in threading.enumerate())
+        assert std_tqdm.monitor_interval != 0, "monitor_interval not restored"
+
+    def test_monitor_on_a_tqdm_SUBCLASS_is_also_stopped(self):
+        # tqdm stores the monitor on the class that built the bar, so
+        # tqdm.auto / tqdm.notebook keep their own. Checking only the base
+        # class misses the notebook case, which is the common one.
+        import threading
+
+        from tqdm import tqdm as std_tqdm
+
+        class _SubBar(std_tqdm):
+            pass
+
+        try:
+            list(_SubBar(range(2), disable=True))
+            assert _SubBar.__dict__.get("monitor") is not None
+            assert std_tqdm.__dict__.get("monitor") is None, (
+                "precondition: the base class must NOT hold the monitor"
+            )
+
+            make_rdf(4).parallel_apply(_identity_start, n_workers=2,
+                                       verbose=False)
+
+            assert not any(
+                t.name == "tqdm_monitor" for t in threading.enumerate()
+            ), "a subclass's monitor thread survived the call"
+            assert _SubBar.__dict__.get("monitor") is None
+        finally:
+            if _SubBar.__dict__.get("monitor") is not None:
+                _SubBar.monitor.exit()
+                _SubBar.monitor = None
+
     def test_nested_calls_work(self):
         # a callable that itself runs parallel_apply, from inside a worker.
         # Per-worker state makes this safe; a parent-side global did not.

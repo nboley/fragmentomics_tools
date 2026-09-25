@@ -96,6 +96,28 @@ def _apply_fn(idx):
     return idx, fn(df.iloc[idx])
 
 
+def _stop_tqdm_monitors():
+    """Stop every live tqdm monitor thread, on subclasses too.
+
+    tqdm starts its monitor in ``__new__`` and stores it on the *actual*
+    class, so `tqdm.auto` and `tqdm.notebook` keep their own rather than
+    sharing `tqdm.std.tqdm`'s. Checking only the base class therefore misses
+    the notebook case, which is the common one. Walk the subclass tree.
+    """
+    seen = set()
+    pending = [tqdm]
+    while pending:
+        cls = pending.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        pending.extend(cls.__subclasses__())
+        monitor = cls.__dict__.get("monitor")
+        if monitor is not None:
+            monitor.exit()
+            cls.monitor = None
+
+
 def _error_if_not_main_thread():
     """Refuse to fork worker processes from anything but the main thread.
 
@@ -279,14 +301,12 @@ class DataFrameBase(pandas.DataFrame):
         records = []
         # Keep tqdm from starting its monitor thread: it outlives the call and
         # would make every later fork in this process a multi-threaded one.
-        # Setting the interval only prevents a NEW monitor, so an existing one
-        # has to be stopped too. tqdm restarts it on the next bar elsewhere.
+        # Setting the interval only prevents a NEW monitor, so existing ones
+        # have to be stopped too. tqdm restarts it on the next bar elsewhere.
         prev_monitor_interval = tqdm.monitor_interval
-        tqdm.monitor_interval = 0
-        if tqdm.monitor is not None:
-            tqdm.monitor.exit()
-            tqdm.monitor = None
         try:
+            tqdm.monitor_interval = 0
+            _stop_tqdm_monitors()
             with ProcessPoolExecutor(
                 max_workers=n_workers,
                 mp_context=ctx,
@@ -341,6 +361,12 @@ class DataFrameBase(pandas.DataFrame):
         if it is not. Forking workers from a non-main thread can deadlock them
         permanently -- see ``_error_if_not_main_thread``. Use ``n_workers=1``
         to run in-process from a thread.
+
+        That guard covers threads this function would otherwise create, not
+        threads that already exist. A lock held by *any* live thread at fork
+        time can still deadlock a worker, so a caller that has started its own
+        thread pool remains exposed. Avoiding that entirely would mean giving
+        up ``fork``, and with it lambda support and copy-on-write frames.
 
         Calls may nest: `fn` may itself call ``parallel_apply``.
         """
