@@ -620,3 +620,37 @@ class TestBinRegionsIntoWindows:
         assert len(result) == expected_n
         assert result["start"].min() >= 1000, "window starts before region"
         assert result["stop"].max() <= 2000, "window extends past region"
+
+    @pytest.mark.parametrize("region_len,window_size,expected", [
+        # 1000 / 300 -> 3 windows of 300 = 900; remainder 100 split 50/50
+        (1000, 300, [(1050, 1350), (1350, 1650), (1650, 1950)]),
+        # 999 / 100 -> 9 windows of 100 = 900; remainder 99 -> floor(99/2) = 49
+        (999, 100, [(1049, 1149), (1149, 1249), (1249, 1349), (1349, 1449),
+                    (1449, 1549), (1549, 1649), (1649, 1749), (1749, 1849),
+                    (1849, 1949)]),
+        # exact multiple: no remainder, so no shift
+        (1000, 250, [(1000, 1250), (1250, 1500), (1500, 1750), (1750, 2000)]),
+    ])
+    def test_valid_mode_default_stride_stays_centred(
+        self, region_len, window_size, expected
+    ):
+        """R4 guard: fixing the overshoot must NOT re-anchor the window grid.
+
+        When the region is not an exact multiple of window_size, the remainder
+        is dropped equally from BOTH ends, so the window grid stays centred on
+        the region. Start-anchoring instead drops the whole remainder off the
+        right, shifting every window -- which silently decentres meta-profiles
+        built as center_on_summit().resize_regions(N).bin_regions_into_windows().
+
+        These are exact coordinates, deliberately. Asserting only window counts
+        and in-bounds-ness passes under BOTH anchorings and cannot catch this.
+        """
+        rdf = RegionDataFrame(
+            pd.DataFrame(
+                {"contig": ["chr1"], "start": [1000], "stop": [1000 + region_len]}
+            ),
+            ref="hg38",
+        )
+        result = rdf.bin_regions_into_windows(window_size=window_size, mode="valid")
+        got = [(int(a), int(b)) for a, b in zip(result["start"], result["stop"])]
+        assert got == expected

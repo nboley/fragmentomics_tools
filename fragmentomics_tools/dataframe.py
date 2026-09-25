@@ -1621,13 +1621,24 @@ class RegionDataFrame(DataFrameBase):
                         f"({window_size}); no valid windows can be produced"
                     )
                 n_windows = (region.length - window_size) // stride + 1
-                new_len = n_windows * stride
-                # Start-anchored, not centered: the widening step (line below)
-                # extends every window rightward by (window_size - stride).
-                # A centered resize would shift the start right, wasting left
-                # margin while the right side overshoots the original region.
+                # `extent` is the span the windows actually occupy once the
+                # widening step below has extended each one rightward by
+                # (window_size - stride). By construction extent <= length, so
+                # centring it keeps every window inside the original region --
+                # which is what 'valid' mode promises and previously broke.
+                extent = (n_windows - 1) * stride + window_size
+                # Centred, NOT start-anchored. The remainder must be dropped
+                # equally from both ends, because callers centre regions on a
+                # feature first (center_on_summit().resize_regions(...)) and
+                # then bin. Start-anchoring drops the whole remainder off the
+                # right, shifting every window and silently decentring the
+                # profile relative to the feature. When stride == window_size
+                # (the default, and what every production caller uses) this
+                # reduces exactly to the original centred resize.
+                offset = (region.length - extent) // 2
+                tiled_start = region.start + offset
                 return Region(
-                    region.chrom, region.start, region.start + new_len,
+                    region.chrom, tiled_start, tiled_start + n_windows * stride,
                     region.strand, region.ref, region.data,
                 )
             elif mode == "exact":
