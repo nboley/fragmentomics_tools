@@ -8,8 +8,20 @@ those, but treat the *rules* as binding unless the owner says otherwise.
 
 - Test/run env: `/home/nathanboley/miniconda3/envs/biomarker_env/bin/python`
   (torch 2.5.1 CUDA-12.4 build, lightning, zarr 2.18.3, numcodecs 0.13.1).
-- Run the suite from the repo root: `python -m pytest tests/ -q`.
-  Baseline as of the last update: **196 passed, 0 skipped**. A few
+- **Run the suite via `make test`, never bare `pytest`.** It wraps the run in
+  `timeout --signal=KILL 3600`. This suite can *wedge* rather than fail: a
+  fork deadlock in `parallel_apply` once ran 12 hours unnoticed, emitting
+  nothing at all, because `pytest -q | tail` never reaches EOF if the process
+  never exits. Override with `make test TEST_TIMEOUT=7200`, and select a
+  different suite with `make test PYTEST_ARGS="tests/ -q"`.
+  A kill shows as exit 137 and means it HUNG — that is a finding to diagnose
+  (`py-spy dump --pid <pid>`), not a flake to re-run.
+- Two suites exist and are easy to confuse: `test/` is the library suite
+  (the `make test` default) and `tests/` is `background_model`.
+  Baselines as of the last update: `test/` **2 failed / 331 passed** (both
+  failures are missing data, not defects: `test_slice_encode_big_wig` needs an
+  ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the in-package
+  GRCh38 reference); `tests/` **196 passed, 0 skipped**, where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
 - Run the suite **before and after** any change. A new test that fails against
   production code is a *finding to report*, not something to patch away.
