@@ -293,28 +293,56 @@ The mechanism is now specified in §3.3 rather than left as a principle.
 
 **6.2 Do the existing artifacts get regenerated?**
 `oracle_nb_v2.json` costs 18 minutes: regenerate, no question.
-`oracle_nb_perhex.json` cost a **3.1-hour** fit and has been hand-edited twice.
-Regenerating it is the only way to prove the refactor is clean for that file,
-but it is expensive and its verdict (NOT_MATERIAL, a negative result) is not
-load-bearing. Options: (a) regenerate once and accept the cost; (b) split it
-so the cheap `render` half is verified and the expensive `compute` half is
-grandfathered with its provenance recorded. **Recommend (b)**, and say so in
-the artifact.
+`oracle_nb_perhex.json` cost a **3.1-hour** fit (11101.9s) and has been
+hand-edited twice.
 
-> **The guarantee this forfeits, stated plainly (review finding #8).**
-> Choosing (b) means: **end-to-end equivalence for the compute→raw split in
-> `nb_oracle_perhex.py` is NOT verified.** Only its render half is.
->
-> The argument for (b) is that the compute half is the same code, merely
-> extracted — but *that is precisely the claim the acceptance test exists to
-> check*, and this project has twice found "pure refactor" code paths that were
-> not equivalent. So (b) is a **cost/correctness trade**, not full
-> verification, and an implementer must not read it as the latter. If the
-> owner prefers certainty over 3.1 hours of compute, choose (a); the design
-> does not consider (b) obviously right.
->
-> If (b) is chosen, stamp the artifact with a field recording that its compute
-> half predates the split and was not re-verified.
+**First, what that 3.1 hours actually buys.** Measured from the artifact:
+
+| block | cost | status |
+|---|---|---|
+| `with_scalar_anchor` → KEN 61.31 / Hybrid 53.78 | milliseconds (arithmetic on the `REF_*` constants) | **`_canonical`** — the only quotable numbers |
+| `perhex_oos`, `perhex_insample`, `fitted_r_summary` | **the 3.1 hours** | evidence behind the verdict |
+| `with_oos_perhex_anchor` → 61.68 / 54.11 | derived from that fit | stamped `_not_an_anchor: DO NOT QUOTE` |
+
+So every number anyone cites from this file is cheap; the expensive half
+produces only do-not-quote figures and the evidence for `NOT_MATERIAL`. That
+verdict is still load-bearing in one specific way — it is what closed open
+question §7.2 and justified keeping the scalar anchor — so it is not free to
+leave unverified either.
+
+**An earlier draft of this section claimed regenerating "is the only way to
+prove the refactor is clean for that file". That is false**, and the option it
+missed is the one now chosen.
+
+### DECIDED 2026-09-25 (owner): function-level bitwise verification
+
+The load-bearing computation lives in three **pure** module-level functions,
+verified by AST inspection:
+
+| function | args | module globals used |
+|---|---|---|
+| `score_val_perhex` | 5 explicit | **none** |
+| `nb_nll_positions` | 3 explicit | **none** |
+| `fit_perhex_grid` | 4 explicit | 4 grid constants (`LOG_R_LO/HI`, `NHEX`, `N_GRID`) |
+
+So the expensive computation is verifiable **without running the expensive
+pipeline**. The acceptance test for Phase 3 is:
+
+1. Call all three on a **fixed small input** (a few hundred pairs, or
+   synthetic, pinned in the test) before and after the refactor and compare
+   outputs **bitwise**.
+2. Verify the render half in full with the §5 leaf-diff — this covers the
+   entire canonical/quotable block.
+3. `git diff` the extracted compute code to show it moved without changing.
+
+Minutes, not hours, and it removes the need for the cost argument the review
+rightly attacked: the objection becomes moot rather than excusing a gap.
+
+**Residual risk, stated plainly:** the Phase C/D **orchestration** inside
+`main()` — how data flows between phases — is still not verified end to end. A
+bug there could survive this test. That is a narrower and more honest thing to
+accept knowingly than "the compute half is unverified". Stamp the artifact with
+a field recording exactly this: function-level verified, orchestration not.
 
 **6.3 Migration for existing readers.**
 Both artifacts are cited in `training_analysis.md` and on Confluence pages
