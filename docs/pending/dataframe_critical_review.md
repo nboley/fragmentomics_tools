@@ -7,17 +7,33 @@
 > **STATUS: much of this review has been acted on.** §1-§8 record the review *as originally written*, before anything could be executed. Do not read those tables as the current state of the code — see **§11 for the resolution ledger**, which maps every finding to what happened to it.
 >
 > Headline: suite went from **not importable** to **2 failed / 289 passed**. **23 defects fixed** (8 from this review, 9 found only by execution, 5 `gc`-misalignment sites from an external report, 1 fragment-weight mask), 2 methods deleted as dead, 1 Critical downgraded after measurement, and 528 lines of dead code removed. Test count grew by 70: 21 for `parallel_apply` (§11.5), 29 for `gc` alignment (§11.9), 20 for the weight callbacks (§11.8).
+>
+> **A second remediation pass ran 2026-09-24/25 — see §11.11.** Suite is now
+> **2 failed / 331 passed** and the work is **merged to `main`**. That pass
+> closed the two items §11.4 listed as remaining (`test_dataframe.py`, which
+> now collects 8 tests rather than none, and I13), renamed
+> `intersect_with_rdf`, caught a silent coordinate regression before it
+> shipped, and diagnosed a `parallel_apply` deadlock that had been hanging
+> the suite indefinitely. **S4 and S5 remain open** and owner-gated.
 
 ### Branch context (read this first)
 
-Two branches are in play, and they differ **only** by the 41-line `detach_h5` feature:
+> **SUPERSEDED 2026-09-25.** The two-branch split described below no longer
+> exists: `main` and `background-model-v2` are the same commit, and
+> `dataframe.py` is 2407 lines with `detach_h5` present. The line numbers
+> throughout §2-§5 were accurate against the 2316-line file this review was
+> written from and have since drifted — grep for the symbol rather than
+> trusting an offset. The section is kept because §5's findings are stated in
+> terms of the split.
+
+Two branches were in play at the time of review, and they differed **only** by the 41-line `detach_h5` feature:
 
 | | Branch | Lines | `detach_h5` |
 |---|---|---|---|
 | Working tree | `background-model-v2` | 2316 | absent |
 | Released v1.4.0 | `main` | 2357 | present |
 
-`git diff main -- fragmentomics_tools/dataframe.py` shows the detach feature as the sole difference. Consequences:
+`git diff main -- fragmentomics_tools/dataframe.py` showed the detach feature as the sole difference. Consequences, as they stood then:
 
 - **Everything before line 1943 is byte-identical on both branches.** All of §2, §3, §4 and §4b therefore apply to `main` (the released code) with the line numbers as given. Verified by grepping `main` directly for each Critical.
 - **After line 1943, `main` is offset by +18 to +41 lines.** §5 gives both numbers where they differ.
@@ -42,7 +58,7 @@ execution; one did not.
 
 1. ~~**The central invariant of the design — required columns — is not actually enforced.**~~ **OVERSTATED — see §10.** Measured across 30 operations, 22 are caught and 8 leak, all requiring a deliberate rename or in-place deletion of a required column. Downgraded Critical -> Low, closed as no-action.
 2. **Methods that are non-functional and fail on first call.** CONFIRMED and worse than stated: ten of them, not two. Seven repaired, two deleted as dead (§11).
-3. **The test suite cannot run in any environment on this machine.** CONFIRMED, and it was the root cause of the rest. **Now resolved** — §9 records the four `environment.yml` defects that had to be fixed first, and the suite now runs at 2 failed / 289 passed.
+3. **The test suite cannot run in any environment on this machine.** CONFIRMED, and it was the root cause of the rest. **Resolved** — §9 records the four `environment.yml` defects that had to be fixed first, which took the suite to 2 failed / 289 passed. It now stands at 2 failed / 331 passed (§11.11), run via `make test`.
 
 A fourth theme emerged only once the code could be executed, and is arguably
 the most important result here:
@@ -597,6 +613,10 @@ label-adjacent by name only.
 
 ## 11.4 Current state
 
+> **Superseded by §11.11.** Items 2 and 3 below are now closed, and the suite
+> command and counts have changed. Retained to show what the first pass left
+> open.
+
 ```
 pytest test/ --ignore=test/test_dataframe.py   ->  2 failed, 289 passed
 ```
@@ -609,9 +629,9 @@ that exact file (§9.4).
 
 Highest-value remaining work, in order:
 
-1. **The two remaining domain-owner findings** — S5 (median returned under the name `mean_fragment_counts`) and S4 (duplicate sample_ids silently dropped). Both alter scientific output and remain unchanged. R5 was a third until it was fixed (§11.7); R12 was a fourth until the method containing it was deleted.
-2. **`test_dataframe.py`** — 26 tests, blocked on the synthetic-fixture decision in §9.4.
-3. **The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer and the labeling API were.
+1. **The two remaining domain-owner findings** — S5 (median returned under the name `mean_fragment_counts`) and S4 (duplicate sample_ids silently dropped). Both alter scientific output and remain unchanged. R5 was a third until it was fixed (§11.7); R12 was a fourth until the method containing it was deleted. **STILL OPEN** — both survived the second pass untouched, still owner-gated.
+2. ~~**`test_dataframe.py`** — 26 tests, blocked on the synthetic-fixture decision in §9.4.~~ **CLOSED in §11.11** — triaged rather than restored; it now collects 8 tests.
+3. ~~**The remaining always-raising methods** — I13 in particular is another orphaned `ravel` reference and may simply be deletable, as the BED layer and the labeling API were.~~ **CLOSED in §11.11** — I13 deleted after proving zero consumers across four repos.
 
 One latent item found while deleting the labeling API and left alone: the
 doctest on `get_indices_of_balanced_labels` fails under numpy 2.x, which
@@ -900,3 +920,86 @@ One result from it is worth carrying back here, because it validates a
 mechanism this module now depends on: the duplication rate measured from SPANK
 UMIs (d = 1.31) and from native cfDNA duplicate counting on the same sample
 (1.286) agreed to ~2%. Two independent populations, two independent code paths.
+
+## 11.11 Second remediation pass (2026-09-24/25) — merged to `main`
+
+The first pass stopped with the suite runnable and §11.4's list open. This
+pass closed that list, and found three things nobody was looking for.
+
+**State:** `make test` -> **2 failed / 331 passed**, same two missing-data
+failures. Merged and pushed; `main` and `background-model-v2` are both at
+`ea9992d`.
+
+### Closed from §11.4
+
+- **`test_dataframe.py`** — the framing in §9.4 turned out to understate the
+  problem: not one unrecoverable fixture but four, plus five library methods
+  the tests call that no longer exist, two undefined names, and an `sdf`
+  fixture whose body is literally `assert False` — meaning those tests were
+  dead even when the fixtures existed and cannot be "restored". Owner ruled
+  triage-don't-restore. 8 restored with invariant-style assertions, 10 deleted
+  as dead, 5 deleted as assertion-hollow rather than carried as skips.
+- **I13** (`attach_num_tss_overlaps` / `get_tss_intervals`) — deleted. Zero
+  consumers across four repos. The three `.ipynb` hits are printed `dir()`
+  output, not calls; they also list already-deleted methods, which is what
+  confirmed they are stale dumps.
+
+### Found in this pass
+
+- **A silent coordinate regression, caught before it shipped.** A fix to
+  "valid" mode in `bin_regions_into_windows` re-anchored the window grid from
+  centred to start-anchored. Window *count* was identical, so every
+  shape-level assertion still passed — but every coordinate shifted
+  (1000bp/stride 300: 1050 -> 1000), which would have decentred every
+  CTCF/DHS meta-profile downstream. The fix's own test asserted counts and
+  bounds, both of which hold under either anchoring. Repaired by centring the
+  extent, with a guard test that pins exact coordinates and is proven to fail
+  against the broken version.
+- **`intersect_with_rdf` never returned intersections.** It returns whole-A
+  intervals (bedtools `-wa -wb`), not geometric intersections, and has since
+  the original commit — the docstring and CLAUDE.md both advertised
+  otherwise. Owner ruled rename over behaviour change: it is now
+  `join_on_overlap`, and the old name raises pointing at it. Notebooks were
+  deliberately *not* updated, so they break loudly rather than silently
+  changing meaning.
+- **A `parallel_apply` fork deadlock (F10).** The suite was not slow, it was
+  hanging — one run burned 12 hours at 53 seconds of CPU, twice more
+  afterwards. Root cause is CPython's own `concurrent.futures.process`:
+  `_threads_wakeups` is module-level state carrying locks, and forking while
+  a sibling thread holds one leaves the child with a lock nothing can
+  release. `parallel_apply` now refuses to fork from a non-main thread, and
+  no longer leaks a `tqdm` monitor thread across calls.
+
+  Note this is a *different* hang from the one §11.5 fixed, and predates that
+  rewrite — the pre-rewrite implementation forked the same way.
+
+### Two process results worth keeping
+
+- **Three mechanisms were confidently wrong before the right one was found.**
+  The allocator (false — modern glibc reinitialises malloc arenas across
+  fork; 0 hangs in 60 forks under deliberate contention), native BLAS threads
+  (false — 0 in 120), and tqdm's lock. The tqdm one is the instructive
+  failure: it was *reproduced deterministically in a purpose-built harness*,
+  which felt like confirmation, and the live capture later showed
+  `tqdm_monitor` sitting idle while the process deadlocked elsewhere. What
+  worked was not better reasoning; it was catching a real occurrence alive
+  and running `py-spy` on it.
+- **A review graded A and still missed the defect that mattered.** The
+  implementation review of the fix raised two cosmetic findings. It did not
+  ask *which class* tqdm stores its monitor on — the answer is the class that
+  built the bar, so `tqdm.auto` and `tqdm.notebook` keep their own and the
+  base-class check saw `None`. The fix silently did nothing in notebooks,
+  which is where essentially every caller runs. Caught by the EM re-checking
+  the review rather than accepting the grade.
+
+### Still open
+
+- **S4 and S5** — unchanged and owner-gated. Both alter scientific output.
+- **Residual fork exposure** — the guard stops *us* forking from a thread; it
+  cannot stop a lock being held by a thread we did not start. A caller
+  running its own `ProcessPoolExecutor` concurrently can still deadlock a
+  worker. Demonstrated, not theoretical. Closing it means abandoning `fork`,
+  and with it lambda support and copy-on-write frames. Documented in the
+  `parallel_apply` docstring.
+- The suite now runs under `make test`, which bounds it at one hour. A hang
+  reports as exit 137 with a `py-spy` recipe rather than running unnoticed.
