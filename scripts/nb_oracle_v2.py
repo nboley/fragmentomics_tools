@@ -412,8 +412,11 @@ def main():
         (np.log(1.0), np.log(3000.0)),
     )
     fitted_r_uniform = np.exp(fitted_log_r_uniform)
+    # np.isclose for the same reason as oracle_source above. The review that
+    # raised this named only oracle_source; this second instance was missed on
+    # the first pass and is the same defect.
     uniform_source = (
-        "sweep" if any(fitted_log_r_uniform == lr for lr in coarse_log_r)
+        "sweep" if any(np.isclose(fitted_log_r_uniform, lr) for lr in coarse_log_r)
         else "scipy"
     )
     print(f"  Selected: loss={uniform_loss:.9f} r={fitted_r_uniform:.4f} "
