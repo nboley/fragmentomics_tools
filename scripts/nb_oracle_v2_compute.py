@@ -31,14 +31,14 @@ from scripts._oracle_scoring import (
     ORACLE_LOSS_KWARGS,
     eval_loss_at_log_r,
     make_oracle_loss_fn,
+    select_min_over_union,
 )
-from scripts.nb_oracle_v2 import (
+from scripts._oracle_models import (
     build_dataset,
     create_untrained_model,
     load_checkpoint_path,
     load_model,
     score_model_nb,
-    select_min_over_union,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────

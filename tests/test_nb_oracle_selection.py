@@ -7,7 +7,7 @@ local bump on the loss plateau while a lower grid point existed.
 This test constructs a synthetic loss surface that reproduces that failure
 mode and verifies the selection logic returns the true argmin.
 
-The selection function is imported from scripts.nb_oracle_v2 — a change in
+The selection function is imported from scripts._oracle_scoring — a change in
 production that breaks the selection will break these tests.
 """
 
@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from scipy.optimize import minimize_scalar
 
-from scripts.nb_oracle_v2 import select_min_over_union
+from scripts._oracle_scoring import select_min_over_union
 
 
 def _synthetic_loss(log_r: float) -> float:
