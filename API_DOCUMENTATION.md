@@ -189,8 +189,6 @@
 **Methods**:
 
 - `__and__(self, other)` (dataframe.py:383)
-- `__eq__(self, other)` (dataframe.py:401)
-  - Checks if two region dataframes have identical regions, in the same order
 - `__init__(self, data)` (dataframe.py:362)
 - `_error_on_invalid_new_starts(new_start)` (dataframe.py:1314)
 - `_error_on_invalid_new_stops(rdf, new_stop)` (dataframe.py:1322)
@@ -223,6 +221,9 @@
   - Downsample so that there is at most `max_number_of_samples_per_label` for each label.  Useful for quick
 - `drop_overlapping_regions(self, other_rdf)` (dataframe.py:1136)
   - Masks blacklist regions, returning a new dataframe with regions that don't overlap blacklist regions.
+- `equals_rdf(self, other)` (dataframe.py:491)
+  - Checks if two region dataframes have identical regions, in the same order.
+    Was `__eq__`, which broke pandas element-wise `==`.
 - `expand_regions(left_amt: int, right_amt: int, inplace: bool, strand_aware: bool, discard_invalid_resizes: bool)` (dataframe.py:1391)
 - `from_bed(cls, in_bed_file, ref)` (dataframe.py:417)
   - Convenience function to load from a bed file.
@@ -249,11 +250,15 @@
 - `get_sequence(self, fasta_path, reverse_complement_sequence_if_minus_strand, verbose)` (dataframe.py:1653)
 - `intersect_with_bed(self, bed_file_path, sorted, rsuff)` (dataframe.py:991)
   - Finds intersection between RegionDataFrame and some bed file
-- `intersect_with_rdf(self, other, sorted, rsuff)` (dataframe.py:947)
-  - Creates the intersection of RegionDataFrames
+- `intersect_with_rdf(self, *args, **kwargs)` (dataframe.py:1080)
+  - REMOVED. Raises `AttributeError` pointing at `join_on_overlap`. The old
+    name claimed to return intersections but never did -- see `join_on_overlap`.
 - `iter_region_row(self)` (dataframe.py:1591)
   - iterates over dataframe rows with the region, each item yielded will be: (region, row)
 - `iter_regions(self)` (dataframe.py:1179)
+- `join_on_overlap(self, other, sorted, rsuff, **intersect_kwargs)` (dataframe.py:1016)
+  - Joins rows whose regions overlap. Returns the WHOLE self interval for each
+    overlapping pair (bedtools `-wa -wb`), NOT the geometric intersection.
 - `label_balanced(self, column_name, random_state)` (dataframe.py:1750)
   - Return a copy of self with balanced labels.
 - `lift_over(self, new_ref, transfer_columns, remove_non_liftoverable_regions)` (dataframe.py:1018)

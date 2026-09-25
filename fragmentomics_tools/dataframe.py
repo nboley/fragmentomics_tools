@@ -322,8 +322,31 @@ class DataFrameBase(pandas.DataFrame):
         pickled (one holding a lambda or a lock, say) reaches the caller as a
         pickling error instead of itself, losing the original message.
 
-        Concurrent calls from different threads are independent. Calls may also
-        nest: `fn` may itself call ``parallel_apply``.
+        Concurrent calls from different threads see independent DATA -- each
+        call's workers get their own frame and `fn`, so callers cannot
+        overwrite each other's inputs. That is a statement about correctness,
+        NOT about liveness.
+
+        **This can deadlock, and not only when you use threads.** Workers are
+        created with ``fork``. ``fork`` duplicates the memory image but keeps
+        only the calling thread, so any lock another thread held at that
+        instant stays locked forever in the child, with no thread left to
+        release it. If that lock is the allocator's, the child hangs on its
+        first allocation -- before reaching any of our code. Observed: two
+        workers stuck at 0s CPU while the parent blocked in
+        ``ProcessPoolExecutor.shutdown``, hanging a test run for 12 hours.
+
+        The threads that trigger this are usually NOT yours and are often
+        invisible to ``threading.enumerate()``: one numpy matmul starts ~7
+        native OpenBLAS workers, and this function's own progress bar leaves a
+        ``tqdm`` monitor thread behind for every later call. Passing
+        ``verbose=False`` does not prevent that -- tqdm starts the monitor in
+        ``__new__``, before it reads ``disable``.
+
+        It is a race -- the lock has to be held at the exact moment of the
+        fork -- so it fires rarely and unpredictably rather than every time.
+
+        Calls may also nest: `fn` may itself call ``parallel_apply``.
         """
         # special case n_workers == 1 so that it runs in the main thread -- mostly used for debugging purposes
         if n_workers == 1:
@@ -1634,7 +1657,13 @@ class RegionDataFrame(DataFrameBase):
                 # right, shifting every window and silently decentring the
                 # profile relative to the feature. When stride == window_size
                 # (the default, and what every production caller uses) this
-                # reduces exactly to the original centred resize.
+                # reduces to the original centred resize for even window_size.
+                # For ODD window_size the two can differ by 1bp, because
+                # (a - b) // 2 != a // 2 - b // 2 when b is odd -- this form
+                # floors the combined remainder, Region.resize() floors each
+                # term separately. No caller anywhere uses an odd window_size
+                # (checked across 4 repos: 64, 8 and 10000 in .py, none in any
+                # notebook), so nothing computed is affected today.
                 offset = (region.length - extent) // 2
                 tiled_start = region.start + offset
                 return Region(
