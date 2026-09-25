@@ -2191,12 +2191,12 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             counts = pd.DataFrame(
                 [x.n_fragments for x in sub_df.fragment_array], columns=[sample_id]
             )
-            means = counts.median().rename("median_fragment_counts")
+            medians = counts.median().rename("median_fragment_counts")
             stds = counts.apply(lambda x: trimmed_std(x, (0.05, 0.05))).rename(
                 "std_fragment_counts"
             )
-            mins = (means - num_sd * stds).rename("min_fragments")
-            maxs = (means + num_sd * stds).rename("max_fragments")
+            mins = (medians - num_sd * stds).rename("min_fragments")
+            maxs = (medians + num_sd * stds).rename("max_fragments")
             res.append(pd.DataFrame([mins, maxs]))
         return pd.concat(res, axis=1).T
 

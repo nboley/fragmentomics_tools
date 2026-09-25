@@ -61,7 +61,7 @@ class TestS4DuplicateSampleIds:
     def test_duplicate_sample_id_raises(self):
         h5_a = MockFragmentsH5("/data/s1.h5", np.arange(512, dtype=float))
         h5_b = MockFragmentsH5("/data/s1_dup.h5", np.arange(512, dtype=float) * 2)
-        # Build a plain DataFrame to bypass SampleDataFrame.__init__ auto-building
+        # init_from_sdf accepts any frame with sample_id + frag_h5 columns
         df = pd.DataFrame({"sample_id": ["s1", "s1"], "frag_h5": [h5_a, h5_b]})
         with pytest.raises(ValueError, match="Duplicate sample_id"):
             FlDist.init_from_sdf(df)
