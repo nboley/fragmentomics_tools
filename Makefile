@@ -14,7 +14,19 @@ IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 # the library suite finishes in well under a minute. Override for slow hosts
 # or a bigger suite: make test TEST_TIMEOUT=7200
 TEST_TIMEOUT ?= 3600
-PYTEST_ARGS ?= test/ -q
+
+# --doctest-modules runs docstring examples as tests. Turning it on found
+# three LIVE defects that the test suite and a five-reviewer static pass had
+# all missed: numpy.product (removed in numpy 2.0), a crash on strandless
+# Regions, and a missing Fragment import breaking three public entry points.
+# Keep it on.
+#
+# The two ignored packages import optional dependencies (datamanifest, fbio)
+# that are absent from the test environment, so their modules cannot even be
+# collected. That is an environment gap, not a code defect.
+PYTEST_ARGS ?= test/ fragmentomics_tools/ -q --doctest-modules \
+	--ignore=fragmentomics_tools/bias_correction \
+	--ignore=fragmentomics_tools/public_data_resources
 
 help:
 	@echo "Usage: make [target]"

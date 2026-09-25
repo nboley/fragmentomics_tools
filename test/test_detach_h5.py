@@ -67,23 +67,35 @@ def srdf(mock_h5):
 
 
 class TestSampleDataFrameDetach:
-    def test_fl_dist_built_with_live_handle(self, sdf):
-        """FlDist is built when frag_h5 contains live handles."""
-        assert sdf._fl_dist is not None
-        # Should not raise
-        _ = sdf.fl_dist
+    def test_construction_does_not_autobuild_fl_dist(self, sdf):
+        """Constructing an SDF must NOT build a fragment-length distribution.
+
+        Guards the decoupling: building it at __init__ tied two unrelated
+        things together, and its guard inspected only iloc[0].
+        """
+        assert not hasattr(sdf, "_fl_dist")
+        assert not hasattr(sdf, "fl_dist")
+
+    def test_fl_dist_builds_explicitly_from_live_handles(self, sdf):
+        """The replacement for the old property."""
+        fl = FlDist.init_from_sdf(sdf)
+        assert "s1" in fl.fl_df.columns
 
     def test_detach_replaces_handle_with_path(self, sdf, mock_h5):
         sdf.detach_h5()
         assert sdf["frag_h5"].iloc[0] == mock_h5._f_fname
         assert isinstance(sdf["frag_h5"].iloc[0], str)
 
-    def test_fl_dist_survives_detach(self, sdf):
-        """fl_dist was built before detach → still accessible after."""
-        fl_before = sdf.fl_dist
+    def test_fl_dist_built_before_detach_stays_usable(self, sdf):
+        """The contract is now build-then-detach.
+
+        FlDist is derived from the live handles, so detaching afterwards
+        cannot invalidate an object you already hold.
+        """
+        fl = FlDist.init_from_sdf(sdf)
+        before = fl.fl_df.values.copy()
         sdf.detach_h5()
-        fl_after = sdf.fl_dist
-        assert (fl_before.fl_df.values == fl_after.fl_df.values).all()
+        assert (fl.fl_df.values == before).all()
 
     def test_pickle_roundtrip_after_detach(self, sdf):
         sdf.detach_h5()
@@ -93,27 +105,17 @@ class TestSampleDataFrameDetach:
         assert list(sdf2["sample_id"]) == ["s1"]
         assert sdf2["frag_h5"].iloc[0] == "/data/sample1.fragments.h5"
 
-    def test_pickle_roundtrip_preserves_fl_dist(self, sdf):
-        fl_before = sdf.fl_dist
-        sdf.detach_h5()
-        sdf2 = pickle.loads(pickle.dumps(sdf))
-        fl_after = sdf2.fl_dist
-        assert (fl_before.fl_df.values == fl_after.fl_df.values).all()
+    def test_paths_only_sdf_constructs_without_handles(self):
+        """String paths are a valid SDF. Nothing is derived from them.
 
-    def test_fl_dist_none_when_paths_only(self):
-        """SDF constructed with string paths → _fl_dist is None."""
+        Previously this branch existed only to decide whether to auto-build
+        fl_dist, and left _fl_dist = None behind.
+        """
         sdf = SampleDataFrame(
             pd.DataFrame({"sample_id": ["s1"], "frag_h5": ["/some/path.h5"]})
         )
-        assert sdf._fl_dist is None
-
-    def test_fl_dist_raises_when_none(self):
-        """Accessing fl_dist when _fl_dist is None raises RuntimeError."""
-        sdf = SampleDataFrame(
-            pd.DataFrame({"sample_id": ["s1"], "frag_h5": ["/some/path.h5"]})
-        )
-        with pytest.raises(RuntimeError, match="fl_dist unavailable"):
-            _ = sdf.fl_dist
+        assert list(sdf["sample_id"]) == ["s1"]
+        assert not hasattr(sdf, "_fl_dist")
 
     def test_detach_idempotent(self, sdf, mock_h5):
         sdf.detach_h5()
@@ -123,8 +125,7 @@ class TestSampleDataFrameDetach:
 
     def test_two_samples_fl_dist(self, sdf_two):
         """FlDist is built correctly with multiple samples."""
-        assert sdf_two._fl_dist is not None
-        fl = sdf_two.fl_dist
+        fl = FlDist.init_from_sdf(sdf_two)
         assert "s1" in fl.fl_df.columns
         assert "s2" in fl.fl_df.columns
 

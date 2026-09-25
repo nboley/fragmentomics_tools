@@ -146,8 +146,8 @@ def get_indices_of_balanced_labels(labels, random_state=None):
     >>> idxs = get_indices_of_balanced_labels(labels, random_state=1)
     >>> idxs
     array([0, 1, 3, 4])
-    >>> Counter(labels[idxs])
-    Counter({1: 2, 0: 2})
+    >>> sorted(Counter(labels[idxs]).values())  # balanced: equal counts
+    [2, 2]
     >>> get_indices_of_balanced_labels([])
     array([], dtype=int64)
     >>> get_indices_of_balanced_labels([1])
@@ -2350,34 +2350,26 @@ class FlDist:
 
 
 class SampleDataFrame(DataFrameBase):
-    _metadata = ["_fl_dist"]
+    # Must stay a LIST, even though it is empty. The base class uses a tuple
+    # to avoid a shared mutable default, but pandas concatenates _metadata
+    # with a list during propagation, and `tuple + list` is a TypeError.
+    # Inheriting the base's `()` here breaks pickling after detach_h5.
+    _metadata = []
     _required_columns = ["sample_id", "frag_h5"]
 
-    def __init__(self, data, *args, **kwargs):
-        super().__init__(data, *args, **kwargs)
-
-        # hack around pandas not correctly using _constructor internally
-        # This line should always be first.  Pandas incorrectly passes this BlockManager to the constructor sometimes.
-        if isinstance(data, pd.core.internals.BlockManager):
-            return
-
-        if (
-            "frag_h5" in self.columns
-            and len(self) > 0
-            and hasattr(self["frag_h5"].iloc[0], "fragment_length_counts")
-        ):
-            self._fl_dist = FlDist.init_from_sdf(self)
-        else:
-            self._fl_dist = None
-
-        return
+    # NOTE: constructing a SampleDataFrame does NOT build a fragment-length
+    # distribution. Call `FlDist.init_from_sdf(sdf)` where you need one.
+    # Building it here coupled two unrelated things, and the guard deciding
+    # whether to build inspected only `iloc[0]`, so a mixed frag_h5 column
+    # either crashed inside FlDist or silently dropped the distribution for
+    # every sample.
 
     def detach_h5(self):
         """Replace live FragmentsH5 handles with their file paths.
 
-        After detaching, the object can be pickled portably. The fl_dist
-        property remains available if it was built before detach (it is
-        preserved in pandas _metadata through pickle).
+        After detaching, the object can be pickled portably. Build any
+        FlDist you need BEFORE detaching -- it is derived from the live
+        handles, and this leaves only paths behind.
         """
         _detach_h5_inplace(self)
         return self
@@ -2394,16 +2386,6 @@ class SampleDataFrame(DataFrameBase):
 
     def dropna(self, *args, **kwargs):
         return type(self)(self.df.dropna(*args, **kwargs))
-
-    @property
-    def fl_dist(self):
-        if self._fl_dist is None:
-            raise RuntimeError(
-                "fl_dist unavailable: frag_h5 handles were not provided or have "
-                "been detached. Build the SampleDataFrame with live FragmentsH5 "
-                "handles to compute fl_dist."
-            )
-        return self._fl_dist.subset_by_sample_ids(self.sample_id)
 
     def label_balanced(self, column_name, random_state=None):
         """Return a copy of self with balanced labels."""

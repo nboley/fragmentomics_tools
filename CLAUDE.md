@@ -18,11 +18,22 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `test/` **2 failed / 331 passed** (both
-  failures are missing data, not defects: `test_slice_encode_big_wig` needs an
-  ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the in-package
-  GRCh38 reference); `tests/` **196 passed, 0 skipped**, where a few
+  Baselines as of the last update: `make test` **2 failed / 389 passed /
+  3 skipped** (both failures are missing data, not defects:
+  `test_slice_encode_big_wig` needs an ENCODE bigwig,
+  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
+  the 3 skips are Region doctests needing the optional `fbio`);
+  `tests/` **196 passed, 0 skipped**, where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
+- **`make test` also runs `--doctest-modules`.** Docstring examples are tests.
+  Turning this on found three LIVE defects that the suite and a five-reviewer
+  static pass had all missed, so treat a failing doctest as a real signal
+  rather than doc drift. Two packages are excluded because they import
+  optional deps (`datamanifest`, `fbio`) missing from the test env.
+- **Do not pin a `np.random.default_rng` draw in a doctest.** NumPy only
+  guarantees stream stability for the legacy `RandomState`; `Generator`
+  streams may change between releases, and one doctest already broke that
+  way. Assert the invariant (count, membership) instead of the exact draw.
 - Run the suite **before and after** any change. A new test that fails against
   production code is a *finding to report*, not something to patch away.
 
