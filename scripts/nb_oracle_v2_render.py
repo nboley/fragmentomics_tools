@@ -342,7 +342,14 @@ def render_published_json(raw: dict) -> dict:
         "gc_mode": raw["gc_mode"],
         "design_doc": raw["design_doc"],
         "supersedes": "oracle_nb.json",
-        "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        # created_utc and runtime_s now BOTH describe the compute run that
+        # produced the numbers, so the pair is internally consistent.
+        # Previously created_utc was the RENDER timestamp while runtime_s was
+        # the COMPUTE duration — adjacent fields in one artifact describing two
+        # different processes, reading as "created at T, took runtime_s", which
+        # was false. rendered_utc records the render step separately.
+        "created_utc": raw["_computed_utc"],
+        "rendered_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "python": sys.executable,
         "runtime_s": raw["_runtime_s"],
     }

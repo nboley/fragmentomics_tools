@@ -5,8 +5,11 @@ Holds the propensity at the true generating surface (via
 sim_oracle.compute_oracle_propensity_for_tile) and sweeps a single scalar
 log_r over a log grid. For each r value, computes the mean NB-offset loss
 over all 1600 val pairs using the FROZEN core loss
-(MaskedNegativeBinomialOffsetNLLLoss with max_dispersion_ratio=2.0,
-clamp_margin=1.0, dispersion_window_size=1).
+(MaskedNegativeBinomialOffsetNLLLoss), configured from
+``scripts._oracle_scoring.ORACLE_LOSS_KWARGS`` and
+``ORACLE_DISPERSION_WINDOW_SIZE``. The values are deliberately NOT restated
+here: they had been transcribed into this docstring and four other places,
+which is the duplication this refactor exists to remove.
 
 Three outcomes (per §4 of the design):
   - r far above 7.18 (>500), minimum below untrained models → premise confirmed

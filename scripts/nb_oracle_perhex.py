@@ -21,8 +21,9 @@ NOTE: the scalar anchor is itself fitted on val. At one parameter that is
 negligible, but stated rather than implied.
 
 Uses the FROZEN-CORE MaskedNegativeBinomialOffsetNLLLoss with the SAME config
-as the scalar anchor and training runs:
-  max_dispersion_ratio=2.0, clamp_margin=1.0, dispersion_window_size=1
+as the scalar anchor and training runs, taken from
+``scripts._oracle_scoring.ORACLE_LOSS_KWARGS`` and
+``ORACLE_DISPERSION_WINDOW_SIZE`` rather than restated here.
 
 Usage:
     cd <repo>
@@ -57,14 +58,50 @@ LOG_R_LO = np.log(0.3)      # grid lower bound
 LOG_R_HI = np.log(5000.0)   # grid upper bound
 NHEX = 4096
 
-# Reference values from nb_oracle_v2.py (for comparison table)
-REF_SCALAR_ORACLE = 4.026351353675127
-REF_UNIFORM = 4.115219691395760
-REF_GAP = REF_UNIFORM - REF_SCALAR_ORACLE
-REF_TRAINED_KEN = 4.060737457573413
-REF_TRAINED_HYBRID = 4.067427050471306
-REF_UNTRAINED_KEN = 4.117498033046722
-REF_UNTRAINED_HYBRID = 4.125973814576864
+# ── Reference values: READ from v2's artifact, never transcribed ──────────
+#
+# These were six float literals copied by hand out of oracle_nb_v2.json, with
+# REF_GAP derived from two of them — while V2_JSON sat declared directly above
+# and completely unused. They happened to be correct, but nothing enforced it:
+# if v2's numbers moved, this script would keep dividing by stale ones, and its
+# own guard (`abs(scalar - REF) < 0.001`) is ~17x too loose to notice — it
+# already sailed through a real 5.72e-5 divergence.
+#
+# See docs/pending/oracle_compute_render_split.md §1.3.
+def _load_v2_reference(path=V2_JSON):
+    """Load the published v2 anchors. Fails loudly; never falls back."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"[perhex] Cannot read the v2 anchors at {path}.\n"
+            f"         They are no longer hardcoded here. Regenerate with:\n"
+            f"           PYTHONPATH=. python scripts/nb_oracle_v2_compute.py\n"
+            f"           PYTHONPATH=. python scripts/nb_oracle_v2_render.py"
+        )
+    m = d["models"]
+    return {
+        "scalar_oracle": d["oracle_nb_nll"],
+        "uniform": d["uniform_nb_nll"],
+        # Taken as PUBLISHED rather than recomputed as uniform - oracle, so the
+        # two artifacts cannot disagree in the last bits.
+        "gap": d["gap_uniform_minus_oracle"],
+        "trained_ken": m["trained_ken"]["nb_loss"],
+        "trained_hybrid": m["trained_hybrid"]["nb_loss"],
+        "untrained_ken": m["untrained_ken"]["nb_loss"],
+        "untrained_hybrid": m["untrained_hybrid"]["nb_loss"],
+    }
+
+
+_V2_REF = _load_v2_reference()
+REF_SCALAR_ORACLE = _V2_REF["scalar_oracle"]
+REF_UNIFORM = _V2_REF["uniform"]
+REF_GAP = _V2_REF["gap"]
+REF_TRAINED_KEN = _V2_REF["trained_ken"]
+REF_TRAINED_HYBRID = _V2_REF["trained_hybrid"]
+REF_UNTRAINED_KEN = _V2_REF["untrained_ken"]
+REF_UNTRAINED_HYBRID = _V2_REF["untrained_hybrid"]
 
 
 # ── Hexamer index computation ─────────────────────────────────────────────

@@ -146,7 +146,7 @@ must be pure — same raw in, same published out — and take seconds.
 
 ### 3.1 Why this addresses each pain
 
-- §1.1: a note fix re-runs `render` only. Seconds, not 18 minutes. The
+- §1.1: a note fix re-runs `render` only. **Measured after Phase 2: 19.9s against compute's 701.2s** — seconds, not minutes, though not the "2 seconds" an earlier draft of this section claimed. The
   incentive to hand-edit an artifact disappears, and with it the drift class.
 - §1.2: `compute` is where the shared scoring helper lands (§4), so the three
   copies collapse to one.
@@ -386,9 +386,9 @@ What held it below an A — **and what review resolved (2026-09-25, grade A-):**
   overstated that pain (the real figure is 0.04pp). Both were caught by review,
   not by me — which is the same failure mode this project keeps hitting, now
   committed by the author of the document warning about it.
-- **No measurement of the claimed win.** I assert render is seconds. Still
-  inference from what it does, not timed. Unresolved; it becomes measurable the
-  moment Phase 2 lands.
+- ~~**No measurement of the claimed win.**~~ **RESOLVED.** Measured after
+  Phase 2: render is **19.9s** against compute's 701.2s. The premise holds,
+  but my "2-second" figure was optimistic by 10x and is corrected in §3.1.
 - **6.2 is a judgement call I have made on the owner's behalf** — grandfathering
   a 3.1-hour artifact is a real trade and I recommend it partly because the run
   is expensive, which is not a correctness argument.

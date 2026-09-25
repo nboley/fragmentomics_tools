@@ -289,6 +289,13 @@ class TestPublishedSchema:
         "verification", "loss", "loss_config", "store", "sim_dir", "fasta",
         "n_val_pairs", "tile_size", "l_target", "crop", "gc_mode",
         "design_doc", "supersedes", "created_utc", "python", "runtime_s",
+        # Added deliberately when the provenance fields were corrected:
+        # created_utc and runtime_s now BOTH describe the compute run, and
+        # rendered_utc records the render step separately. Previously
+        # created_utc was the render timestamp sitting beside a compute
+        # duration, which read as one claim and was actually two.
+        # This test caught that addition, which is what it is for.
+        "rendered_utc",
     }
 
     def test_has_all_top_level_keys(self):
