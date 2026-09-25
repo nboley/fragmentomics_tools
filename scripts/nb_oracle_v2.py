@@ -10,8 +10,9 @@ This script implements §3–§5 of docs/pending/nb_oracle.md:
 
 The propensity comes from sim_oracle.compute_oracle_propensity_for_tile
 (verified, tracked) — no re-derivation.  The loss is the FROZEN core
-MaskedNegativeBinomialOffsetNLLLoss with config matched to the training
-runs (max_dispersion_ratio=2.0, clamp_margin=1.0, dispersion_window_size=1).
+MaskedNegativeBinomialOffsetNLLLoss with ORACLE_LOSS_KWARGS from
+scripts/_oracle_scoring.py (the single source for loss config).
+dispersion_window_size=1 is a MODEL constructor arg, not a loss parameter.
 
 The uniform anchor gets its own separately fitted r (§4 step 3 of the
 design — review flagged this could be misread as reusing oracle's r).
@@ -119,13 +120,9 @@ def score_model_nb(model, ds, device="cpu"):
     _pooled_log_dispersion which: (1) mean-pools to the window level, and
     (2) adds log_dispersion_init. We call that method directly.
     """
-    from background_model_core import (
-        MaskedNegativeBinomialOffsetNLLLoss,
-        _prepare_mask,
-    )
-    loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
-        max_dispersion_ratio=2.0, clamp_margin=1.0,
-    )
+    from background_model_core import _prepare_mask
+    from scripts._oracle_scoring import make_oracle_loss_fn
+    loss_fn = make_oracle_loss_fn()
     model = model.to(device)
     nlls = []
     with torch.no_grad():
@@ -587,12 +584,22 @@ def main():
           f"r(0)={r_at_zero:.4f} vs r(-128)={r_at_minus128:.4f} "
           f"({ratio:.1f}x) — {'PASS' if best_shift == 0 else '**FAIL**'}")
 
-    # 4. Loss-object identity
+    # 4. Loss-object identity — read the live object and compare
     print(f"\n  [4] Loss-object identity:")
-    print(f"    Loss class: MaskedNegativeBinomialOffsetNLLLoss (frozen core)")
-    print(f"    max_dispersion_ratio=2.0, clamp_margin=1.0, "
-          f"dispersion_window_size=1")
-    print(f"    Matches training run config: YES")
+    from scripts._oracle_scoring import ORACLE_LOSS_KWARGS
+    gate4_pass = True
+    for param, expected in ORACLE_LOSS_KWARGS.items():
+        actual = getattr(loss_fn, param)
+        match = (actual == expected)
+        if not match:
+            gate4_pass = False
+        print(f"    {param}: expected={expected}, actual={actual} "
+              f"{'PASS' if match else '**FAIL**'}")
+    print(f"    dispersion_window_size=1 (model constructor arg, not loss parameter)")
+    status = "PASS" if gate4_pass else "**FAIL**"
+    print(f"    Overall: {status}")
+    if not gate4_pass:
+        all_pass = False
 
     # 5. Sweep raggedness (descriptive — does NOT gate all_pass, because
     #    §9.1 concludes the plateau is flat and r is not identified, so a
@@ -773,8 +780,8 @@ def main():
         },
         "loss": "MaskedNegativeBinomialOffsetNLLLoss (background_model_core, frozen)",
         "loss_config": {
-            "max_dispersion_ratio": 2.0,
-            "clamp_margin": 1.0,
+            "max_dispersion_ratio": loss_fn.max_dispersion_ratio,
+            "clamp_margin": loss_fn.clamp_margin,
             "dispersion_window_size": 1,
             "_why": (
                 "Matched to the training runs (v3nb_ken/hybrid_nb_frozen_lr5e-3). "

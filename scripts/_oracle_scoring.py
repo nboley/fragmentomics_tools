@@ -19,6 +19,12 @@ import torch
 # The loss config that all oracle scripts and training runs share.
 ORACLE_LOSS_KWARGS = dict(max_dispersion_ratio=2.0, clamp_margin=1.0)
 
+# dispersion_window_size is a MODEL constructor arg, not a loss parameter.
+# Recorded here as the single source for the oracle protocol config: the
+# oracle uses per-position dispersion (window_size=1), matching the training
+# runs' frozen config.
+ORACLE_DISPERSION_WINDOW_SIZE = 1
+
 
 def make_oracle_loss_fn():
     """Construct the frozen-core NB-offset loss with the standard oracle config."""
