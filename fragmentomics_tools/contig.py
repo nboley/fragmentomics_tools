@@ -230,7 +230,6 @@ def make_chrom_sizes_file(out_fname, assembly, chroms=None):
             fp.write(f"{chrom}\t{length}\n")
 
 
-_CHROMOSOME_Q_ARM_STARTS_HG38 = None  #: cache for chromosome q_arm_starts
 
 
 def get_flattened_genome_offsets(assembly):
@@ -283,57 +282,3 @@ def get_flattened_genome_offsets(assembly):
                 + CONTIG_LENGTHS[assembly][STANDARD_CHROMS[i - 1]]
             )
     return flattened_chrom_offsets
-
-
-def get_chromosome_q_arm_starts(assembly: str) -> Dict[str, int]:
-    """
-    Gets the chromosome -> long arm start positions
-    >>> from pprint import pprint
-    >>> pprint(get_chromosome_q_arm_starts('hg38'), indent=1)
-    {'chr1': 123400000,
-     'chr10': 39800000,
-     'chr11': 53400000,
-     'chr12': 35500000,
-     'chr13': 17700000,
-     'chr14': 17200000,
-     'chr15': 19000000,
-     'chr16': 36800000,
-     'chr17': 25100000,
-     'chr18': 18500000,
-     'chr19': 26200000,
-     'chr2': 93900000,
-     'chr20': 28100000,
-     'chr21': 12000000,
-     'chr22': 15000000,
-     'chr3': 90900000,
-     'chr4': 50000000,
-     'chr5': 48800000,
-     'chr6': 59800000,
-     'chr7': 60100000,
-     'chr8': 45200000,
-     'chr9': 43000000,
-     'chrX': 61000000,
-     'chrY': 10400000}
-    """
-    from fragmentomics_tools.formats import BedReader
-
-    global _CHROMOSOME_Q_ARM_STARTS_HG38
-    if assembly != "hg38":
-        raise NotImplementedError("Implemented only for hg38")
-
-    if _CHROMOSOME_Q_ARM_STARTS_HG38 is None:
-        with load_data_manifest(DEFAULT_DATA_MANIFEST_PATH) as dm:
-            fname = dm.sync_and_get(
-                "annotations/GRCh38_extras/hg38.cytobands.bed.gz"
-            ).path
-            df = BedReader.load_dataframe(fname)
-            # get the first occurance of a cytoband that starts with a "q" for each chromosome
-            long_arm_starts = dict(
-                df[df["name"].str.startswith("q")]
-                .groupby("chrom")
-                .first()["start"]
-                .items()
-            )
-            _CHROMOSOME_Q_ARM_STARTS_HG38 = long_arm_starts
-
-    return _CHROMOSOME_Q_ARM_STARTS_HG38

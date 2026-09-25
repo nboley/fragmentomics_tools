@@ -20,6 +20,7 @@ from fragments_h5 import FragmentsH5
 
 
 from ..constants import DEFAULT_VPLOT_SUMPOOL_BY, DEFAULT_MIN_MAPQ, DEFAULT_MAX_FRAG_LEN
+from ..fragment import Fragment
 from ..region import Region
 from .fragment_matrix import RegionFragmentMatrix, FragmentMatrix
 from .fragment_matrix_math import reverse_sum_pool
@@ -501,15 +502,18 @@ class FragmentArray:
 
     def __eq__(self, other: "FragmentArray"):
         """
+        Wrapped in bool() because this returns a numpy bool, whose repr
+        changed from `True` to `np.True_` in numpy 2.0.
+
         >>> fa1 = FragmentArray([-1,2,3], [3,4,500], 100, 511)
         >>> fa2 = FragmentArray([-1,2,3], [3,4,500], 100, 511)
         >>> fa2r = RegionFragmentArray([-1,2,3], [3,4,500], Region('chr1', 0, 100), 511)
         >>> fa3 = FragmentArray([-1,2,4], [3,4,500], 100, 511)
-        >>> fa1 == fa2
+        >>> bool(fa1 == fa2)
         True
-        >>> fa1 == fa2r # python calls the __eq__ method of the subclass, which is stricter.
+        >>> bool(fa1 == fa2r) # python calls the __eq__ method of the subclass, which is stricter.
         False
-        >>> fa1 == fa3
+        >>> bool(fa1 == fa3)
         False
         """
         if (
@@ -564,15 +568,24 @@ class FragmentArray:
         :param random_state: random seed
         :return: a downsampled version of this FragmentArray
 
+        These assert the invariants rather than one particular draw. The
+        sampler is ``np.random.default_rng``, and NumPy does not guarantee
+        ``Generator`` streams across releases (only the legacy ``RandomState``
+        is frozen), so pinning the exact fragments kept would break on the
+        next numpy upgrade -- as it already did once.
+
         >>> fa = FragmentArray(starts_0=[-1,2,3], stops_0=[3,4,5], length=5, max_frag_len=10)
         >>> fa.n_frags
         3
-        >>> fa.downsampled(2, random_state=1)
-        FragmentArray(n_frags=2, length=5, starts_0=[-1, 3], stops_0=[3, 5], strand=None, weights=[1.0, 1.0], num_cpgs=[0, 0], num_converted_cpgs=[0, 0], num_cytosines=[0, 0], num_converted_cytosines=[0, 0], max_frag_len=10)
+        >>> kept = fa.downsampled(2, random_state=1)
+        >>> kept.n_frags
+        2
+        >>> set(kept.starts_0) <= set(fa.starts_0)
+        True
         >>> fa.downsampled(4, random_state=1)
         Traceback (most recent call last):
         ...
-        ValueError: n_population should be greater or equal than n_samples, got n_samples > n_population (4 > 3)
+        ValueError: Cannot take a larger sample than population when replace is False
         """
         if n is None:
             return self._replace(validate_data=False)
@@ -1633,12 +1646,15 @@ class RegionFragmentArray(FragmentArray):
 
     def __eq__(self, other: "RegionFragmentArray"):
         """
+        Wrapped in bool() because this returns a numpy bool, whose repr
+        changed from `True` to `np.True_` in numpy 2.0.
+
         >>> fa1 = RegionFragmentArray([-1,2,3], [3,4,500], Region('chr1', 0, 100), 511)
         >>> fa2 = RegionFragmentArray([-1,2,3], [3,4,500], Region('chr1', 0, 100), 511)
         >>> fa3 = RegionFragmentArray([-1,2,4], [3,4,500], Region('chr1', 0, 100), 511)
-        >>> fa1 == fa2
+        >>> bool(fa1 == fa2)
         True
-        >>> fa1 == fa3
+        >>> bool(fa1 == fa3)
         False
         """
         if type(other) != type(self):

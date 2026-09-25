@@ -381,6 +381,10 @@ def reverse_sum_pool(
     ), f"{sum_pool_by} should have {arr.ndim} dimensions"
     unpooler = numpy.ones(sum_pool_by, dtype=arr.dtype)
     if preserve_sum:
-        dims = numpy.product(unpooler.shape)
+        # numpy.prod, NOT numpy.product -- the latter was an alias that numpy
+        # 2.0 removed, so this raised AttributeError for every caller passing
+        # preserve_sum=True. Reachable from the public API via
+        # FragmentMatrix.reverse_sum_pooled() and smooth_by_sum_pool().
+        dims = numpy.prod(unpooler.shape)
         unpooler = unpooler / dims
     return numpy.kron(arr, unpooler)

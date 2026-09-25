@@ -201,13 +201,13 @@ def _get_subclasses_of(cls, include_self=False):
 
 def _windowed_range(start, stop, window_size):
     """
-    >>> list(windowed_range(0, 5, 2))
+    >>> list(_windowed_range(0, 5, 2))
     [(0, 2), (2, 4), (4, 5)]
-    >>> list(windowed_range(0, 1, 2))
+    >>> list(_windowed_range(0, 1, 2))
     [(0, 1)]
-    >>> list(windowed_range(0, 11, 3))
+    >>> list(_windowed_range(0, 11, 3))
     [(0, 3), (3, 6), (6, 9), (9, 11)]
-    >>> list(windowed_range(-3, 3, 3))
+    >>> list(_windowed_range(-3, 3, 3))
     [(-3, 0), (0, 3)]
     """
     if window_size <= 0:
@@ -459,7 +459,7 @@ class WigRecord(RegionRecord):
         >>> region = Region('chr1', 500, 506)
         >>> arr = [1.,2.,2.,numpy.nan,6.,6.]
         >>> list(WigRecord.iter_wiggle_records_from_region_scores(arr, region, min_score=2, max_score=5))
-        [WigRecord(chrom='chr1', start=501, stop=503, score=2.0)]
+        [WigRecord(chrom='chr1', start=501, stop=503, score=np.float64(2.0))]
         """
         scores = numpy.asarray(scores).copy()
 

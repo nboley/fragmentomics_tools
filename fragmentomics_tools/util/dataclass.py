@@ -60,6 +60,7 @@ def isinstance_typing_union(x):
     """
     returns True if x is an instance of typing.Union (isinstance does not work)
 
+    >>> from typing import Union
     >>> isinstance_typing_union(Union[str, int])
     True
     >>> isinstance_typing_union(1)

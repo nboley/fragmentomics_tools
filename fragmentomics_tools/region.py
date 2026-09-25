@@ -141,21 +141,24 @@ class Region(DataClassMixin):
     def three_prime_resize(self, new_length):
         return self.three_prime_shift(new_length - self.length)
 
-    def intersect(self, other: "Region") -> bool:
-        """
+    def intersect(self, other: "Region") -> Optional["Region"]:
+        """Return the overlapping Region, or None if they do not overlap.
+
+        `intersects()` is the boolean form of this.
+
         >>> x = Region('chr1', 10, 20)
         >>> y = Region('chr1', 5, 15)
         >>> z = Region('chr1', 20, 40)
         >>> a = Region('chr1', 10, 20, '+')
         >>> b = Region('chr1', 5, 15, '-')
-        >>> x.intersects(y)
+        >>> x.intersect(y)
         Region(chr1:10-15)
-        >>> y.intersects(x)
+        >>> y.intersect(x)
         Region(chr1:10-15)
-        >>> x.intersects(z)
-        None
-        >>> a.intersects(b)
-        None
+        >>> x.intersect(z) is None
+        True
+        >>> a.intersect(b) is None
+        True
         """
         if self.ref != other.ref:
             raise ValueError(
@@ -165,9 +168,17 @@ class Region(DataClassMixin):
         if self.chrom != other.chrom:
             return None
 
-        if self.strand in "+-" and (other.strand is None or other.strand == "."):
+        # Tuple membership, NOT `in "+-"`. A strandless Region normalises
+        # .strand to None, and `None in "+-"` raises TypeError rather than
+        # returning False -- which crashed every strandless comparison,
+        # including intersects(), cmp(), is_subregion() and __lt__.
+        if self.strand in ("+", "-") and (
+            other.strand is None or other.strand == "."
+        ):
             strand = self.strand
-        elif other.strand in "+-" and (self.strand is None or self.strand == "."):
+        elif other.strand in ("+", "-") and (
+            self.strand is None or self.strand == "."
+        ):
             strand = other.strand
         elif self.strand == other.strand:
             strand = self.strand
@@ -190,11 +201,14 @@ class Region(DataClassMixin):
           for options.
         :return: A List of Records
 
-        >>> list(Region('chr1',10000,10010).intersect_annotation('repeat_masker'))
+        SKIPPED: needs `fbio`, an optional dependency absent from the test
+        environment, plus its real annotation data.
+
+        >>> list(Region('chr1',10000,10010).intersect_annotation('repeat_masker'))  # doctest: +SKIP
         [Bed6Record(chrom='chr1', start=10000, stop=10468, name='(TAACCC)n', score=463.0, strand='+')]
-        >>> list(Region('chr1',10000,10010).intersect_annotation('anshul_blacklist'))
+        >>> list(Region('chr1',10000,10010).intersect_annotation('anshul_blacklist'))  # doctest: +SKIP
         [Bed3Record(chrom='chr1', start=0, stop=792500)]
-        >>> list(Region('chr1',10000,10010).intersect_annotation('not-a-track'))
+        >>> list(Region('chr1',10000,10010).intersect_annotation('not-a-track'))  # doctest: +SKIP
         Traceback (most recent call last):
         ....
         KeyError: 'Could not find annotation for name `not-a-track` and reference `hg38`'
@@ -262,10 +276,13 @@ class Region(DataClassMixin):
         :return: A boolean array which is True everywhere the region intersects a repeat element or an element
           in Anshul's blacklist.
 
-        >>> is_repeat = Region('chr1',794555-5,794555+5).get_overlaps_repeat_or_blacklist_mask_array()
-        >>> is_repeat
+        SKIPPED: needs `fbio`, an optional dependency absent from the test
+        environment, plus its real annotation data.
+
+        >>> is_repeat = Region('chr1',794555-5,794555+5).get_overlaps_repeat_or_blacklist_mask_array()  # doctest: +SKIP
+        >>> is_repeat  # doctest: +SKIP
         array([False, False, False, False, False,  True,  True,  True,  True,  True])
-        >>> is_repeat.mean()
+        >>> is_repeat.mean()  # doctest: +SKIP
         0.5
         """
         return self.get_annotation_coverage_array(
@@ -297,7 +314,10 @@ class Region(DataClassMixin):
 
         :param annotation_names: a list of annotation names from fbio.annotations.ANNOTATIONS
 
-        >>> _ = Region('chr1', 10000, 10100).plot_annotations()
+        SKIPPED: needs `fbio`, an optional dependency absent from the test
+        environment, plus its real annotation data.
+
+        >>> _ = Region('chr1', 10000, 10100).plot_annotations()  # doctest: +SKIP
         """
         from fbio.plot.tracks import BedTrack, Tracks
         from fbio.annotations import ANNOTATIONS
