@@ -159,6 +159,14 @@ class Region(DataClassMixin):
         True
         >>> a.intersect(b) is None
         True
+
+        A stranded operand's strand survives an intersection with a
+        strandless one, in EITHER order:
+
+        >>> a.intersect(x).strand
+        '+'
+        >>> x.intersect(a).strand
+        '+'
         """
         if self.ref != other.ref:
             raise ValueError(
@@ -191,7 +199,12 @@ class Region(DataClassMixin):
         if stop <= start:
             return None
 
-        return type(self)(chrom=self.chrom, start=start, stop=stop, strand=self.strand)
+        # `strand`, not `self.strand` -- the branching above exists precisely
+        # to decide which operand's strand survives, and passing self.strand
+        # discarded that answer. Only reachable case that differs is
+        # strandless.intersect(stranded), which raised TypeError before the
+        # `in ("+", "-")` fix, so no previously-working result changes.
+        return type(self)(chrom=self.chrom, start=start, stop=stop, strand=strand)
 
     def intersect_annotation(self, annotation_name: str) -> List:
         """

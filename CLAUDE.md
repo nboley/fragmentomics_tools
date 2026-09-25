@@ -18,7 +18,7 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **2 failed / 389 passed /
+  Baselines as of the last update: `make test` **2 failed / 388 passed /
   3 skipped** (both failures are missing data, not defects:
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
