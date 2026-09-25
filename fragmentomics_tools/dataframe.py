@@ -327,24 +327,33 @@ class DataFrameBase(pandas.DataFrame):
         overwrite each other's inputs. That is a statement about correctness,
         NOT about liveness.
 
-        **This can deadlock, and not only when you use threads.** Workers are
-        created with ``fork``. ``fork`` duplicates the memory image but keeps
-        only the calling thread, so any lock another thread held at that
-        instant stays locked forever in the child, with no thread left to
-        release it. If that lock is the allocator's, the child hangs on its
-        first allocation -- before reaching any of our code. Observed: two
-        workers stuck at 0s CPU while the parent blocked in
-        ``ProcessPoolExecutor.shutdown``, hanging a test run for 12 hours.
+        **Calling this concurrently from several threads can deadlock.**
+        Workers are created with ``fork``. ``fork`` duplicates the memory
+        image but keeps only the calling thread, so any lock another thread
+        held at that instant stays locked forever in the child, with no thread
+        left to release it. Observed: two workers stuck at 0s CPU while the
+        parent blocked in ``ProcessPoolExecutor.shutdown``, hanging a test run
+        for 12 hours.
 
-        The threads that trigger this are usually NOT yours and are often
-        invisible to ``threading.enumerate()``: one numpy matmul starts ~7
-        native OpenBLAS workers, and this function's own progress bar leaves a
-        ``tqdm`` monitor thread behind for every later call. Passing
-        ``verbose=False`` does not prevent that -- tqdm starts the monitor in
-        ``__new__``, before it reads ``disable``.
+        The lock is CPython's own, captured live from a hung run.
+        ``concurrent.futures.process`` keeps a module-level ``_threads_wakeups``
+        dict whose entries carry locks. Forking from inside ``submit`` while a
+        sibling thread holds one gives the child a dict describing threads
+        that do not exist in it; at interpreter shutdown ``_python_exit()``
+        walks that dict calling ``wakeup()``, blocks on the orphaned lock, and
+        never exits. The parent then waits forever on that child. CPython's
+        own source marks the call ``# not protected by
+        ProcessPoolExecutor._shutdown_lock``.
 
         It is a race -- the lock has to be held at the exact moment of the
-        fork -- so it fires rarely and unpredictably rather than every time.
+        fork -- so it fires rarely and unpredictably. The same commit hung for
+        12 hours, then passed in 82 seconds on re-run.
+
+        Things that are NOT the cause, each checked because each is the
+        obvious suspect: the allocator (modern glibc reinitialises its arena
+        locks across ``fork``; 60 forks under deliberate malloc contention,
+        zero hangs), and native BLAS worker threads (120 forks with the pool
+        idle and actively computing, zero hangs).
 
         Calls may also nest: `fn` may itself call ``parallel_apply``.
         """

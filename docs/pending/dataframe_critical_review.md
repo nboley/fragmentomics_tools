@@ -649,6 +649,17 @@ because a reviewer with no stake in the design went looking. The same
 verify-don't-assume discipline this document argues for applies to the
 document's own remediation work.
 
+> **Correction, 2026-09-25.** Read with the summary row for B2–B5 ("hangs /
+> crashes — **FIXED**"), this section reads as though `parallel_apply` no
+> longer hangs. It still does, by a different mechanism. What was fixed here
+> is the *worker-death* hang: a dead worker's row never being reprocessed.
+> A second, unrelated hang remains — `fork` running while another thread
+> holds a lock leaves that lock held forever in the child. It was found when
+> a suite run wedged for 12 hours in the very test file this section added.
+> See `docs/pending/parallel_apply_fork_safety.md`. The rewrite did not cause
+> it (the pre-rewrite implementation forked the same way) and did not claim
+> to address it, but "FIXED" in the summary table overstates the coverage.
+
 ## 11.6 What this exercise demonstrated
 
 The review's own §8 note argued that acknowledged uncertainty beat unverifiable
