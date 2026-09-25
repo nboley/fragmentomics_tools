@@ -488,3 +488,5 @@ not only in train/val split.
 1-parameter fit out-of-sample means the per-hexamer anchor is **not a floor**
 and cannot serve as the oracle. Open question §7.2 is closed **by measurement**
 in favour of the scalar.
+
+<!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/nb_oracle.md", "title": "[WIP] A correct NB oracle for the overdispersed simulation store", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T16:00:20.692671+00:00", "page_id": "4964155436", "published_version": 1} -->

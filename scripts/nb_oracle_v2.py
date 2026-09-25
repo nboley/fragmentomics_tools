@@ -342,6 +342,13 @@ def main():
         "plateau_loss_span": plateau_loss_span,
         "max_adjacent_non_monotonicity": max_adj_non_mono,
         "plateau_range": {
+            # A fixed reporting convention, NOT a measured plateau boundary,
+            # and deliberately not the same as profiled_nuisance_r.
+            # plateau_interval (data-driven, loss < min+1e-3). The span is
+            # 8.2619e-4 over either range, because the min (r=1096) and max
+            # (r=2458.8) both fall inside this narrower one. See nb_oracle.md
+            # §9.1 — an earlier draft justified this window as excluding a
+            # "rising tail", which the sweep data contradicts.
             "r_lo": 15.0,
             "r_hi": 3000.0,
             "min_loss": float(plateau_min) if len(plateau_entries) >= 2 else None,
@@ -353,14 +360,29 @@ def main():
             "bitwise identical). The loss varies across the plateau as a "
             "function of r — this is reproducible structure in the "
             "softmax/lgamma/clamp pipeline, not stochastic noise. "
-            "plateau_loss_span is the total loss range over r in [15, 3000]; "
-            "the rising tail above r~3000 is excluded because it is genuine "
-            "signal (the loss climbs there)."
+            "plateau_loss_span is the total loss range (max - min) over the "
+            "fixed window r in [15, 3000]. That window is a REPORTING "
+            "CONVENTION, not a measured boundary, and is deliberately not the "
+            "same as profiled_nuisance_r.plateau_interval, which is "
+            "data-driven (loss < min + 1e-3). The choice does not affect the "
+            "statistic: the span is 8.2619e-4 over either range, because the "
+            "minimum (r=1096) and maximum (r=2458.8) both fall inside this "
+            "narrower one. An earlier version of this note claimed the window "
+            "excluded a 'rising tail above r~3000 because it is genuine "
+            "signal'; that was WRONG — r=3506.3 has loss 4.026652, LOWER than "
+            "the highest point inside the window (4.027178 at r=2458.8). Only "
+            "r=5000 rises clear of the plateau, and both ranges exclude it. "
+            "max_adjacent_non_monotonicity is the largest absolute difference "
+            "between losses at adjacent swept r values within the window; on a "
+            "flat plateau any such difference IS the non-monotonicity of "
+            "interest, but the name overstates it — a strictly monotonic "
+            "sequence would also produce a large value."
         ),
     }
     print(f"\n  Deterministic: {determinism_ok}")
-    print(f"  Plateau loss span (r in [15, 3000]): {plateau_loss_span:.2e}")
-    print(f"  Max adjacent non-monotonicity: {max_adj_non_mono:.2e}")
+    print(f"  Plateau loss span (fixed window r in [15, 3000]): "
+          f"{plateau_loss_span:.2e}")
+    print(f"  Max adjacent |delta| in window: {max_adj_non_mono:.2e}")
     if len(plateau_entries) >= 2:
         print(f"    min={plateau_min:.9f}  max={plateau_max:.9f}  "
               f"over {len(plateau_entries)} points")
@@ -378,8 +400,12 @@ def main():
         (np.log(1.0), np.log(3000.0)),
     )
     fitted_r_oracle = np.exp(fitted_log_r_oracle)
+    # np.isclose rather than ==: this is only a provenance label, and exact
+    # float equality happens to work solely because select_min_over_union
+    # returns a value copied straight out of the grid. That is an accident of
+    # the current implementation, not a property worth depending on.
     oracle_source = (
-        "sweep" if any(fitted_log_r_oracle == lr for lr in coarse_log_r)
+        "sweep" if any(np.isclose(fitted_log_r_oracle, lr) for lr in coarse_log_r)
         else "scipy"
     )
     print(f"  Selected: loss={oracle_loss:.9f} r={fitted_r_oracle:.4f} "
@@ -690,6 +716,21 @@ def main():
         "noise_floor": noise_floor_info,
         "sweep_curve": sweep_results,
         "models": {
+            "_note": (
+                "nb_loss is THIS script's float32 rescoring on CPU and is the "
+                "number pct_bias_captured is derived from. "
+                "nb_val_loss_from_training is what the training run logged, "
+                "and the two are NOT computed the same way: training "
+                "validated under precision=bf16-mixed on GPU. bf16 carries "
+                "roughly three decimal digits of mantissa, so disagreement at "
+                "the 1e-4 level is expected and the float32 figure is the more "
+                "accurate one. Measured here: KEN differs by 1.3e-5, hybrid by "
+                "4.1e-4 — a 30x asymmetry between two architectures scored by "
+                "identical code, which is NOT fully explained by precision "
+                "alone and is recorded as an open question rather than a "
+                "resolved one. It moves hybrid's pct_bias_captured by about "
+                "0.46pp. Quote nb_loss, not nb_val_loss_from_training."
+            ),
             "trained_ken": {
                 "nb_loss": ken_mean,
                 "nb_val_loss_from_training": ken_summary["best_val_loss"],
