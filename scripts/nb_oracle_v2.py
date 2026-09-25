@@ -642,7 +642,11 @@ def main():
         "uniform_nb_nll": uniform_loss,
         "gap_uniform_minus_oracle": gap,
         "profiled_nuisance_r": {
-            "not_identified": True,
+            # Derived from the same `r_identified` that verification.r_identified
+            # publishes, so the two cannot disagree. This was a literal `True`,
+            # which would have kept claiming "not identified" even if the sweep
+            # ever came out smooth.
+            "not_identified": not r_identified,
             "oracle": {
                 "r": fitted_r_oracle,
                 "log_r": fitted_log_r_oracle,
