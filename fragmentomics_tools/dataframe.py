@@ -1981,6 +1981,30 @@ def _detach_h5_inplace(df):
         )
 
 
+def _close_h5_handles(df):
+    """Close live FragmentsH5 handles and replace them with file paths.
+
+    **Ownership warning:** ``frag_h5`` handles are shared by reference across
+    rows (a cross-join puts the same object in every row for a sample) and
+    across DataFrame slices (``iloc``/``loc`` copy the Python reference, not
+    the handle).  Closing a handle here therefore invalidates it in *every*
+    DataFrame that shares it.
+
+    Call this only when you are done with ALL DataFrames that share the same
+    set of handles — typically at the end of a pipeline run.  If you need to
+    keep some DataFrames alive while releasing others, use ``detach_h5()``
+    instead, which replaces the handle with its path string without closing.
+    """
+    if "frag_h5" not in df.columns:
+        return
+    closed = set()
+    for h5 in df["frag_h5"]:
+        if hasattr(h5, 'close') and id(h5) not in closed:
+            h5.close()
+            closed.add(id(h5))
+    _detach_h5_inplace(df)
+
+
 class SampleAndRegionDataFrame(RegionDataFrame):
     _additional_required_columns = ["sample_id", "frag_h5"]
 
@@ -1992,6 +2016,16 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         transparently re-open them.
         """
         _detach_h5_inplace(self)
+        return self
+
+    def close_handles(self):
+        """Close all live HDF5 handles and replace them with file paths.
+
+        See :func:`_close_h5_handles` for the ownership contract: handles
+        are shared across rows and slices, so closing here invalidates the
+        handle in every DataFrame that shares it.
+        """
+        _close_h5_handles(self)
         return self
 
     def reorder_columns(self):
@@ -2157,7 +2191,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
             counts = pd.DataFrame(
                 [x.n_fragments for x in sub_df.fragment_array], columns=[sample_id]
             )
-            means = counts.median().rename("mean_fragment_counts")
+            means = counts.median().rename("median_fragment_counts")
             stds = counts.apply(lambda x: trimmed_std(x, (0.05, 0.05))).rename(
                 "std_fragment_counts"
             )
@@ -2263,6 +2297,13 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 class FlDist:
     @classmethod
     def init_from_sdf(cls, sdf):
+        sample_ids = list(sdf["sample_id"])
+        dupes = sorted(set(sid for sid in sample_ids if sample_ids.count(sid) > 1))
+        if dupes:
+            raise ValueError(
+                f"Duplicate sample_id(s) in SDF: {dupes}. "
+                f"FlDist requires unique sample ids."
+            )
         max_frag_len = 512
         columns = {}
         for record in sdf.itertuples():
@@ -2283,6 +2324,11 @@ class FlDist:
         return cls(fl_df)
 
     def subset_by_sample_ids(self, sample_ids):
+        missing = set(sample_ids) - set(self.fl_df.columns)
+        if missing:
+            raise KeyError(
+                f"sample_id(s) not found in FlDist: {sorted(missing)}"
+            )
         fl_df = self.fl_df.T.loc[sample_ids].T
         return type(self)(fl_df)
 
@@ -2336,6 +2382,16 @@ class SampleDataFrame(DataFrameBase):
         _detach_h5_inplace(self)
         return self
 
+    def close_handles(self):
+        """Close all live HDF5 handles and replace them with file paths.
+
+        See :func:`_close_h5_handles` for the ownership contract: handles
+        are shared across rows and slices, so closing here invalidates the
+        handle in every DataFrame that shares it.
+        """
+        _close_h5_handles(self)
+        return self
+
     def dropna(self, *args, **kwargs):
         return type(self)(self.df.dropna(*args, **kwargs))
 
@@ -2377,9 +2433,12 @@ def str_concat_columns(input_df, agg_column_names):
         A DataFrame with the groupby columns, the concatenated aggregation
         columns, and an 'n' column indicating group size.
     """
+    assert 'n' not in input_df.columns, (
+        "input_df already has an 'n' column, which str_concat_columns would overwrite"
+    )
+
     def apply_fn(sub_df):
         res = {key: ",".join(sub_df[key]) for key in agg_column_names}
-        assert 'n' not in input_df.columns
         res['n'] = sub_df.shape[0]
         return pd.Series(res)
 
@@ -2399,6 +2458,10 @@ def intersect_region_dataframes(region_dataframes, sort=False):
     assert isinstance(region_dataframes, (list, tuple)) and all(
         [isinstance(rdf, RegionDataFrame) for rdf in region_dataframes]
     ), "Must pass list or tuple of RegionDataFrames"
+    if len(region_dataframes) == 0:
+        raise ValueError(
+            "intersect_region_dataframes requires at least one RegionDataFrame"
+        )
     if sort:
         region_dataframes = [rdf.sort() for rdf in region_dataframes]
     intersected_rdf = region_dataframes[0]
