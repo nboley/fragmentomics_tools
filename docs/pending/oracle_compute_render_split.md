@@ -13,9 +13,14 @@ them as JSON on `/efs`:
 
 | script | lines | `main()` | runtime | artifact |
 |---|---|---|---|---|
-| `scripts/nb_oracle_v2.py` | 837 | 173–837 | ~18 min | `oracle_nb_v2.json` |
-| `scripts/nb_oracle_perhex.py` | 859 | 277–849 | ~3.1 h | `oracle_nb_perhex.json` |
+| `scripts/nb_oracle_v2.py` | 837 | 173–833 (661 lines) | ~18 min | `oracle_nb_v2.json` |
+| `scripts/nb_oracle_perhex.py` | 859 | 277–855 (579 lines) | ~3.1 h | `oracle_nb_perhex.json` |
 | `scripts/nb_oracle_sweep.py` | 236 | 46–236 | minutes | stdout only |
+
+*(Corrected after review. My original `main()` ranges ran past the
+`if __name__` guard at v2:836 / perhex:858. The reviewer's file totals were
+each one higher than `wc -l` reports; its `main()` boundaries were right and
+mine were not. Both re-verified here.)*
 
 Those artifacts are the *denominators* for every model-quality percentage
 quoted in `docs/pending/training_analysis.md` and now on two Confluence pages.
@@ -61,11 +66,25 @@ All three build `torch.full((1, C, L), log_r)` and call the same frozen-core
 These have already diverged in a way that mattered. `nb_oracle_perhex.py`
 re-fit its own scalar anchor using scipy alone — the method that
 `nb_oracle_v2.py` had superseded with min-over-union — landing at 4.026408539
-against v2's published 4.026351354. Every delta and percentage in that file
-was computed against the wrong denominator, reading KEN at 61.68% where the
-canonical artifact said 61.31%. Same model, same checkpoint, two numbers.
+against v2's published 4.026351354, a **5.72e-5** disagreement. Every delta and
+percentage in that file was computed against the wrong denominator.
 Partitioning work by file prevented a *write* collision but not this *method*
 divergence.
+
+**Two corrections to an earlier draft of this section, both from review:**
+
+- The method divergence alone is worth **0.04pp** (the scalar-anchor block read
+  61.35% before the fix, 61.31% after). The draft attributed the larger
+  61.68% → 61.31% swing to it, but 61.68% comes from the *per-hexamer anchor*
+  block, which uses a different denominator **by design**. Both numbers were
+  genuinely in the file and "same model, same checkpoint, different numbers"
+  remains true — but the cause is mostly anchor choice, not method divergence,
+  and conflating them overstates this pain.
+- The draft called the script's guard `assert abs(scalar - REF) < 0.001`
+  "three orders of magnitude too loose". **Measured: 1e-3 / 5.72e-5 = 17.5x,
+  which is 1.24 orders of magnitude.** The guard is still far too loose — it
+  passed straight through the real divergence, which is the point — but the
+  quantitative claim was wrong and is corrected here.
 
 ### 1.3 A third form of the same disease, found while researching this design
 
@@ -87,9 +106,10 @@ currently correct — I checked all six against the live JSON by parsing them
 out of the source and comparing with `==`, and all six match bitwise, with
 `REF_GAP` deriving exactly to the published `gap_uniform_minus_oracle` — but
 nothing enforces that. If v2's numbers move, perhex keeps using stale ones and its
-internal cross-check (`assert abs(scalar - REF) < 0.001`) is three orders of
-magnitude too loose to notice: it passed happily through the 5.7e-5
-disagreement described in §1.2.
+internal cross-check (`assert abs(scalar - REF) < 0.001`) is **~17x too loose**
+(1e-3 against a 5.72e-5 divergence, i.e. 1.24 orders of magnitude — an earlier
+draft said three) to notice: it passed happily through the disagreement
+described in §1.2.
 
 **The three pains are one pain.** Numbers computed in one place are re-entered
 by hand somewhere else, and nothing binds the copy to the original.
@@ -139,6 +159,57 @@ Not a framework, not a plugin system, not a general-purpose report engine.
 Two functions and a file per script. The scripts are research code whose
 output is cited in documents; the goal is that a correction is cheap and a
 copy cannot go stale, nothing more.
+
+### 3.3 The raw artifact schema (added after review)
+
+The design review traced all 661 lines of `nb_oracle_v2.main()` and established
+the thing I could not: **every variable crossing the compute→render boundary is
+a JSON-serialisable scalar, string, or small dict.** No torch tensors, models,
+datasets, closures or FASTA handles are required in the render half; `pct_bias`
+needs only `uniform_loss` and `gap`, both scalars. Phase 2 is therefore **low
+risk, not medium** — my original estimate was pessimistic.
+
+`oracle_nb_v2.raw.json`:
+
+```
+_schema_version   int          bump on ANY field add/remove/rename
+_computed_utc     str
+_runtime_s        float
+store/sim_dir/fasta/design_doc          str    provenance
+n_val_pairs, tile_size, l_target, crop, gc_mode
+sweep_curve       [{log_r, r, loss} x 27]
+determinism       {r, eval1, eval2, bitwise_equal} x 4
+oracle            {loss, log_r, r, source}
+uniform           {loss, log_r, r, source}
+alignment         {best_shift, best_r, r_at_shift_0, r_at_shift_minus128,
+                   ratio_0_vs_minus128, n_tiles}
+models            {trained_ken, trained_hybrid, untrained_ken,
+                   untrained_hybrid} -> {nb_loss, checkpoint?,
+                   nb_val_loss_from_training?, seed?}
+loss_config       {class_name, max_dispersion_ratio, clamp_margin,
+                   dispersion_window_size, matches_training_config}
+```
+
+Everything else in the published JSON is **derived** and belongs to render:
+`gap_uniform_minus_oracle`, `pct_bias_captured`, `noise_floor` (span,
+max-adjacent-delta, plateau range/interval), `profiled_nuisance_r`
+(`not_identified`, plateau interval, the reference markers), the `verification`
+block, `supersedes`, and every `_note`.
+
+**Gate placement — decided (review finding #6):** verification gates go in
+**render**. They depend only on scalars already in the raw artifact, and the
+whole point of the split is that a wrong gate — or wrong gate *prose* — is
+correctable without recompute. This project has already shipped one gate that
+could never pass and one note that was false; both would have been cheap to fix
+under this placement. Render is therefore "derive + format + judge", not pure
+formatting, and that is deliberate.
+
+**Staleness — decided (review finding #5):** render reads `_schema_version` and
+compares against a constant in the render module. On mismatch or missing file it
+**raises and exits non-zero**, naming the expected and found versions and the
+command to regenerate. It must **never** silently recompute: a surprise
+18-minute run inside what should be a 2-second render is exactly the behaviour
+that gets worked around by hand-editing, which is the disease being cured.
 
 ## 4. The frozen-core question — DECIDED 2026-09-25
 
@@ -198,6 +269,18 @@ stream: it proved the `not_identified` dedup was pure (only timestamps moved),
 proved today's note fixes were pure, and proved the perhex text alignment
 touched zero numeric leaves.
 
+**Second sub-test, added after review (finding #9).** The leaf-diff proves
+numeric fidelity but cannot prove the raw artifact is *complete* — render might
+reproduce the published JSON only because it quietly re-reads something else
+(the run `summary.json` files, the store, the FASTA). So:
+
+> **Render-from-raw-alone.** Run render with nothing available but the raw
+> artifact, and diff against the published JSON. If render needs any other
+> input, the raw schema is incomplete and that is a finding, not something to
+> paper over by letting render open the extra file.
+
+Without this, §3.3's schema is an assertion rather than a tested property.
+
 ## 6. Open decisions
 
 **6.1 Is the raw artifact committed, cached, or throwaway?**
@@ -206,6 +289,7 @@ CLAUDE.md already bars committing stores and pileup arrays. Render must fail
 loudly if it is absent or if its schema version does not match — never fall
 back to recomputing silently, because a silent 18-minute recompute inside what
 should be a 2-second render is exactly the surprise that gets worked around.
+The mechanism is now specified in §3.3 rather than left as a principle.
 
 **6.2 Do the existing artifacts get regenerated?**
 `oracle_nb_v2.json` costs 18 minutes: regenerate, no question.
@@ -216,6 +300,21 @@ load-bearing. Options: (a) regenerate once and accept the cost; (b) split it
 so the cheap `render` half is verified and the expensive `compute` half is
 grandfathered with its provenance recorded. **Recommend (b)**, and say so in
 the artifact.
+
+> **The guarantee this forfeits, stated plainly (review finding #8).**
+> Choosing (b) means: **end-to-end equivalence for the compute→raw split in
+> `nb_oracle_perhex.py` is NOT verified.** Only its render half is.
+>
+> The argument for (b) is that the compute half is the same code, merely
+> extracted — but *that is precisely the claim the acceptance test exists to
+> check*, and this project has twice found "pure refactor" code paths that were
+> not equivalent. So (b) is a **cost/correctness trade**, not full
+> verification, and an implementer must not read it as the latter. If the
+> owner prefers certainty over 3.1 hours of compute, choose (a); the design
+> does not consider (b) obviously right.
+>
+> If (b) is chosen, stamp the artifact with a field recording that its compute
+> half predates the split and was not re-verified.
 
 **6.3 Migration for existing readers.**
 Both artifacts are cited in `training_analysis.md` and on Confluence pages
@@ -229,7 +328,7 @@ refactor that was supposed to move nothing.
 | phase | scope | risk |
 |---|---|---|
 | 1 | Extract `scripts/_oracle_scoring.py`; point all three scripts at it. No structural change. | low — bitwise test covers it |
-| 2 | Split `nb_oracle_v2.py` into compute/render with a raw artifact. | medium — the 664-line `main()` is the hard part |
+| 2 | Split `nb_oracle_v2.py` into compute/render with a raw artifact. | **low** (was "medium") — review traced the 661-line `main()` and the boundary is clean; schema now fixed in §3.3 |
 | 3 | Same split for `nb_oracle_perhex.py`; delete the seven `REF_*` constants in favour of reading v2's artifact. | medium — see 6.2 |
 | 4 | `nb_oracle_sweep.py` (stdout only, no artifact). | low |
 
@@ -245,15 +344,23 @@ entirely from things that actually happened, with the evidence attached, and
 §1.3 is a genuine finding surfaced while researching rather than a restatement
 of the brief. The acceptance test is concrete and has a track record.
 
-What holds it below an A:
+What held it below an A — **and what review resolved (2026-09-25, grade A-):**
 
-- **I have not read all 664 lines of `nb_oracle_v2.main()`.** I know its phase
-  structure from its output and from targeted greps. The compute/render seam
-  in Phase 2 is where the real difficulty lives, and I am proposing the split
-  without having traced every variable across that boundary. A reviewer should
-  push hard there; my estimate that it is "medium risk" is not well founded.
-- **No measurement of the claimed win.** I assert render is seconds. That is
-  inference from what it does, not timed.
+- ~~**I have not read all 664 lines of `nb_oracle_v2.main()`.**~~ **RESOLVED.**
+  The reviewer traced all 661 lines and found the boundary clean: every
+  crossing variable is a JSON-serialisable scalar or small dict. My "medium
+  risk" was pessimistic; Phase 2 is low risk and the schema is now pinned in
+  §3.3. This was the single largest uncertainty and it resolved in the
+  favourable direction.
+- **Two of my factual claims were WRONG and are corrected in §1.2:** the guard
+  is ~17x too loose, not three orders of magnitude; and the 61.68% figure comes
+  from the per-hexamer anchor, so attributing it to method divergence
+  overstated that pain (the real figure is 0.04pp). Both were caught by review,
+  not by me — which is the same failure mode this project keeps hitting, now
+  committed by the author of the document warning about it.
+- **No measurement of the claimed win.** I assert render is seconds. Still
+  inference from what it does, not timed. Unresolved; it becomes measurable the
+  moment Phase 2 lands.
 - **6.2 is a judgement call I have made on the owner's behalf** — grandfathering
   a 3.1-hour artifact is a real trade and I recommend it partly because the run
   is expensive, which is not a correctness argument.
@@ -263,3 +370,73 @@ What holds it below an A:
   exists.
 
 **This design must not be implemented without a design review at ≥ A-.**
+
+## Review Notes (2026-09-25)
+
+**Verdict**: APPROVED WITH CONDITIONS
+**Grade**: A-
+
+### Method
+
+Full source verification against `nb_oracle_v2.py` (838 lines),
+`nb_oracle_perhex.py` (860 lines), `nb_oracle_sweep.py` (237 lines), both
+published JSON artifacts on `/efs`, and the live test suite (447 passed, 102
+warnings). All seven REF_* constants verified bitwise against
+`oracle_nb_v2.json`. The 661-line `main()` in `nb_oracle_v2.py` was traced
+end-to-end to map the compute/render boundary.
+
+### Key finding: the boundary is clean
+
+Every variable that crosses the compute→render boundary is a JSON-serializable
+scalar, string, or small dict (~20 fields + the 27-entry sweep curve + nested
+metadata). No torch tensors, model objects, datasets, closures, or file
+handles are needed in the render half. `pct_bias` uses only `uniform_loss` and
+`gap` (both scalars). The design's self-assessed "medium risk" for Phase 2 is
+conservative — the boundary is straightforward.
+
+### Conditions for approval
+
+1. **Correct "three orders of magnitude" (§1.2).** Actual ratio: threshold
+   (1e-3) / divergence (5.72e-5) = 17.5x ≈ 1.24 OoM, not three. The guard IS
+   too loose, but the quantitative claim is wrong.
+2. **Add a raw artifact schema** — even a sketch listing the fields the raw
+   artifact will contain. This reduces Phase 2 risk and prevents the
+   implementer from making ad hoc boundary decisions.
+3. **Define the staleness detection mechanism** referenced in §6.1. What field
+   carries the schema version? What value? What does render do on mismatch?
+4. **State explicitly in §6.2** that grandfathering means the perhex
+   compute→raw split is NOT verified end-to-end. The economic argument is
+   valid; the lost guarantee must be visible.
+
+### Risks
+
+1. Without the schema specification, the implementer must re-trace the
+   boundary. (Mitigated: this review documents that the boundary is clean and
+   identifies the ~20 fields.)
+2. Grandfathered perhex compute→raw split could contain a bug the skipped
+   acceptance test would have caught.
+3. Schema staleness detection is undefined; a render failure on a stale raw
+   artifact could produce a confusing error rather than a helpful one.
+
+### Accuracy corrections
+
+- §1.2 "reading KEN at 61.68%" conflates per-hexamer-anchor divergence with
+  scalar method divergence. The scalar-only divergence is 0.04pp (61.35% →
+  61.31%); the 61.68% figure comes from the per-hexamer anchor section, which
+  uses a different denominator by design.
+- Table in §1: v2.py main() is 173–833 (661 lines, not 173–837 / 664 lines);
+  perhex.py main() ends at 855 (not 849); sweep.py has 237 lines (not 236).
+  Minor; doc acknowledges line numbers rot.
+
+### Key tradeoffs
+
+- **Scoring helper in `scripts/_oracle_scoring.py` vs frozen core**: the
+  design's recommendation is correct. The helper is plumbing, not statistical
+  specification, and keeping it out avoids frozen-core approval overhead for a
+  refactor that should need none.
+- **Grandfathering perhex**: defensible for a NOT_MATERIAL negative result, but
+  the implementer should understand it is a cost/correctness tradeoff, not
+  full verification.
+- **Verification gates**: the design should decide whether gates go in compute
+  (raw artifact records outcomes) or render (gate logic correctable without
+  recompute). Either works; the choice should be deliberate.

@@ -9,8 +9,12 @@ those, but treat the *rules* as binding unless the owner says otherwise.
 - Test/run env: `/home/nathanboley/miniconda3/envs/biomarker_env/bin/python`
   (torch 2.5.1 CUDA-12.4 build, lightning, zarr 2.18.3, numcodecs 0.13.1).
 - Run the suite from the repo root: `python -m pytest tests/ -q`.
-  Baseline as of the last update: **196 passed, 0 skipped**. A few
+  Baseline **447 passed, 0 skipped** (measured 2026-09-25 @ f6c5246). A few
   `self.log()`-without-Trainer warnings are expected and harmless.
+  This number moves with almost every commit, so **measure it yourself before
+  and after your change** rather than quoting this line — it said 196 for long
+  enough that the gap to reality reached 251 tests, which makes it useless as
+  the regression check it exists to be.
 - Run the suite **before and after** any change. A new test that fails against
   production code is a *finding to report*, not something to patch away.
 
