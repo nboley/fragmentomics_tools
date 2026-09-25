@@ -51,7 +51,7 @@ def main():
     import zarr
     from background_model.config import PlumbingConfig
     from background_model.dataset import BackgroundTileDataset
-    from background_model_core import MaskedNegativeBinomialOffsetNLLLoss
+    from scripts._oracle_scoring import eval_loss_at_log_r, make_oracle_loss_fn
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
 
@@ -132,10 +132,7 @@ def main():
     exact_points = [np.log(7.179), np.log(1096.0)]
     log_r_values = np.sort(np.unique(np.concatenate([log_r_values, exact_points])))
 
-    loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
-        max_dispersion_ratio=2.0,
-        clamp_margin=1.0,
-    )
+    loss_fn = make_oracle_loss_fn()
 
     print(f"\n[sweep] Sweeping {len(log_r_values)} log_r values...", flush=True)
     print(f"{'log_r':>10s} {'r':>12s} {'mean_loss':>12s}")
@@ -144,17 +141,7 @@ def main():
     results = []
     for log_r_val in log_r_values:
         r_val = np.exp(log_r_val)
-        losses = []
-        with torch.no_grad():
-            for di in sorted(pair_logits):
-                logits, y_t, m_t = pair_logits[di]
-                B, C, L = logits.shape
-                W = L  # dispersion_window_size=1
-                ld = torch.full((1, C, W), log_r_val, dtype=torch.float32)
-                loss_val = loss_fn(logits, ld, y_t, m_t).item()
-                losses.append(loss_val)
-
-        mean_loss = float(np.mean(losses))
+        mean_loss = eval_loss_at_log_r(float(log_r_val), pair_logits, loss_fn)
         results.append((float(log_r_val), float(r_val), mean_loss))
         print(f"{log_r_val:10.4f} {r_val:12.4f} {mean_loss:12.6f}")
 

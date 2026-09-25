@@ -283,7 +283,7 @@ def main():
 
     from background_model.config import PlumbingConfig
     from background_model.dataset import BackgroundTileDataset
-    from background_model_core import MaskedNegativeBinomialOffsetNLLLoss
+    from scripts._oracle_scoring import eval_loss_at_log_r, make_oracle_loss_fn
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
 
@@ -340,9 +340,7 @@ def main():
         val_tile_to_pairs.setdefault(t_idx, []).append((di, s_idx))
 
     fa = pysam.FastaFile(FASTA)
-    loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
-        max_dispersion_ratio=2.0, clamp_margin=1.0,
-    )
+    loss_fn = make_oracle_loss_fn()
 
     val_oracle_data = {}   # di -> (oracle_logits, uniform_logits, y_t, m_t)
     val_hex_data = {}      # di -> (hex_idx, hex_valid)
@@ -387,22 +385,15 @@ def main():
     print("PHASE B: Scalar anchor (verification) + TRUE per-hexamer r")
     print(f"{'='*70}")
 
-    # Scalar r: reproduce the nb_oracle_v2 result
-    def eval_scalar_loss(log_r_val, use_oracle=True):
-        losses = []
-        with torch.no_grad():
-            for di in sorted(val_oracle_data):
-                oracle_logits, uniform_logits, y_t, m_t = val_oracle_data[di]
-                logits = oracle_logits if use_oracle else uniform_logits
-                B, C, L = logits.shape
-                ld = torch.full((1, C, L), log_r_val, dtype=torch.float32)
-                loss_val = loss_fn(logits, ld, y_t, m_t).item()
-                losses.append(loss_val)
-        return float(np.mean(losses))
+    # Build 3-tuple dicts for the shared scoring helper
+    oracle_pairs = {di: (oracle_logits, y_t, m_t)
+                    for di, (oracle_logits, _, y_t, m_t) in val_oracle_data.items()}
+    uniform_pairs = {di: (uniform_logits, y_t, m_t)
+                     for di, (_, uniform_logits, y_t, m_t) in val_oracle_data.items()}
 
     # Fit scalar r (oracle propensity) on val
     result_scalar = minimize_scalar(
-        lambda lr: eval_scalar_loss(lr, use_oracle=True),
+        lambda lr: eval_loss_at_log_r(lr, oracle_pairs, loss_fn),
         bounds=(np.log(1.0), np.log(3000.0)),
         method="bounded",
         options={"xatol": 0.01},
@@ -412,7 +403,7 @@ def main():
 
     # Fit scalar r (uniform) on val
     result_uniform = minimize_scalar(
-        lambda lr: eval_scalar_loss(lr, use_oracle=False),
+        lambda lr: eval_loss_at_log_r(lr, uniform_pairs, loss_fn),
         bounds=(np.log(1.0), np.log(3000.0)),
         method="bounded",
         options={"xatol": 0.01},

@@ -177,7 +177,6 @@ def main():
     import zarr
     from background_model.config import PlumbingConfig
     from background_model.dataset import BackgroundTileDataset
-    from background_model_core import MaskedNegativeBinomialOffsetNLLLoss
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
 
@@ -253,23 +252,14 @@ def main():
           flush=True)
 
     # ── Helper: evaluate loss at a given log_r for a given logit set ───────
-    loss_fn = MaskedNegativeBinomialOffsetNLLLoss(
-        max_dispersion_ratio=2.0, clamp_margin=1.0,
-    )
+    from scripts._oracle_scoring import eval_loss_at_log_r, make_oracle_loss_fn
+    loss_fn = make_oracle_loss_fn()
 
-    def eval_loss_at_log_r(log_r_val, use_oracle=True):
-        """Mean loss across all val pairs at a given scalar log_r."""
-        losses = []
-        with torch.no_grad():
-            for di in sorted(oracle_data):
-                oracle_logits, uniform_logits, y_t, m_t = oracle_data[di]
-                logits = oracle_logits if use_oracle else uniform_logits
-                B, C, L = logits.shape
-                W = L  # dispersion_window_size=1
-                ld = torch.full((1, C, W), log_r_val, dtype=torch.float32)
-                loss_val = loss_fn(logits, ld, y_t, m_t).item()
-                losses.append(loss_val)
-        return float(np.mean(losses))
+    # Build 3-tuple dicts for the shared helper (oracle vs uniform logits)
+    oracle_pairs = {di: (oracle_logits, y_t, m_t)
+                    for di, (oracle_logits, _, y_t, m_t) in oracle_data.items()}
+    uniform_pairs = {di: (uniform_logits, y_t, m_t)
+                     for di, (_, uniform_logits, y_t, m_t) in oracle_data.items()}
 
     # ── Step 0 recap: coarse sweep for the report ──────────────────────────
     print("\n" + "=" * 70)
@@ -285,7 +275,7 @@ def main():
     print(f"{'log_r':>10s} {'r':>12s} {'loss':>12s}")
     print(f"{'-'*10} {'-'*12} {'-'*12}")
     for lr in coarse_log_r:
-        loss = eval_loss_at_log_r(lr, use_oracle=True)
+        loss = eval_loss_at_log_r(lr, oracle_pairs, loss_fn)
         sweep_results.append({"log_r": float(lr), "r": float(np.exp(lr)),
                               "loss": loss})
         note = ""
@@ -305,8 +295,8 @@ def main():
     test_log_rs = [np.log(7.179), np.log(21.0), np.log(1096.0), np.log(500.0)]
     determinism_ok = True
     for test_lr in test_log_rs:
-        v1 = eval_loss_at_log_r(test_lr, use_oracle=True)
-        v2 = eval_loss_at_log_r(test_lr, use_oracle=True)
+        v1 = eval_loss_at_log_r(test_lr, oracle_pairs, loss_fn)
+        v2 = eval_loss_at_log_r(test_lr, oracle_pairs, loss_fn)
         match = (v1 == v2)
         if not match:
             determinism_ok = False
@@ -395,7 +385,7 @@ def main():
     print("=" * 70)
 
     oracle_loss, fitted_log_r_oracle = select_min_over_union(
-        lambda lr: eval_loss_at_log_r(lr, use_oracle=True),
+        lambda lr: eval_loss_at_log_r(lr, oracle_pairs, loss_fn),
         coarse_log_r,
         (np.log(1.0), np.log(3000.0)),
     )
@@ -417,7 +407,7 @@ def main():
     print("=" * 70)
 
     uniform_loss, fitted_log_r_uniform = select_min_over_union(
-        lambda lr: eval_loss_at_log_r(lr, use_oracle=False),
+        lambda lr: eval_loss_at_log_r(lr, uniform_pairs, loss_fn),
         coarse_log_r,
         (np.log(1.0), np.log(3000.0)),
     )
