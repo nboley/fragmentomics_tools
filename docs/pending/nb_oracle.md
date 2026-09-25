@@ -281,9 +281,9 @@ not one.
    back near 1096, the answer is effectively no, and the finding is about the
    objective rather than about the oracle. This is the most important thing the
    step-0 sweep will tell us.
-2. **Should `r` be fitted per-position, per-window, or scalar?** Scalar is
-   proposed for tractability. A per-hexamer fit would be closer to the generative
-   structure but reintroduces overfitting risk on 1600 val pairs.
+2. ~~**Should `r` be fitted per-position, per-window, or scalar?**~~ **CLOSED —
+   see §9.4.** Scalar anchor stands; per-hexamer fit is not a floor (OOS delta
+   +0.000483, under 0.001-nat threshold).
 3. **Does the clamp bind on the oracle path?** §2.4 flags an inconsistency in the
    current file. Resolve during step 0.
 4. **Is anchor A the right question?** It measures propensity capture holding
@@ -377,29 +377,27 @@ mathematically correct:
 
 ## 9. Results addendum (post-implementation)
 
-### 9.1 The fitted r is not identified
+### 9.1 The profiled nuisance r is not identified
 
-The step-0 sweep shows the loss descending steeply from r=1 to r≈20, then
-entering a flat plateau. The fitted r (via scipy or grid minimum) lands
-somewhere on this plateau, but the plateau's non-monotonicity — numerical noise
-from the softmax/lgamma/clamp pipeline in the deterministic objective — exceeds
-the loss difference between adjacent grid points by a factor that makes the
-specific fitted r meaningless.
+The step-0 sweep shows the loss descending steeply from r=1 to r≈15, then
+entering a flat plateau. The profiled nuisance r (via scipy or grid minimum)
+lands somewhere on this plateau, but the plateau's loss span — reproducible
+structure in the softmax/lgamma/clamp pipeline, NOT stochastic noise (the
+objective is bitwise deterministic) — makes the specific value meaningless.
+The JSON field is `profiled_nuisance_r` with `not_identified: true`.
 
-Measured: the objective IS deterministic (bitwise identical on re-evaluation),
-so the non-monotonicity is real numerical noise in the loss computation, not
-stochastic evaluation. The `noise_floor` field in `oracle_nb_v2.json` records
-the measured magnitude.
+The `noise_floor` field in `oracle_nb_v2.json` reports `plateau_loss_span`
+(scoped to the actual plateau r∈[15, 3000], excluding the rising tail above
+r~3000 which is genuine signal) and `max_adjacent_non_monotonicity`.
 
 The defensible conclusion is: **the offset conditioning absorbs the
-overdispersion above r≈20, and the loss plateau is flat to within numerical
-noise, so r is not identified.** This answers open question §7.1 in the
-negative: the `nb_offset` objective effectively cannot see the overdispersion
-this store injected.
+overdispersion above r≈15–20, and the loss plateau is flat, so r is not
+identified.** This answers open question §7.1 in the negative: the `nb_offset`
+objective effectively cannot see the overdispersion this store injected.
 
 The earlier claim that fitted r=21 vs true r=7.18 demonstrates "partial
 sensitivity" rested on a loss difference (1.4e-4) smaller than the plateau's
-own non-monotonicity (~1.8e-4). That claim is withdrawn.
+own loss span (~8.3e-4). That claim is withdrawn.
 
 ### 9.2 Min-over-union anchor selection
 
@@ -407,3 +405,65 @@ The scipy optimizer returned a point that was NOT the minimum of the sweep
 curve stored in the same JSON — the sweep contained a lower-loss point. The
 oracle and uniform anchors are now selected as the minimum over the union of
 (swept grid points, scipy result), eliminating this inconsistency.
+
+### 9.3 Corrections to oracle_nb_v2.json
+
+Applied in the second pass to fix misstatements in the initial oracle_nb_v2.json:
+
+- **`profiled_nuisance_r`** (was `fitted_r`): renamed to clarify that this is
+  the argmin of a nuisance parameter, not an estimate of the generative r.
+  The published value r≈1096 coincides with the frozen model initialisation
+  exp(log_dispersion_init) = exp(7) ≈ 1096; this is an artefact of the flat
+  plateau plus the reference marker log(1096) being injected into the sweep
+  grid as a selectable point — NOT agreement between the oracle and the model.
+  Any r on the plateau produces an effectively identical oracle loss. The field
+  carries `not_identified: true` and a published plateau interval. The oracle
+  VALUE (4.026351) is unchanged.
+
+- **`noise_floor._note`**: no longer calls deterministic structure "numerical
+  noise". The objective is bitwise deterministic; what varies across the plateau
+  is reproducible structure in the loss computation. The statistic is rescoped
+  from r>20 (which included the rising tail) to r∈[15, 3000] (the actual
+  plateau) and renamed from `plateau_non_monotonicity` to `plateau_loss_span`.
+
+- **Sweep raggedness gate split**: the sweep's 11 sign changes (vs threshold 5)
+  previously set `sanity_gate_all_pass = false`, making the overall gate
+  permanently fail. Since the design's own conclusion (§9.1) is that the
+  plateau is flat and r is not identified, a gate that can never pass carries
+  no information. Raggedness is now a descriptive field `r_identified: false`
+  with the sign-change count and threshold alongside it. `sanity_gate_all_pass`
+  covers only conditions that mean the artifact is BROKEN: alignment
+  best_shift==0, untrained-above-oracle, trained-between-anchors.
+
+- **Deleted `uniform_vs_log_W`**: compared NB loss against log(2048), an exact
+  identity for the multinomial loss that has no analogue for the NB-offset loss.
+  The delta (-3.51) compared unlike things and could not fail.
+
+- **Deleted `descending_before`**: computed and never read.
+
+### 9.4 Per-hexamer r investigation (closes open question §7.2)
+
+The per-hexamer investigation is complete. The scalar anchor stands.
+
+Measured results (from the completed per-hexamer run):
+
+| configuration | oracle NLL | delta vs scalar |
+|---|---|---|
+| scalar oracle (1 param) | 4.026409 | — |
+| true per-hexamer r, no fit | 4.026575 | +0.000166 (WORSE) |
+| per-hexamer fit-on-train, scored-on-val (OOS) | 4.026892 | +0.000483 (WORSE) |
+| per-hexamer fit-on-val (in-sample) | 4.026611 | +0.000202 |
+
+Note: the scalar oracle reported here (4.026409) is the per-hexamer script's
+own refit; the published v2 anchor is 4.026351354 (from the min-over-union
+selection on the full sweep grid).
+
+4014 hexamers were fitted out-of-sample vs 2952 in-sample. The in-sample/OOS
+comparison is therefore confounded — the two differ in effective model size,
+not only in train/val split.
+
+**Verdict: NOT_MATERIAL.** The OOS delta (+0.000483) is under the pre-registered
+0.001-nat threshold in a gap of 0.0888. A 4096-parameter fit landing ABOVE a
+1-parameter fit out-of-sample means the per-hexamer anchor is **not a floor**
+and cannot serve as the oracle. Open question §7.2 is closed **by measurement**
+in favour of the scalar.

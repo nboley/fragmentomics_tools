@@ -145,6 +145,31 @@ def score_model_nb(model, ds, device="cpu"):
     return np.array(nlls)
 
 
+def select_min_over_union(loss_fn, grid, bounds):
+    """Select the minimum loss over the union of grid evaluations and scipy.
+
+    Evaluates loss_fn at every point in grid, runs scipy minimize_scalar
+    on the same bounds, and returns whichever produced the lower loss.
+
+    Returns (best_loss, best_log_r).
+    """
+    grid_losses = np.array([loss_fn(lr) for lr in grid])
+    grid_best_idx = int(np.argmin(grid_losses))
+    grid_best_loss = float(grid_losses[grid_best_idx])
+    grid_best_log_r = float(grid[grid_best_idx])
+
+    result = minimize_scalar(
+        loss_fn, bounds=bounds, method="bounded",
+        options={"xatol": 0.01},
+    )
+    scipy_loss = result.fun
+    scipy_log_r = result.x
+
+    if grid_best_loss < scipy_loss:
+        return grid_best_loss, grid_best_log_r
+    return scipy_loss, scipy_log_r
+
+
 def main():
     t0 = time.time()
 
@@ -288,130 +313,95 @@ def main():
         print(f"  r={np.exp(test_lr):10.4f}: eval1={v1:.15f} eval2={v2:.15f} "
               f"bitwise_equal={match}")
 
-    # Characterise non-monotonicity in the sweep's plateau region (r > 20)
-    plateau_entries = [(s["r"], s["loss"]) for s in sweep_results if s["r"] > 20]
+    # Characterise the plateau region: r in [15, 3000] (excludes the steep
+    # descent below r~15 and the rising tail above r~3000 where the loss
+    # genuinely climbs — those are signal, not plateau structure).
+    plateau_entries = [(s["r"], s["loss"]) for s in sweep_results
+                       if 15 <= s["r"] <= 3000]
     if len(plateau_entries) >= 2:
         plateau_losses = [l for _, l in plateau_entries]
         plateau_max = max(plateau_losses)
         plateau_min = min(plateau_losses)
-        non_monotonicity = plateau_max - plateau_min
+        plateau_loss_span = plateau_max - plateau_min
+        adj_diffs = [abs(plateau_losses[i+1] - plateau_losses[i])
+                     for i in range(len(plateau_losses) - 1)]
+        max_adj_non_mono = max(adj_diffs) if adj_diffs else 0.0
     else:
-        non_monotonicity = 0.0
+        plateau_loss_span = 0.0
+        max_adj_non_mono = 0.0
+
+    # Plateau interval: range of r where loss < global_min + 0.001
+    global_min_loss = min(s["loss"] for s in sweep_results)
+    plateau_threshold = global_min_loss + 0.001
+    plateau_r_vals = [s["r"] for s in sweep_results
+                      if s["loss"] < plateau_threshold]
+    plateau_interval = (float(min(plateau_r_vals)), float(max(plateau_r_vals)))
 
     noise_floor_info = {
         "deterministic": determinism_ok,
-        "plateau_non_monotonicity": non_monotonicity,
-        "plateau_range_r_gt_20": {
+        "plateau_loss_span": plateau_loss_span,
+        "max_adjacent_non_monotonicity": max_adj_non_mono,
+        "plateau_range": {
+            "r_lo": 15.0,
+            "r_hi": 3000.0,
             "min_loss": float(plateau_min) if len(plateau_entries) >= 2 else None,
             "max_loss": float(plateau_max) if len(plateau_entries) >= 2 else None,
             "n_points": len(plateau_entries),
         },
         "_note": (
-            "The objective is deterministic given cached logits/counts, so "
-            "non-monotonicity across the plateau is real numerical noise from "
-            "the softmax/lgamma/clamp pipeline, not stochastic evaluation. "
-            "Any claim about fitted r must exceed this noise floor to be "
-            "meaningful."
+            "The objective is deterministic (verified: repeat evaluations are "
+            "bitwise identical). The loss varies across the plateau as a "
+            "function of r — this is reproducible structure in the "
+            "softmax/lgamma/clamp pipeline, not stochastic noise. "
+            "plateau_loss_span is the total loss range over r in [15, 3000]; "
+            "the rising tail above r~3000 is excluded because it is genuine "
+            "signal (the loss climbs there)."
         ),
     }
     print(f"\n  Deterministic: {determinism_ok}")
-    print(f"  Plateau non-monotonicity (r>20): {non_monotonicity:.2e}")
+    print(f"  Plateau loss span (r in [15, 3000]): {plateau_loss_span:.2e}")
+    print(f"  Max adjacent non-monotonicity: {max_adj_non_mono:.2e}")
     if len(plateau_entries) >= 2:
         print(f"    min={plateau_min:.9f}  max={plateau_max:.9f}  "
               f"over {len(plateau_entries)} points")
+    print(f"  Plateau interval (loss < min+1e-3): "
+          f"r in [{plateau_interval[0]:.1f}, {plateau_interval[1]:.1f}]")
 
-    # ── Step 2: fit r for oracle propensity ────────────────────────────────
+    # ── Step 2: fit r for oracle propensity (min-over-union) ─────────────
     print("\n" + "=" * 70)
-    print("STEP 2: Fitting scalar r for oracle propensity")
+    print("STEP 2: Fitting scalar r for oracle propensity (min-over-union)")
     print("=" * 70)
 
-    # Use scipy minimize_scalar in the reliable range [log(1), log(3000)]
-    # The coarse sweep shows the curve plateaus above r≈20-30
-    result_oracle = minimize_scalar(
+    oracle_loss, fitted_log_r_oracle = select_min_over_union(
         lambda lr: eval_loss_at_log_r(lr, use_oracle=True),
-        bounds=(np.log(1.0), np.log(3000.0)),
-        method="bounded",
-        options={"xatol": 0.01},
+        coarse_log_r,
+        (np.log(1.0), np.log(3000.0)),
     )
-    scipy_log_r_oracle = result_oracle.x
-    scipy_r_oracle = np.exp(scipy_log_r_oracle)
-    scipy_loss_oracle = result_oracle.fun
-
-    print(f"  Scipy log_r: {scipy_log_r_oracle:.4f}")
-    print(f"  Scipy r:     {scipy_r_oracle:.4f}")
-    print(f"  Scipy loss:  {scipy_loss_oracle:.9f}")
-
-    # Select oracle = min over union of (swept grid, scipy result)
-    sweep_losses = [s["loss"] for s in sweep_results]
-    sweep_best_idx = int(np.argmin(sweep_losses))
-    sweep_best_loss = sweep_losses[sweep_best_idx]
-    sweep_best_log_r = sweep_results[sweep_best_idx]["log_r"]
-    print(f"  Sweep best:  {sweep_best_loss:.9f} at r={sweep_results[sweep_best_idx]['r']:.4f}")
-
-    if sweep_best_loss < scipy_loss_oracle:
-        oracle_loss = sweep_best_loss
-        fitted_log_r_oracle = sweep_best_log_r
-        oracle_source = "sweep"
-        print(f"  -> Sweep beats scipy by {scipy_loss_oracle - sweep_best_loss:.2e}; "
-              f"using sweep minimum")
-    else:
-        oracle_loss = scipy_loss_oracle
-        fitted_log_r_oracle = scipy_log_r_oracle
-        oracle_source = "scipy"
-        print(f"  -> Scipy beats sweep by {sweep_best_loss - scipy_loss_oracle:.2e}; "
-              f"using scipy result")
     fitted_r_oracle = np.exp(fitted_log_r_oracle)
-    print(f"  Final oracle loss: {oracle_loss:.9f} (r={fitted_r_oracle:.4f}, "
-          f"source={oracle_source})")
+    oracle_source = (
+        "sweep" if any(fitted_log_r_oracle == lr for lr in coarse_log_r)
+        else "scipy"
+    )
+    print(f"  Selected: loss={oracle_loss:.9f} r={fitted_r_oracle:.4f} "
+          f"(source={oracle_source})")
 
     # ── Step 3: fit r for uniform propensity (SEPARATE fit) ────────────────
     print("\n" + "=" * 70)
-    print("STEP 3: Fitting scalar r for uniform propensity (separate fit)")
+    print("STEP 3: Fitting scalar r for uniform propensity (min-over-union)")
     print("=" * 70)
 
-    # Sweep for uniform too
-    uniform_sweep_results = []
-    for lr in coarse_log_r:
-        loss = eval_loss_at_log_r(lr, use_oracle=False)
-        uniform_sweep_results.append({"log_r": float(lr), "r": float(np.exp(lr)),
-                                      "loss": loss})
-
-    result_uniform = minimize_scalar(
+    uniform_loss, fitted_log_r_uniform = select_min_over_union(
         lambda lr: eval_loss_at_log_r(lr, use_oracle=False),
-        bounds=(np.log(1.0), np.log(3000.0)),
-        method="bounded",
-        options={"xatol": 0.01},
+        coarse_log_r,
+        (np.log(1.0), np.log(3000.0)),
     )
-    scipy_log_r_uniform = result_uniform.x
-    scipy_r_uniform = np.exp(scipy_log_r_uniform)
-    scipy_loss_uniform = result_uniform.fun
-
-    print(f"  Scipy log_r: {scipy_log_r_uniform:.4f}")
-    print(f"  Scipy r:     {scipy_r_uniform:.4f}")
-    print(f"  Scipy loss:  {scipy_loss_uniform:.9f}")
-
-    # Select uniform = min over union of (swept grid, scipy result)
-    u_sweep_losses = [s["loss"] for s in uniform_sweep_results]
-    u_sweep_best_idx = int(np.argmin(u_sweep_losses))
-    u_sweep_best_loss = u_sweep_losses[u_sweep_best_idx]
-    u_sweep_best_log_r = uniform_sweep_results[u_sweep_best_idx]["log_r"]
-    print(f"  Sweep best:  {u_sweep_best_loss:.9f} at r={uniform_sweep_results[u_sweep_best_idx]['r']:.4f}")
-
-    if u_sweep_best_loss < scipy_loss_uniform:
-        uniform_loss = u_sweep_best_loss
-        fitted_log_r_uniform = u_sweep_best_log_r
-        uniform_source = "sweep"
-        print(f"  -> Sweep beats scipy by {scipy_loss_uniform - u_sweep_best_loss:.2e}; "
-              f"using sweep minimum")
-    else:
-        uniform_loss = scipy_loss_uniform
-        fitted_log_r_uniform = scipy_log_r_uniform
-        uniform_source = "scipy"
-        print(f"  -> Scipy beats sweep by {u_sweep_best_loss - scipy_loss_uniform:.2e}; "
-              f"using scipy result")
     fitted_r_uniform = np.exp(fitted_log_r_uniform)
-    print(f"  Final uniform loss: {uniform_loss:.9f} (r={fitted_r_uniform:.4f}, "
-          f"source={uniform_source})")
+    uniform_source = (
+        "sweep" if any(fitted_log_r_uniform == lr for lr in coarse_log_r)
+        else "scipy"
+    )
+    print(f"  Selected: loss={uniform_loss:.9f} r={fitted_r_uniform:.4f} "
+          f"(source={uniform_source})")
 
     gap = uniform_loss - oracle_loss
     print(f"\n  Oracle:  {oracle_loss:.9f}")
@@ -578,39 +568,30 @@ def main():
           f"r(0)={r_at_zero:.4f} vs r(-128)={r_at_minus128:.4f} "
           f"({ratio:.1f}x) — {'PASS' if best_shift == 0 else '**FAIL**'}")
 
-    # 4. Uniform cross-check
-    log_tile = np.log(tile_size)
-    print(f"\n  [4] Uniform cross-check:")
-    print(f"    log(tile_size={tile_size}) = {log_tile:.6f}")
-    print(f"    Fitted uniform NB:          {uniform_loss:.6f}")
-    print(f"    Delta:                      {uniform_loss - log_tile:+.6f}")
-    print(f"    Note: no collapsed v3nb run exists; log(2048) minus zero-count "
-          f"correction is the available check (weaker than v3_A's)")
-
-    # 5. Loss-object identity
-    print(f"\n  [5] Loss-object identity:")
+    # 4. Loss-object identity
+    print(f"\n  [4] Loss-object identity:")
     print(f"    Loss class: MaskedNegativeBinomialOffsetNLLLoss (frozen core)")
     print(f"    max_dispersion_ratio=2.0, clamp_margin=1.0, "
           f"dispersion_window_size=1")
     print(f"    Matches training run config: YES")
 
-    # 6. Monotonicity of sweep
-    sweep_losses = np.array([s["loss"] for s in sweep_results])
-    sweep_diffs = np.diff(sweep_losses)
+    # 5. Sweep raggedness (descriptive — does NOT gate all_pass, because
+    #    §9.1 concludes the plateau is flat and r is not identified, so a
+    #    ragged curve is the expected permanent state, not a failure)
+    sweep_losses_arr = np.array([s["loss"] for s in sweep_results])
+    sweep_diffs = np.diff(sweep_losses_arr)
     sign_changes = int(np.sum(np.diff(np.sign(sweep_diffs)) != 0))
-    # Check just the reliable region (r < 3000)
-    print(f"\n  [6] Sweep monotonicity (r in [1, 5000]):")
-    print(f"    Sign changes in slope: {sign_changes}")
-    # The curve should descend then plateau — check for one transition
-    min_idx = np.argmin(sweep_losses)
-    descending_before = all(d <= 0.0005 for d in sweep_diffs[:max(1, min_idx)])
-    print(f"    Minimum at index {min_idx}/{len(sweep_losses)} "
+    r_identified = sign_changes <= 5
+    print(f"\n  [5] Sweep raggedness (r in [1, 5000]):")
+    print(f"    Sign changes in slope: {sign_changes} (threshold: 5)")
+    min_idx = np.argmin(sweep_losses_arr)
+    print(f"    Minimum at index {min_idx}/{len(sweep_losses_arr)} "
           f"(r={sweep_results[min_idx]['r']:.1f})")
-    if sign_changes <= 5:
-        print(f"    Verdict: smooth (few sign changes) — PASS")
+    if r_identified:
+        print(f"    r_identified: true (smooth curve)")
     else:
-        print(f"    Verdict: somewhat noisy ({sign_changes} sign changes) — "
-              f"curve plateaus, minimum may be in flat region")
+        print(f"    r_identified: false — RAGGED ({sign_changes} sign changes): "
+              f"r is not identified on the plateau")
 
     # ── Results table ──────────────────────────────────────────────────────
     print("\n" + "=" * 70)
@@ -622,7 +603,7 @@ def main():
 
     print(f"\n  {'Model':<22s} {'NB loss':>12s} {'% bias':>10s}")
     print(f"  {'-'*22} {'-'*12} {'-'*10}")
-    print(f"  {'Oracle (fitted r)':<22s} {oracle_loss:>12.6f} {'100.0%':>10s}")
+    print(f"  {'Oracle (true prop.)':<22s} {oracle_loss:>12.6f} {'100.0%':>10s}")
     print(f"  {'Trained KEN':<22s} {ken_mean:>12.6f} {pct_bias(ken_mean):>9.1f}%")
     print(f"  {'Trained Hybrid':<22s} {hybrid_mean:>12.6f} "
           f"{pct_bias(hybrid_mean):>9.1f}%")
@@ -630,11 +611,12 @@ def main():
           f"{pct_bias(ken_u_mean):>9.1f}%")
     print(f"  {'Untrained Hybrid':<22s} {hybrid_u_mean:>12.6f} "
           f"{pct_bias(hybrid_u_mean):>9.1f}%")
-    print(f"  {'Uniform (fitted r)':<22s} {uniform_loss:>12.6f} {'0.0%':>10s}")
+    print(f"  {'Uniform':<22s} {uniform_loss:>12.6f} {'0.0%':>10s}")
 
-    print(f"\n  Fitted r (oracle propensity):  {fitted_r_oracle:.4f} "
-          f"(log_r={fitted_log_r_oracle:.4f})")
-    print(f"  Fitted r (uniform propensity): {fitted_r_uniform:.4f} "
+    print(f"\n  Profiled nuisance r (oracle):  {fitted_r_oracle:.4f} "
+          f"(NOT identified — plateau interval "
+          f"[{plateau_interval[0]:.1f}, {plateau_interval[1]:.1f}])")
+    print(f"  Profiled nuisance r (uniform): {fitted_r_uniform:.4f} "
           f"(log_r={fitted_log_r_uniform:.4f})")
     print(f"  True hexamer_r median:         7.179 (log_r=1.971)")
     print(f"  Frozen model init:             1096  (log_r=7.000)")
@@ -647,19 +629,20 @@ def main():
     payload = {
         "_what": (
             "Anchor A for the v3nb overdispersed simulation store: true "
-            "propensity with a FITTED scalar dispersion r, minimising the "
-            "frozen-core NB-offset loss. The offset conditioning absorbs the "
-            "overdispersion above r~20, and the loss plateau is flat to within "
-            "numerical noise so the fitted r is not identified — do not read "
-            "an effective-r value from it. This SUPERSEDES oracle_nb.json, "
-            "which plugged in the true per-position r and produced a value "
-            "ABOVE untrained models (not a floor). See docs/pending/nb_oracle.md "
-            "for the full diagnosis."
+            "propensity with a profiled scalar dispersion r (a nuisance "
+            "parameter, NOT an estimate of the generative r). The offset "
+            "conditioning absorbs the overdispersion above r~20, and the "
+            "loss plateau is flat — r is not identified. The oracle VALUE "
+            "(oracle_nb_nll) is the lowest loss observed and is a genuine "
+            "floor. This SUPERSEDES oracle_nb.json, which plugged in the "
+            "true per-position r and produced a value ABOVE untrained "
+            "models (not a floor). See docs/pending/nb_oracle.md."
         ),
         "oracle_nb_nll": oracle_loss,
         "uniform_nb_nll": uniform_loss,
         "gap_uniform_minus_oracle": gap,
-        "fitted_r": {
+        "profiled_nuisance_r": {
+            "not_identified": True,
             "oracle": {
                 "r": fitted_r_oracle,
                 "log_r": fitted_log_r_oracle,
@@ -671,17 +654,33 @@ def main():
                 "source": uniform_source,
                 "_note": "Separately fitted (not reusing oracle's r)",
             },
+            "plateau_interval": {
+                "r_lo": plateau_interval[0],
+                "r_hi": plateau_interval[1],
+                "_note": "Range of r where loss < global_min + 0.001",
+            },
             "reference": {
                 "true_hexamer_r_median": 7.179,
                 "frozen_model_init_r": 1096.0,
                 "frozen_model_log_dispersion_init": 7.0,
             },
             "_note": (
-                "The fitted r is NOT identified on the plateau — the loss is "
-                "flat to within numerical noise above r~20. The specific "
-                "value is an artefact of which grid/optimizer point happened "
-                "to land lowest in the noise. Do not interpret it as an "
+                "This is the argmin of a nuisance parameter (the scalar r "
+                "minimising the frozen-core nb_offset loss with propensity "
+                "held at truth), NOT an estimate of the generative r. The "
+                "loss plateau is flat across the interval above — the "
+                "specific value is an artefact of which grid/optimizer point "
+                "happened to land lowest. Do not interpret it as an "
                 "effective dispersion."
+            ),
+            "_r_1096_coincidence": (
+                "The published r (≈1096) coincides with the frozen model "
+                "initialisation exp(log_dispersion_init) = exp(7) ≈ 1096. "
+                "This is an artefact of the flat plateau plus the reference "
+                "marker log(1096) being injected into the sweep grid as a "
+                "selectable point — NOT agreement between the oracle and "
+                "the model. Any r on the plateau produces an effectively "
+                "identical oracle loss."
             ),
         },
         "noise_floor": noise_floor_info,
@@ -721,12 +720,18 @@ def main():
                 "ken": bool(oracle_loss < ken_mean < uniform_loss),
                 "hybrid": bool(oracle_loss < hybrid_mean < uniform_loss),
             },
-            "uniform_vs_log_W": {
-                "log_tile_size": float(log_tile),
-                "uniform_nb": uniform_loss,
-                "delta": float(uniform_loss - log_tile),
+            "r_identified": {
+                "value": r_identified,
+                "sweep_sign_changes": sign_changes,
+                "threshold": 5,
+                "_note": (
+                    "Whether the profiled nuisance r is identified (smooth, "
+                    "unimodal sweep curve). False means the plateau is flat "
+                    "and the specific r value is an artefact of which grid "
+                    "point landed lowest. This is a descriptive field, not a "
+                    "gate — a flat plateau does not mean the artifact is broken."
+                ),
             },
-            "sweep_sign_changes": sign_changes,
         },
         "loss": "MaskedNegativeBinomialOffsetNLLLoss (background_model_core, frozen)",
         "loss_config": {
@@ -778,6 +783,8 @@ def main():
     if not all_pass:
         print("\n  *** VERIFICATION FAILED — see details above ***")
         return 1
+    if not r_identified:
+        print("\n  Note: r is not identified (ragged sweep) — see r_identified field")
     return 0
 
 
