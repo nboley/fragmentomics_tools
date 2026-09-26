@@ -131,6 +131,13 @@ forward.
   survive. Do not "tidy" it to match its name; that would floor every weight
   < 1 to zero and make corrected pileups quietly wrong. See its docstring.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.
+- **Never identify tqdm's monitor thread by name.** `TMonitor` is named
+  `tqdm_monitor` only from tqdm **4.69.0**; the pinned env has 4.67.1, where it
+  is an anonymous `Thread-N`. Two `parallel_apply` guard tests asserted the
+  name and so failed here while passing wherever they were written. Use the
+  `monitor` attribute tqdm stores on the class that built the bar. Related:
+  tqdm creates a new monitor only when the inherited one is absent or dead, so
+  a subclass shares the base's unless you clear it first.
 - **Store/zarr pinning**: the zarr store is v2 format; `zarr==2.18.3` with
   `numcodecs==0.13.1`. Newer numcodecs privatized symbols zarr 2.18 imports,
   which breaks at import time — pin both together.
