@@ -535,3 +535,77 @@ is a landmine for the first strand-aware caller.
 ## Not in scope
 
 Name-based source registration and config-driven pipelines.
+
+## Review Notes (2026-09-26)
+
+**Verdict**: APPROVED WITH CONDITIONS — **Grade A-**
+
+Reviewed against the 503-line copy of this document. Two of its findings were
+overtaken by commits that landed while the review ran; those are marked
+RESOLVED below with the commit that closed them. The rest stand.
+
+### Verified claims
+- Total method count (61 on `RegionDataFrame`) correct.
+- Cross-layer identification (`sort`, `lift_over`, `unique_regions`,
+  `drop_overlapping_regions`, `attach_blacklist_regions`) correct — all five
+  verified.
+- `lift_over` SRDF bug is real: no SRDF override, so an SRDF with fragment
+  arrays passes through silently. **RESOLVED by `cd7ff60`**, which makes it
+  refuse.
+- Phase 1 consolidation target (4 overlap wrappers -> 1) verified: they are
+  exactly the thin wrappers described.
+- bioframe boundary semantics match (the differential test is accepted).
+- `inplace=` pattern (`rdf = self if inplace else self.copy()`) confirmed.
+
+### Risks
+1. **Partial pybedtools migration.** Phase 2 replaces pybedtools in interval
+   algebra but leaves it imported for `from_beds_merged` (construction/IO) and
+   `_get_fragment_coverage_sum` (fragment coverage). Both call
+   `pybedtools.BedTool` directly. `from_beds_merged` additionally accepts a
+   `bed_filter_callback` documented as a pybedtools filter function, making the
+   dependency *contractual*, not merely implementational. Until these migrate,
+   the top-level `import pybedtools` stays and no import-weight reduction is
+   delivered.
+2. **`on_resize` has no concrete API.** The semantics (receives new
+   coordinates, `shrink_only` refusal) are sound; the mechanism (protocol
+   class? callback at attachment? method on the annotation object?) is
+   unspecified. Phase 4 could discover at implementation time that the
+   described semantics do not compose.
+3. ~~Strand-aware bioframe behaviour is the acknowledged unknown, and
+   `strand="." -> None` could interact with it in ways strandless differential
+   tests would not catch.~~ **RESOLVED by `a61b8eb`**, which measured all nine
+   combinations, found the single `.`-vs-`.` divergence the risk anticipated,
+   and recorded a binding rule (same-strand as equality *excluding* `.`, never
+   `on=['strand']`, pinned by a test).
+
+### Conditions
+1. Fix factual inaccuracies before implementation uses this as a reference:
+   - `SampleDataFrame` has **4** methods, not 6 (`detach_h5`, `close_handles`,
+     `dropna`, `label_balanced`).
+   - `get_overlapping_base_counts` reaches pybedtools *indirectly* (via
+     `intersect_with_bed` -> `join_on_overlap`), not directly. Two of the six
+     "transitive" methods go through `join_on_overlap`, not through GOBC.
+   - Geometry/resizing is **9** methods, not 10 (`center_on_summit` plus the
+     eight resize-related ones).
+2. Add `from_beds_merged` and `_get_fragment_coverage_sum` to Phase 2's scope,
+   or explicitly defer them with a rationale for why a partial migration is
+   acceptable.
+3. Expand "Still open" with (a) how `center_regions_on_tf_motif` (150 LOC, GPU,
+   deferred torch/motif imports) fits the annotation-source model, and (b)
+   where `intersect_with_bed` lands — it combines I/O and algebra, is used by
+   `get_overlapping_base_counts`, and fits neither layer 2 nor layer 3 alone.
+4. Specify the `on_resize` API concretely before Phase 4. Phases 0-3 can
+   proceed without it.
+
+### Key tradeoffs
+- **bioframe over pybedtools**: correct. 3x faster at realistic scale, removes
+  the binary dependency and the import-time PATH hazard. The scope is wider
+  than stated (two non-algebra usages survive), but the direction is right.
+- **`on_resize` over keeping SRDF overrides**: the hook decouples layers and
+  generalises to future positional annotations. A smaller alternative — keep
+  the four overrides through Phase 3, defer the hook to its own design pass —
+  would still deliver interval-algebra importability without the hook risk.
+  The underspecification is tolerable only because Phase 4 is last.
+- **Composition-based annotation over method-per-source**: scales better and
+  enables fake sources in tests. The convenience-wrapper escape valve (methods
+  that delegate rather than implement) preserves ergonomics.
