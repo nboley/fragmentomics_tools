@@ -35,12 +35,22 @@ Generative procedure, per region, propose-and-reject (plan sec 3):
   4. accept w.p.  w6(left) * w6(right) * gc_bias(length, gc), normalised so the
      max achievable acceptance weight is 1 (per-sample normaliser, because
      regime-B jitter can push a w6 entry above 1).
-  5. per-(sample, region) target counts sampled independently from the
-     empirical per-tile count distribution of either the production zarr store
-     (--real-store), a per-region count TSV measured at the tile width and
-     rescaled to the central carve (--real-count-tsv + --count-region-set,
-     recommended when the store's tiles are a different width), or the heldout
-     h5.  --real-store and --real-count-tsv are mutually exclusive.
+  5. per-(sample, region) target counts.  Two families of source:
+     POOLED (scrambles the region-to-depth pairing): draw each target
+     independently from a flat pool of observed counts -- the production zarr
+     store (--real-store), a per-region count TSV measured at the tile width and
+     rescaled to the central carve (--real-count-tsv + --count-region-set), or
+     the heldout h5.
+     MATCHED (--real-count-dir + --count-region-set): target_counts[s, r] is the
+     depth REAL sample s actually had at region r, joined exactly on genomic
+     coordinate with NO rescaling.  This keeps the true spatial coverage
+     heterogeneity (mappability/GC/copy-number) that pooling throws away; the
+     owner accepts that matched depth correlates with the sequence features the
+     model predicts (a deliberate realism-vs-confounding trade-off, 2026-09-26).
+     Truncated count files are rejected loudly, samples are chosen
+     deterministically and their libraries recorded in ground_truth.json, and a
+     genuinely-zero region stays zero (yields an empty tile).
+     --real-store, --real-count-tsv and --real-count-dir are mutually exclusive.
 
 Regimes (plan sec 4):
   A  every sample shares one bias table.
@@ -81,6 +91,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import glob
+import gzip
 import json
 import os
 import shutil
@@ -463,6 +475,169 @@ def per_region_count_pool_from_tsv(tsv_path: str, region_set: str, region_len: i
     return pool, tile_width, scale
 
 
+# ── matched per-sample target counts (directory of per-sample count files) ──
+
+class IncompleteCountFile(Exception):
+    """A per-sample count file could not be fully decompressed (truncated gzip).
+
+    Detected rather than tolerated: a partial file would decode a REGION SUBSET
+    and quietly bias matched depth downward for whichever regions fell past the
+    truncation point.  The loader rejects such files loudly instead.
+    """
+
+
+def _read_sample_count_map(path: str, region_set: str) -> dict:
+    """Return ``{(contig, start, stop): count}`` for one region set in one file.
+
+    Raises ``IncompleteCountFile`` if the gzip is truncated (pandas raises
+    ``EOFError`` reading a chopped gzip; a truncated stream never yields a
+    partial DataFrame, it raises -- verified against the three known-truncated
+    files in ibd_region_counts_mapq10/).  The truncation condition is DETECTED,
+    not hardcoded by filename, so any future truncated file is caught too.
+    """
+    import pandas as pd
+    try:
+        df = pd.read_csv(path, sep="\t", comment="#",
+                         usecols=["sample", "region_set", "contig",
+                                  "start", "stop", "count"])
+    except (EOFError, gzip.BadGzipFile, OSError) as e:
+        raise IncompleteCountFile(f"{path}: {e}") from e
+    sub = df[df["region_set"] == region_set]
+    if len(sub) == 0:
+        available = sorted(df["region_set"].unique())
+        raise ValueError(
+            f"region_set {region_set!r} not found in {path}; available: {available}"
+        )
+    contig = sub["contig"].astype(str).to_numpy()
+    start = sub["start"].to_numpy()
+    stop = sub["stop"].to_numpy()
+    count = sub["count"].to_numpy()
+    cmap = {}
+    for c, a, b, n in zip(contig, start, stop, count):
+        cmap[(c, int(a), int(b))] = int(n)
+    if len(cmap) != len(sub):
+        raise ValueError(
+            f"{path}: region_set {region_set!r} has duplicate (contig,start,stop) "
+            "rows; the coordinate join would be ambiguous"
+        )
+    return cmap
+
+
+def load_matched_count_files(count_dir: str, region_set: str):
+    """Read every ``*.region_counts.tsv.gz`` in a directory, rejecting truncated ones.
+
+    Returns ``(names, maps)`` as parallel lists ordered by sorted filename, over
+    the COMPLETE files only.  Incomplete (truncated-gzip) files are detected by
+    a decompression failure, reported loudly, and skipped -- never used
+    partially.  The library name is the filename stem (``<name>.region_counts.tsv.gz``
+    -> ``<name>``) and is cross-checked against the file's ``sample`` column.
+    """
+    paths = sorted(glob.glob(os.path.join(count_dir, "*.region_counts.tsv.gz")))
+    if not paths:
+        raise FileNotFoundError(
+            f"no *.region_counts.tsv.gz files found in {count_dir}"
+        )
+    names, maps, rejected = [], [], []
+    for p in paths:
+        name = os.path.basename(p)[:-len(".region_counts.tsv.gz")]
+        try:
+            cmap = _read_sample_count_map(p, region_set)
+        except IncompleteCountFile as e:
+            rejected.append(name)
+            print(f"[sim] REJECTED incomplete count file (truncated gzip): {e}",
+                  flush=True)
+            continue
+        names.append(name)
+        maps.append(cmap)
+    print(f"[sim] matched counts: {len(names)} complete of {len(paths)} files, "
+          f"{len(rejected)} rejected {rejected}", flush=True)
+    if not names:
+        raise RuntimeError(
+            f"no complete count files in {count_dir} (all {len(paths)} truncated)"
+        )
+    return names, maps
+
+
+def build_matched_target_counts(count_dir: str, region_set: str, regions: list,
+                                n_samples: int, seed: int):
+    """Per-region target counts MATCHED to real per-sample depth (no pooling).
+
+    ``target_counts[s, r]`` is the fragment count observed for the selected real
+    sample ``s`` at the tile that simulated region ``r`` was carved from, joined
+    EXACTLY on ``(contig, gstart, gstop)``.  This preserves the real
+    region-to-depth pairing -- mappability, GC, copy number -- that the pooled
+    ``--real-count-tsv`` path destroys by resampling a flat pool.
+
+    Owner-approved trade-off (2026-09-26): matched depth correlates with the
+    very sequence features the model is learning to predict, which could confound
+    a bias estimate.  This is a DELIBERATE choice in favour of realism, not an
+    oversight -- do not "fix" it back to pooling.
+
+    Decisions, documented here because a reader looks here first:
+
+    * **Sample selection is deterministic and seeded.** A ``default_rng(seed +
+      101)`` draws ``n_samples`` library names WITHOUT replacement from the
+      sorted list of complete files (the ``+101`` offset only decorrelates this
+      stream from ``build_w6(seed)`` and the per-sample-seed stream; it carries
+      no meaning).  The realised sim-index -> library mapping is returned and
+      recorded in ground_truth.json so any result traces to the libraries behind
+      it.  Requesting more samples than are available fails loudly rather than
+      silently sampling with replacement (which would duplicate libraries and
+      understate between-sample variance).
+    * **Coordinate matching is an EXACT join.** It is valid only when
+      ``region_len`` equals the counted tile width, so the centred carve offset
+      is 0 and the simulated region IS the whole counted tile.  A simulated
+      region with no counted counterpart fails loudly -- a silent fallback here
+      would be the worst outcome, quietly substituting a wrong or zero depth.
+    * **No length rescaling** (owner instruction): counts are taken over the full
+      region.  Training later consumes a jittered subset, so rescaling here would
+      double-count that crop.
+    * **Genuinely-zero regions stay zero.**  Unlike the pooled path -- which
+      drops zeros because a zero draw there is just an unlucky sample -- a matched
+      zero is a FACT about a specific locus and is preserved.  ``simulate_sample``
+      emits no fragments for a zero-count region (an empty, realistic tile).
+
+    Returns ``(target_counts int64 (n_samples, n_regions), sample_libraries,
+    tile_width, n_available)``.
+    """
+    names, maps = load_matched_count_files(count_dir, region_set)
+    n_available = len(names)
+    if n_samples > n_available:
+        raise ValueError(
+            f"requested n_samples={n_samples} but only {n_available} complete "
+            f"count files are available in {count_dir}; refusing to sample real "
+            "libraries with replacement"
+        )
+    sel_rng = np.random.default_rng(seed + 101)
+    sel_idx = sel_rng.choice(n_available, size=n_samples, replace=False)
+    sample_libraries = [names[i] for i in sel_idx]
+
+    keys = [(r["contig"], int(r["gstart"]), int(r["gstop"])) for r in regions]
+    target_counts = np.zeros((n_samples, len(regions)), dtype=np.int64)
+    for si, lib_i in enumerate(sel_idx):
+        cmap = maps[lib_i]
+        missing = []
+        for ri, key in enumerate(keys):
+            n = cmap.get(key)
+            if n is None:
+                missing.append(key)
+                if len(missing) >= 5:
+                    break
+            else:
+                target_counts[si, ri] = n
+        if missing:
+            raise ValueError(
+                f"sample {names[lib_i]!r}: >={len(missing)} simulated regions have "
+                f"no counted counterpart in region_set {region_set!r} (exact join "
+                f"on (contig,start,stop) failed); first few unmatched: {missing}. "
+                "region_len must equal the counted tile width so the centred-carve "
+                "offset is 0 -- check --region-len and --region-set."
+            )
+    tile_widths = {b - a for (_, a, b) in keys}
+    tile_width = tile_widths.pop() if len(tile_widths) == 1 else None
+    return target_counts, sample_libraries, tile_width, n_available
+
+
 # ── the sampler ───────────────────────────────────────────────────────────
 
 def simulate_sample(region_pre, target_counts, w6, gcbias, len_vals, len_p,
@@ -712,14 +887,19 @@ def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         heldout_h5, region_len=REGION_LEN, real_store=None, workers=1,
         fl_dist_npz=None, nb_dispersion=None, region_set=None,
-        real_count_tsv=None, count_region_set=None):
+        real_count_tsv=None, count_region_set=None, real_count_dir=None):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
-    if real_store is not None and real_count_tsv is not None:
+    count_modes = [n for n in ("--real-store", "--real-count-tsv",
+                               "--real-count-dir")
+                   if {"--real-store": real_store,
+                       "--real-count-tsv": real_count_tsv,
+                       "--real-count-dir": real_count_dir}[n] is not None]
+    if len(count_modes) > 1:
         raise ValueError(
-            "--real-store and --real-count-tsv are mutually exclusive: "
-            "pick one target-count source"
+            f"{', '.join(count_modes)} are mutually exclusive: pick one "
+            "target-count source"
         )
     if region_set is None:
         region_set = TRAINING_TILES
@@ -762,44 +942,73 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         len_p_per_sample = np.tile(len_p_shared, (n_samples, 1))
     real_counts = per_region_real_counts(heldout_h5, regions)
 
-    # Build the pool of per-tile fragment counts to sample from.
-    # --real-store: use the production store's empirical N distribution
+    # Choose per-(sample, region) target counts.
+    # --real-count-dir: MATCHED -- target_counts[s,r] is the real depth of the
+    #   selected sample s at region r, joined exactly on coordinate (no pool).
+    # --real-store: POOLED from the production store's empirical N distribution
     #   (totals/N has shape (samples, tiles, tracks); sum tracks, flatten).
-    # --real-count-tsv: use a measured per-region count TSV, rescaled from the
-    #   tile width to the central carve (density measured at the right width).
-    # Otherwise: fall back to the heldout-h5 per-region counts.
+    # --real-count-tsv: POOLED from a measured per-region count TSV, rescaled
+    #   from the tile width to the central carve.
+    # Otherwise: POOLED from the heldout-h5 per-region counts.
     count_scale = 1.0
     count_tile_width = None
-    if real_store is not None:
-        import zarr
-        store = zarr.open(real_store, mode="r")
-        N = np.asarray(store["totals/N"])       # (samples, tiles, tracks)
-        count_pool = N.sum(axis=2).ravel()       # total frags per (sample, tile)
-        count_pool = count_pool[count_pool > 0]  # drop empty tiles
-        print(f"[sim] real-store N pool: {len(count_pool)} entries, "
-              f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
-              flush=True)
-    elif real_count_tsv is not None:
+    count_source_mode = "heldout_pool"
+    matched_sample_libraries = None
+    n_real_samples_available = None
+    if real_count_dir is not None:
+        # MATCHED mode: target_counts[s, r] = real depth of sample s at region r,
+        # joined exactly on genomic coordinate.  No pooling, no rescaling.
         if count_region_set is None:
             raise ValueError(
-                "--real-count-tsv requires --count-region-set (the TSV holds "
-                "several region sets; name the one to draw from)"
+                "--real-count-dir requires --count-region-set (the per-sample "
+                "files hold several region sets; name the one to match on)"
             )
-        count_pool, count_tile_width, count_scale = per_region_count_pool_from_tsv(
-            real_count_tsv, count_region_set, region_len)
-        print(f"[sim] real-count-tsv pool ({count_region_set}): {len(count_pool)} "
-              f"entries, tile_width={count_tile_width} scale={count_scale:.4f} "
-              f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
+        count_source_mode = "matched_per_sample"
+        (target_counts, matched_sample_libraries, count_tile_width,
+         n_real_samples_available) = build_matched_target_counts(
+            real_count_dir, count_region_set, regions, n_samples, seed)
+        print(f"[sim] matched target counts ({count_region_set}): "
+              f"{n_samples} of {n_real_samples_available} real samples, "
+              f"tile_width={count_tile_width} "
+              f"median per-(sample,region)={np.median(target_counts):.0f} "
+              f"total={int(target_counts.sum()):,} zeros="
+              f"{int((target_counts == 0).sum()):,} ({time.time()-t0:.1f}s)",
               flush=True)
     else:
-        count_pool = real_counts
+        # POOLED modes: draw each (sample, region) target independently from a
+        # flat pool of observed counts (scrambles the region-to-depth pairing).
+        if real_store is not None:
+            count_source_mode = "real_store_pool"
+            import zarr
+            store = zarr.open(real_store, mode="r")
+            N = np.asarray(store["totals/N"])       # (samples, tiles, tracks)
+            count_pool = N.sum(axis=2).ravel()       # total frags per (sample, tile)
+            count_pool = count_pool[count_pool > 0]  # drop empty tiles
+            print(f"[sim] real-store N pool: {len(count_pool)} entries, "
+                  f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
+                  flush=True)
+        elif real_count_tsv is not None:
+            count_source_mode = "real_count_tsv_pool"
+            if count_region_set is None:
+                raise ValueError(
+                    "--real-count-tsv requires --count-region-set (the TSV holds "
+                    "several region sets; name the one to draw from)"
+                )
+            count_pool, count_tile_width, count_scale = per_region_count_pool_from_tsv(
+                real_count_tsv, count_region_set, region_len)
+            print(f"[sim] real-count-tsv pool ({count_region_set}): {len(count_pool)} "
+                  f"entries, tile_width={count_tile_width} scale={count_scale:.4f} "
+                  f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
+                  flush=True)
+        else:
+            count_pool = real_counts
 
-    # Each (sample, region) gets an independently sampled target count.
-    target_counts = rng.choice(count_pool, size=(n_samples, n_regions),
-                               replace=True)
-    print(f"[sim] real per-tile counts median={np.median(count_pool):.0f} "
-          f"targets total={int(target_counts.sum()):,} ({time.time()-t0:.1f}s)",
-          flush=True)
+        # Each (sample, region) gets an independently sampled target count.
+        target_counts = rng.choice(count_pool, size=(n_samples, n_regions),
+                                   replace=True)
+        print(f"[sim] real per-tile counts median={np.median(count_pool):.0f} "
+              f"targets total={int(target_counts.sum()):,} ({time.time()-t0:.1f}s)",
+              flush=True)
 
     region_pre = [precompute_region(r, region_len) for r in regions]
     print(f"[sim] precomputed region arrays ({time.time()-t0:.1f}s)", flush=True)
@@ -886,6 +1095,9 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
     )
     if hexamer_r is not None:
         gt_kwargs["hexamer_r"] = hexamer_r
+    if matched_sample_libraries is not None:
+        gt_kwargs["matched_sample_libraries"] = np.array(
+            matched_sample_libraries, dtype="U64")
     np.savez(os.path.join(out_dir, "ground_truth.npz"), **gt_kwargs)
     gt_json = dict(
         regime=regime, n_samples=n_samples, seed=seed,
@@ -896,11 +1108,16 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         max_len=MAX_LEN, jitter_sd=(JITTER_SD if regime == "B" else 0.0),
         heldout_h5=heldout_h5, fasta=FASTA, gc_bias_json=GC_BIAS_JSON,
         region_set=region_set,
+        count_source_mode=count_source_mode,
         real_count_tsv=real_count_tsv or "",
+        real_count_dir=real_count_dir or "",
         count_region_set=count_region_set or "",
         count_tile_width=(int(count_tile_width)
                           if count_tile_width is not None else None),
         count_scale=float(count_scale),
+        n_real_samples_available=n_real_samples_available,
+        # sim sample index -> real library, so any result traces to its libraries
+        matched_sample_libraries=matched_sample_libraries or [],
         per_sample_fl=fl_dist_npz is not None,
         fl_dist_npz=fl_dist_npz or "",
         nb_dispersion=nb_dispersion or "",
@@ -1204,9 +1421,20 @@ def main(argv=None):
                          "rescaled to the central carve.  Requires "
                          "--count-region-set.  Mutually exclusive with "
                          "--real-store.")
+    ap.add_argument("--real-count-dir", default=None,
+                    help="directory of per-sample count files (gzipped; columns "
+                         "sample region_set contig start stop count).  MATCHED "
+                         "mode: target_counts[s,r] is the real depth of sample s "
+                         "at region r, joined exactly on (contig,start,stop) with "
+                         "NO rescaling -- preserving the region-to-depth pairing "
+                         "the pooled paths discard.  Truncated files are rejected "
+                         "loudly; samples are chosen deterministically from the "
+                         "complete files and recorded in ground_truth.json.  "
+                         "Requires --count-region-set.  Mutually exclusive with "
+                         "--real-store and --real-count-tsv.")
     ap.add_argument("--count-region-set", default=None,
-                    help="which region_set in --real-count-tsv to draw counts "
-                         "from (the TSV holds several).")
+                    help="which region_set in --real-count-tsv / --real-count-dir "
+                         "to draw counts from (the files hold several).")
     ap.add_argument("--fl-dist-npz", default=None,
                     help="path to NPZ with per-sample fragment-length "
                          "distributions (keys: counts, fragment_length). "
@@ -1238,7 +1466,8 @@ def main(argv=None):
                   nb_dispersion=args.nb_dispersion,
                   region_set=args.region_set,
                   real_count_tsv=args.real_count_tsv,
-                  count_region_set=args.count_region_set)
+                  count_region_set=args.count_region_set,
+                  real_count_dir=args.real_count_dir)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))

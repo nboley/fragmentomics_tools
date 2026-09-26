@@ -424,3 +424,171 @@ def test_real_store_and_real_count_tsv_mutually_exclusive():
     with pytest.raises(ValueError, match="mutually exclusive"):
         sim.run("A", 1, 0, 4.0, 1, "/tmp/none", "/tmp/none.h5",
                 real_store="/tmp/store.zarr", real_count_tsv="/tmp/c.tsv.gz")
+
+
+# ── Matched per-sample target counts (--real-count-dir) ────────────────────
+
+_RS = "quiet_v2_pad1200_repeats_removed_tile2560"
+
+
+def _regions(coords):
+    """coords: iterable of (contig, gstart, gstop) -> list of region dicts."""
+    return [{"contig": c, "gstart": a, "gstop": b} for c, a, b in coords]
+
+
+def _write_sample_count_file(path, name, rows, header_ok=True):
+    """rows: iterable of (region_set, contig, start, stop, count) for one sample.
+
+    Writes a gzipped count file matching the real layout (two ``#`` comment
+    lines then a header).  If ``header_ok`` is False the gzip trailer is chopped
+    to simulate the truncated files in ibd_region_counts_mapq10/.
+    """
+    buf = "# mapq_filter: min(mapq_read1,mapq_read2) >= 10, dedup: by (start,stop)\n"
+    buf += "# matches bg-model store\n"
+    buf += "sample\tregion_set\tcontig\tstart\tstop\tcount\n"
+    for rs, contig, start, stop, count in rows:
+        buf += f"{name}\t{rs}\t{contig}\t{start}\t{stop}\t{count}\n"
+    raw = gzip.compress(buf.encode())
+    if not header_ok:
+        raw = raw[:-8]  # chop the gzip trailer -> "unexpected end of file"
+    with open(path, "wb") as fh:
+        fh.write(raw)
+
+
+def _matched_dir(tmp_path, samples):
+    """samples: dict name -> list of (region_set, contig, start, stop, count).
+
+    A name may map to the sentinel string 'TRUNCATED' to write a chopped file.
+    """
+    d = tmp_path / "counts"
+    d.mkdir()
+    for name, rows in samples.items():
+        path = d / f"{name}.region_counts.tsv.gz"
+        if rows == "TRUNCATED":
+            _write_sample_count_file(path, name, [(_RS, "chr1", 0, 2560, 9)],
+                                     header_ok=False)
+        else:
+            _write_sample_count_file(path, name, rows)
+    return str(d)
+
+
+def test_matched_truncated_file_rejected(tmp_path):
+    # A truncated gzip must be DETECTED (not hardcoded) and skipped loudly, not
+    # used partially.  Two complete files + one truncated -> 2 usable.
+    good = [(_RS, "chr1", 0, 2560, 10)]
+    d = _matched_dir(tmp_path, {
+        "RD-A-Lib1": good, "RD-B-Lib1": good, "RD-TRUNC-Lib1": "TRUNCATED"})
+    names, maps = sim.load_matched_count_files(d, _RS)
+    assert names == ["RD-A-Lib1", "RD-B-Lib1"]      # sorted, truncated excluded
+    assert "RD-TRUNC-Lib1" not in names
+    assert len(maps) == 2
+
+
+def test_matched_all_truncated_raises(tmp_path):
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": "TRUNCATED"})
+    with pytest.raises(RuntimeError, match="truncated"):
+        sim.load_matched_count_files(d, _RS)
+
+
+def test_matched_empty_dir_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        sim.load_matched_count_files(str(empty), _RS)
+
+
+def test_matched_exact_join_values(tmp_path):
+    coords = [("chr1", 0, 2560), ("chr1", 2560, 5120), ("chr1", 5120, 7680)]
+    d = _matched_dir(tmp_path, {
+        "RD-A-Lib1": [(_RS, c, a, b, v) for (c, a, b), v in zip(coords, [11, 22, 33])],
+        "RD-B-Lib1": [(_RS, c, a, b, v) for (c, a, b), v in zip(coords, [44, 55, 66])],
+    })
+    tc, libs, tile_w, n_avail = sim.build_matched_target_counts(
+        d, _RS, _regions(coords), n_samples=2, seed=0)
+    assert n_avail == 2 and tile_w == 2560
+    assert tc.shape == (2, 3)
+    # target_counts[s, r] is exactly the counted depth of the chosen library.
+    lib_vals = {"RD-A-Lib1": [11, 22, 33], "RD-B-Lib1": [44, 55, 66]}
+    for s, lib in enumerate(libs):
+        assert tc[s].tolist() == lib_vals[lib]
+
+
+def test_matched_unmatched_region_fails_loud(tmp_path):
+    # A simulated region with no counted counterpart must raise, never silently
+    # fall back to zero/wrong depth.
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": [(_RS, "chr1", 0, 2560, 10)]})
+    regions = _regions([("chr1", 0, 2560), ("chr1", 9999, 12559)])  # 2nd not counted
+    with pytest.raises(ValueError, match="no counted counterpart"):
+        sim.build_matched_target_counts(d, _RS, regions, n_samples=1, seed=0)
+
+
+def test_matched_selection_deterministic_and_recorded(tmp_path):
+    coords = [("chr1", 0, 2560)]
+    samples = {f"RD-{i:02d}-Lib1": [(_RS, "chr1", 0, 2560, i)] for i in range(6)}
+    d = _matched_dir(tmp_path, samples)
+    regions = _regions(coords)
+    tc1, libs1, _, n1 = sim.build_matched_target_counts(d, _RS, regions, 3, seed=7)
+    tc2, libs2, _, n2 = sim.build_matched_target_counts(d, _RS, regions, 3, seed=7)
+    assert n1 == 6
+    assert libs1 == libs2                       # deterministic under a seed
+    assert np.array_equal(tc1, tc2)
+    assert len(set(libs1)) == 3                 # WITHOUT replacement
+    assert set(libs1).issubset(samples)         # recorded libraries are real
+    # the recorded count equals the library index (count==i by construction)
+    for s, lib in enumerate(libs1):
+        assert tc1[s, 0] == int(lib.split("-")[1])
+    libs3 = sim.build_matched_target_counts(d, _RS, regions, 3, seed=8)[1]
+    assert libs3 != libs1                       # a different seed picks differently
+
+
+def test_matched_more_samples_than_available_fails(tmp_path):
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": [(_RS, "chr1", 0, 2560, 10)]})
+    regions = _regions([("chr1", 0, 2560)])
+    with pytest.raises(ValueError, match="only 1 complete"):
+        sim.build_matched_target_counts(d, _RS, regions, n_samples=2, seed=0)
+
+
+def test_matched_zero_count_preserved_and_yields_empty_tile(tmp_path):
+    # A genuinely-zero region stays zero (a fact about the locus), and
+    # simulate_sample emits no fragments for it -> an empty tile.
+    coords = [("chr1", 0, 2560), ("chr1", 2560, 5120)]
+    d = _matched_dir(tmp_path, {
+        "RD-A-Lib1": [(_RS, "chr1", 0, 2560, 0), (_RS, "chr1", 2560, 5120, 7)]})
+    tc, libs, _, _ = sim.build_matched_target_counts(
+        d, _RS, _regions(coords), n_samples=1, seed=0)
+    assert tc[0].tolist() == [0, 7]             # zero preserved, not dropped
+    # zero target -> no fragments for that region
+    region_len = 60
+    pre = _synthetic_region(region_len, fav_pos=5)
+    w6 = np.full(sim.NHEX, 0.5); w6[0] = 1.0
+    ridx, start, stop, strand = sim.simulate_sample(
+        [pre, pre], [0, 50], w6, _FlatBias(), np.array([20, 30]),
+        np.array([0.5, 0.5]), region_len, np.random.default_rng(0))
+    assert (ridx == 0).sum() == 0               # region 0 (target 0) is empty
+    assert (ridx == 1).sum() == 50
+
+
+def test_matched_duplicate_coords_raises(tmp_path):
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": [
+        (_RS, "chr1", 0, 2560, 10), (_RS, "chr1", 0, 2560, 20)]})  # dup key
+    with pytest.raises(ValueError, match="duplicate"):
+        sim.load_matched_count_files(d, _RS)
+
+
+def test_matched_region_set_absent_raises(tmp_path):
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": [("other_set", "chr1", 0, 2560, 10)]})
+    with pytest.raises(ValueError, match="not found"):
+        sim.load_matched_count_files(d, _RS)
+
+
+# ── all three count-source modes are mutually exclusive in run() ───────────
+
+@pytest.mark.parametrize("kwargs", [
+    dict(real_store="/tmp/s.zarr", real_count_dir="/tmp/d"),
+    dict(real_count_tsv="/tmp/c.tsv.gz", real_count_dir="/tmp/d"),
+    dict(real_store="/tmp/s.zarr", real_count_tsv="/tmp/c.tsv.gz",
+         real_count_dir="/tmp/d"),
+])
+def test_count_sources_mutually_exclusive(kwargs):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        sim.run("A", 1, 0, 4.0, 1, "/tmp/none", "/tmp/none.h5", **kwargs)
