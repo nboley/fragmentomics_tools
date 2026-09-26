@@ -61,4 +61,4 @@ dependencies:
     # That dead pin made this file — and `docker build` — fail outright.
     # v2.13.3 verified: tag dereferences to f6a936b, whose pyproject declares 2.13.3.
     - git+https://github.com/nboley/fragments_h5.git@v2.13.3
-    - git+https://github.com/nboley/datamanifest.git@v1.2.0
+    - git+https://github.com/nboley/datamanifest.git@v1.3.0
