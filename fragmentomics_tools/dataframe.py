@@ -2085,6 +2085,29 @@ class SampleAndRegionDataFrame(RegionDataFrame):
 
         return self
 
+    def lift_over(self, *args, **kwargs):
+        """Refuse to lift over an SRDF that still has fragment arrays attached.
+
+        Unlike the resize overrides above, there is nothing to recompute here.
+        Those adjust coordinates within one assembly, so a fragment array can
+        follow by subsetting. Liftover changes the assembly, and the fragments
+        in an attached array were aligned to the OLD one -- they cannot be
+        transformed into the new coordinate frame at all.
+
+        Inherited unguarded, this silently produced new-assembly coordinates
+        carrying old-assembly fragments, with no error. Refusing converts that
+        into something the caller can see.
+        """
+        if self.has_fragment_array:
+            raise ValueError(
+                "lift_over is not supported on a SampleAndRegionDataFrame with "
+                "fragment arrays attached: the fragments were aligned to the "
+                "current reference and cannot be lifted to another one. "
+                "Hint: drop the fragment arrays, lift over the regions, and then "
+                "re-attach the fragment arrays against the new reference."
+            )
+        return super().lift_over(*args, **kwargs)
+
     def get_sample_count_bounds(self, num_sd):
         res = []
         for sample_id, sub_df in self.groupby("sample_id"):
