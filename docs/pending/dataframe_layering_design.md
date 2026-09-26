@@ -370,8 +370,41 @@ spawns a process, and parses the output back on *every* call, and that
 round-trip dominates. Read this as specific to our usage — for data that
 already lives in BED files and stays there, raw bedtools compares far better.
 
-Remaining caveat: strand-aware variants were not tested and should be checked
-during implementation rather than assumed.
+**Strand-aware behaviour — RESOLVED, and it diverges.** Measured 2026-09-26,
+all nine `(A strand, B strand)` combinations for `intersect -u`:
+
+| A | B | bedtools `-s` | bioframe `on=['strand']` | |
+|---|---|---|---|---|
+| `+` | `+` | True | True | agree |
+| `+` | `-` | False | False | agree |
+| `+` | `.` | False | False | agree |
+| `-` | `+` | False | False | agree |
+| `-` | `-` | True | True | agree |
+| `-` | `.` | False | False | agree |
+| `.` | `+` | False | False | agree |
+| `.` | `-` | False | False | agree |
+| **`.`** | **`.`** | **False** | **True** | **DIVERGE** |
+
+Eight of nine agree. The exception is strandless-vs-strandless: bedtools `-s`
+treats `.` as *no strand*, so two strandless features never satisfy "same
+strandedness". bioframe's `on=['strand']` is an equality join and `"." == "."`
+is true. The result inverts — no matches becomes all matches — on the input
+shape this codebase uses by default, since `Region(strand=".")` normalises to
+`None` and the ordinary path is strandless.
+
+**Not a live bug.** No library code passes a strand flag to bedtools; the only
+`same_strand` references are in `plot/tracks.py`, which compares in pandas.
+The migration is safe as things stand.
+
+**But a landmine.** `merge_regions(self, **kwargs)` forwards arbitrary kwargs
+straight to `bedtool.merge(**kwargs)`, so `s=True` is already reachable by a
+caller. The first person to add strand-aware overlap after the migration would
+get an inverted result on the common case, with no error. So: **do not
+implement `-s` as `on=['strand']`.** Same-strand must exclude `.` explicitly,
+and that rule needs a test pinning `.` vs `.` to *no match*.
+
+`-S` (opposite strand) has no bioframe equivalent and was not tested. Also
+unused.
 
 ## What a call site looks like
 
@@ -479,7 +512,9 @@ merely looks unused stays.
 
 **Phase 2 — `bioframe` swap.** Replace `pybedtools` behind the existing
 method signatures, validated against Phase 0. Collapse the IntervalTree path
-in `overlaps_rdf` into it. Resolve the strand question in "Still open" here.
+in `overlaps_rdf` into it. If any same-strand behaviour is added, implement it
+as strand-equality **excluding `.`** — not `on=['strand']` — and pin `.` vs
+`.` to no-match with a test. See the strand table above for why.
 
 **Phase 3 — module extraction.** `intervals` module of free functions,
 `RegionDataFrame` delegating; `FlDist` moves out.
@@ -492,11 +527,10 @@ of the above.
 
 ## Still open
 
-- Whether `bioframe`'s **strand-aware** variants match bedtools' `-s`/`-S`
-  behaviour. The migration was validated on strandless intervals only. This
-  codebase normalises `"."` to `None` and has been burned by strand handling
-  before, so it needs the same differential treatment the strandless cases
-  got — not an assumption that it follows.
+Nothing. The strand question — the last open item — was measured and is
+recorded above: bedtools and bioframe agree on eight of nine strand
+combinations and diverge on `.` vs `.`, which is not currently reachable but
+is a landmine for the first strand-aware caller.
 
 ## Not in scope
 
