@@ -37,7 +37,10 @@ Generative procedure, per region, propose-and-reject (plan sec 3):
      regime-B jitter can push a w6 entry above 1).
   5. per-(sample, region) target counts sampled independently from the
      empirical per-tile count distribution of either the production zarr store
-     (--real-store, recommended) or the heldout h5.
+     (--real-store), a per-region count TSV measured at the tile width and
+     rescaled to the central carve (--real-count-tsv + --count-region-set,
+     recommended when the store's tiles are a different width), or the heldout
+     h5.  --real-store and --real-count-tsv are mutually exclusive.
 
 Regimes (plan sec 4):
   A  every sample shares one bias table.
@@ -265,28 +268,53 @@ class GCBias2D:
 
 # ── region set + per-region precompute ────────────────────────────────────
 
+def _center_offset(tile_width: int, region_len: int) -> int:
+    """Left offset that centres a ``region_len`` window inside a ``tile_width`` tile.
+
+    Derived from the ACTUAL tile width, not the old hardcoded 16,384: applied to
+    a narrower tile the hardcoded constant carved a window thousands of bp past
+    the tile start, silently outside the region set.  For the default path
+    (training_tiles.bed, all 16,384 bp wide) this reproduces the old
+    ``(16_384 - region_len) // 2`` byte-for-byte.  Raises if the tile is
+    narrower than the requested window (no valid centred carve exists).
+    """
+    if tile_width < region_len:
+        raise ValueError(
+            f"tile width {tile_width} is narrower than region_len {region_len}; "
+            "cannot carve a centred window"
+        )
+    return (tile_width - region_len) // 2
+
+
 def load_regions(bed: str, n_regions: int, region_len: int, ref: str = "hg38"):
-    """Carve ``n_regions`` central ``region_len``-bp windows from the training tiles.
+    """Carve ``n_regions`` central ``region_len``-bp windows from a tile BED.
 
     Uses the library (RegionDataFrame.from_bed) per CLAUDE.md rather than parsing
     the BED by hand -- the same loader background_model/preprocess.build_tiles
-    uses, so region coordinates are identical to the plumbing path.  Central
-    windows avoid the 16,384bp tile edges.  Tiles whose central window carries
-    >1% N are skipped (a hexamer over N has no defined w6 weight); scanning
-    continues until ``n_regions`` clean windows are found.
+    uses, so region coordinates are identical to the plumbing path.  The carve
+    is centred inside EACH tile using its own width (``_center_offset``), so tile
+    sets of any width work; a tile narrower than ``region_len`` fails loudly.
+    Per-row (not whole-file-uniform) widths are handled because that is the
+    minimal rule the correctness requirement states -- "centred inside its own
+    tile" -- and it keeps the uniform-width sets (all four new ones, and the
+    16,384 bp default) working without a separate uniformity assertion that
+    would reject a legitimately mixed-width BED.  Tiles whose central window
+    carries >1% N are skipped (a hexamer over N has no defined w6 weight);
+    scanning continues until ``n_regions`` clean windows are found.
     """
     import pysam
     from fragmentomics_tools.dataframe import RegionDataFrame
 
     rdf = RegionDataFrame.from_bed(bed, ref=ref)
     fa = pysam.FastaFile(FASTA)
-    off = (16_384 - region_len) // 2
     regions = []
     for row in rdf.itertuples():
         if len(regions) >= n_regions:
             break
         contig = str(row.contig)
-        gstart = int(row.start) + off
+        tile_start = int(row.start)
+        off = _center_offset(int(row.stop) - tile_start, region_len)
+        gstart = tile_start + off
         gstop = gstart + region_len
         seq = fa.fetch(contig, gstart, gstop).upper()
         if seq.count("N") / region_len > 0.01:
@@ -375,6 +403,62 @@ def per_region_real_counts(h5_path: str, regions: list, min_mapq: int = 10):
         counts[i] = int(rfa.n_fragments)
     h5.close()
     return counts
+
+
+def _scale_counts_to_region(counts, tile_width: int, region_len: int):
+    """Rescale full-tile fragment counts to the central ``region_len`` carve.
+
+    The measured counts span the whole ``tile_width`` tile, but the simulated
+    region is the central ``region_len`` window, so per-tile depth scales by
+    ``region_len / tile_width`` (e.g. x0.900 for a 2,304 bp carve of a 2,560 bp
+    tile, x0.833 for a 1,280 bp carve of a 1,536 bp tile).  Rounded to the
+    nearest integer because target counts are fragment counts; tiles that round
+    to <=0 are dropped, matching the ``--real-store`` pool which drops empty
+    tiles.
+    """
+    scale = region_len / tile_width
+    scaled = np.rint(np.asarray(counts, dtype=np.float64) * scale).astype(np.int64)
+    return scaled[scaled > 0], scale
+
+
+def per_region_count_pool_from_tsv(tsv_path: str, region_set: str, region_len: int):
+    """Per-region target-count pool for one region set, rescaled to the carve.
+
+    Reads the gzipped per-region count TSV (two ``#`` comment lines, then a
+    ``sample region_set contig start stop count`` header), keeps the rows whose
+    ``region_set`` matches, derives the tile width from ``stop - start`` (must be
+    uniform within the set -- fails loudly otherwise), and rescales each count to
+    the central ``region_len`` carve via ``_scale_counts_to_region``.
+
+    Returns ``(pool, tile_width, scale)``.  ``pool`` is a 1-D int array drawn
+    from downstream exactly like the ``--real-store`` pool.
+
+    LIMITATION (record in provenance, do not mistake for per-sample realism):
+    the TSV that motivated this holds a SINGLE counted sample, so the pool
+    carries no inter-sample depth variation.  Each (sample, region) target is an
+    independent draw from one sample's empirical per-tile distribution -- the
+    shared-bias regime this is for, not a per-sample-depth generative model.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(tsv_path, sep="\t", comment="#",
+                     usecols=["region_set", "start", "stop", "count"])
+    sub = df[df["region_set"] == region_set]
+    if len(sub) == 0:
+        available = sorted(df["region_set"].unique())
+        raise ValueError(
+            f"region_set {region_set!r} not found in {tsv_path}; "
+            f"available: {available}"
+        )
+    widths = np.unique((sub["stop"] - sub["start"]).to_numpy())
+    if len(widths) != 1:
+        raise ValueError(
+            f"region_set {region_set!r} has non-uniform tile widths {widths.tolist()}; "
+            "cannot derive a single scale factor"
+        )
+    tile_width = int(widths[0])
+    pool, scale = _scale_counts_to_region(sub["count"].to_numpy(), tile_width, region_len)
+    return pool, tile_width, scale
 
 
 # ── the sampler ───────────────────────────────────────────────────────────
@@ -625,14 +709,24 @@ def _simulate_one_sample(region_pre, target_counts_s, w6, log_jitter_s,
 
 def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         heldout_h5, region_len=REGION_LEN, real_store=None, workers=1,
-        fl_dist_npz=None, nb_dispersion=None):
+        fl_dist_npz=None, nb_dispersion=None, region_set=None,
+        real_count_tsv=None, count_region_set=None):
     t0 = time.time()
     rng = np.random.default_rng(seed)
 
+    if real_store is not None and real_count_tsv is not None:
+        raise ValueError(
+            "--real-store and --real-count-tsv are mutually exclusive: "
+            "pick one target-count source"
+        )
+    if region_set is None:
+        region_set = TRAINING_TILES
+
     print(f"[sim] regime={regime} n_samples={n_samples} seed={seed} "
           f"n_regions={n_regions} region_len={region_len}", flush=True)
+    print(f"[sim] region_set={region_set}", flush=True)
 
-    regions = load_regions(TRAINING_TILES, n_regions, region_len)
+    regions = load_regions(region_set, n_regions, region_len)
     print(f"[sim] loaded {len(regions)} regions ({time.time()-t0:.1f}s)", flush=True)
 
     gcbias = GCBias2D.from_json(GC_BIAS_JSON)
@@ -669,7 +763,11 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
     # Build the pool of per-tile fragment counts to sample from.
     # --real-store: use the production store's empirical N distribution
     #   (totals/N has shape (samples, tiles, tracks); sum tracks, flatten).
+    # --real-count-tsv: use a measured per-region count TSV, rescaled from the
+    #   tile width to the central carve (density measured at the right width).
     # Otherwise: fall back to the heldout-h5 per-region counts.
+    count_scale = 1.0
+    count_tile_width = None
     if real_store is not None:
         import zarr
         store = zarr.open(real_store, mode="r")
@@ -677,6 +775,18 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         count_pool = N.sum(axis=2).ravel()       # total frags per (sample, tile)
         count_pool = count_pool[count_pool > 0]  # drop empty tiles
         print(f"[sim] real-store N pool: {len(count_pool)} entries, "
+              f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
+              flush=True)
+    elif real_count_tsv is not None:
+        if count_region_set is None:
+            raise ValueError(
+                "--real-count-tsv requires --count-region-set (the TSV holds "
+                "several region sets; name the one to draw from)"
+            )
+        count_pool, count_tile_width, count_scale = per_region_count_pool_from_tsv(
+            real_count_tsv, count_region_set, region_len)
+        print(f"[sim] real-count-tsv pool ({count_region_set}): {len(count_pool)} "
+              f"entries, tile_width={count_tile_width} scale={count_scale:.4f} "
               f"median={np.median(count_pool):.0f} ({time.time()-t0:.1f}s)",
               flush=True)
     else:
@@ -784,6 +894,12 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         max_len=MAX_LEN, jitter_sd=(JITTER_SD if regime == "B" else 0.0),
         heldout_h5=heldout_h5, fasta=FASTA, gc_bias_json=GC_BIAS_JSON,
         training_tiles=TRAINING_TILES,
+        region_set=region_set,
+        real_count_tsv=real_count_tsv or "",
+        count_region_set=count_region_set or "",
+        count_tile_width=(int(count_tile_width)
+                          if count_tile_width is not None else None),
+        count_scale=float(count_scale),
         per_sample_fl=fl_dist_npz is not None,
         fl_dist_npz=fl_dist_npz or "",
         nb_dispersion=nb_dispersion or "",
@@ -1070,10 +1186,26 @@ def main(argv=None):
                          "tile=2048, jitter=128).")
     ap.add_argument("--out-root", default=OUT_ROOT)
     ap.add_argument("--heldout-h5", default=DEFAULT_HELDOUT_H5)
+    ap.add_argument("--region-set", default=None,
+                    help="path to a tile BED to carve regions from (default: "
+                         "data/region_sets/training_tiles.bed).  The central "
+                         "region-len window is carved from each tile using the "
+                         "tile's own width.")
     ap.add_argument("--real-store", default=None,
                     help="path to production zarr store; sample target counts "
                          "from its totals/N distribution instead of the "
-                         "heldout h5 (recommended: bg_store_b67d7c95.zarr)")
+                         "heldout h5 (recommended: bg_store_b67d7c95.zarr).  "
+                         "Mutually exclusive with --real-count-tsv.")
+    ap.add_argument("--real-count-tsv", default=None,
+                    help="path to a per-region count TSV (gzipped; columns "
+                         "sample region_set contig start stop count) measured at "
+                         "the tile width; target counts are drawn from it and "
+                         "rescaled to the central carve.  Requires "
+                         "--count-region-set.  Mutually exclusive with "
+                         "--real-store.")
+    ap.add_argument("--count-region-set", default=None,
+                    help="which region_set in --real-count-tsv to draw counts "
+                         "from (the TSV holds several).")
     ap.add_argument("--fl-dist-npz", default=None,
                     help="path to NPZ with per-sample fragment-length "
                          "distributions (keys: counts, fragment_length). "
@@ -1102,7 +1234,10 @@ def main(argv=None):
                   region_len=args.region_len,
                   real_store=args.real_store, workers=args.workers,
                   fl_dist_npz=args.fl_dist_npz,
-                  nb_dispersion=args.nb_dispersion)
+                  nb_dispersion=args.nb_dispersion,
+                  region_set=args.region_set,
+                  real_count_tsv=args.real_count_tsv,
+                  count_region_set=args.count_region_set)
     if args.validate:
         res = validate(out_dir)
         print(json.dumps(res, indent=2))

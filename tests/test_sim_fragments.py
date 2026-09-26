@@ -10,6 +10,7 @@ strand) representation round-trips through RegionFragmentArray / build_coverage_
 All synthetic and tiny -- no FASTA, no h5, no torch.
 """
 
+import gzip
 import importlib.util
 import os
 
@@ -286,3 +287,102 @@ def test_representation_builds_rfa_and_coverage_counts():
     # (b) apply_fragment_weights preconditions: strandless, not flipped
     assert rfa.region.strand in (None, ".", "+")
     assert rfa.is_flipped is False
+
+
+# ── Change 1: centred carve offset derived from the tile width ─────────────
+
+def test_center_offset_default_byte_identical():
+    # Default path (training_tiles.bed, all 16,384 bp) must reproduce the old
+    # hardcoded (16_384 - region_len) // 2 exactly, for every plausible width.
+    for region_len in (1, 2, 2047, 2048, 2049, 2304, 8192, 16383, 16384):
+        assert sim._center_offset(16_384, region_len) == (16_384 - region_len) // 2
+
+
+def test_center_offset_narrow_tiles_are_centred():
+    # The two runs ahead: 2,304 bp carve of a 2,560 tile, 1,280 bp carve of 1,536.
+    assert sim._center_offset(2560, 2304) == 128
+    assert sim._center_offset(1536, 1280) == 128
+    # exact-fit tile has zero offset
+    assert sim._center_offset(2304, 2304) == 0
+
+
+def test_center_offset_fails_when_tile_narrower_than_region():
+    with pytest.raises(ValueError):
+        sim._center_offset(1536, 2048)
+    with pytest.raises(ValueError):
+        sim._center_offset(2303, 2304)
+
+
+# ── Change 3: count rescaling from tile width to the central carve ─────────
+
+def test_scale_counts_to_region_factor():
+    counts = np.array([100, 200, 1000], dtype=np.int64)
+    # 2,304 carve of a 2,560 tile -> x0.900
+    scaled, scale = sim._scale_counts_to_region(counts, 2560, 2304)
+    assert np.isclose(scale, 0.9)
+    assert scaled.tolist() == [90, 180, 900]
+    # 1,280 carve of a 1,536 tile -> x0.8333
+    scaled2, scale2 = sim._scale_counts_to_region(counts, 1536, 1280)
+    assert np.isclose(scale2, 1280 / 1536)
+    # 100*0.8333=83.33->83, 200->167 (166.67 rounds to 167), 1000->833
+    assert scaled2.tolist() == [83, 167, 833]
+
+
+def test_scale_counts_drops_nonpositive_after_rounding():
+    # a count that rounds to 0 (0*scale, and 1*0.4 -> 0) is dropped, like the
+    # --real-store pool drops empty tiles
+    counts = np.array([0, 1, 3], dtype=np.int64)
+    scaled, _ = sim._scale_counts_to_region(counts, 5, 2)  # scale 0.4
+    # 0->0 dropped, 1*0.4=0.4->0 dropped, 3*0.4=1.2->1 kept
+    assert scaled.tolist() == [1]
+
+
+def _write_count_tsv(path, rows):
+    """rows: iterable of (sample, region_set, contig, start, stop, count)."""
+    with gzip.open(path, "wt") as fh:
+        fh.write("# mapq_filter: >30, dedup: by (start,stop)\n")
+        fh.write("# NOT comparable to bg-model store (min_mapq=10)\n")
+        fh.write("sample\tregion_set\tcontig\tstart\tstop\tcount\n")
+        for r in rows:
+            fh.write("\t".join(str(x) for x in r) + "\n")
+
+
+def test_per_region_count_pool_from_tsv(tmp_path):
+    tsv = tmp_path / "counts.tsv.gz"
+    _write_count_tsv(tsv, [
+        ("S", "removed_tile2560", "chr1", 0, 2560, 100),
+        ("S", "removed_tile2560", "chr1", 3000, 5560, 200),
+        # a different region set, must be excluded
+        ("S", "removed_tile1536", "chr2", 0, 1536, 999),
+    ])
+    pool, tile_width, scale = sim.per_region_count_pool_from_tsv(
+        str(tsv), "removed_tile2560", 2304)
+    assert tile_width == 2560
+    assert np.isclose(scale, 0.9)
+    assert sorted(pool.tolist()) == [90, 180]  # 999-row excluded
+
+
+def test_per_region_count_pool_missing_region_set_raises(tmp_path):
+    tsv = tmp_path / "counts.tsv.gz"
+    _write_count_tsv(tsv, [("S", "removed_tile2560", "chr1", 0, 2560, 100)])
+    with pytest.raises(ValueError):
+        sim.per_region_count_pool_from_tsv(str(tsv), "does_not_exist", 2304)
+
+
+def test_per_region_count_pool_nonuniform_width_raises(tmp_path):
+    tsv = tmp_path / "counts.tsv.gz"
+    _write_count_tsv(tsv, [
+        ("S", "mixed", "chr1", 0, 2560, 100),
+        ("S", "mixed", "chr1", 0, 2000, 100),  # different width
+    ])
+    with pytest.raises(ValueError):
+        sim.per_region_count_pool_from_tsv(str(tsv), "mixed", 1280)
+
+
+# ── Change 3: --real-store and --real-count-tsv are mutually exclusive ─────
+
+def test_real_store_and_real_count_tsv_mutually_exclusive():
+    # the guard is the first thing run() checks, before any FASTA/EFS access
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        sim.run("A", 1, 0, 4.0, 1, "/tmp/none", "/tmp/none.h5",
+                real_store="/tmp/store.zarr", real_count_tsv="/tmp/c.tsv.gz")
