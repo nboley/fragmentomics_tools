@@ -486,8 +486,16 @@ class IncompleteCountFile(Exception):
     """
 
 
-def _read_sample_count_map(path: str, region_set: str) -> dict:
+def _read_sample_count_map(path: str, region_set: str,
+                           expected_sample: str | None = None) -> dict:
     """Return ``{(contig, start, stop): count}`` for one region set in one file.
+
+    When ``expected_sample`` is given, the file's ``sample`` column must hold
+    exactly that one value.  The library name otherwise comes from the FILENAME
+    alone, so a copied or renamed file would be recorded in
+    ``ground_truth.json`` under a library whose depths it does not contain --
+    false provenance that nothing downstream could detect.  Verified to hold
+    for all 36 files in ibd_region_counts_mapq10/ (stem == sample column).
 
     Raises ``IncompleteCountFile`` if the gzip is truncated (pandas raises
     ``EOFError`` reading a chopped gzip; a truncated stream never yields a
@@ -508,6 +516,14 @@ def _read_sample_count_map(path: str, region_set: str) -> dict:
         raise ValueError(
             f"region_set {region_set!r} not found in {path}; available: {available}"
         )
+    if expected_sample is not None:
+        found = sorted(set(sub["sample"].astype(str)))
+        if found != [expected_sample]:
+            raise ValueError(
+                f"{path}: filename implies library {expected_sample!r} but the "
+                f"'sample' column holds {found}; the matched-count provenance "
+                "recorded in ground_truth.json would be false"
+            )
     contig = sub["contig"].astype(str).to_numpy()
     start = sub["start"].to_numpy()
     stop = sub["stop"].to_numpy()
@@ -530,7 +546,9 @@ def load_matched_count_files(count_dir: str, region_set: str):
     the COMPLETE files only.  Incomplete (truncated-gzip) files are detected by
     a decompression failure, reported loudly, and skipped -- never used
     partially.  The library name is the filename stem (``<name>.region_counts.tsv.gz``
-    -> ``<name>``) and is cross-checked against the file's ``sample`` column.
+    -> ``<name>``) and IS cross-checked against the file's ``sample`` column
+    (see ``_read_sample_count_map``); a mismatch raises rather than recording a
+    library name the depths did not come from.
     """
     paths = sorted(glob.glob(os.path.join(count_dir, "*.region_counts.tsv.gz")))
     if not paths:
@@ -541,7 +559,7 @@ def load_matched_count_files(count_dir: str, region_set: str):
     for p in paths:
         name = os.path.basename(p)[:-len(".region_counts.tsv.gz")]
         try:
-            cmap = _read_sample_count_map(p, region_set)
+            cmap = _read_sample_count_map(p, region_set, expected_sample=name)
         except IncompleteCountFile as e:
             rejected.append(name)
             print(f"[sim] REJECTED incomplete count file (truncated gzip): {e}",
@@ -634,7 +652,14 @@ def build_matched_target_counts(count_dir: str, region_set: str, regions: list,
                 "offset is 0 -- check --region-len and --region-set."
             )
     tile_widths = {b - a for (_, a, b) in keys}
-    tile_width = tile_widths.pop() if len(tile_widths) == 1 else None
+    if len(tile_widths) != 1:
+        raise ValueError(
+            f"simulated regions span {len(tile_widths)} distinct widths "
+            f"{sorted(tile_widths)}; the matched join is only meaningful when "
+            "every region has the counted tile width, and a null tile_width in "
+            "ground_truth.json would hide that"
+        )
+    tile_width = tile_widths.pop()
     return target_counts, sample_libraries, tile_width, n_available
 
 

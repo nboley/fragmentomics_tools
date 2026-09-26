@@ -513,6 +513,30 @@ def test_matched_exact_join_values(tmp_path):
         assert tc[s].tolist() == lib_vals[lib]
 
 
+def test_matched_sample_column_must_match_filename(tmp_path):
+    # The library name recorded in ground_truth.json comes from the FILENAME, so
+    # a renamed/copied file would attribute one sample's depths to another with
+    # nothing downstream able to notice.  The sample column must agree.
+    d = tmp_path / "counts"
+    d.mkdir()
+    _write_sample_count_file(d / "RD-A-Lib1.region_counts.tsv.gz",
+                             "RD-SOMEONE-ELSE-Lib1",
+                             [(_RS, "chr1", 0, 2560, 10)])
+    with pytest.raises(ValueError, match="provenance"):
+        sim.load_matched_count_files(str(d), _RS)
+
+
+def test_matched_mixed_region_widths_raises(tmp_path):
+    # The join is only meaningful when every region has the counted tile width.
+    # Mixed widths previously recorded tile_width=null in ground_truth.json
+    # instead of failing.
+    rows = [(_RS, "chr1", 0, 2560, 10), (_RS, "chr1", 2560, 4096, 7)]
+    d = _matched_dir(tmp_path, {"RD-A-Lib1": rows})
+    regions = _regions([("chr1", 0, 2560), ("chr1", 2560, 4096)])  # 2560 and 1536
+    with pytest.raises(ValueError, match="distinct widths"):
+        sim.build_matched_target_counts(d, _RS, regions, n_samples=1, seed=0)
+
+
 def test_matched_unmatched_region_fails_loud(tmp_path):
     # A simulated region with no counted counterpart must raise, never silently
     # fall back to zero/wrong depth.
