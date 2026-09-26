@@ -313,6 +313,44 @@ def test_center_offset_fails_when_tile_narrower_than_region():
         sim._center_offset(2303, 2304)
 
 
+def test_load_regions_centres_window_in_each_tile(tmp_path, monkeypatch):
+    # Guards the WIRING, not just _center_offset in isolation: load_regions must
+    # feed EACH row's own width (row.stop - row.start) into _center_offset, so a
+    # constant fed back inside load_regions (the original bug) would still be
+    # caught.  Two tiles of DIFFERENT widths, so a shared constant cannot centre
+    # both.  Monkeypatch pysam.FastaFile to serve all-A sequence (no FASTA/EFS).
+    import pysam
+
+    bed = tmp_path / "tiles.bed"
+    bed.write_text("chr1\t0\t2560\nchr1\t5000\t6536\n")  # widths 2560, 1536
+
+    class _AllAFasta:
+        def __init__(self, path):
+            pass
+
+        def fetch(self, contig, start, stop):
+            return "A" * (stop - start)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pysam, "FastaFile", _AllAFasta)
+
+    region_len = 1280
+    regions = sim.load_regions(str(bed), n_regions=2, region_len=region_len)
+    assert len(regions) == 2
+
+    # Centred inside EACH tile using its own width:
+    #   tile1 width 2560 -> offset (2560-1280)//2 = 640 -> [640, 1920)
+    #   tile2 width 1536 -> offset (1536-1280)//2 = 128 -> [5128, 6408)
+    assert regions[0] == {"contig": "chr1", "gstart": 640, "gstop": 1920}
+    assert regions[1] == {"contig": "chr1", "gstart": 5128, "gstop": 6408}
+    for reg, (t_start, t_stop) in zip(regions, [(0, 2560), (5000, 6536)]):
+        left = reg["gstart"] - t_start
+        right = t_stop - reg["gstop"]
+        assert left == right == (t_stop - t_start - region_len) // 2
+
+
 # ── Change 3: count rescaling from tile width to the central carve ─────────
 
 def test_scale_counts_to_region_factor():

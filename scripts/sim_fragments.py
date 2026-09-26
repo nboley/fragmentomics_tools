@@ -257,8 +257,9 @@ class GCBias2D:
     def lookup(self, length, gc_pct):
         """Fast table lookup: length is int (or int array), gc_pct is float (or array).
 
-        Rounds gc_pct to nearest integer, offsets by ``_GC_PAD``, and indexes
-        directly into the padded table (no clipping needed).
+        Rounds gc_pct with ``np.rint`` (round-half-to-even), offsets by
+        ``_GC_PAD``, and indexes directly into the padded table (no clipping
+        needed).
         """
         table = self._lookup_table
         gc_int = np.rint(gc_pct).astype(np.intp) + self._GC_PAD
@@ -411,10 +412,10 @@ def _scale_counts_to_region(counts, tile_width: int, region_len: int):
     The measured counts span the whole ``tile_width`` tile, but the simulated
     region is the central ``region_len`` window, so per-tile depth scales by
     ``region_len / tile_width`` (e.g. x0.900 for a 2,304 bp carve of a 2,560 bp
-    tile, x0.833 for a 1,280 bp carve of a 1,536 bp tile).  Rounded to the
-    nearest integer because target counts are fragment counts; tiles that round
-    to <=0 are dropped, matching the ``--real-store`` pool which drops empty
-    tiles.
+    tile, x0.833 for a 1,280 bp carve of a 1,536 bp tile).  Rounded with
+    ``np.rint`` (round-half-to-even) because target counts are fragment counts;
+    tiles that round to <=0 are dropped, matching the ``--real-store`` pool which
+    drops empty tiles.
     """
     scale = region_len / tile_width
     scaled = np.rint(np.asarray(counts, dtype=np.float64) * scale).astype(np.int64)
@@ -424,7 +425,8 @@ def _scale_counts_to_region(counts, tile_width: int, region_len: int):
 def per_region_count_pool_from_tsv(tsv_path: str, region_set: str, region_len: int):
     """Per-region target-count pool for one region set, rescaled to the carve.
 
-    Reads the gzipped per-region count TSV (two ``#`` comment lines, then a
+    Reads the gzipped per-region count TSV (any number of leading ``#`` comment
+    lines dropped by ``comment='#'``, then a
     ``sample region_set contig start stop count`` header), keeps the rows whose
     ``region_set`` matches, derives the tile width from ``stop - start`` (must be
     uniform within the set -- fails loudly otherwise), and rescales each count to
@@ -893,7 +895,6 @@ def run(regime, n_samples, seed, w6_dynamic_range, n_regions, out_root,
         n_regions=n_regions, region_len=region_len, hex_half=HEX_HALF,
         max_len=MAX_LEN, jitter_sd=(JITTER_SD if regime == "B" else 0.0),
         heldout_h5=heldout_h5, fasta=FASTA, gc_bias_json=GC_BIAS_JSON,
-        training_tiles=TRAINING_TILES,
         region_set=region_set,
         real_count_tsv=real_count_tsv or "",
         count_region_set=count_region_set or "",

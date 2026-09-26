@@ -5,16 +5,24 @@ Computes the true per-position endpoint propensity from ground-truth w6 +
 GC bias + per-sample FL distributions, then evaluates multinomial NLL of the
 actual validation counts against this propensity using MaskedMultinomialNLLLoss.
 
-The KEY correctness requirement is coordinate alignment:
-  - Store tiles span l_target = tile_size + 2*jitter = 2304 positions.
-  - The BackgroundTileDataset center-crops to tile_size=2048 (positions [128, 2176)
-    within the l_target extent) for val (jitter=0).
+The KEY correctness requirement is coordinate alignment.  All geometry below is
+derived from the store config at run time, never hardcoded:
+  - Store tiles span l_target = tile_size + 2*jitter positions.
+  - The BackgroundTileDataset center-crops to the central tile_size window,
+    [crop_start, crop_start + tile_size), where crop_start = (l_target -
+    tile_size) // 2 == jitter, for val (jitter=0).
   - The oracle propensity MUST be computed over the FULL l_target extent and
     then center-cropped identically, so that propensity[i] matches counts[i].
 
-The previous compute_true_propensity had a 128-position offset: it accumulated
-into a (C, tile_size=2048) array clipping to [0, 2048), but the counts come from
-positions [128, 2176). This script fixes that.
+Worked example (one instantiation, not a constraint): at jitter=128,
+tile_size=2048 the extent is l_target=2304 and the crop is [128, 2176); at
+jitter=256, tile_size=2048 the extent is l_target=2560 and the crop is
+[256, 2304).
+
+The bug this alignment guards against: a compute_true_propensity that accumulates
+into a (C, tile_size) array clipping to [0, tile_size) is offset by crop_start
+positions from the counts, which come from [crop_start, crop_start + tile_size).
+This script computes over l_target and crops identically.
 
 Usage:
     cd /home/nathanboley/src/fragmentomics_tools
@@ -213,8 +221,9 @@ def main():
     print(f"[oracle] {n_samples_train} train samples, {n_val_tiles} val tiles")
     print(f"[oracle] total val pairs: {n_samples_train * n_val_tiles}")
 
-    # Center-crop offset (jitter=0 in val mode)
-    crop_start = (l_target - tile_size) // 2  # = jitter = 128
+    # Center-crop offset (jitter=0 in val mode).  crop_start == jitter because
+    # l_target == tile_size + 2*jitter (128 at jitter=128, 256 at jitter=256).
+    crop_start = (l_target - tile_size) // 2
     crop_stop = crop_start + tile_size
     print(f"[oracle] center-crop: [{crop_start}, {crop_stop}) within l_target={l_target}")
 
@@ -222,8 +231,9 @@ def main():
     from background_model.dataset import BackgroundTileDataset
 
     # We need model_input_size to create the dataset. Use a reasonable value.
-    # The model_input_size must satisfy: l_seq >= model_input_size + 2*jitter
-    # l_seq = tile_size + 2*(jitter + rf_budget) = 2048 + 2*(128 + 2048) = 6400
+    # The model_input_size must satisfy: l_seq >= model_input_size + 2*jitter,
+    # where l_seq = tile_size + 2*(jitter + rf_budget) (e.g. 6400 at tile_size=
+    # 2048, jitter=128, rf_budget=2048).
     # For val (jitter=0 in the dataset), we just need model_input_size <= l_seq
     # The actual value doesn't matter for y and mask — only x depends on it.
     # Use tile_size as model_input_size (we won't use x).

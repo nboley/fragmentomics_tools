@@ -5,7 +5,8 @@ Reads sim_fragments.py output (.npz files) and constructs a zarr store
 compatible with BackgroundTileDataset, using the real fragment_array library
 to build coverage counts (plan §6 step 5: "using the existing preprocess path").
 
-Geometry: TILE=2048, JITTER=128 (positional augmentation during training),
+Geometry: TILE defaults to 2048 (override with --tile-size, e.g. 1024 for the
+1536 bp region set), JITTER=128 (positional augmentation during training),
 RF_BUDGET=2048 (architecture-dependent receptive field).  With jitter > 0 the
 simulator must generate fragments over a wider region (tile_size + 2*jitter)
 so the Dataset can apply random positional offsets.
@@ -181,25 +182,40 @@ def _process_sample(sample_data, n_tiles, region_len, l_target, jitter, tile_siz
 
 
 def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
-                jitter=128):
+                jitter=128, tile_size=SIM_TILE):
     """Build a zarr store from simulation output."""
     t0 = time.time()
     regions, region_len, samples = load_sim_output(sim_dir)
     n_tiles = len(regions)
     n_samples = len(samples)
 
-    tile_size = SIM_TILE
     rf_budget = SIM_RF_BUDGET
     l_target = tile_size + 2 * jitter
     l_seq = tile_size + 2 * (jitter + rf_budget)
 
+    # Fail LOUDLY on bad geometry rather than building a store the Dataset
+    # rejects later.  BackgroundTileDataset asserts tile_size, l_target and
+    # l_seq are all even (jitter_matrix same-parity requirement); since
+    # l_target = tile_size + 2*jitter and l_seq = tile_size + 2*(jitter+rf_budget)
+    # add only even offsets, that reduces to tile_size (and jitter) being even.
+    if tile_size <= 0 or tile_size % 2 != 0:
+        raise ValueError(
+            f"tile_size={tile_size} must be a positive even integer "
+            "(jitter_matrix same-parity requirement asserted by the Dataset)."
+        )
+    if jitter < 0 or jitter % 2 != 0:
+        raise ValueError(
+            f"jitter={jitter} must be a non-negative even integer "
+            "(keeps l_target = tile_size + 2*jitter even)."
+        )
+
     expected_region_len = tile_size + 2 * jitter
     if region_len != expected_region_len:
         raise ValueError(
-            f"Simulation region_len={region_len} but jitter={jitter} requires "
-            f"region_len={expected_region_len} (tile_size + 2*jitter = "
-            f"{tile_size} + 2*{jitter}).  Re-run sim_fragments.py with "
-            f"--region-len {expected_region_len}."
+            f"Simulation region_len={region_len} but tile_size={tile_size} with "
+            f"jitter={jitter} requires region_len={expected_region_len} "
+            f"(tile_size + 2*jitter = {tile_size} + 2*{jitter}).  Re-run "
+            f"sim_fragments.py with --region-len {expected_region_len}."
         )
 
     print(f"[store] {n_tiles} tiles, {n_samples} samples, "
@@ -425,11 +441,17 @@ def main():
     ap.add_argument("--jitter", type=int, default=128,
                     help="Positional jitter margin (default 128, matching real store). "
                          "Requires sim data with region_len = tile_size + 2*jitter.")
+    ap.add_argument("--tile-size", type=int, default=SIM_TILE,
+                    help=f"Center tile width (default {SIM_TILE}).  Must be a "
+                         "positive even integer; requires sim data with "
+                         "region_len = tile_size + 2*jitter (e.g. 1024 for the "
+                         "1536 bp region set at jitter 256).")
     ap.add_argument("--workers", type=int, default=1,
                     help="Number of parallel workers (default 1, sequential)")
     args = ap.parse_args()
     build_store(args.sim_dir, args.out, args.n_train_samples, args.seed,
-                workers=args.workers, jitter=args.jitter)
+                workers=args.workers, jitter=args.jitter,
+                tile_size=args.tile_size)
 
 
 if __name__ == "__main__":
