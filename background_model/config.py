@@ -13,12 +13,10 @@ import os
 from dataclasses import dataclass, field, fields
 from typing import Dict, Tuple
 
-# Track constants duplicated here to avoid importing background_model_core
-# (which requires lightning/torch).  These MUST match background_model_core.py.
-_STRANDS = ("+", "-")
-_FL_BANDS_DEFAULT = ((40, 65), (120, 175))
-_COVERAGE_TYPES = ("first", "last", "midpoint")
-_N_DEFAULT_TRACKS = len(_STRANDS) * len(_FL_BANDS_DEFAULT) * len(_COVERAGE_TYPES)  # 12
+from background_model.tracks import FL_BANDS, N_TRACKS, STRANDS
+
+_FL_BANDS_DEFAULT = FL_BANDS
+_N_DEFAULT_TRACKS = N_TRACKS
 
 # ── geometry constants (from design §0) ──────────────────────────────────
 

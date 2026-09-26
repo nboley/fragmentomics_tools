@@ -23,8 +23,12 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
   the 3 skips are Region doctests needing the optional `fbio`);
-  `tests/` **196 passed, 0 skipped**, where a few
+  `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
+  These numbers move with almost every commit, so **measure them yourself
+  before and after your change** rather than quoting this line — the `tests/`
+  figure sat at 196 long enough that the gap to reality reached 298 tests,
+  which makes a stale baseline useless as the regression check it exists to be.
 - **`make test` also runs `--doctest-modules`.** Docstring examples are tests.
   Turning this on found three LIVE defects that the suite and a five-reviewer
   static pass had all missed, so treat a failing doctest as a real signal
@@ -88,6 +92,27 @@ its primitives (`jitter_matrix`, `reverse_complement_track_permutation`,
 
 Engineering work — plumbing, config, containers, tests, I/O layout — is fine
 without a sign-off. Anything that changes computed results is not.
+
+## Writing PyTorch / Lightning code
+
+`docs/pending/pytorch_canonical_research.md` is a 21-rule reference compiled
+from official docs, community style guides and published agent rulesets, each
+rule carrying a source URL and a bad/good contrast. It is scoped to a *research*
+codebase — rules justified only by production-serving concerns are marked as
+such, so don't import them here. It is also explicit about its own gaps
+(couldn't verify the Lightning style-guide page; most `torch.compile` guidance
+targets 2.6+ while we pin 2.5.1; sources conflict on the `weights_only`
+default), so treat it as a strong prior, not scripture.
+
+Worth reading before writing model or training code, and worth checking a review
+against. Its Tier-1 "silent correctness" rules are the ones that matter: applied
+to this repo they found a real latent bug — `predict_profile` left the module in
+`eval()` with nothing restoring it, which `BatchNorm1d` makes mode-sensitive
+*regardless of dropout rate*, so the `--dropout 0.0` convention would not have
+saved us. Fixed in `e8b7ca5`. The other Tier-1 rules passed, which is the more
+useful half of the result: `.cpu().numpy()` only inside inference entry points,
+and `4 ** torch.arange(...)` inside `register_buffer` rather than rebuilt per
+forward.
 
 ## Known traps (each cost real debugging time)
 

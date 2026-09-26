@@ -6,6 +6,7 @@ BackgroundModel._step loss.  Also covers CLI arg parsing.
 """
 import json
 import os
+import subprocess
 
 import lightning as L
 import torch
@@ -15,11 +16,19 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from background_model_core import BackgroundModel, _with_lr_schedule
 from background_model.train import (
     ApplyLRReduction,
+    RECOVERABLE_REASONS,
     DivergenceStop,
     InstrumentedBackgroundModel,
+    InstrumentedBackgroundModelKEN,
+    InstrumentedBackgroundModelHybrid,
     TrainConfig,
+    _InstrumentationMixin,
     _determine_stop_reason,
+    _git_sha,
+    _check_dirty_subprocess,
+    _per_element_multinomial_nll,
     build_arg_parser,
+    build_run_summary,
     build_trainer,
     cfg_from_args,
     run_recovery_loop,
@@ -980,7 +989,8 @@ class _DivergingModel(L.LightningModule):
     def __init__(self, lr=1e-2, scale=0.1, spike_epochs=None,
                  first_spike=3, spike_every=None,
                  spike=2.0, base_loss=10.0, trend=-0.01,
-                 lr_patience=4, max_lr_reductions=3, lr_factor=0.5):
+                 lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
+                 nan_epochs=None):
         super().__init__()
         self.save_hyperparameters()
         self.layer1 = torch.nn.Linear(4, 4)
@@ -1007,6 +1017,10 @@ class _DivergingModel(L.LightningModule):
         x, y = batch
         ep = self.current_epoch
         base = self.hparams.base_loss
+        # nan_epochs defaults to None so existing tests are unaffected.
+        if self.hparams.nan_epochs and ep in set(self.hparams.nan_epochs):
+            self.log("val_loss", float("nan"))
+            return torch.tensor(float("nan"))
         if ep in self._spike_epochs:
             loss = base * self.hparams.spike
         else:
@@ -1043,7 +1057,7 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
 
     derived_patience = (lr_patience + 1) * max_lr_reductions + lr_patience
 
-    def build_and_fit(ckpt_path, extra_callbacks):
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
         ckpt = ModelCheckpoint(
             dirpath=os.path.join(run_dir, "checkpoints"),
             monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
@@ -1079,7 +1093,7 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
     global_best_path = trainer.checkpoint_callback.best_model_path
 
     # Production recovery loop
-    stop_reason, global_best_score, global_best_path, recoveries = (
+    stop_reason, global_best_score, global_best_path, recoveries, _ = (
         run_recovery_loop(
             build_and_fit=build_and_fit,
             stop_reason=stop_reason,
@@ -1087,6 +1101,11 @@ def _run_with_recovery(model, tmp_path, max_recoveries=3, recovery_factor=0.5,
             global_best_path=global_best_path,
             max_recoveries=max_recoveries,
             recovery_factor=recovery_factor,
+            # Same derivation production uses: min_lr / original_lr.
+            # Taken from the MODEL's hparams, because those are what
+            # _with_lr_schedule used to compute the scheduler's min_lrs.
+            floor_ratio=(model.hparams.lr_factor
+                         ** model.hparams.max_lr_reductions),
         )
     )
 
@@ -1501,7 +1520,7 @@ def test_zero_epoch_recovery_reports_unrecovered(tmp_path):
     os.makedirs(run_dir, exist_ok=True)
     derived_patience = (4 + 1) * 1 + 4  # 9
 
-    def build_and_fit(ckpt_path, extra_callbacks, max_epochs=10):
+    def build_and_fit(ckpt_path, extra_callbacks, max_epochs=10, attempt=0):
         ckpt_cb = ModelCheckpoint(
             dirpath=os.path.join(run_dir, "checkpoints"),
             monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
@@ -1536,10 +1555,10 @@ def test_zero_epoch_recovery_reports_unrecovered(tmp_path):
 
     # Phase 2: recovery with max_epochs=2, so the checkpoint at epoch 1
     # leaves zero room to train.
-    def build_and_fit_capped(ckpt_path, extra_callbacks):
+    def build_and_fit_capped(ckpt_path, extra_callbacks, attempt=0):
         return build_and_fit(ckpt_path, extra_callbacks, max_epochs=2)
 
-    stop_reason, _, _, recoveries = run_recovery_loop(
+    stop_reason, _, _, recoveries, _ = run_recovery_loop(
         build_and_fit=build_and_fit_capped,
         stop_reason=stop_reason,
         global_best_score=global_best_score,
@@ -1585,7 +1604,10 @@ def test_recovery_factor_cli_default_and_override():
     p = build_arg_parser()
     required = ["--loss", "multinomial", "--run-name", "t"]
     cfg = cfg_from_args(p.parse_args(required))
-    assert cfg.recovery_factor == 0.5
+    # 0.2 (cut by 80%), changed from 0.5 on 2026-09-24 together with
+    # lr_factor. The two must stay equal so the recovery ladder and the
+    # plateau floor bottom out at the same value.
+    assert cfg.recovery_factor == 0.2
 
     cfg2 = cfg_from_args(p.parse_args(required + ["--recovery-factor", "0.3"]))
     assert cfg2.recovery_factor == pytest.approx(0.3)
@@ -1859,3 +1881,687 @@ def test_multi_group_floor_clamp_different_floors(tmp_path):
         assert lr1 >= floor_g1 - 1e-10, (
             f"epoch {ep}: group1 LR={lr1:.6e} < floor={floor_g1:.6e}"
         )
+
+
+# --------------------------------------------------------------------------
+# Absolute LR rung (2026-09-24).  ApplyLRReduction targets
+# recovery_factor**N x ORIGINAL lr rather than multiplying the resumed
+# checkpoint's LR by a factor relative to it.  That removed the
+# best_recovery_level bookkeeping which caused the ladder double-count.
+# --------------------------------------------------------------------------
+
+
+def _fake_trainer(current_lrs, min_lrs):
+    """Optimizer + real ReduceLROnPlateau wired like _with_lr_schedule does."""
+    from types import SimpleNamespace
+    groups = [{"params": [torch.nn.Parameter(torch.zeros(1))], "lr": lr}
+              for lr in current_lrs]
+    opt = torch.optim.Adam(groups)
+    sch = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, min_lr=list(min_lrs))
+    return SimpleNamespace(optimizers=[opt],
+                           lr_scheduler_configs=[SimpleNamespace(scheduler=sch)]), opt
+
+
+def test_recovery_rung_is_absolute_regardless_of_resume_depth():
+    """The Nth rung is recovery_factor**N x ORIGINAL lr, whatever we resume from.
+
+    This is the regression guard for the ladder double-count: under the old
+    relative scheme, resuming from an already-reduced checkpoint multiplied the
+    from-original factor on top, giving 0.125L where 0.25L was intended.
+    """
+    L, rf, floor_ratio = 5e-3, 0.2, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+
+    for n, resume_lr in ((1, L), (2, L * rf), (3, L * rf ** 2)):
+        tr, opt = _fake_trainer([resume_lr, resume_lr * 0.1], min_lrs)
+        ApplyLRReduction(rf ** n, floor_ratio).on_train_start(tr, None)
+        got = opt.param_groups[0]["lr"]
+        want = max(L * rf ** n, min_lrs[0])
+        assert got == pytest.approx(want, rel=1e-9), (
+            f"N={n} resuming at {resume_lr:.4g}: got {got:.6g}, want rung {want:.6g}"
+        )
+        # inter-group ratio must survive (dispersion_lr_scale)
+        assert opt.param_groups[1]["lr"] / got == pytest.approx(0.1, rel=1e-9)
+
+
+def test_recovery_rung_never_raises_lr():
+    """If plateau drove the LR BELOW the rung, recovery must not raise it.
+
+    A bare absolute assignment would snap back up to the rung, undoing plateau
+    adaptation and increasing the LR right after a divergence.  min(current,
+    rung) is what preserves the monotonicity the multiplicative form had.
+    """
+    L, rf, floor_ratio = 5e-3, 0.2, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+    deep = L * 1e-2                      # far below rung 1, above the floor
+    assert deep < L * rf and deep > min_lrs[0]
+
+    tr, opt = _fake_trainer([deep, deep * 0.1], min_lrs)
+    ApplyLRReduction(rf ** 1, floor_ratio).on_train_start(tr, None)
+    assert opt.param_groups[0]["lr"] <= deep, "recovery raised the LR"
+    assert opt.param_groups[0]["lr"] == pytest.approx(deep, rel=1e-9)
+
+
+def test_floor_clamp_applies_even_without_floor_ratio():
+    """The floor binds whenever the scheduler exposes one.
+
+    Regression guard: an earlier version of this change skipped the clamp when
+    floor_ratio was absent, which let a caller drive the LR below min_lr and
+    re-created the very bug the clamp exists to prevent.
+    """
+    L = 5e-3
+    min_lrs = [L * 0.5 ** 3]
+    tr, opt = _fake_trainer([L * 0.5 ** 3], min_lrs)     # already at the floor
+    cb = ApplyLRReduction(0.25, None)                    # no floor_ratio
+    cb.on_train_start(tr, None)
+    assert opt.param_groups[0]["lr"] >= min_lrs[0] - 1e-18
+    assert cb.clamped_groups, "clamp did not fire without floor_ratio"
+
+
+def test_applied_lrs_recorded_for_audit():
+    L, floor_ratio = 5e-3, 0.2 ** 3
+    min_lrs = [L * floor_ratio, L * 0.1 * floor_ratio]
+    tr, opt = _fake_trainer([L, L * 0.1], min_lrs)
+    cb = ApplyLRReduction(0.2, floor_ratio)
+    cb.on_train_start(tr, None)
+    assert cb.applied_lrs == [pytest.approx(g["lr"]) for g in opt.param_groups]
+
+
+def test_ladder_and_floor_bottom_out_together_by_default():
+    """recovery_factor == lr_factor and max_recoveries == max_lr_reductions,
+    so the deepest rung lands exactly on the plateau floor rather than
+    agreeing only by coincidence."""
+    p = build_arg_parser()
+    cfg = cfg_from_args(p.parse_args(["--loss", "multinomial", "--run-name", "t"]))
+    assert cfg.lr_factor == 0.2
+    assert cfg.recovery_factor == 0.2
+    assert cfg.recovery_factor == cfg.lr_factor
+    assert cfg.max_recoveries == cfg.max_lr_reductions
+    deepest = cfg.recovery_factor ** cfg.max_recoveries
+    floor = cfg.lr_factor ** cfg.max_lr_reductions
+    assert deepest == pytest.approx(floor, rel=1e-12)
+
+
+def test_non_finite_triggers_recovery(tmp_path):
+    """A NaN loss must be recoverable, not fatal.
+
+    The hybrid+NB run died at epoch 7 with stop_reason=non_finite and simply
+    stopped -- recovery only handled reason=='diverged'.  Owner approved
+    treating non-finite as recoverable on 2026-09-24.
+    """
+    assert "non_finite" in RECOVERABLE_REASONS
+    model = _DivergingModel(lr=1e-2, spike_epochs=set(), nan_epochs={3},
+                            base_loss=10.0, trend=-0.01)
+    stop_reason, _, _, recoveries, _ = _run_with_recovery(
+        model, tmp_path, max_recoveries=2, recovery_factor=0.2, max_epochs=8,
+    )
+    assert recoveries, "NaN did not trigger recovery"
+    assert recoveries[0]["epoch"] == 3
+
+
+def test_each_recovery_attempt_gets_its_own_metrics_csv(tmp_path):
+    """Recovery must not overwrite the previous attempt's metrics.csv.
+
+    Lightning's CSVLogger re-initialises when recovery re-fits.  Reusing one
+    version silently clobbered the file: a real 26-epoch KEN run that recovered
+    3x retained only 5 epochs, and train_loss for the overwritten attempts was
+    gone for good (checkpoint filenames carry val_loss, not train_loss).
+    """
+    cfg = TrainConfig(**{**_REQUIRED, "run_name": "r",
+                         "runs_root": str(tmp_path / "runs")})
+    base = build_trainer(cfg, str(tmp_path / "run"), attempt=0)
+    rec1 = build_trainer(cfg, str(tmp_path / "run"), attempt=1)
+    rec2 = build_trainer(cfg, str(tmp_path / "run"), attempt=2)
+
+    dirs = [t.logger.log_dir for t in (base, rec1, rec2)]
+    assert len(set(dirs)) == 3, f"attempts share a log dir: {dirs}"
+    # attempt 0 keeps the original path so existing readers are unaffected
+    assert dirs[0].rstrip("/").endswith(cfg.run_name)
+    assert "recovery_1" in dirs[1] and "recovery_2" in dirs[2]
+
+
+# --------------------------------------------------------------------------
+# Defect: summary.json global_step/current_epoch are stale on recovered runs
+#
+# run_training reads trainer.global_step / trainer.current_epoch from the
+# INITIAL-fit trainer.  The recovery loop builds fresh trainers that are
+# never assigned back.  On any run that recovered, both fields describe
+# only the first attempt.
+#
+# The fix makes run_recovery_loop return a 5th element: the last trainer
+# built during recovery (or None when no recovery fired).  run_training
+# then uses that trainer for the summary dict.
+# --------------------------------------------------------------------------
+
+
+def test_recovery_loop_returns_final_trainer(tmp_path):
+    """run_recovery_loop must return the final trainer as 5th element.
+
+    After recovery, the returned trainer's current_epoch and global_step
+    must exceed the initial trainer's, since the recovered run trained
+    additional epochs.
+    """
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs={5}, spike=2.0, base_loss=10.0, trend=-0.01,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    dl = _tiny_dataloader()
+    run_dir = str(tmp_path / "run")
+    os.makedirs(run_dir, exist_ok=True)
+    derived_patience = (2 + 1) * 1 + 2  # 5
+
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(run_dir, "checkpoints"),
+            monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
+            filename="{epoch}-{step}-{val_loss:.4f}",
+        )
+        early = EarlyStopping(
+            monitor="val_loss", mode="min",
+            patience=derived_patience, min_delta=0.0,
+        )
+        div = DivergenceStop(1.10)
+        cbs = [ckpt, early, div] + list(extra_callbacks)
+        trainer = L.Trainer(
+            max_epochs=20,
+            default_root_dir=run_dir,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=cbs,
+            accelerator="cpu",
+            log_every_n_steps=1,
+        )
+        trainer.fit(model, dl, dl, ckpt_path=ckpt_path)
+        return trainer
+
+    # Initial fit
+    initial_trainer = build_and_fit(None, [])
+    stop_reason = _determine_stop_reason(initial_trainer)
+    global_best_score = (
+        float(initial_trainer.checkpoint_callback.best_model_score)
+        if initial_trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = initial_trainer.checkpoint_callback.best_model_path
+
+    # Destructure 5 return values — fails on unfixed code (ValueError)
+    stop_reason, global_best_score, global_best_path, recoveries, last_trainer = (
+        run_recovery_loop(
+            build_and_fit=build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=1,
+            recovery_factor=0.5,
+            floor_ratio=0.5 ** 1,
+        )
+    )
+
+    assert len(recoveries) >= 1, "Recovery must fire for this test"
+    assert last_trainer is not None, "last_trainer must be set after recovery"
+
+    # The final trainer must have progressed beyond the initial fit
+    assert last_trainer.current_epoch > initial_trainer.current_epoch, (
+        f"final epoch {last_trainer.current_epoch} should exceed "
+        f"initial epoch {initial_trainer.current_epoch}"
+    )
+    assert last_trainer.global_step > initial_trainer.global_step, (
+        f"final step {last_trainer.global_step} should exceed "
+        f"initial step {initial_trainer.global_step}"
+    )
+
+
+def test_recovery_loop_returns_none_trainer_without_recovery(tmp_path):
+    """When no recovery fires, last_trainer must be None.
+
+    This ensures the zero-recovery path is unchanged: the caller uses the
+    initial-fit trainer for the summary, which is correct when there was
+    no recovery.
+    """
+    model = _DivergingModel(
+        lr=1e-2, spike_epochs=set(), spike=2.0, base_loss=10.0, trend=-0.01,
+        lr_patience=2, max_lr_reductions=1, lr_factor=0.5,
+    )
+    dl = _tiny_dataloader()
+    run_dir = str(tmp_path / "run")
+    os.makedirs(run_dir, exist_ok=True)
+    derived_patience = (2 + 1) * 1 + 2  # 5
+
+    def build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        ckpt = ModelCheckpoint(
+            dirpath=os.path.join(run_dir, "checkpoints"),
+            monitor="val_loss", mode="min", save_top_k=-1, save_last=True,
+            filename="{epoch}-{step}-{val_loss:.4f}",
+        )
+        early = EarlyStopping(
+            monitor="val_loss", mode="min",
+            patience=derived_patience, min_delta=0.0,
+        )
+        div = DivergenceStop(1.10)
+        cbs = [ckpt, early, div] + list(extra_callbacks)
+        trainer = L.Trainer(
+            max_epochs=10,
+            default_root_dir=run_dir,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            callbacks=cbs,
+            accelerator="cpu",
+            log_every_n_steps=1,
+        )
+        trainer.fit(model, dl, dl, ckpt_path=ckpt_path)
+        return trainer
+
+    # Initial fit — no divergence
+    initial_trainer = build_and_fit(None, [])
+    stop_reason = _determine_stop_reason(initial_trainer)
+    global_best_score = (
+        float(initial_trainer.checkpoint_callback.best_model_score)
+        if initial_trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = initial_trainer.checkpoint_callback.best_model_path
+
+    # Destructure 5 return values — fails on unfixed code (ValueError)
+    stop_reason, _, _, recoveries, last_trainer = (
+        run_recovery_loop(
+            build_and_fit=build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=3,
+            recovery_factor=0.5,
+        )
+    )
+
+    assert len(recoveries) == 0, "No recovery should fire for a clean run"
+    assert last_trainer is None, (
+        "last_trainer must be None when no recovery fired"
+    )
+
+
+# --------------------------------------------------------------------------
+# Defect: run_meta.json omits TrainConfig fields
+#
+# _write_run_meta manually lists fields.  When TrainConfig gains new fields,
+# they are silently omitted.  The fix uses dataclasses.asdict(cfg) so that
+# any new field is automatically included.
+# --------------------------------------------------------------------------
+
+
+class _FakeDataset:
+    """Minimal mock for _write_run_meta's dataset interface."""
+
+    config_hash = "test_hash_abc123"
+    split_version = 42
+
+    class config:
+        @staticmethod
+        def full_config_json():
+            return '{"tile_size": 2048}'
+
+    def __len__(self):
+        return 100
+
+
+def test_run_meta_contains_all_trainconfig_fields(tmp_path):
+    """Every TrainConfig field must appear in run_meta.json.
+
+    Asserts the COMPLETENESS PROPERTY: the set of dataclasses.fields(TrainConfig)
+    is a subset of the meta dict keys.  This catches any future field that is
+    added to TrainConfig but not plumbed through to _write_run_meta.
+    """
+    import dataclasses
+    from background_model.train import _write_run_meta
+
+    cfg = TrainConfig(**{**_REQUIRED, "runs_root": str(tmp_path)})
+    run_dir = str(tmp_path / cfg.run_name)
+
+    meta = _write_run_meta(run_dir, cfg, _FakeDataset(), _FakeDataset())
+
+    all_field_names = {f.name for f in dataclasses.fields(TrainConfig)}
+    missing = all_field_names - set(meta.keys())
+    assert not missing, (
+        f"run_meta.json is missing {len(missing)} TrainConfig field(s): "
+        f"{sorted(missing)}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Task 1: All instrumented classes share one mixin implementation
+# --------------------------------------------------------------------------
+
+
+def test_instrumentation_shares_single_implementation():
+    """All three instrumented classes use the SAME _step, _log_multinomial_nll,
+    _log_per_track, _log_dispersion_trajectory and on_before_optimizer_step
+    methods from _InstrumentationMixin.  A second copy of any of these
+    methods is the defect shape this codebase has the most receipts for."""
+    methods = [
+        "_step",
+        "_log_multinomial_nll",
+        "_log_per_track",
+        "_log_dispersion_trajectory",
+        "on_before_optimizer_step",
+    ]
+    classes = [
+        InstrumentedBackgroundModel,
+        InstrumentedBackgroundModelKEN,
+        InstrumentedBackgroundModelHybrid,
+    ]
+    for method_name in methods:
+        mixin_method = getattr(_InstrumentationMixin, method_name)
+        for cls in classes:
+            cls_method = None
+            for klass in cls.__mro__:
+                if method_name in klass.__dict__:
+                    cls_method = klass.__dict__[method_name]
+                    break
+            assert cls_method is mixin_method, (
+                f"{cls.__name__}.{method_name} is NOT the mixin's method — "
+                f"found on {klass.__name__} instead of _InstrumentationMixin. "
+                f"The whole point of the mixin is one implementation."
+            )
+
+
+def test_instrumented_ken_loss_matches_frozen():
+    """KEN instrumented model loss byte-matches the base KEN _step."""
+    from background_model_core import BackgroundModelKEN
+    torch.manual_seed(0)
+    model = InstrumentedBackgroundModelKEN(
+        loss="multinomial", d_embed=8, d_context=8,
+    )
+    model.eval()
+    L_in = model.calc_input_region_size(L_OUT)
+    x = torch.randn(2, 4, L_in)
+    y = torch.randint(0, 5, (2, 12, L_OUT)).float()
+    mask = torch.ones(2, L_OUT, dtype=torch.bool)
+    batch = (x, y, mask)
+    child = model._step(batch, "train_loss")
+    parent = BackgroundModelKEN._step(model, batch, "train_loss")
+    assert torch.equal(child.detach(), parent.detach())
+
+
+def test_instrumented_hybrid_loss_matches_frozen():
+    """Hybrid instrumented model loss byte-matches the base Hybrid _step."""
+    from background_model_core import BackgroundModelHybrid
+    torch.manual_seed(0)
+    model = InstrumentedBackgroundModelHybrid(
+        loss="multinomial", n_kernels=8, d_embed=8,
+    )
+    model.eval()
+    L_in = model.calc_input_region_size(L_OUT)
+    x = torch.randn(2, 4, L_in)
+    y = torch.randint(0, 5, (2, 12, L_OUT)).float()
+    mask = torch.ones(2, L_OUT, dtype=torch.bool)
+    batch = (x, y, mask)
+    child = model._step(batch, "train_loss")
+    parent = BackgroundModelHybrid._step(model, batch, "train_loss")
+    assert torch.equal(child.detach(), parent.detach())
+
+
+# --------------------------------------------------------------------------
+# Task 2+5: _git_sha resolves from package location
+# --------------------------------------------------------------------------
+
+
+def test_git_sha_from_tmp_cwd():
+    """_git_sha works when CWD is /tmp (the batch container scenario).
+
+    The old subprocess-based implementation shelled ``git rev-parse HEAD``
+    against CWD, which fails with "not a git repository" when CWD is /tmp.
+    The new implementation resolves from the package file location.
+    """
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir("/tmp")
+        sha = _git_sha()
+        assert sha != "unknown", (
+            f"_git_sha() returned 'unknown' from /tmp — "
+            f"the package-location resolution is not working"
+        )
+        bare_sha = _bare_sha(sha)
+        assert len(bare_sha) == 40 and all(c in "0123456789abcdef" for c in bare_sha), (
+            f"_git_sha() returned '{sha}' which is not a valid git SHA"
+        )
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_git_sha_does_not_raise():
+    """_git_sha degrades to 'unknown' rather than raising."""
+    sha = _git_sha()
+    assert isinstance(sha, str)
+
+
+_SHA_SUFFIXES = ("-dirty-untracked", "-dirtyunknown", "-dirty", "-untracked")
+
+
+def _bare_sha(sha: str) -> str:
+    """Strip any working-tree-state suffix, leaving the bare hex sha."""
+    for suffix in _SHA_SUFFIXES:          # longest-first; -dirty is a prefix of two others
+        if sha.endswith(suffix):
+            return sha[: -len(suffix)]
+    return sha
+
+
+def test_git_sha_dirty_flag():
+    """_git_sha reports working-tree state as a recognised suffix.
+
+    The dirty state cannot be controlled deterministically here, so this pins
+    the *format*: a 40-char hex sha plus at most one recognised suffix.
+    """
+    sha = _git_sha()
+    if sha == "unknown":
+        pytest.skip("git not available")
+    bare = _bare_sha(sha)
+    assert len(bare) == 40 and all(c in "0123456789abcdef" for c in bare), (
+        f"_git_sha() returned {sha!r}; suffix is not one of {_SHA_SUFFIXES}"
+    )
+
+
+def test_dirty_check_reports_untracked_files(tmp_path):
+    """Untracked files must be reported, not ignored.
+
+    Regression guard for a real incident: `scripts/sim_oracle.py` was untracked
+    while two *committed* scripts imported it, so a fresh clone could not run.
+    Throughout that window every run was stamped with a clean sha, because the
+    check passed ``--untracked-files=no``.  An untracked file is not always a
+    problem, but it is never something the provenance record should hide.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("hello\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+
+    assert _check_dirty_subprocess(str(tmp_path)) == "", "clean tree must have no suffix"
+
+    (tmp_path / "stray.py").write_text("x = 1\n")
+    assert _check_dirty_subprocess(str(tmp_path)) == "-untracked"
+
+    (tmp_path / "a.txt").write_text("modified\n")
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirty-untracked"
+
+    (tmp_path / "stray.py").unlink()
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirty"
+
+
+def test_dirty_check_never_claims_clean_when_it_cannot_tell(tmp_path):
+    """When git cannot answer, the result must NOT look clean.
+
+    The sha is resolved from the filesystem precisely because the batch
+    container has no ``git`` binary.  The dirty check still shells out, and it
+    used to return False on failure — so every containerised run was stamped
+    clean regardless of the truth.  A record that admits ignorance is useful;
+    one that silently asserts cleanliness is worse than none.
+    """
+    # tmp_path is a real directory but not a git repository
+    assert _check_dirty_subprocess(str(tmp_path)) == "-dirtyunknown"
+
+
+def test_git_sha_store_uses_train_implementation():
+    """store._get_version_info uses the same _git_sha as train.py."""
+    from background_model.store import _get_version_info
+    import inspect
+    source = inspect.getsource(_get_version_info)
+    assert "from background_model.train import _git_sha" in source, (
+        "store._get_version_info should import _git_sha from train, "
+        "not have its own implementation"
+    )
+
+
+# --------------------------------------------------------------------------
+# Task 3: _per_element_multinomial_nll matches frozen MaskedMultinomialNLLLoss
+# --------------------------------------------------------------------------
+
+
+def test_per_element_nll_matches_frozen_loss():
+    """_per_element_multinomial_nll().mean() must equal MaskedMultinomialNLLLoss().
+
+    This is the equivalence proof that Task 3 is a refactor, not a change.
+    The per-element helper is the frozen loss's computation stopped before
+    .mean(); they must produce numerically identical results.
+    """
+    from background_model_core import MaskedMultinomialNLLLoss, _prepare_mask
+    torch.manual_seed(42)
+    B, C, L = 4, 12, 512
+    shape_logits = torch.randn(B, C, L)
+    y = torch.randint(0, 10, (B, C, L)).float()
+    mask = torch.ones(B, L, dtype=torch.bool)
+    # Mask out some positions
+    mask[:, 100:120] = False
+    y[:, :, 100:120] = 0.0
+
+    mask3 = _prepare_mask(mask, y)
+    frozen_loss = MaskedMultinomialNLLLoss()
+    scalar = frozen_loss(shape_logits, y, mask3)
+
+    per_element = _per_element_multinomial_nll(shape_logits, y, mask3)
+    assert per_element.shape == (B, C)
+    reconstructed = per_element.mean()
+
+    assert torch.allclose(scalar, reconstructed, atol=1e-6), (
+        f"Frozen loss = {scalar.item():.8f}, "
+        f"per-element mean = {reconstructed.item():.8f}. "
+        f"These must be identical — the per-element helper IS the frozen "
+        f"loss without .mean()."
+    )
+
+
+def test_per_element_nll_matches_frozen_no_mask():
+    """Equivalence holds when mask is None."""
+    from background_model_core import MaskedMultinomialNLLLoss
+    torch.manual_seed(7)
+    B, C, L = 2, 12, 256
+    shape_logits = torch.randn(B, C, L)
+    y = torch.randint(0, 10, (B, C, L)).float()
+
+    frozen_loss = MaskedMultinomialNLLLoss()
+    scalar = frozen_loss(shape_logits, y, None)
+    per_element = _per_element_multinomial_nll(shape_logits, y, None)
+    assert torch.allclose(scalar, per_element.mean(), atol=1e-6)
+
+
+# --------------------------------------------------------------------------
+# Task 4: build_run_summary pure function
+# --------------------------------------------------------------------------
+
+
+class _FakeTrainerForSummary:
+    """Minimal trainer stand-in for testing build_run_summary."""
+
+    def __init__(self, global_step=100, current_epoch=9):
+        self.global_step = global_step
+        self.current_epoch = current_epoch
+
+
+def test_build_run_summary_step_epoch_track_final_trainer():
+    """global_step and current_epoch must come from the trainer passed in,
+    not from a stale reference.
+
+    This is the bug that motivated the extraction: the summary read these
+    from the initial-fit trainer instead of the recovery trainer.
+    """
+    initial = _FakeTrainerForSummary(global_step=50, current_epoch=4)
+    final = _FakeTrainerForSummary(global_step=200, current_epoch=19)
+
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=final,
+        stop_reason={"reason": "early_stopped", "epoch": 19},
+        recoveries=[],
+    )
+    assert summary["global_step"] == 200
+    assert summary["current_epoch"] == 19
+
+    # Now with the initial (wrong) trainer — values differ
+    summary_wrong = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=initial,
+        stop_reason={"reason": "early_stopped", "epoch": 19},
+        recoveries=[],
+    )
+    assert summary_wrong["global_step"] == 50, (
+        "This test proves the function uses the trainer it receives"
+    )
+
+
+def test_build_run_summary_recoveries_omitted_when_empty():
+    """recoveries key must NOT appear when the list is empty."""
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "completed", "epoch": 9},
+        recoveries=[],
+    )
+    assert "recoveries" not in summary
+
+
+def test_build_run_summary_recoveries_present_when_nonempty():
+    """recoveries key must appear when recoveries fired."""
+    recovery_event = {
+        "attempt": 1,
+        "epoch": 5,
+        "pre_divergence_best": 7.56,
+        "diverged_value": 8.73,
+        "recovery_lr_factor": 0.5,
+        "checkpoint": "/efs/best.ckpt",
+        "applied_lrs": [5e-3],
+    }
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "early_stopped", "epoch": 9},
+        recoveries=[recovery_event],
+    )
+    assert "recoveries" in summary
+    assert len(summary["recoveries"]) == 1
+    # All seven fields survive
+    for key in ["attempt", "epoch", "pre_divergence_best", "diverged_value",
+                "recovery_lr_factor", "checkpoint", "applied_lrs"]:
+        assert key in summary["recoveries"][0], f"recovery event missing {key}"
+
+
+def test_build_run_summary_json_serialisable():
+    """The summary dict must round-trip through json.dumps/loads."""
+    summary = build_run_summary(
+        global_best_path="/efs/best.ckpt",
+        global_best_score=7.55,
+        final_trainer=_FakeTrainerForSummary(),
+        stop_reason={"reason": "diverged_unrecovered", "epoch": 12,
+                     "recoveries_attempted": 3},
+        recoveries=[{
+            "attempt": 1, "epoch": 5, "pre_divergence_best": 7.56,
+            "diverged_value": 8.73, "recovery_lr_factor": 0.5,
+            "checkpoint": "/efs/best.ckpt", "applied_lrs": [5e-3],
+        }],
+    )
+    serialised = json.dumps(summary)
+    loaded = json.loads(serialised)
+    assert loaded == summary

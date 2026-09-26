@@ -42,19 +42,13 @@ SIM_RF_BUDGET = 2_048
 
 FASTA = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
 
-# Track layout (must match background_model/preprocess.py)
-STRANDS = ("+", "-")
-FL_BANDS = ((40, 65), (120, 175))
-COVERAGE_TYPES = ("first", "last", "midpoint")
-N_TRACKS = len(STRANDS) * len(FL_BANDS) * len(COVERAGE_TYPES)  # 12
-
-TRACK_INDEX = {}
-_idx = 0
-for _s in STRANDS:
-    for _fl in FL_BANDS:
-        for _c in COVERAGE_TYPES:
-            TRACK_INDEX[(_s, _fl, _c)] = _idx
-            _idx += 1
+from background_model.tracks import (
+    COVERAGE_TYPES,
+    FL_BANDS,
+    N_TRACKS,
+    STRANDS,
+    TRACK_INDEX,
+)
 
 # Split/role codes (must match dataset.py)
 SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2}
@@ -300,10 +294,6 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
 
     # /tiles/
     tiles_grp = root.create_group("tiles")
-    z2_create = (lambda g, n, **kw: g.create_dataset(n, **kw)
-                 if int(zarr.__version__.split(".")[0]) < 3
-                 else lambda g, n, **kw: g.create_array(n, **kw))
-
     def _ca(grp, name, **kwargs):
         if int(zarr.__version__.split(".")[0]) >= 3:
             return grp.create_array(name, **kwargs)

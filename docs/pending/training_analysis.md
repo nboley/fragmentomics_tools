@@ -749,6 +749,84 @@ the baseline rather than read directly. **Runs in the tables above are
 therefore not fully reproducible from their own `run_meta.json`.** Fix queued
 for `_write_run_meta`.
 
+### 7.10 The v3_NB store — a real NB oracle, and the architecture ranking inverts
+
+**A different store from everything above.** §7.1–7.9 use `simulation_v3/A`,
+which is multinomial-sampled with *no* overdispersion (§7.3). This section uses
+`sim_store_v3nb_A.zarr` — purpose-built with per-hexamer NB overdispersion —
+scored under the NB-offset loss. **The anchors are not interchangeable with the
+multinomial ones in either direction**; a v3nb number compared against the 7.52
+oracle is meaningless.
+
+#### The anchors
+
+Artifact: `simulation_v3_nb/A/oracle_nb_v2.json` (supersedes `oracle_nb.json`,
+which must not be quoted).
+
+| | NB loss | % bias captured |
+|---|---|---|
+| **Oracle** (true propensity) | **4.026351353675127** | 100% |
+| Trained KEN | 4.060737 | **61.31%** |
+| Trained Hybrid | 4.067427 | **53.78%** |
+| Untrained KEN | 4.117498 | −2.6% |
+| Untrained Hybrid | 4.125974 | −12.1% |
+| Uniform | 4.115220 | 0% |
+
+Gap = 0.088868338. Both untrained controls sit *above* the oracle and both
+trained models sit strictly between the anchors, which is the sanity gate.
+
+#### The ranking inverts — with a confound that may explain all of it
+
+On v3_A (multinomial) the hybrid beat KEN decisively: **90.8% vs 71.3%**
+(§7.4). On v3nb under NB-offset, **KEN beats the hybrid, 61.31% vs 53.78%.**
+
+Before reading that as an architecture result, note the training histories are
+not comparable:
+
+| run | stop_reason | epochs | recoveries | best ckpt |
+|---|---|---|---|---|
+| `v3nb_ken_nb_frozen_lr5e-3` | early_stopped | 33 | **none** | epoch 14 |
+| `v3nb_hybrid_nb_frozen_lr5e-3` | completed | 60 | **2** (NaN at ep4, again at ep21) | epoch 56 |
+
+The hybrid diverged to NaN twice and was rewound twice; KEN never diverged.
+Per conclusion 7 and §7.9, the hybrid is documented unstable at lr 5e-3 and NB
+dispersion training is independently unstable — so the hybrid's 53.78% may
+measure *its two divergences* rather than its architecture. **This is an open
+question, not a result.** The experiment that settles it is a hybrid v3nb rerun
+with more recovery budget or a lower LR (see §9).
+
+#### The profiled r is not identified — do not interpret it
+
+The published `profiled_nuisance_r` is ≈1096, which coincides exactly with the
+frozen model init `exp(log_dispersion_init) = exp(7)`. **That is an artefact,
+not agreement.** The loss plateau is flat (span 8.26e-4 over r ∈ [15, 3000];
+data-driven plateau r ∈ [4.1, 3506.3]) and the reference marker `log(1096)` is
+injected into the sweep grid *as a selectable point*, so on a flat plateau it
+can simply land lowest. Quantified: the next-best non-marker point (r=594.6)
+would move KEN from 61.31% to 61.33% — **0.02pp**, immaterial. The direction is
+conservative anyway, since adding a grid point can only lower the oracle, which
+*enlarges* the denominator and makes models look worse.
+
+#### Per-hexamer dispersion is worse, so the scalar anchor stands
+
+A 4096-parameter per-hexamer `r` fit scores **+4.83e-4 above** the 1-parameter
+scalar fit out-of-sample (fit on 12800 train pairs, scored on val), with
+4014/4096 hexamers receiving a real fit — so it is not a coverage artefact. A
+larger model landing above a smaller one out-of-sample is the overfitting
+signature: **the per-hexamer anchor is not a floor and cannot serve as the
+oracle.** Recorded in `oracle_nb_perhex.json`, whose `with_oos_perhex_anchor`
+block is stamped `_not_an_anchor: DO NOT QUOTE` — dividing by its looser gap
+reads KEN at 61.68% instead of 61.31%.
+
+#### A caveat on the model numbers themselves
+
+`nb_loss` above is a float32 CPU rescoring; the training runs validated under
+`precision: bf16-mixed` on GPU. The float32 figure is the more accurate one and
+is what the % column uses. But the two disagree by **1.3e-5 for KEN and 4.1e-4
+for the hybrid** — a 30× asymmetry between two architectures scored by
+identical code, which bf16 rounding alone does not obviously explain. It shifts
+the hybrid's % by ~0.46pp. Recorded in the artifact's `models._note` as open.
+
 ## 8. Key Conclusions
 
 1. **Loss function choice is secondary.** Multinomial is the best performer,
@@ -831,6 +909,16 @@ for `_write_run_meta`.
 
 Ordered by what most reduces uncertainty in the result above.
 
+- **Rerun the hybrid on v3nb with more recovery budget or a lower LR (§7.10).**
+  Highest-value open question in the NB results: the hybrid's 53.78% comes from
+  a run that diverged to NaN twice and was rewound twice, while the KEN run it
+  loses to never diverged at all. Until that is repeated on a clean run, the
+  KEN-beats-hybrid inversion against v3_A (§7.4, where the hybrid won by ~20pp)
+  cannot be attributed to architecture. Acceptance: `stop_reason` not
+  `diverged_unrecovered` and zero or few entries in `recoveries[]`; then compare
+  % bias captured against 61.31%. Note `max_recoveries=3` is already recorded as
+  too small for an unstable NB loss (§7.7).
+
 - **Run the training-loop acceptance test (code landed §7.7, not yet measured).**
   Divergence recovery is implemented and reviewed; what remains is the
   experiment. Acceptance: hybrid lr2e-3 on v3_A must not end in unrecovered
@@ -907,3 +995,5 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 | `lrsweep_cnn_lr2e-3` | cnn 128k/1L | 2e-3 | 7.552690 | 39 | 67.0% | not converged (ep 39/40) |
 | `lrsweep_cnn_lr7e-3` | cnn 128k/1L | 7e-3 | 7.579552 | 31 | 37.0% | diverged ep31 (pre-div min) |
 | `lrsweep_ken_lr2e-2` | ken 512k/2L | 2e-2 | 7.612706 | 0 | — | **collapsed ep0 — equals uniform, not a result** |
+
+<!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/training_analysis.md", "title": "[WIP] Background Model v2 — Simulation Study Training Analysis", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T22:07:11.520404+00:00", "page_id": "4963532846", "published_version": 3} -->

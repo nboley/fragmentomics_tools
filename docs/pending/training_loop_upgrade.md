@@ -67,7 +67,66 @@ the gap `stop_reason` exists to close. `_RecoveryEpochTracker` now counts
 `on_train_epoch_start` and forces `diverged_unrecovered` instead.
 
 **New CLI:** `--max-recoveries` (default 3, 0 disables), `--recovery-factor`
-(default 0.5).
+(default 0.5). *(Default since changed to 0.2 — see §0.1.)*
+
+---
+
+## 0.1 Revision — what changed AFTER the Phase 3 reconciliation
+
+Added 2026-09-24. Everything in §0 above describes the code as of `0e1473c`.
+Six things have changed since, three of them owner-approved changes to computed
+results and three engineering-only. Recorded here as a revision rather than
+back-written into §0, per this document's own convention.
+
+**Owner-approved, affects computed results:**
+
+1. **`non_finite` is now RECOVERABLE.** `RECOVERABLE_REASONS =
+   {"diverged", "non_finite"}` gates both the retry test and the exhaustion
+   check. Previously recovery fired only on `diverged`, so a NaN ended the run
+   outright — the design never considered non-finite a recoverable state, which
+   was a **design gap, not a coding slip**. Found by a real run that hit NaN at
+   epoch 7 and discarded a usable best checkpoint. Since validated twice on real
+   data: a v3nb hybrid run NaN'd at ep4 and went on to complete 60 epochs, and a
+   v3_A hybrid run NaN'd at ep8 and went on to train 51 further clean epochs.
+2. **`--divergence-factor` default 1.10 -> 1.005.** Measured across every run
+   available: healthy runs never exceed 1.0006x their own best, while a genuine
+   basin-loss degradation reached 1.0079x. 1.10 was not slightly loose, it was
+   two orders of magnitude above where the signal lives.
+3. **`lr_factor` and `recovery_factor` defaults 0.5 -> 0.2.** The deeper rung
+   cut proved able to keep a run out of the unstable regime entirely rather than
+   repeatedly recovering it.
+
+**Engineering-only:**
+
+4. **`recoveries[]` carries a 7th field, `applied_lrs`** — the LRs actually
+   installed per param group, so the ladder is auditable from `summary.json`
+   without re-deriving it. The §0 table lists only six fields.
+5. **`global_step` / `current_epoch` now describe the FINAL attempt.** They were
+   read off the initial-fit `Trainer`, which the recovery loop never reassigned,
+   so on any recovered run they described only the first attempt — a summary
+   could report `current_epoch: 5` beside a best checkpoint at `epoch=56`.
+   `run_recovery_loop` now returns the last `Trainer` as a **5th element**
+   (`None` when no recovery fired); callers that destructure its return must be
+   updated. Fixed in `6c20352`.
+6. **`summary.json` now carries every `TrainConfig` field** (34 -> 42 keys).
+   `_write_run_meta` used a hand-maintained dict that silently omitted 11 fields
+   for a CNN run, several of which materially affect results
+   (`dispersion_window_size`, `min_N`, `fl_dist_npz`, the three KEN `d_context`
+   fields, `resume_from`). It now derives from `dataclasses.asdict(cfg)`, so a
+   newly added field cannot go missing. No existing key was renamed or dropped —
+   verified by key-set diff against an on-disk pre-change `run_meta.json`.
+
+**Known caveat in the field guide.** On a `non_finite` recovery,
+`pre_divergence_best` is `null` and `diverged_value` is the string `"nan"`. The
+event reads `stop_reason.get("best")`, and the `non_finite` stop_reason carries
+only `reason`/`epoch`/`value` — no `best`. So the §0 table's description of
+`pre_divergence_best` does not hold on the path that now fires most often. The
+value is recoverable from the restored checkpoint's filename, which embeds
+`val_loss`.
+
+**Still true and worth re-stating:** AWS Batch reports **exit code 0 /
+SUCCEEDED** for runs that NaN'd or ended `diverged_unrecovered`. The job-level
+signal cannot detect a bad outcome; only `summary.json`'s `stop_reason` can.
 
 ---
 
