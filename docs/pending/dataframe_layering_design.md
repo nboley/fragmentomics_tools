@@ -315,39 +315,56 @@ today's silent corruption into an explicit step.
 out to the `bedtools` binary. Excluding the dead `intersect_with_rdf` stub,
 that is 8 live methods out of 9.
 
-But the fan-in is far narrower than "nine methods" suggests, and this is the
-single most important fact for Phase 2. **Only two methods touch `pybedtools`
-directly**: `merge_regions` and `join_on_overlap`. Every other one reaches it
-through them:
+That count is also too low, because it is scoped to the interval-algebra
+bucket. The true blast radius is **13 methods**, and it crosses three buckets:
+two *cross-layer* methods and the *fragment-coverage* pair also reach
+`bedtools`. Derived by AST call-graph closure over the class, not by reading:
 
 ```
-merge_regions ─────────────────► BedTool.from_dataframe().sort().merge()
+merge_regions ────────────────────► BedTool.from_dataframe().sort().merge()
 
-join_on_overlap ───────────────► BedTool.from_dataframe().intersect()
+join_on_overlap ──────────────────► BedTool.from_dataframe().intersect()
       ▲
+      ├── attach_blacklist_regions            [cross-layer]
+      ├── drop_overlapping_regions            [cross-layer]
       └── intersect_with_bed
                 ▲
                 └── get_overlapping_base_counts
                           ▲
-                          ├── overlaps_with_bed ──► overlaps_with_beds
-                          └── bases_overlap_with_bed ──► bases_overlap_with_beds
+                          ├── overlaps_with_bed ──────► overlaps_with_beds
+                          └── bases_overlap_with_bed ─► bases_overlap_with_beds
+
+from_beds_merged ─────────────────► BedTool(path).filter().cat()   [construction/IO]
+
+_get_fragment_coverage_sum ───────► BedTool(path).intersect()      [fragment coverage]
+      ▲
+      └── get_fragment_coverage_sum
 ```
 
-Two corrections to an earlier draft of this section, both verified by reading
-the call sites: it is **two** direct callers, not three —
-`get_overlapping_base_counts` reaches `pybedtools` at two removes, via
-`intersect_with_bed` -> `join_on_overlap`. And the transitive methods do
-**not** all funnel through `get_overlapping_base_counts`:
-`intersect_with_bed` and `get_overlapping_base_counts` themselves reach
-`join_on_overlap` without passing through it. Four do funnel through it
+**Four** methods touch `pybedtools` directly; the other nine inherit it. Two
+corrections to an earlier draft, both verified against the call sites:
+`get_overlapping_base_counts` is *not* a direct caller — it reaches
+`pybedtools` at two removes via `intersect_with_bed` -> `join_on_overlap`; and
+the transitive methods do **not** all funnel through it. Only four do
 (`overlaps_with_bed`, `overlaps_with_beds`, `bases_overlap_with_bed`,
 `bases_overlap_with_beds`).
 
-Consequence for scoping: **swapping two function bodies migrates the whole
-interval-algebra surface.** The other seven methods need no edit at all, which
-is what makes a differential test cheap — pin `merge_regions` and
-`join_on_overlap` against bedtools output and everything downstream is covered
-by construction.
+Two methods that look like they belong here and do not:
+
+- **`sort`** — a text search for `pybedtools` hits it, but the only occurrence
+  is the docstring phrase "same as pybedtools". The body is
+  `self.sort_values([...])`, pure pandas. Noted because an automated scan
+  flags it and a migration that "fixed" it would be changing nothing.
+- **`overlaps_rdf`** — genuinely bedtools-free, using `get_interval_dict` and
+  an `IntervalTree`. It is the second overlap implementation discussed below.
+- **`intersect_with_rdf`** — a stub that raises `AttributeError` pointing at
+  `join_on_overlap`. Dead; nothing to migrate.
+
+Consequence for scoping: **swapping two function bodies migrates the entire
+interval-algebra surface**, and two more covers everything else. The remaining
+nine methods need no edit at all, which is what makes the differential test
+cheap — pin the four direct sites against bedtools output and everything
+downstream is covered by construction.
 
 The single exception is `overlaps_rdf`, which uses `get_interval_dict` and an
 **IntervalTree** — a pure-Python overlap implementation already in the tree.
