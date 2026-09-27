@@ -9,8 +9,11 @@ The discriminating question (Phase 4 control):
     model's predicted dip manufactures a spurious peak in the corrected profile at
     the same [-50,-10] short-band location where the blood run showed amplification.
 
-This reads both pileups.npz and reports, for the short band (40-65bp endpoints,
-summed over first/last and both strands) and mono band (120-175bp):
+This reads both pileups.npz and reports, for the short band (endpoints summed
+over first/last and both strands) and the mono band -- whose bp bounds are
+whatever `background_model.tracks.FL_BANDS` says and are deliberately NOT
+restated here, because the literals that used to sit in this sentence survived a
+band change and went on describing the retired bounds:
   * raw footprint amplitude   = mean(raw   in FP) / mean(raw   in FLANK)
   * predicted footprint level = mean(probs in FP) / mean(probs in FLANK)
   * corrected footprint amp.  = mean(corr  in FP) / mean(corr  in FLANK)

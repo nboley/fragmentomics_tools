@@ -110,8 +110,12 @@ TRAINING_TILES = os.path.join(REPO, "data", "region_sets", "training_tiles.bed")
 OUT_ROOT = "/efs/analytics/nathanboley/background_model/simulation"
 SIM_PLOTS = os.path.join(REPO, "data", "sim_plots")  # gitignored editor copy
 # held-out (role=1) library from data/sample_sheets/draw50.tsv -- a normal cfDNA
-# length profile (median ~128bp, 46% in the 120-175 band) so both fl bands are
-# well populated for the per-length-stratum validation.
+# length profile (median ~128bp) so both fl bands are well populated for the
+# per-length-stratum validation.  The old parenthetical "46% in the 120-175
+# band" was measured under the retired bands and is deliberately NOT restated
+# for the current ones: it would be a fresh unmeasured number, and in-band share
+# is ambiguous anyway between PMF mass and realised-fragment share (they differ
+# by ~5 points here -- see simulator_split_and_fragment_nll.md).
 DEFAULT_HELDOUT_H5 = ("/efs/analytics/nathanboley/biomarker-projects/data_cache/"
                       "NC-13909/b0315d6c52ac7f4f8744b4dafb6661ca-63-"
                       "RD-50548-Lib1.hg38.fragments.h5")
