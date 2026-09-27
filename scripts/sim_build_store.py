@@ -184,6 +184,14 @@ def _process_sample(sample_data, n_tiles, region_len, l_target, jitter, tile_siz
 def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
                 jitter=128, tile_size=SIM_TILE):
     """Build a zarr store from simulation output."""
+    # Guard the WRITE side: never emit a store whose bands diverge from the
+    # canonical FL_BANDS this script counts and records with.  Runs before any
+    # sim I/O so a mismatch fails fast, and mirrors the read-side guard in
+    # BackgroundTileDataset.  (A store built under a different layout is
+    # deliberately unreadable — no migration path.)
+    from background_model.config import check_fl_bands
+    check_fl_bands(FL_BANDS)
+
     t0 = time.time()
     regions, region_len, samples = load_sim_output(sim_dir)
     n_tiles = len(regions)

@@ -20,6 +20,7 @@ shared across a fork), reads are read-only, and there are NO torch CUDA calls
 anywhere in this module.
 """
 
+import json
 import os
 from typing import Optional
 
@@ -28,7 +29,7 @@ import torch
 import zarr
 from torch.utils.data import Dataset
 
-from background_model.config import PlumbingConfig
+from background_model.config import PlumbingConfig, check_fl_bands
 from background_model_core import (
     DEFAULT_OUTPUT_TRACKS,
     jitter_matrix,
@@ -156,6 +157,13 @@ class BackgroundTileDataset(Dataset):
                 f"store has C={C_store} tracks but DEFAULT_OUTPUT_TRACKS has "
                 f"{len(self.output_tracks)}"
             )
+        # The C-check above does NOT protect against a changed band layout:
+        # different fl_bands with the same count still yield C=12 while every
+        # track is mis-indexed.  Compare the store's RECORDED fl_bands (read
+        # straight from config_json so a store that predates fl_bands recording
+        # trips too) against the code's FL_BANDS and fail loudly on mismatch.
+        _recorded_fl_bands = json.loads(root.attrs["config_json"]).get("fl_bands")
+        check_fl_bands(_recorded_fl_bands)
         self.n_tracks = C_store
         self.rc_perm = np.asarray(
             reverse_complement_track_permutation(self.output_tracks), dtype=np.int64

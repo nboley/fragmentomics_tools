@@ -3,7 +3,7 @@
 Consumes pileups.npz + run_meta.json (from ctcf_pileup_run.py) and emits PNGs
 and a markdown report under the pileup dir.  CPU-only; regenerable without GPU.
 
-Track order (DEFAULT_OUTPUT_TRACKS): strand{+,-} x band{(40,65),(120,175)} x
+Track order (DEFAULT_OUTPUT_TRACKS): strand{+,-} x band{(25,110),(110,180)} x
 coverage{first,last,midpoint}.  Index map:
   0 +short-first  1 +short-last  2 +short-mid
   3 +mono-first   4 +mono-last   5 +mono-mid

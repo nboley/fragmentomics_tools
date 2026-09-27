@@ -83,7 +83,10 @@ SAMPLES = {
     "NC-13909/e4172484cb6b3379bf6ed14405dc2f58-138-RD-50551-Lib1.hg38.fragments.h5",
 }
 MIN_MAPQ = 10
-MAX_FRAG_LEN = 175  # config.max_frag_len = max(hi over fl_bands)
+# Derive rather than hardcode: config.max_frag_len = max(hi over fl_bands),
+# so this tracks FL_BANDS automatically and cannot silently disagree (180 for
+# the current ((25,110),(110,180)) layout).
+MAX_FRAG_LEN = max(hi for _lo, hi in FL_BANDS)
 BLACKLIST_EXPANSION = 120
 
 # weight-distribution histogram (identity clamp), log-spaced

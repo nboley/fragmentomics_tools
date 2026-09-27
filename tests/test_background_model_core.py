@@ -415,17 +415,17 @@ class TestReverseComplementPermutation:
             return tracks[perm[tracks.index(name)]]
 
         assert (
-            partner_of("strand_+__fl_40_65__coverage_first")
-            == "strand_-__fl_40_65__coverage_last"
+            partner_of("strand_+__fl_25_110__coverage_first")
+            == "strand_-__fl_25_110__coverage_last"
         )
         assert (
-            partner_of("strand_-__fl_120_175__coverage_first")
-            == "strand_+__fl_120_175__coverage_last"
+            partner_of("strand_-__fl_110_180__coverage_first")
+            == "strand_+__fl_110_180__coverage_last"
         )
         # midpoint maps to itself modulo strand swap; fl band unchanged
         assert (
-            partner_of("strand_+__fl_120_175__coverage_midpoint")
-            == "strand_-__fl_120_175__coverage_midpoint"
+            partner_of("strand_+__fl_110_180__coverage_midpoint")
+            == "strand_-__fl_110_180__coverage_midpoint"
         )
 
     def test_asymmetric_track_list_raises(self):

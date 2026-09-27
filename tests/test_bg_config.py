@@ -248,13 +248,13 @@ class TestConfigSerialization:
 class TestMaxFragLen:
     def test_default_max_frag_len(self):
         cfg = PlumbingConfig(sample_sheet="dummy")
-        assert cfg.max_frag_len == 175
+        assert cfg.max_frag_len == 180
 
     def test_half_open_semantics(self):
-        """fl_bands (40,65) means [40, 65) — max_frag_len=175 is exclusive (condition #5)."""
-        cfg = PlumbingConfig(sample_sheet="dummy", fl_bands=((40, 65), (120, 175)))
-        # max_frag_len = max of hi values = 175, used as exclusive bound
-        assert cfg.max_frag_len == 175
+        """fl_bands (110,180) means [110, 180) — max_frag_len=180 is exclusive (condition #5)."""
+        cfg = PlumbingConfig(sample_sheet="dummy", fl_bands=((25, 110), (110, 180)))
+        # max_frag_len = max of hi values = 180, used as exclusive bound
+        assert cfg.max_frag_len == 180
 
 
 class TestDriftRule:
