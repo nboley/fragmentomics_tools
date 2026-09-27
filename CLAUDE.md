@@ -18,13 +18,27 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **2 failed / 388 passed /
-  3 skipped** (both failures are missing data, not defects:
+  Baselines as of the last update: `make test` **4 failed / 386 passed /
+  3 skipped**, measured 2026-09-27. Two of the four are missing data, not defects:
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
-  the 3 skips are Region doctests needing the optional `fbio`);
-  `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
-  `self.log()`-without-Trainer warnings are expected and harmless.
+  the 3 skips are Region doctests needing the optional `fbio`).
+  **The other two are an OPEN FINDING, not flakes**:
+  `test_parallel_apply.py::test_monitor_thread_is_gone_after_the_call` and
+  `::test_monitor_on_a_tqdm_SUBCLASS_is_also_stopped`. Both assert the
+  subclass's own `__dict__` holds `monitor`, but tqdm 4.67.1 appears to assign
+  one to a subclass only when no live base-class monitor already exists — so the
+  precondition depends on process state and test ordering rather than on the
+  production code the tests guard, which came from af84b76 "Stop tqdm monitors
+  on subclasses too". **The guard for a real fork-deadlock fix may therefore be
+  silently void.** Reproduced deterministically in isolation; the mechanism is a
+  reading of tqdm's `__new__` and is NOT verified against its source. Do not
+  "fix" these by relaxing the assertion. Two separate agents have now
+  misdiagnosed them as regressions they had caused, which is why the count above
+  is stated rather than left at the old 2/388.
+  `tests/` **558 passed, 0 skipped** (measured 2026-09-27, after the FL_BANDS
+  widening), where a few `self.log()`-without-Trainer warnings are expected and
+  harmless.
   These numbers move with almost every commit, so **measure them yourself
   before and after your change** rather than quoting this line — the `tests/`
   figure sat at 196 long enough that the gap to reality reached 298 tests,
