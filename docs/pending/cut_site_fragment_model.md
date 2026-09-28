@@ -12,7 +12,7 @@ unified — see below).
 
 The per-fragment NLL metric, the normalisation domain `D`, the cut-site index
 convention, and the uniform/oracle anchors are defined in the sibling doc
-`simulator_split_and_fragment_nll.md` (the NLL doc). This doc specifies the
+`simulator_and_fragment_nll.md` (the NLL doc). This doc specifies the
 model, its store, its dataset, its objective, and its evaluation.
 
 ## The problem

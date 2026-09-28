@@ -58,16 +58,11 @@ The factorised artifact reconstructs the weight exactly (its only 2-D term is an
 integer-indexed GC LUT), is ~150× smaller than the materialised array, and is
 what enables the shared-builder design below.
 
-**PMF mass vs realised-fragment share are different quantities.** The realised
-length distribution is not the length PMF, because the sampler reweights `(p,L)`
-by the cut-site and GC terms, and GC bias varies strongly with length
-(high/low-GC ratio 0.65 at L=24 vs 4.08 at L=75). A PMF-mass figure and a
-realised-share figure over the same bands will differ by several points and can
-look exactly like an arithmetic error. **Any in-band figure must say which of
-the two it is.** Neither is load-bearing for the metric: the per-fragment NLL
-denominator is a measured PMF sum applied identically to oracle and model, so
-nothing computed depends on in-band mass — the only risk is a wrong constant
-being hardcoded.
+**PMF mass and realised-fragment share are different quantities**, because the
+sampler reweights `(p,L)` by the cut-site and GC terms and GC bias varies
+strongly with length (high/low-GC ratio 0.65 at L=24 vs 4.08 at L=75). The two
+differ by several points over the same bands, so **any in-band figure must say
+which of the two it is.**
 
 ## Stage 1 — propensity builder
 
@@ -88,6 +83,22 @@ the region table.
 L_range)` returns `(p, q, w)`. Stage 2 calls it to sample; the scorer calls it
 for the truth term. That shared call is where the correctness benefit lives —
 not in the artifact format.
+
+**`w` carries the per-start normaliser. This is load-bearing, not a detail:**
+
+```
+w(p, q, s) = start_s[hex(p)] · end_s[hex(q)] · FLGC(L, gc(p,q)) / Z_s(p)
+Z_s(p)     = sum_q' end_s[hex(q')] · FLGC(L', gc(p,q'))
+```
+
+With the `1/Z_s(p)` factor the sum telescopes — `sum_{p,q} w = sum_p start_s(p)`
+— so `w / sum_D w` equals the sequential joint **exactly**, and "flatten and
+draw once" and "globally normalise to score" are the same distribution.
+**Without it they are not:** `start·end·FLGC` globally normalised is the
+*symmetric* joint, which is a different model. An implementer could otherwise
+satisfy "one shared function returns `(p,q,w)`" and still build an oracle that
+diverges from the sampler wherever `Z_s(p)` varies — which is exactly the
+failure this design exists to prevent.
 
 ## Stage 2 — generative form
 
@@ -113,40 +124,68 @@ FLGC(L, gc)        = observed_len_p(L) * capture(L, gc) / capture_marginal(L)
 capture(L, gc_pct) = 1 / GCFlDistModel.predict(L, gc_pct)
 ```
 
-`GCFlDistModel.predict` is **inverse** capture: `predict(25) = 2.753` means a
-25 bp fragment is seen only ~36% of the time, so using `predict` directly as a
-positive weight would invert the assay — hence the reciprocal. Its length
-profile spans only **2.58×** while the observed length PMF spans **7.3×**, so
-capture alone cannot carry length structure; the observed PMF carries it. The
-trailing ratio `capture / capture_marginal` averages to 1 per length, adding GC
-dependence without re-applying the length effect the PMF already holds.
+`GCFlDistModel.predict` is **inverse** capture: `predict(25) = 2.753` (measured
+on sample `RD-56153`) means a 25 bp fragment is seen only ~36% of the time, so
+using `predict` directly as a positive weight would invert the assay — hence the
+reciprocal. Its length profile spans only **2.58×** while that sample's observed
+length PMF spans **7.3×**, so capture alone cannot carry length structure; the
+observed PMF carries it.
+
+`gc_pct` is a **percent**, `100 · (cum_gc[q] − cum_gc[p]) / L`, matching
+`predict()`'s contract. GC is percent throughout the `flgc` path.
+
+**`capture_marginal(L)` — definition required, and it is an OWNER DECISION.**
+The claim that `capture / capture_marginal` averages to 1 per length only holds
+under the measure used to marginalise, and picking the wrong one silently
+re-tilts the length distribution away from `observed_len_p`, defeating the whole
+point of the term. Three candidates:
+
+| option | definition | property |
+|---|---|---|
+| **(a) recommended** | unweighted mean of `capture(L, gc(p,q))` over all valid `(p,q)` with `q−p = L` in the **region set being simulated** | non-circular, computed once per (region set, L); makes the *simulated* length marginal match the PMF over the geometry actually used |
+| (b) | the same mean weighted by `end_s[hex(q)]` | exact for the sampler, but **circular** — depends on the tables it is normalising |
+| (c) | mean over the real data's empirical `P(gc \| L)` from the duphist | consistent with `observed_len_p`, which comes from the same file, but the simulated region set's GC-at-`L` differs from genome-wide |
+
+`CLAUDE.md` gates changes to computed results on explicit approval, so this is
+not an implementer's choice to make.
+
+**Capture fit bins.** FL in **1 bp** bins, GC in **5% bins covering 0–100**. Do
+not take the `flgc` defaults: their top length bin is `(101,200)`, which would
+collapse the entire high band `[110,180)` into one bin and leave `capture`
+constant in `L` across it; and their GC range stops short of 0–100, so extreme-GC
+fragments would fall out of bin and receive `max_weight` (→ `capture = 1/3`)
+rather than a fitted value. At 1 bp × 5% over lengths 25–180 this is 3,120 cells,
+of which 2,057 fit at `MIN_CELL_SIZE = 200` and the starved remainder holds
+**0.0333% of molecule mass** — measured, so the unfitted floor is immaterial.
 
 Output layout: `sample_<i>.npz` with `region_idx`, `start`, `stop`, `strand`.
 Overdispersion is a count-drawing option on top of the shared propensity, which
 is what the "can excess variance be learned" question needs.
 
-The split simulator has **no** regime B, `--regime`, per-sample `w6` jitter,
-`log_jitter`, `acceptance_normaliser`, or propose-and-reject sampling. Anything
-referencing those after the change is stale — flag it, do not maintain it.
+## Bands
 
-## Bands (done and committed)
-
-`FL_BANDS = ((25,110), (110,180))`. Track count stays 12, so no shape check
-catches a mismatch: `dataset.py` verifies only `C == len(DEFAULT_OUTPUT_TRACKS)`
-and never compares the store's recorded `fl_bands` to the constant, so every
-existing store would be silently reinterpreted (including the real-data
-production store `bg_store_b67d7c95`). The guard — in `dataset.py` **and**
-`sim_build_store.py` — **asserts the store's recorded `fl_bands` equals
-`FL_BANDS` at construction and fails loudly.**
+`FL_BANDS = ((25,110), (110,180))`, and the track count stays 12 — so a store
+built under other bands is caught not by any shape check but by
+`config.check_fl_bands`, asserted at construction in **both** `dataset.py` and
+`sim_build_store.py`, failing loudly and naming both tuples.
 
 ## Per-fragment NLL
 
-For fragment `(p, L)` in region `r`, under model `m`:
+For fragment `(p, L, s)` in region `r`, under model `m`:
 
 ```
-NLL       = -log( w_m[p, L] / sum_{(p',L') in D} w_m[p', L'] )
-w_m[p, L] = first_m[p] * last_m[p+L-1] * gc_correction(L, GC%) * len_p[L]
+NLL = -log( w_m[p, L, s] / sum_{(p',L',s') in D} w_m[p', L', s'] )
 ```
+
+The weight `w_m` is **model-class specific**:
+
+- **Track models** (12-track / KEN / Hybrid):
+  `w_m = first_m[p] · last_m[p+L-1] · gc_correction(L, GC%)`, with `first_m`/
+  `last_m` taken from the fragment's FL band. **No `len_p` factor is supplied** —
+  see below.
+- **Cut-site model**: its own `log_softmax` logits over `D`. It needs no external
+  `len_p` or GC factor; the logit already carries both. Applying the track-model
+  product to it would double-count length.
 
 where `first_m`, `last_m` are the model's per-base track predictions for the
 fragment's band and strand.
@@ -161,10 +200,8 @@ and its cut sites are `p` and `p+L`.
 
 **Required test:** assert the endpoint bases the scorer indexes are the same
 genomic positions as the cut sites the sampler drew from, over a small region
-with known fragments. A silent 1 bp offset corrupts every NLL, and this project
-has already paid for exactly this class of error once (a 128-position crop
-misalignment), which is why a shift-correlation proof is owed on every geometry
-change.
+with known fragments. A silent 1 bp offset corrupts every NLL, so a
+shift-correlation proof is owed on every geometry change.
 
 - `midpoint` is **not** a factor. All three coverage types are deterministic
   functions of the same fragment; multiplying them would triple-count one piece
@@ -191,10 +228,22 @@ state with every number: the denominator changes when the bands change, so a
 per-fragment NLL under one banding is **not** comparable to one under another,
 even on identical data. Report the bands with the number, always.
 
-**Normalisation domain `D`** = pairs *entirely* inside the centred evaluation
-crop; only fragments in `D` are scored. A fragment with one endpoint in the crop
-and its partner outside would put numerator and denominator on different sets —
-the same class of error as the crop misalignment.
+**Normalisation domain `D`** `= {(p, L, strand)}` such that the fragment lies
+*entirely* inside the centred evaluation crop **AND** `L` is in band. Strand is a
+dimension of `D`, so `|D| = pairs_inband_in_crop × 2` and `log|D|` already
+contains the `log 2`.
+
+`D` is **exactly the set that is scored** — the in-band rule above is this same
+definition, not a filter applied after it. Two ways to get this wrong, both
+silent: including out-of-band pairs makes `log|D|` count cells no model is ever
+charged for, and admitting a fragment with one endpoint outside the crop puts
+numerator and denominator on different sets.
+
+**`|D|` is computed, never a constant.** In particular it is **not** the 622,720
+figure in the sizing table: that is the *sampling* count — all `L ∈ [1,256]` over
+the full 2560 bp region — whereas `D` is in-band lengths over the 2048 crop,
+times 2 for strand. Hardcoding 622,720 as `|D|` is precisely the wrong-constant
+error this doc warns about.
 
 ### The two anchors
 
@@ -222,9 +271,10 @@ span, so asking models to predict `gc_correction` would rank receptive fields
 more than anything else — the recommendation is to supply GC externally); it
 blocks only real-data scoring.
 
-**Cost.** `log Z` needs the sum over ~622,720 pairs per region — factorised, a
-few vector ops per length. Affordable for validation, plausibly affordable as a
-loss.
+**Cost.** The sampler's `log Z` sums ~622,720 `(p,L)` pairs per 2560 bp region
+(all lengths, full region); the metric's denominator is the smaller in-band
+in-crop `|D|`. Factorised, both are a few vector ops per length — affordable for
+validation, and measured affordable as a training loss.
 
 ## Validation
 
