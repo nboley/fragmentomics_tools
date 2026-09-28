@@ -106,16 +106,35 @@ backwards, which corrupts strand asymmetry silently.
 - `1/Z_s(c5)` makes the end step a proper conditional. Omit it and globally
   normalising `start·end·FLGC` gives the **symmetric** joint — a different model.
 - `1/S_s` makes the start step a proper conditional **per strand**. Omit it and
-  `sum_D w = S_+ + S_-`, so the scored strand marginal comes out `∝ S_s` instead of
-  ½. That is only harmless if `S_+ = S_-`, which **untied tables do not
+  the total becomes `S_+ + S_-`, so the strand marginal comes out `∝ S_s` instead
+  of ½. That is only harmless if `S_+ = S_-`, which **untied tables do not
   guarantee**.
 - the `1/2` is the strand prior the sampler actually draws from.
 
-With all three, `sum_D w = 1` exactly, so the oracle NLL is `−log w` directly with
-no further normalisation, and "flatten and draw" and "score" are provably the same
-distribution. **This matters beyond tidiness: a mis-normalised oracle is not the
-minimum achievable NLL, so a model can score above 100% captured** — which reads
-as a bug rather than as the anchor being wrong.
+With all three, **`sum_Ω w = 1` exactly over the GENERATIVE domain `Ω`** — every
+`(c5, c3, s)` the sampler can emit — and the strand marginal is exactly ½. So
+"flatten and draw" and "score" are provably the same distribution.
+
+### `Ω` and `D` are different sets — do not conflate them
+
+`Ω` is everything the simulator can emit. **`D` is the scoring domain: in-band ∧
+in-crop ∧ strand, a strict subset of `Ω`.** Write `W_D = sum_{x in D} w(x) < 1`.
+
+Because scoring is conditional on a fragment being in `D`, the true conditional is
+`w(x)/W_D`, so
+
+```
+oracle NLL  =  −log( w(x) / W_D )  =  −log w(x) + log W_D
+```
+
+**`−log w(x)` alone is NOT the oracle.** `log W_D < 0`, so it overstates the oracle
+— i.e. makes it too weak — by exactly `|log W_D|`. A model that correctly learns
+the conditional `w/W_D` would then **beat** that number and print **above 100%
+captured**, which reads as an implementation bug rather than as a mis-specified
+anchor. This is the same failure the three normalisers exist to prevent, one level
+up: normalising over the wrong set is as wrong as not normalising.
+
+`W_D` is **computed per store**, like `|D|`, and never treated as a constant.
 
 ## Stage 2 — generative form
 
@@ -159,10 +178,18 @@ capture_marginal(L) = ───────────────────�
                    sum_{(c5,c3): L}  start_s[hex(c5)] · end_s[hex(c3)]
 ```
 
-over all cut-site pairs at that length in the region set being simulated.
-**Strand-independent** — `capture(L, gc)` depends only on `L` and the fragment's
-GC, so this is one value per `L`, computed once per `(region set, L)` and cached
-beside `gcfl_model.json`. Do not split it per strand.
+**summed over both strands as well as over cut-site pairs** at that length in the
+region set being simulated — i.e. the free `s` on the right-hand side is bound by
+pooling, `sum_{(c5,c3,s): L}`, giving **one value per `L`**.
+
+That pooling is a deliberate choice and worth stating, because `capture(L, gc)`
+itself is strand-independent but the *weights* `start_s`/`end_s` are not: the
+tables are untied, so a per-strand weighted average would generally differ between
+strands. Pooling makes the ratio `capture/capture_marginal` average to 1 over the
+**strand-pooled** measure rather than within each strand separately. Since strand
+is drawn 50/50 and enters symmetrically, the per-strand residual is small and of
+the same second-order character as the one-pass approximation below. Computed once
+per `(region set, L)` and cached beside `gcfl_model.json`.
 
 **It is a one-pass approximation, deliberately.** The measure the sampler actually
 realises at length `L` also includes `FLGC` itself and the `1/Z_s(c5)` factor —
@@ -178,7 +205,8 @@ not take the `flgc` defaults: their top length bin is `(101,200)`, which would
 collapse the entire high band `[110,180)` into one bin and leave `capture`
 constant in `L` across it; and their GC range stops short of 0–100, so extreme-GC
 fragments would fall out of bin and receive `max_weight` (→ `capture = 1/3`)
-rather than a fitted value. At 1 bp × 5% over lengths 25–180 this is 3,120 cells,
+rather than a fitted value. The fit covers lengths 25–180 INCLUSIVE (156 bins, one
+wider than the 155-length scoring band) x 20 GC bins = 3,120 cells,
 of which 2,057 fit at `MIN_CELL_SIZE = 200` and the starved remainder holds
 **0.0333% of molecule mass** — measured, so the unfitted floor is immaterial.
 
@@ -283,12 +311,15 @@ is an absolute number in nats, so it needs both anchors in its own units.
 
 | anchor | definition |
 |---|---|
-| **uniform** | `log|D|` — every pair in the normalisation domain equally likely |
-| **oracle** | the same NLL evaluated with the TRUE simulator weights |
+| **uniform** | `log\|D\|` — every cell in `D` equally likely |
+| **oracle** | `−log w(x) + log W_D`, the true weights **renormalised over `D`** |
 
 The oracle anchor is cheap because the true weights are exactly what the shared
 `build_region_weights` returns — the same call the sampler makes, so the anchor
-cannot drift from the generative model.
+cannot drift from the generative model. **But it must be renormalised over `D`
+before use**: `w` is normalised over `Ω`, and `D ⊂ Ω`, so the `log W_D` term is
+required. Using `−log w` directly is the mis-normalisation that lets a model print
+above 100% (see "`Ω` and `D` are different sets").
 
 **Both anchors are recomputed per store and never carried across.** Under the
 per-track metric, uniform's deficit below `log(tile_size)` tracks the empty-mass
