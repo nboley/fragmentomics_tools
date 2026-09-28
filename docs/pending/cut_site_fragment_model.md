@@ -23,8 +23,12 @@ removes:
 
 1. **`FL_BANDS` is baked into the output channel axis**, and all lengths in a
    band share one per-position propensity, so a 125 bp and a 174 bp fragment are
-   indistinguishable to a track.
-2. **~49% of fragments fall outside every band** and contribute to no track.
+   indistinguishable to a track. This is the structural problem, and it does not
+   go away by choosing better bands.
+2. **Fragments outside every band contribute to no track at all** — ~24% of
+   realised fragments under the current `((25,110),(110,180))`. Widening the bands
+   shrank this (it was ~49% under `((40,65),(120,175))`) but cannot remove it,
+   because any banding leaves a remainder.
 
 The new model emits a logit for every `(m, L, strand)` and trains on the
 fragment multinomial. Bands become a reporting choice, not a model
@@ -45,14 +49,16 @@ deterministically and always in the same direction. The taps are exactly `L`
 apart, so they index **CUT SITES** (`p` and `p+L`), matching the simulator's
 `fwd_cut[p]` / `rc_cut[p+L]` — **not** per-base end positions.
 
-The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`. The
-offset axis is sized to the store's `max_len` (256 ⇒ 257 cut-site offsets) — a
-**store-compatibility and domain-guard** choice, **not** a spatial requirement of
-scoring. Scoring is in-band (`L ≤ 179`), so the largest offset it ever reaches is
-`o_r = 128 + ceil(179/2) = 218`; offsets 219–256 are never touched. The axis need
-only cover the maximum scored `o_r` (**219 slots** for in-band `L`), a ~15% saving
-on the dominant `(B, 32, 2048, ·)` prefix tensor. Sizing it to 257 is a generality
-choice, to be made deliberately rather than by accident.
+The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`.
+
+**The offset axis is 219 slots.** Scoring is in-band (`L ≤ 179`), so the largest
+offset reached is `o_r = 128 + ceil(179/2) = 218`. Sizing the axis to the store's
+`max_len` instead (256 ⇒ 257 slots) would waste ~15% of the dominant
+`(B, 32, 2048, ·)` prefix tensor on offsets never touched. Scoring out-of-band
+lengths would require widening it; nothing else would.
+
+The store's `max_len` is a separate quantity, checked by its own domain guard
+(see Store schema) — it is not what sizes this axis.
 
 ## Model architecture
 
@@ -74,18 +80,21 @@ default and the embedding is a comparison arm**.
 
 ### L2a — endpoint branch
 
-The **truth has FOUR hexamer tables**: `{start, end} × {forward, reverse}`,
-**untied** — no RC tying. This data is short-read single-stranded, so the two
-ends are not related by reverse complement.
+The truth has **four hexamer tables**, `{start, end} × {forward, reverse}`, and
+they are **untied**: this is short-read single-stranded data, so the two ends are
+not related by reverse complement. The model mirrors that with **four full banks,
+one per `(tap, strand)`** — each carrying its own `a`, `B` and `W`.
 
-**Four full banks — `a`, `B`, `W` for each `(tap, strand)`** in
-`{start, end} × {forward, reverse}`, **untied**. Two distinct products
-`start_f·end_f` and `start_r·end_r` require two independent banks per tap; a
-shared bank plus a per-strand *additive* bias will not do — it exponentiates to a
-single product, exactly the strandless failure this branch exists to avoid. Each
-bank has bank dimension `K` = **128**: `a (K, N1)`, per-group multiplicative gain
-`B (K, 10)`, projection `W (32, K)`. Per bank `16,384 + 1,280 + 4,096 = 21,760`;
-per tap (both strands) `43,520`; all four banks `87,040`.
+Each bank has bank dimension `K` = **128**: `a (K, N1)`, per-group multiplicative
+gain `B (K, 10)`, projection `W (32, K)`. Per bank
+`16,384 + 1,280 + 4,096 = 21,760`; per tap (both strands) `43,520`; all four
+`87,040`.
+
+**Why four full banks and not a shared bank with a per-strand bias:** the two
+strands need two *distinct products*, `start_f·end_f` and `start_r·end_r`. An
+additive per-strand bias exponentiates to a single product scaled by a constant,
+which cannot represent their mixture. This is the one argument the strand axis
+rests on; §L3 states the consequence, not the argument again.
 
 `K = 128` rationale: the factorisation is kept for a **statistical** reason —
 `a` pools estimation across all lengths, `B` is a small per-group correction.
@@ -109,7 +118,11 @@ strand.
 ```
 
 Index `g = min((L-25)//15, 9)`; the clamp folds `[175,180)` into the last group.
-Limitation: 15 bp resolution cannot isolate a sharp effect at ~167.
+
+Limitation, stated precisely because it is easy to overstate: the **length ×
+sequence interaction** is resolved at 15 bp, so a cut-site preference specific to
+~167 bp cannot be isolated from its neighbours. The **length distribution itself**
+is unaffected — `len_emb` carries that at 1 bp.
 
 ### L2b — interior branch
 
@@ -118,7 +131,7 @@ offset**. Aggregate by a prefix sum along the **filter-offset** axis:
 
 ```
 u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]
-U        = prefix_sum(u, axis=o)          # exclusive; W+1 = 257 slots so L=256 is reachable
+U        = prefix_sum(u, axis=o)          # exclusive; 219 slots (max scored o_r + 1)
 span     = U[n,m,o_r] - U[n,m,o_l]
 ```
 
@@ -132,27 +145,31 @@ from `[span, L]`.
 `concat(L2a, L2b)` → dense `H = 32` → nonlinearity → **one logit per
 `(m, L, strand)`**.
 
-**The model HAS a strand axis — two logits per `(m, L)`.** The marginal is
-`0.5·(start_f·end_f) + 0.5·(start_r·end_r)`, a **sum of two products**, while an
-additive strandless logit exponentiates to a **single** product — so a strandless
-model structurally cannot represent it. Representing the two distinct products
-needs the four full endpoint banks of §L2a (one per `(tap, strand)`); a shared
-bank with a per-strand additive bias still exponentiates to one product and does
-not suffice. Strand is observed, so conditioning on it is legitimate.
+**The model HAS a strand axis — two logits per `(m, L)`.** The strand marginal is
+`0.5·(start_f·end_f) + 0.5·(start_r·end_r)`, a sum of two products, which a single
+strandless logit cannot represent (§L2a). Strand is observed, so conditioning on
+it is legitimate rather than a modelling liberty.
 
 ## The fold-down, and its condition
 
 Both branches fold to per-position tensors:
 
 - **L2a** folds because the endpoint term is a **sum** of two per-position
-  projections: `M_l[g] = W_l diag(B_l[:,g]) a_l` collapses to ten `(32,128)`
-  matrices applied directly to `h`, so the `K`-wide `e_l` is never materialised.
+  projections: `M_l[g,s] = W_l[s] diag(B_l[s,g]) a_l[s]` collapses to **20**
+  `(32,128)` matrices (10 length groups × 2 strands) applied directly to `h`, so
+  the `K`-wide `e_l` is never materialised.
 - **L2b** folds because the span is a **difference** of two values from one
   per-`(m,o)` tensor, and `W·(span/L) = (W·span)/L` folds too.
 
-Unfolded, the per-pair concat is `e_l(128) + e_r(128) + span(32) + mean(32) =
-320` wide — exactly what §Cost's benchmark measured at 5.4 GB. Folded, the pair
-grid holds only `H = 32`.
+Unfolded, the per-pair concat would be ~320 wide; folded, the pair grid holds only
+`H = 32`. §Cost's 5.4 GB measurement was taken on a 320-wide *strandless* unfolded
+implementation, so treat it as the order of magnitude the fold avoids rather than
+as this design's number.
+
+**Materialise `f_l`/`f_r` per chunk, not for all groups at once.** A given `L` uses
+only its own group `g(L)`, so the full `(B, 10, 2, 32, 2304)` tensor in the diagram
+below (378 MB per tap) is the naive reading: an `L_chunk` of 32 spans 2–3 groups,
+so computing `M[g,s] @ h` for just those groups cuts this several-fold.
 
 **CONDITION: the endpoint path must stay LINEAR until it is summed into the
 pre-activation.** A nonlinearity on the per-pair features destroys the fold-down.
@@ -164,7 +181,8 @@ B    = 64     regions per step          N1  = 128   L1 cut-site bank
 P    = 2048   scored centres m (crop)   K   = 128   L2a bank dim (x4 banks)
 n_L  = 155    in-band L = 25..179       N2  = 32    L2b interior bank
 W    = 256    window bases (257 cuts)   H   = 32    hidden width
-L_chunk = 32                            l_in  = P + 256 + 5 = 2309 (pre-conv)
+O    = 219    offset axis (max o_r + 1) L_chunk = 32
+l_in = P + 256 + 5 = 2309 (pre-conv)    model_input_size = P + W = 2304 (crop out)
 ```
 
 ```
@@ -191,8 +209,10 @@ L_chunk = 32                            l_in  = P + 256 + 5 = 2309 (pre-conv)
         │                                               │
         v                                               v
  ┌──────────────────────────┐                 ┌──────────────────────────────┐
- │ (B,10,2,32,2304) 378 MB  │                 │ (B, 32, 2048, 257)  4.3 GB   │
- │ x2 taps = 756 MB         │                 │ chunk over m -> 538 MB       │
+ │ (B,10,2,32,2304) 378 MB  │                 │ (B, 32, 2048, 219)  3.67 GB  │
+ │ x2 taps = 756 MB         │                 │ chunk over m -> 459 MB       │
+ │ (naive; do 2-3 groups    │                 │                              │
+ │  per L_chunk instead)    │                 │                              │
  └──────────────────────────┘                 └──────────────────────────────┘
         │  gather at o_l, o_r                         │  difference at o_r, o_l
         └───────────────┬─────────────────────────────┘
@@ -223,10 +243,10 @@ folded *into* the prefix tensor, so the difference is taken after projecting to
 (`span = U[o_r] − U[o_l]`, then `W_span·span`); the two are the same quantity,
 `W` being the matrix and `V` the folded prefix.
 
-**Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 257)`. The
-prefix sum is cumulative over `o`, so the axis cannot be tiled (a chunk would lose
-the running sum), and in-band `o_l`/`o_r` span `o ∈ [39, 218]` — essentially the
-whole axis. So **chunk over `m`, not over `o`**.
+**Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 219)`. The
+prefix sum is cumulative over `o`, so the axis cannot be tiled — a chunk would lose
+the running sum — and in-band `o_l`/`o_r` span `o ∈ [39, 218]`, essentially all of
+it. So **chunk over `m`, not over `o`**.
 
 > These sizes are arithmetic, not measured, and the §Cost benchmark measured a
 > **strandless** unfolded implementation with a 320-wide per-pair concat at
@@ -312,6 +332,14 @@ store records its geometry in a separate small config (`tile_size`, `jitter`,
 **Domain guard.** Because `max_len` defines `D`, the Dataset MUST assert
 `model.max_len == store.attrs["max_len"]` at construction and fail loudly. A
 silent `max_len` mismatch changes `|D|` and reinterprets every reported NLL.
+
+**`fl_bands` must be recorded and guarded too.** This model is band-free in its
+*parameterisation*, which makes it tempting to skip — but scoring is **in-band**,
+so `|D|`, the uniform anchor and the oracle anchor all depend on the band
+definition. A band change would silently move every percentage for this model
+exactly as it would for the track models. Record `fl_bands` in the store's config
+and assert it against the constant at construction, reusing
+`config.check_fl_bands`.
 
 ## Dataset / dataloader
 
