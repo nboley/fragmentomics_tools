@@ -26,9 +26,8 @@ removes:
    indistinguishable to a track. This is the structural problem, and it does not
    go away by choosing better bands.
 2. **Fragments outside every band contribute to no track at all** — ~24% of
-   realised fragments under the current `((25,110),(110,180))`. Widening the bands
-   shrank this (it was ~49% under `((40,65),(120,175))`) but cannot remove it,
-   because any banding leaves a remainder.
+   realised fragments under `FL_BANDS = ((25,110),(110,180))`. No banding can
+   remove this remainder: any set of bands leaves lengths outside every band.
 
 The new model emits a logit for every `(m, L, strand)` and trains on the
 fragment multinomial. Bands become a reporting choice, not a model
@@ -51,8 +50,10 @@ apart, so they index **CUT SITES** (`p` and `p+L`), matching the simulator's
 
 The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`.
 
-**The offset axis is 219 slots.** Scoring is in-band (`L ≤ 179`), so the largest
-offset reached is `o_r = 128 + ceil(179/2) = 218`. Sizing the axis to the store's
+**The offset axis is sized to the in-band geometry: `F` spans 218 base offsets and
+its exclusive prefix `U` is 219 slots** (§L2b derives the one-apart pair). Scoring
+is in-band (`L ≤ 179`), so the largest cut-site offset reached is
+`o_r = 128 + ceil(179/2) = 218`. Sizing the axis to the store's
 `max_len` instead (256 ⇒ 257 slots) would waste ~15% of the dominant
 `(B, 32, 2048, ·)` prefix tensor on offsets never touched. Scoring out-of-band
 lengths would require widening it; nothing else would.
@@ -99,17 +100,29 @@ rests on; §L3 states the consequence, not the argument again.
 `K = 128` rationale: the factorisation is kept for a **statistical** reason —
 `a` pools estimation across all lengths, `B` is a small per-group correction.
 
-**A free per-`L` additive term `len_emb (H, n_L)` is required**, separate from the
+**A free per-`L` additive term `len_bias (n_L,)` is required**, separate from the
 length groups. The groups carry the length × *sequence* interaction at 15 bp
-resolution; `len_emb` carries the length distribution itself at 1 bp resolution.
+resolution; `len_bias` carries the length distribution itself at 1 bp resolution.
 These must not be conflated: the length component is worth **~0.4255 nats, about
 5× the whole sequence-bias gap of ~0.084**, so it is the dominant term in the
 likelihood, and forcing it through a piecewise-constant 15 bp approximation would
-be a large avoidable loss. At `H = 32` and `n_L = 155` this costs 4,960
-parameters. It is additive and per-`L` only, so it folds like everything else,
-and it is **shared across strand** — the FL/GC (length) term `FLGC(L, gc)` is
-strand-independent in the generative form, so there is one `len_emb`, not one per
-strand.
+be a large avoidable loss.
+
+**Placement: post-activation, added onto the logit — not into `pre`:**
+
+```
+logit[m,L,s] = w_out · act(pre[·,m,L,s]) + len_bias[L]
+```
+
+A per-`L` additive term on the logit **is** a length-marginal offset in the
+multinomial — exactly the claimed role. Added pre-activation it cannot perform
+it: after `act` and `w_out` its per-`L` effect is entangled with the
+position-dependent `f_l + f_r`, and "shared across strand" can leak
+strand-dependence through the nonlinearity. On the logit these problems vanish.
+It is **strand-shared** — the FL/GC (length) term `FLGC(L, gc)` is
+strand-independent in the generative form, so there is one `len_bias`, not one
+per strand — which makes it `(n_L,)` = **155 parameters**, not `(H, n_L)` =
+4,960. It never touches the per-pair tensor's width, so it still folds trivially.
 
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
 
@@ -122,18 +135,32 @@ Index `g = min((L-25)//15, 9)`; the clamp folds `[175,180)` into the last group.
 Limitation, stated precisely because it is easy to overstate: the **length ×
 sequence interaction** is resolved at 15 bp, so a cut-site preference specific to
 ~167 bp cannot be isolated from its neighbours. The **length distribution itself**
-is unaffected — `len_emb` carries that at 1 bp.
+is unaffected — `len_bias` carries that at 1 bp.
 
 ### L2b — interior branch
 
-A **second, separate** bank `F (N2=32, 4, 256)` with weights **learned per
-offset**. Aggregate by a prefix sum along the **filter-offset** axis:
+A **second, separate** bank `F (N2=32, 4, 218)` with weights **learned per
+offset**. Two widths, one apart, and they must not be conflated:
+
+- **`F` spans 218 base offsets.** The interior mask is half-open `[o_l, o_r)`, so
+  the largest base offset ever read is `o_r,max − 1 = 217`. The widest in-band
+  fragment (`L = 179` at `o_l = 39`) occupies offsets 39–217 — 179 bases.
+- **`U` is 219 slots**, being the *exclusive* prefix of 218 entries.
+
+Both are sized to the in-band geometry, **not** the store's `max_len`; `F` carries
+no tail past offset 217. Aggregate by a prefix sum along the **filter-offset**
+axis:
 
 ```
-u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]
-U        = prefix_sum(u, axis=o)          # exclusive; 219 slots (max scored o_r + 1)
-span     = U[n,m,o_r] - U[n,m,o_l]
+u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]   # o in [0, 218)
+U        = prefix_sum(u, axis=o)            # exclusive, 219 slots; U[k] = sum_{o<k} u[o]
+span     = U[n,m,o_r] - U[n,m,o_l]          # o_l >= 39, o_r <= 218
 ```
+
+`x` here is in **`h`'s post-convolution frame** — the width-6 valid conv's 5 bp
+coordinate shift is already accounted for, so the offset `o` addresses the same
+cut site the tap indices `o_l`/`o_r` do (a silent shift here is the ±1 class of
+bug).
 
 The centred masks are **nested**, so this is **one subtraction per pair** — not
 a per-candidate 256-wide convolution, which would be ~256× the work. Feed
@@ -162,9 +189,8 @@ Both branches fold to per-position tensors:
   per-`(m,o)` tensor, and `W·(span/L) = (W·span)/L` folds too.
 
 Unfolded, the per-pair concat would be ~320 wide; folded, the pair grid holds only
-`H = 32`. §Cost's 5.4 GB measurement was taken on a 320-wide *strandless* unfolded
-implementation, so treat it as the order of magnitude the fold avoids rather than
-as this design's number.
+`H = 32`. §Cost's 5.4 GB benchmark was taken on exactly that 320-wide unfolded
+concat (see the re-measure disclaimer there); the fold avoids it.
 
 **Materialise `f_l`/`f_r` per chunk, not for all groups at once.** A given `L` uses
 only its own group `g(L)`, so the full `(B, 10, 2, 32, 2304)` tensor in the diagram
@@ -198,14 +224,14 @@ l_in = P + 256 + 5 = 2309 (pre-conv)    model_input_size = P + W = 2304 (crop ou
         ┌────────────┘                              └──────────────┐
         v  L2a                                                     v  L2b
  ── ENDPOINT BRANCH ─────────────────────        ── INTERIOR BRANCH ──────────────
- a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 256)   32,768 params
+ a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 218)   27,904 params
  B[t,s] : (128,10)  x4      5,120 params        W_span, W_mean : (32,32) each
  W[t,s] : (32,128)  x4     16,384 params
                                                  u never materialised whole;
  FOLD: M_l[g,s] = W_l[s] diag(B_l[s,g]) a_l[s]   prefix-sum over o then difference
        -> 20 matrices of (32,128)  (10 groups x 2 strands)
-                                                 v[h,m,o] = sum_c G[h,c,o]·x[..]
- f_l[s] = M_l[g,s] @ h                           U = cumsum(v, axis=o)
+                                                 u[n,m,o] = sum_c F[n,c,o]·x[..]
+ f_l[s] = M_l[g,s] @ h                           U = cumsum(u, axis=o)
         │                                               │
         v                                               v
  ┌──────────────────────────┐                 ┌──────────────────────────────┐
@@ -218,16 +244,15 @@ l_in = P + 256 + 5 = 2309 (pre-conv)    model_input_size = P + W = 2304 (crop ou
         └───────────────┬─────────────────────────────┘
                         v
               pre[h, m, L, s]  =  f_l[s] + f_r[s]           <-- LINEAR until summed
-                                + (V_span[o_r] - V_span[o_l])
-                                + (V_mean[o_r] - V_mean[o_l]) / L
-                                + len_emb[h, L]              <-- free per-L term
+                                + W_span·(U[o_r] - U[o_l])
+                                + W_mean·(U[o_r] - U[o_l]) / L
                         │
                         v   <-- THE ONLY PER-PAIR TENSOR
               ┌──────────────────────────────────────────────┐
               │ hid = act(pre)  (B,32,2048,L_chunk=32,2)     │
               │        1074 MB fp32  /  537 MB bf16          │
               └──────────────────────────────────────────────┘
-                        │  w_out : (32,)
+                        │  logit = w_out · hid + len_bias[L]   (w_out : (32,))
                         v
               ┌──────────────────────────────────────────────┐
               │ logit  (B, 2048, 155, 2)          strand axis │
@@ -237,21 +262,21 @@ l_in = P + 256 + 5 = 2309 (pre-conv)    model_input_size = P + W = 2304 (crop ou
               log Z  (B,)  ->  fragment multinomial NLL
 ```
 
-In the diagram `V_span = W_span @ U` and `V_mean = W_mean @ U` — the projection
-folded *into* the prefix tensor, so the difference is taken after projecting to
-`H`. The forward-pass listing below shows the same arithmetic unfolded
-(`span = U[o_r] − U[o_l]`, then `W_span·span`); the two are the same quantity,
-`W` being the matrix and `V` the folded prefix.
+Both the diagram and the forward-pass listing write the interior branch
+**unfolded**: form `span = U[o_r] − U[o_l]` on the `N2`-wide prefix `U`, then
+project with `W_span`. It **folds** by absorbing the projection into the offset
+weights, `G = W_span @ F` (equivalently `V_span = W_span @ U`), so the difference
+is taken directly in `H`-space and the `N2`-wide `U` is never materialised. Same
+quantity either way; the doc uses the unfolded `F`/`u`/`U` symbols throughout.
 
 **Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 219)`. The
 prefix sum is cumulative over `o`, so the axis cannot be tiled — a chunk would lose
 the running sum — and in-band `o_l`/`o_r` span `o ∈ [39, 218]`, essentially all of
 it. So **chunk over `m`, not over `o`**.
 
-> These sizes are arithmetic, not measured, and the §Cost benchmark measured a
-> **strandless** unfolded implementation with a 320-wide per-pair concat at
-> 5.4 GB. The strand axis and the learned-per-offset interior branch both change
-> the intermediate; re-measure before budgeting on these numbers.
+> These sizes are arithmetic, not measured; see §Cost's re-measure disclaimer
+> for why the strand axis and the learned-per-offset interior branch make them a
+> lower bound rather than a budget.
 
 ### Forward pass
 
@@ -264,17 +289,16 @@ p_l, p_r = m - L//2, m - L//2 + L        # genomic cut sites p and p+L
 g        = min((L - 25)//15, 9)          # length group
 f_l[s] = M_l[g,s] @ h ; f_r[s] = M_r[g,s] @ h   # per strand s; M_x[g,s] = W_x[s] diag(B_x[s,g]) a_x[s]
 
-# L2b interior: weights learned per offset
-u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]   # (B, N2, P, W)
-U        = prefix_sum(u, axis=o)            # (B, N2, P, W+1), exclusive
+# L2b interior: weights learned per offset (sized to the in-band geometry, not max_len)
+u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]   # (B, N2, P, 218); x in h's post-conv frame
+U        = prefix_sum(u, axis=o)            # (B, N2, P, 219), exclusive: U[k] = sum_{o<k} u[o]
 span     = U[:,:,o_r] - U[:,:,o_l]
 mean     = span / L                         # both fed explicitly
 
-pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean
-             + len_emb[h, L]
+pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean   # LINEAR; no len term here
 hid          = act(pre)                                      # (B, H, P, L_chunk, 2)
-logit[m,L,s] = w_out · hid                                   # (B, P, n_L, 2)
-disp_bp      = dispersion_head(h)   # (B, 2, P) per-position, seq-indexed, FROZEN
+logit[m,L,s] = w_out · hid + len_bias[L]                     # (B, P, n_L, 2); len_bias (n_L,), strand-shared
+disp_bp      = dispersion_head(h)   # (B, 2, P) per-position, seq-indexed, FROZEN at log_dispersion_init
 ```
 
 ## Store schema
@@ -329,9 +353,13 @@ store records its geometry in a separate small config (`tile_size`, `jitter`,
 `hashlib.sha256(canonical_json)` discipline, giving it its own drift guard while
 `config.py` stays frozen for the old class. `split_version` carries over.
 
-**Domain guard.** Because `max_len` defines `D`, the Dataset MUST assert
-`model.max_len == store.attrs["max_len"]` at construction and fail loudly. A
-silent `max_len` mismatch changes `|D|` and reinterprets every reported NLL.
+**`max_len` guard.** The Dataset MUST assert `model.max_len ==
+store.attrs["max_len"]` at construction and fail loudly. `max_len` does **not**
+set `|D|` — scoring is in-band (`L ≤ 179`), so `max_len = 256` never binds the
+domain; the bands do (see the `fl_bands` guard). What `max_len` bounds is the
+store's **fragment universe** and its `uint16` field sizing: a mismatch means
+the store holds a different fragment population than the model was built to
+consume, and the fragment/endpoint arrays were sized under a different ceiling.
 
 **`fl_bands` must be recorded and guarded too.** This model is band-free in its
 *parameterisation*, which makes it tempting to skip — but scoring is **in-band**,
@@ -344,10 +372,18 @@ and assert it against the constant at construction, reusing
 ## Dataset / dataloader
 
 This model is **sequence-only**: the `(m, L, strand)` logit map depends only on
-the tile's sequence, so **one forward serves all samples of a region**. The
+the tile's sequence, so one forward can serve all `S` samples of a region. The
 dataset therefore batches **by region**, not by `(sample, tile)`.
 
-Item = one region, yielding:
+**`S` is a parameter and is currently `S = 1`.** Region-batching exists so that
+`S > 1` works later without restructuring the dataset — that is its purpose, a
+forward-looking capability, not a present speedup. At `S = 1` there is nothing
+to share, so batching by region is identical to batching by `(sample, tile)`
+and it degenerates to the naive case (which is exactly why §Cost budgets the
+naive per-example figure). Wherever a per-sample list or `mean_s` appears below,
+read it at `S = 1`.
+
+Item = one region, yielding (`S = 1` today):
 
 ```
 x         : (4, l_in)              float32   one-hot sequence (shared)
@@ -359,7 +395,8 @@ mask      : (tile_size,)           bool      valid positions
 ```
 
 The multinomial shares one per-region `logp` map across the `S` samples:
-`NLL_s = -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s`, averaged over samples.
+`NLL_s = -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s`, averaged over samples — at
+`S = 1` this is a single term, no averaging.
 
 **Crop.** The jittered centre crop is the frozen `jitter_matrix`, applied
 identically to `seq`, `mask`, the endpoint tracks, and the fragment coordinates
@@ -376,16 +413,17 @@ actually handed to L1 — **not** a crop target; it does not enter the parity
 assertion, which covers only the even `tile_size` / `l_target` / store `l_seq` /
 `model_input_size`.
 
-**Shared-jitter coupling.** Because one sequence forward serves all `S` samples,
-all samples of a region in a step share one jitter offset — the crop defines the
-position frame the shared `logp` map lives in. This is accepted: it is the price
-of the shared-forward speedup (the whole point of region-batching). Diversity is
-recovered across steps/epochs (fresh `j` per region each draw) and across
-regions within a batch. Document this in the dataset docstring so it is not
-"fixed" later.
+**Shared-jitter coupling (a tradeoff only at `S > 1`).** When one sequence
+forward serves several samples, all samples of a region in a step share one
+jitter offset — the crop defines the position frame the shared `logp` map lives
+in. At the current `S = 1` there is nothing to couple; this becomes a real
+tradeoff only once `S > 1`, and it is accepted then as the price of the shared
+forward. Diversity is recovered across steps/epochs (fresh `j` per region each
+draw) and across regions within a batch. Document this in the dataset docstring
+so it is not "fixed" later.
 
-**RC augmentation is DROPPED: `rc_prob = 0`.** There is no RC-equivariance
-requirement on this model and no RC-equivariance test.
+**RC augmentation: `rc_prob = 0`.** This model carries no RC-equivariance
+requirement, so there is no RC augmentation and no RC-equivariance test.
 
 **`min_N` = 0 for these stores.** The old `N.min(axis=2) ≥ min_N` filter does
 not transfer (its axis is now the 2 endpoint tracks, and training needs
@@ -406,9 +444,10 @@ uses the embedding arm; `MaskedNegativeBinomialOffsetNLLLoss` reused unchanged
 for the endpoint NB term (a `(B, C=2, L)` call); the per-window dispersion
 machinery reused unchanged — `_BackgroundModelMixin._pooled_log_dispersion`
 (`background_model_core.py`), which mean-pools `disp_bp (B, 2, P)` to the NB
-loss's window level `(B, 2, W)`, `W = P // dispersion_window_size`. Because the
-class does not subclass the mixin (see below), copy this method verbatim rather
-than inheriting it. The design changes no frozen-core statistical semantics.
+loss's window level `(B, 2, n_win)`, `n_win = P // dispersion_window_size` (the
+dispersion window count — distinct from the window-base `W = 256` of §Shapes).
+Because the class does not subclass the mixin (see below), copy this method
+verbatim rather than inheriting it. The design changes no frozen-core statistical semantics.
 
 The class is a `lightning.LightningModule`. It does **not** subclass
 `_BackgroundModelMixin`, whose `_step` is hardwired to the per-track core losses
@@ -423,12 +462,15 @@ are ancillary.** Per sample, over the region's shared
 `logp = log_softmax(logit over D)`:
 
 ```
-L_mult = mean_s [ -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s ]
+L_mult = mean_s [ -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s ]   # at S = 1, one term
 ```
 
 Plus an **NB term on each of the two band-free endpoint tracks**, one
 `MaskedNegativeBinomialOffsetNLLLoss` call on the `(B, C=2, L)` target
-(`first` = 0, `last` = 1), with the **dispersion head FROZEN (not trained)**.
+(`first` = 0, `last` = 1), with the **dispersion head FROZEN**: its per-position
+output is not trained but held at the frozen core's `log_dispersion_init`
+constant (`background_model_core.py`) — not random init and not loaded from a
+track model.
 The endpoint tracks are band-free by design, so `N_first = N_last = N_fragments
 = N_s` and both terms are per-fragment nats on the same scale; this equality
 would break if the tracks were banded.
@@ -466,15 +508,20 @@ logp      = log_softmax(logit over D)
 ```
 
 The `(m, L, strand)` logits are softmaxed over exactly `D` (the NLL doc's set).
-**No external `len_p[L]` or GC factor** — the model's logit already carries both;
-applying the track-model product would double-count length.
+The logit carries length and GC directly, so no external `len_p[L]` or GC factor
+is applied (the NLL doc states why applying the track-model product to this
+model would double-count).
 
-**Old 12-track models** are scored via `w_old[p, L] = first_b[p] · last_b[p+L-1]`,
-**scored natively on strand**, with **no `len_p` supplied**. With `first_b`/
-`last_b` identical for every `L` in a band and no `len_p`, an old model implicitly
-predicts **uniform lengths within each band**, so its NLL is dominated by length
-mis-specification rather than by sequence bias. Structurally fair, but it does
-**not** isolate sequence-bias recovery.
+**Old 12-track models** are scored with the NLL doc's track-model weight (which
+supplies `gc_correction(L, GC%)` and no `len_p`), **scored natively on strand**.
+Within a band `first_b`/`last_b` are constant across `L`, so the *only* length
+dependence an old model carries is the **supplied `gc_correction`**, whose length
+profile spans ~**2.58×**. That is **not** uniform-in-`L` within a band — but it
+is far short of the observed length PMF, which spans ~**7.3×**. So the old model
+still lacks the dominant length term (the PMF) even though it is not
+uniform-within-band, and its NLL is substantially shaped by that length
+mis-specification. Structurally fair, but it does **not** cleanly isolate
+sequence-bias recovery.
 
 ### Why the model cannot reach the oracle exactly
 
@@ -526,13 +573,17 @@ fwd+bwd ms / peak VRAM, **naive** batching (map recomputed per sample):
 Two caveats that must be stated:
 
 1. The benchmark's 8–10× amortisation came from sharing one region forward
-   across 16 samples, and **training is now single-sample**, so budget the naive
-   **~9.3 ms/example** (597.6 ms ÷ 64 at H=32, `L_chunk=32`), **~1.8×** the
-   330–360 ms/batch baseline per example.
-2. The learned-per-offset interior weights need an offset-axis prefix tensor the
-   benchmark did not build, and the strand axis roughly doubles the endpoint
-   branch — neither was in the measured grid, so **re-measure** rather than
-   assuming it fits.
+   across 16 samples. At the current **`S = 1`** there is nothing to share, so
+   budget the naive **~9.3 ms/example** (597.6 ms ÷ 64 at H=32, `L_chunk=32`),
+   **~1.8×** the 330–360 ms/batch baseline per example. The amortisation returns
+   only when `S > 1`.
+2. The 5.4 GB peak was measured on a **strandless** unfolded implementation with
+   a 320-wide per-pair concat. This design differs on both axes: the fold-down
+   collapses the per-pair concat, while the learned-per-offset interior weights
+   add an offset-axis prefix tensor the benchmark did not build and the strand
+   axis roughly doubles the endpoint branch. None of this was in the measured
+   grid, so treat every VRAM figure here as arithmetic and **re-measure** before
+   budgeting rather than assuming it fits.
 
 ## Required tests
 
@@ -546,7 +597,8 @@ Two caveats that must be stated:
   the model's cut-site tap indexing, and the centre↔endpoint round-trip
   `p = m - L//2` for **both parities of `L`** — a shift here is silent, and a
   test that only exercises even `L` would miss it.
-- **No RC-equivariance test** — it is void now.
+- **No RC-equivariance test** — `rc_prob = 0` and the model has no
+  RC-equivariance requirement, so none is owed.
 - **Store consistency:** `/endpoints/` recomputed from `/fragments/` at build
   time must match the stored tracks exactly.
 - **Domain guard:** constructing the Dataset against a store whose
