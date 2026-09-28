@@ -2,7 +2,7 @@
 
 Status: DESIGN, not implemented. Specifies the simulator's generative form and
 the per-fragment NLL metric that scores both model classes. The band widening
-this doc once described is **done and committed** — see "Bands" below.
+The current bands and their guard are stated under "Bands" below.
 
 **This simulator is written from scratch.** Existing code may be reused where it
 is genuinely useful — `load_duphist` / `build_cell_map`
@@ -84,21 +84,38 @@ L_range)` returns `(p, q, w)`. Stage 2 calls it to sample; the scorer calls it
 for the truth term. That shared call is where the correctness benefit lives —
 not in the artifact format.
 
-**`w` carries the per-start normaliser. This is load-bearing, not a detail:**
+**`w` is a fully normalised probability, not an unnormalised weight. This is
+load-bearing, not a detail.** `build_region_weights` returns
 
 ```
-w(p, q, s) = start_s[hex(p)] · end_s[hex(q)] · FLGC(L, gc(p,q)) / Z_s(p)
-Z_s(p)     = sum_q' end_s[hex(q')] · FLGC(L', gc(p,q'))
+w(c5, c3, s) = 1/2 · start_s[hex(c5)]/S_s · end_s[hex(c3)] · FLGC(L, gc) / Z_s(c5)
+
+S_s     = sum_c5' start_s[hex(c5')]                          per-strand start mass
+Z_s(c5) = sum_c3' end_s[hex(c3')] · FLGC(L', gc')            per-5'-site end mass
 ```
 
-With the `1/Z_s(p)` factor the sum telescopes — `sum_{p,q} w = sum_p start_s(p)`
-— so `w / sum_D w` equals the sequential joint **exactly**, and "flatten and
-draw once" and "globally normalise to score" are the same distribution.
-**Without it they are not:** `start·end·FLGC` globally normalised is the
-*symmetric* joint, which is a different model. An implementer could otherwise
-satisfy "one shared function returns `(p,q,w)`" and still build an oracle that
-diverges from the sampler wherever `Z_s(p)` varies — which is exactly the
-failure this design exists to prevent.
+`c5` is the fragment's **5′ cut site** and `c3` its **3′** one. On the plus strand
+`c5 = p`, `c3 = p + L`; **on the minus strand they swap** — the 5′ end is at the
+*higher* coordinate, so `c5 = p + L` and `c3 = p`, with hexamers read
+reverse-complemented. Writing the formula in `(c5, c3)` rather than `(p, q)` is
+deliberate: an implementer coding from a `p`/`q` formula gets the minus strand
+backwards, which corrupts strand asymmetry silently.
+
+**Why all three normalisers, and not just `1/Z_s`:**
+
+- `1/Z_s(c5)` makes the end step a proper conditional. Omit it and globally
+  normalising `start·end·FLGC` gives the **symmetric** joint — a different model.
+- `1/S_s` makes the start step a proper conditional **per strand**. Omit it and
+  `sum_D w = S_+ + S_-`, so the scored strand marginal comes out `∝ S_s` instead of
+  ½. That is only harmless if `S_+ = S_-`, which **untied tables do not
+  guarantee**.
+- the `1/2` is the strand prior the sampler actually draws from.
+
+With all three, `sum_D w = 1` exactly, so the oracle NLL is `−log w` directly with
+no further normalisation, and "flatten and draw" and "score" are provably the same
+distribution. **This matters beyond tidiness: a mis-normalised oracle is not the
+minimum achievable NLL, so a model can score above 100% captured** — which reads
+as a bug rather than as the anchor being wrong.
 
 ## Stage 2 — generative form
 
@@ -134,20 +151,27 @@ observed PMF carries it.
 `gc_pct` is a **percent**, `100 · (cum_gc[q] − cum_gc[p]) / L`, matching
 `predict()`'s contract. GC is percent throughout the `flgc` path.
 
-**`capture_marginal(L)` — definition required, and it is an OWNER DECISION.**
-The claim that `capture / capture_marginal` averages to 1 per length only holds
-under the measure used to marginalise, and picking the wrong one silently
-re-tilts the length distribution away from `observed_len_p`, defeating the whole
-point of the term. Three candidates:
+**`capture_marginal(L)` — the hexamer-weighted marginal:**
 
-| option | definition | property |
-|---|---|---|
-| **(a) recommended** | unweighted mean of `capture(L, gc(p,q))` over all valid `(p,q)` with `q−p = L` in the **region set being simulated** | non-circular, computed once per (region set, L); makes the *simulated* length marginal match the PMF over the geometry actually used |
-| (b) | the same mean weighted by `end_s[hex(q)]` | exact for the sampler, but **circular** — depends on the tables it is normalising |
-| (c) | mean over the real data's empirical `P(gc \| L)` from the duphist | consistent with `observed_len_p`, which comes from the same file, but the simulated region set's GC-at-`L` differs from genome-wide |
+```
+                   sum_{(c5,c3): L}  start_s[hex(c5)] · end_s[hex(c3)] · capture(L, gc)
+capture_marginal(L) = ──────────────────────────────────────────────────────────────────
+                   sum_{(c5,c3): L}  start_s[hex(c5)] · end_s[hex(c3)]
+```
 
-`CLAUDE.md` gates changes to computed results on explicit approval, so this is
-not an implementer's choice to make.
+over all cut-site pairs at that length in the region set being simulated.
+**Strand-independent** — `capture(L, gc)` depends only on `L` and the fragment's
+GC, so this is one value per `L`, computed once per `(region set, L)` and cached
+beside `gcfl_model.json`. Do not split it per strand.
+
+**It is a one-pass approximation, deliberately.** The measure the sampler actually
+realises at length `L` also includes `FLGC` itself and the `1/Z_s(c5)` factor —
+and `FLGC` contains `capture/capture_marginal`, so the exact quantity is a fixed
+point requiring iteration. Weighting by `start·end` only is one pass and
+non-circular; the residual is second-order, the covariance between `capture` and
+`FLGC`'s own GC tilt at fixed `L`. Written down so nobody "fixes" it by iterating
+without knowing what that buys. One fixed-point iteration would close most of the
+remaining gap if it ever matters.
 
 **Capture fit bins.** FL in **1 bp** bins, GC in **5% bins covering 0–100**. Do
 not take the `flgc` defaults: their top length bin is `(101,200)`, which would
@@ -157,6 +181,13 @@ fragments would fall out of bin and receive `max_weight` (→ `capture = 1/3`)
 rather than a fitted value. At 1 bp × 5% over lengths 25–180 this is 3,120 cells,
 of which 2,057 fit at `MIN_CELL_SIZE = 200` and the starved remainder holds
 **0.0333% of molecule mass** — measured, so the unfitted floor is immaterial.
+
+**Bin boundaries must be contiguous.** `flgc`'s `_bin_index` tests `lo ≤ v ≤ hi`
+and `gc_pct` is **continuous** (`100·Δcum_gc/L`), so integer bins like
+`(0,4),(5,9),…` would drop every non-integer value — 4.5 matches no bin and
+silently lands on `max_weight`, which is the exact failure the range choice above
+avoids. Use `[0,5), [5,10), …, [95,100]` semantics with the last bin inclusive.
+Length bins are `(25,25)…(180,180)`, unambiguous because `L` is an integer.
 
 Output layout: `sample_<i>.npz` with `region_idx`, `start`, `stop`, `strand`.
 Overdispersion is a count-drawing option on top of the shared propensity, which
