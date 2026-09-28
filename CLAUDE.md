@@ -144,6 +144,9 @@ forward.
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight
   < 1 to zero and make corrected pileups quietly wrong. See its docstring.
+- **`reverse_complement_track_permutation` is NOT dead code** — `ctcf_pileup_run.py`
+  uses it to orient minus-strand CTCF sites, so do not delete it when refactoring
+  the track models.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.
 - **Store/zarr pinning**: the zarr store is v2 format; `zarr==2.18.3` with
   `numcodecs==0.13.1`. Newer numcodecs privatized symbols zarr 2.18 imports,
