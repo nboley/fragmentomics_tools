@@ -538,14 +538,18 @@ only a per-region count, so chunking is exact — no cross-chunk state beyond
 the running sum. Callers are `get_fragment_coverage_sum` and one test, so the
 blast radius is small.
 
-**Prerequisite for Phase 2.** `bioframe` is declared in none of
-`environment.yml`, `pyproject.toml`, `recipe/recipe.yaml` or `requires.txt` —
-all four of which list `pybedtools` — and is installed in no conda env on this
-host. It installs from PyPI normally, but the default pip index here is a
-CodeArtifact proxy that does not mirror it, so the dependency addition must
-either mirror it or pin an index. The benchmark and strand numbers above were
-measured in a throwaway venv; re-run them in `biomarker_env` once the
-dependency lands, before relying on them.
+**Prerequisite for Phase 2, and it is a small one.** `bioframe` is declared in
+none of `environment.yml`, `pyproject.toml`, `recipe/recipe.yaml` or
+`requires.txt` — all four of which list `pybedtools` — and is installed in no
+env on this host. Adding it is a one-line change per manifest:
+**`bioframe 0.8.0` is packaged on bioconda** (`pyhdfd78af_0`, noarch), and
+`bioconda` is already a declared channel in `environment.yml`, immediately
+above where `pybedtools` is pulled from. No pip section, no vendoring, no
+index pinning. It is *not* on conda-forge, so the channel matters.
+
+The benchmark and strand numbers above were measured in a throwaway venv;
+re-run them in `biomarker_env` once the dependency lands, before relying on
+them.
 
 ## The interval API — DECIDED
 
@@ -796,15 +800,36 @@ not just syntax. It is not a precondition for anything here.
 All of this happens in a worktree, not on `main`.
 
 **Phase 0 — differential fixtures, before anything changes.** Capture current
-output for every interval operation on large, real region sets, plus the
-edge and corner cases. Everything after this validates against those
-fixtures. Capturing them *first* rather than just before the `bioframe` swap
-costs nothing and means Phase 1 is covered too.
+output on large, real region sets plus deliberate edge cases, so that
+everything after this validates against a recorded baseline. Capturing them
+first rather than just before the `bioframe` swap costs nothing and means
+Phase 1 is covered too.
+
+**Scope them to what we implement, not to what we delegate.** A fixture that
+pins `bedtools merge` against `bioframe.merge` is testing someone else's
+library, and it will fail on their next release for reasons that are not our
+bug. The fixtures exist to protect the code *we* write. That means:
+
+| Fixture-worthy — we implement it | Not fixture-worthy — delegated |
+|---|---|
+| `how` handling, especially `anti` by composition | the underlying inner/left/right/outer join |
+| fraction thresholds (`min_frac_a/b`, `reciprocal`) — absent from `bioframe` | interval containment arithmetic |
+| `same_strand` as equality **excluding** `.` — the divergence | plain strand equality |
+| the `contig`/`chrom` schema mapping, index preservation and realignment | — |
+| `overlap_bases` arithmetic where we compute rather than read it | — |
+| `wiggle` semantics being identical across all four functions | — |
 
 The corner cases must be written deliberately, not sampled — real data will
-not contain a zero-length interval or a book-ended pair often enough to
-catch a regression. At minimum the eight already differential-tested here,
-plus their strand-aware variants.
+not contain a zero-length interval or a book-ended pair often enough to catch a
+regression. At minimum the eight already differential-tested here, plus their
+strand-aware variants, plus `.` vs `.` pinned to no-match.
+
+`nearest` and `cluster` have no current implementation to capture a baseline
+from, so they get **specification tests rather than differential fixtures** —
+hand-written cases asserting the documented semantics, including the transitive
+chain (`A-B` overlap, `B-C` overlap, `A-C` not, all one cluster) and signed
+strand-aware distance. This is a weaker safety net than the other functions
+get, and it is the price of adding them without a prior implementation.
 
 **Phase 1 — the interval API.** Build the five functions *before* layering.
 Every method collapsed is one that does not have to be assigned a layer,
@@ -861,6 +886,11 @@ glossed:
   replacement is a list comprehension, which is serial. Parallelism becomes the
   caller's decision. This is a deliberate loss of implicit concurrency, and it
   removes two of the four joblib call sites ahead of the later consolidation.
+  The loss is likely notional: that parallelism was hiding per-call subprocess
+  spawn and BED serialisation, and after Phase 2 there is no subprocess to
+  hide, so the serial version may well be faster in wall time than the parallel
+  one it replaces. Not measured, and not claimed as a benefit — only a reason
+  not to treat the loss as a regression without measuring it first.
 
 Remaining consolidation candidates, to be assessed rather than assumed: the six
 constructors (`from_bed`, `from_beds_merged`, `rdf_from_bed3`, `from_regions`,
@@ -929,12 +959,20 @@ Candidates: its own module outside the layer stack, invoked explicitly; or a
 the choice is safe — nothing in Phases 0-3 touches it — but Phase 4 should not
 try to force it into `on_resize`.
 
-**2. Whether `nearest` and `cluster` belong in Phase 1.** Both are new code
-rather than migrations: nothing in the codebase calls them today. They are
-included because the API is incoherent without them — `nearest` is the one
-operation not derivable from the overlap primitive, and `cluster` is what makes
-`merge` non-lossy. But by this document's own standard that is a speculative
-addition, and deferring them until a caller exists is defensible.
+**2. ~~Whether `nearest` and `cluster` belong in Phase 1.~~ DECIDED: they
+stay.** Both are new code rather than migrations — nothing calls them today,
+and design review r2 recommended deferring them on exactly that basis. Kept
+anyway, by owner decision: this is a general-purpose library, and "nearest
+feature and distance" is a core interval operation whose absence would send the
+next caller to hand-roll it, which is the failure mode `CLAUDE.md` names
+first. `nearest` is also the one operation not derivable from the overlap
+primitive, and `cluster` is what keeps `merge` from being lossy.
+
+The cost is accepted and named rather than waved away: they ship without
+production use, and Phase 0 has no baseline to capture for them, so they are
+covered by specification tests rather than differential fixtures. Both are
+thin wrappers over `bioframe.closest` and `bioframe.cluster`, so the code we
+own for them is the adapter, not the algorithm.
 
 ## Not in scope
 
