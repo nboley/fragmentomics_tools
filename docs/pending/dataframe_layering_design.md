@@ -141,8 +141,7 @@ reinvent column attachment. The library provides the common cases:
 A source that needs neither is free to build its frame directly. The helpers
 are a library, not a base class.
 
-**No new map helper. DECIDED.** An earlier draft proposed
-`map_over_regions`. Dropped: `dataframe.py` already has *two* parallel-map
+**No new map helper. DECIDED.** `dataframe.py` already has *two* parallel-map
 mechanisms — `DataFrameBase.parallel_apply` (fork-based, main-thread only,
 supports lambdas because nothing is pickled) and `joblib.Parallel`, used by
 `overlaps_with_beds`, `bases_overlap_with_beds`,
@@ -167,9 +166,8 @@ that, and `Pfm` becomes a thin domain object constructed from its output.
 
 ## Orientation: three patterns, not one
 
-An earlier draft proposed a single `positional` flag plus `reverse(values)`.
-That is wrong — the three existing implementations are genuinely different
-problems:
+A single `positional` flag plus `reverse(values)` cannot express this — the
+three existing implementations are genuinely different problems:
 
 | Case | Where | Pattern |
 |---|---|---|
@@ -221,13 +219,12 @@ The rejected alternatives, recorded so they are not re-proposed:
 - **Load fragment arrays lazily.** Removes the coupling by removing the
   stored state, but pays repeated h5 I/O on every access.
 
-**`on_resize` receives the new coordinates, nothing more.** An earlier draft
-claimed it needed both old and new frames because
-`bin_regions_into_windows` is one-to-many. That was wrong. The row
-multiplication happens in the frame operation itself — the join duplicates
-each parent's annotation onto every output row — so by the time the hook
-runs it is a plain per-row call needing only that row's new region. The
-existing SRDF override is already written this way:
+**`on_resize` receives the new coordinates, nothing more.** One-to-many
+operations like `bin_regions_into_windows` do not require the old frame: the
+row multiplication happens in the frame operation itself — the join duplicates
+each parent's annotation onto every output row — so by the time the hook runs
+it is a plain per-row call needing only that row's new region. The existing
+SRDF override is already written this way:
 `record.fragment_array.subset_by_region(region)`, with `region` being the new
 one.
 
@@ -265,7 +262,7 @@ class PositionalAnnotation(Protocol):
         """
 ```
 
-Four rules fix the behaviour that was previously left implicit:
+Four rules govern how layer 2 applies it:
 
 1. **Discovery.** Layer 2 scans object-dtype columns once per operation and
    collects those whose values satisfy the protocol. Columns that do not are
@@ -311,14 +308,10 @@ today's silent corruption into an explicit step.
 
 ## `pybedtools` — a decision, not an open question
 
-**Nine of the ten** interval-algebra methods reach `pybedtools`, which shells
-out to the `bedtools` binary. Excluding the dead `intersect_with_rdf` stub,
-that is 8 live methods out of 9.
-
-That count is also too low, because it is scoped to the interval-algebra
-bucket. The true blast radius is **13 methods**, and it crosses three buckets:
-two *cross-layer* methods and the *fragment-coverage* pair also reach
-`bedtools`. Derived by AST call-graph closure over the class, not by reading:
+**Thirteen methods reach `pybedtools`**, which shells out to the `bedtools`
+binary. The dependency crosses three buckets — interval algebra, the two
+cross-layer methods, and the fragment-coverage pair. Derived by AST call-graph
+closure over the class:
 
 ```
 merge_regions ────────────────────► BedTool.from_dataframe().sort().merge()
@@ -341,42 +334,22 @@ _get_fragment_coverage_sum ───────► BedTool(path).intersect()   
       └── get_fragment_coverage_sum
 ```
 
-**Four** methods touch `pybedtools` directly; the other nine inherit it. Two
-corrections to an earlier draft, both verified against the call sites:
-`get_overlapping_base_counts` is *not* a direct caller — it reaches
-`pybedtools` at two removes via `intersect_with_bed` -> `join_on_overlap`; and
-the transitive methods do **not** all funnel through it. Only four do
-(`overlaps_with_bed`, `overlaps_with_beds`, `bases_overlap_with_bed`,
-`bases_overlap_with_beds`).
+**Four** methods touch `pybedtools` directly; the other nine inherit it.
+Swapping four function bodies therefore migrates the whole surface, and the
+differential test only has to pin those four.
 
-Two methods that look like they belong here and do not:
+Three methods look like they belong here and do not:
 
-- **`sort`** — a text search for `pybedtools` hits it, but the only occurrence
-  is the docstring phrase "same as pybedtools". The body is
-  `self.sort_values([...])`, pure pandas. Noted because an automated scan
-  flags it and a migration that "fixed" it would be changing nothing.
-- **`overlaps_rdf`** — genuinely bedtools-free, using `get_interval_dict` and
-  an `IntervalTree`. It is the second overlap implementation discussed below.
-- **`intersect_with_rdf`** — a stub that raises `AttributeError` pointing at
-  `join_on_overlap`. Dead; nothing to migrate.
+| Method | Reality |
+|---|---|
+| `sort` | pure `self.sort_values([...])`. The only `pybedtools` token is the docstring phrase "same as pybedtools", so text scans flag it falsely. |
+| `overlaps_rdf` | genuine second implementation of overlap, via `get_interval_dict` + `IntervalTree`. The "two implementations of one rule, free to drift" hazard CLAUDE.md names — and proof a non-`bedtools` path is viable. |
+| `intersect_with_rdf` | a stub raising `AttributeError`. Dead. |
 
-Consequence for scoping: **swapping two function bodies migrates the entire
-interval-algebra surface**, and two more covers everything else. The remaining
-nine methods need no edit at all, which is what makes the differential test
-cheap — pin the four direct sites against bedtools output and everything
-downstream is covered by construction.
-
-The single exception is `overlaps_rdf`, which uses `get_interval_dict` and an
-**IntervalTree** — a pure-Python overlap implementation already in the tree.
-That is a second implementation of overlap living alongside the bedtools one,
-which is precisely the "two implementations of one rule, free to drift" hazard
-CLAUDE.md warns about for genomic logic. It is also proof that a
-non-`bedtools` path is viable here.
-
-CLAUDE.md records that the binary is "frequently *not* on `PATH` in sandboxes
-and AWS Batch containers, and this has caused real failures." At 9 of 10, the
-dependency is effectively total, so this contradicts the central promise that
-layer 2 imports cleanly.
+The binary is "frequently *not* on `PATH` in sandboxes and AWS Batch
+containers, and this has caused real failures" (CLAUDE.md). At 13 methods the
+dependency is effectively total, contradicting the central promise that layer 2
+imports cleanly.
 
 **Measured, 2026-09-26** (pybedtools 0.12.1, bedtools 2.31.1):
 
@@ -413,9 +386,8 @@ risk against established semantics).
 
 `RegionDataFrame` stays a `pandas.DataFrame` subclass. `bioframe` is a
 function library, not a container, so nothing about the class hierarchy
-changes — only what the interval methods call underneath. The duplicate
-overlap implementation collapses into it too: the IntervalTree path in
-`overlaps_rdf` goes.
+changes — only what the interval functions call underneath. The duplicate
+overlap implementation collapses into it too: the IntervalTree path goes.
 
 The decision rests on three independent measurements below — semantics,
 dependency behaviour, and speed. Any one of them alone would be a weak case;
@@ -554,14 +526,155 @@ only a per-region count, so chunking is exact — no cross-chunk state beyond
 the running sum. Callers are `get_fragment_coverage_sum` and one test, so the
 blast radius is small.
 
-**Prerequisite that gates all of Phase 2: `bioframe` is not available.**
-Checked, because this decision rests on it: `bioframe` is installed in **no**
-conda env on this host, and is declared in **none** of `environment.yml`,
-`pyproject.toml`, `recipe/recipe.yaml` or `requires.txt` — all four of which
-list `pybedtools`. Phase 2 therefore starts with a dependency addition, and
-the benchmark and strand-divergence numbers recorded above cannot currently be
-reproduced in the documented test env (`biomarker_env`). Re-run both after
-adding the dependency and before relying on them.
+**Prerequisite for Phase 2.** `bioframe` is declared in none of
+`environment.yml`, `pyproject.toml`, `recipe/recipe.yaml` or `requires.txt` —
+all four of which list `pybedtools` — and is installed in no conda env on this
+host. It installs from PyPI normally, but the default pip index here is a
+CodeArtifact proxy that does not mirror it, so the dependency addition must
+either mirror it or pin an index. The benchmark and strand numbers above were
+measured in a throwaway venv; re-run them in `biomarker_env` once the
+dependency lands, before relying on them.
+
+## The interval API — DECIDED
+
+Layer 2 exposes **five free functions**. Everything the current thirteen
+methods do is either one of these or a pandas expression over one of them.
+
+```python
+# One primitive. Returns index pairs, never joined columns.
+overlap_indices(a, b, *, how="inner", wiggle=0,
+                min_frac_a=0.0, min_frac_b=0.0, reciprocal=False,
+                same_strand=False) -> DataFrame[a_index, b_index, overlap_bases]
+
+nearest(a, b, *, k=1, ignore_overlaps=False, direction=None,
+        same_strand=False)        -> DataFrame[a_index, b_index, distance]
+
+cluster(a, b=None, *, wiggle=0, same_strand=False) -> Series[int]
+merge(a,   *, wiggle=0, same_strand=False)         -> RegionDataFrame
+
+overlaps(a, b, *, wiggle=0, same_strand=False)     -> Series[bool]
+```
+
+**`overlaps` is deliberately redundant.** It is
+`a.index.isin(overlap_indices(a, b).a_index)` and nothing more. It exists
+because it is the most-used operation in the family — 22 call sites across 11
+notebooks — and that composition is too noisy to write at each of them. This is
+an ergonomics exception to the "one way to do it" rule, recorded as an
+exception rather than dressed up as a principle. No other reduction gets one.
+
+**Why index pairs are the primitive.** Today `join_on_overlap` stuffs
+`self.index` into a column, serialises to BED text, and reconstructs the index
+on the way back — along with `reordered_columns`, suffix collision handling and
+column renaming. All of that machinery exists *only* to carry columns through a
+backend that cannot hold them. A primitive returning
+`(a_index, b_index, overlap_bases)` deletes it: column carrying becomes one
+pandas `.join`, performed where we control the semantics. It also collapses the
+differential-test surface to a single function returning integers, which is far
+less brittle to pin than a DataFrame with backend-dependent column order.
+
+**Everything else is pandas.** These are call-site expressions, not API:
+
+| Need | Expression |
+|---|---|
+| joined columns | `overlap_indices(a, b)` then `.join` |
+| boolean mask | `overlaps(a, b)` |
+| blacklist / non-overlapping | `overlap_indices(a, b, how="anti")` |
+| overlapping bases per region | `.groupby("a_index").overlap_bases.sum()` |
+| widest single overlap | `.groupby("a_index").overlap_bases.max()` |
+| count of hits per region | `.groupby("a_index").size()` |
+
+**Joins preserve provenance; set algebra does not.** This is the boundary that
+decides what may return an index-aligned result:
+
+| | Produces | Index-aligned result possible? |
+|---|---|---|
+| `overlap_indices`, `nearest`, `overlaps`, `cluster` | existing rows, or labels for them | **yes** |
+| `merge` | new intervals | **no** |
+
+`cluster` is the index-preserving sibling of `merge`: same grouping, but it
+returns a label per input row instead of collapsing rows, so the caller keeps
+the ability to say *which* originals formed a group.
+
+**`cluster` is transitive, and that is why it is not a join type.** Given
+`A=[100,200)`, `B=[150,300)`, `C=[250,400)`, A and C do not overlap but both
+reach B. A self-join yields the two edges `(A,B)`, `(B,C)`; `cluster` puts all
+three in one group. Overlap is a *relation*, compactly encoded as pairs;
+transitive overlap is an *equivalence*, compactly encoded as labels. Forcing
+the latter into the pair contract would emit k² pairs for a component of size k
+and leave `overlap_bases` undefined for indirectly connected pairs. Passing `b`
+gives the transitive grouping across two frames.
+
+**Scope rules.**
+
+- **Inputs are frames, never paths.** Callers load with `from_bed` explicitly.
+  This is what dissolves `intersect_with_bed`, which combined I/O with algebra
+  and belonged to neither layer.
+- **Returns are index-aligned.** Never a bare ndarray, dict, or list.
+- **No backend arguments in any signature.** `cols1`, `cols2`, `on`,
+  `suffixes`, `return_input`, `keep_order`, `ensure_int` are implementation
+  detail. Our schema is an invariant, not a parameter. This also removes the
+  `**kwargs` passthrough that makes `s=True` reachable today.
+- **One word per concept.** `wiggle` means the same thing in `overlap_indices`,
+  `overlaps`, `cluster` and `merge`.
+
+**`nearest` is not `overlap_indices(wiggle=n)`.** Wiggle answers *whether*
+something is within range; `nearest` answers *which* and *how far*, with a
+signed strand-aware distance. Neither substitutes for the other.
+
+### Net change to the thirteen
+
+| | Methods |
+|---|---|
+| **Deleted** | `get_overlapping_base_counts`, `overlaps_with_bed`, `bases_overlap_with_bed`, `overlaps_with_beds`, `bases_overlap_with_beds`, `intersect_with_bed`, `intersect_with_rdf` |
+| **Renamed / moved** | `join_on_overlap`→`overlap_indices`, `overlaps_rdf`→`overlaps`, `merge_regions`→`merge`, `drop_overlapping_regions`→ sugar for `how="anti"` |
+| **Added** | `nearest`, `cluster` |
+| **Unchanged** | `attach_blacklist_regions`, the fragment-coverage pair |
+
+All seven deletions are dead: measured across four repos and 1022 notebooks
+(source cells only), `overlaps_with_bed`, `bases_overlap_with_bed` and both
+`*_beds` variants have **zero** callers, and `get_overlapping_base_counts`'
+only two callers are those dead wrappers. `overlaps_rdf` is the one heavily
+used member — 22 uses across 11 notebooks — which is why it survives as
+`overlaps` rather than being replaced by the bedtools boolean.
+
+The deletions also remove a latent defect without needing a fix.
+`get_overlapping_base_counts` keys aggregation on `(contig, start, stop)`,
+strand excluded, so any two rows sharing coordinates collide: the later
+overwrites the earlier's entry and receives both rows' bases. A locus annotated
+on both strands returns `overlaps = [False, True]` where both are `True`, and
+counts `[0, 200]` where both are `100`. Index-aligned aggregation cannot express
+this bug, so it disappears with the code rather than needing a patch.
+
+### Mapping onto `bioframe`
+
+Verified against bioframe 0.8.0 by introspection, not from documentation.
+`bioframe` is called in three places and appears in no signature of ours.
+
+| Ours | `bioframe` | We supply |
+|---|---|---|
+| `overlap_indices` | `overlap(..., return_index=True)`, `how ∈ {left,right,outer,inner}` | `contig`→`chrom` mapping; `how="anti"` as outer + null filter; fraction thresholds; `same_strand` |
+| `nearest` | `closest(k=, ignore_overlaps=, ignore_upstream=, ignore_downstream=, return_distance=)` | signed-distance and direction convention |
+| `cluster`, `merge` | `cluster(min_dist=, return_cluster_ids=)`, `merge(min_dist=)` | `b=None` handling, label alignment |
+
+Two gaps confirmed by reading the source rather than assumed:
+
+- **Fraction thresholds do not exist in `bioframe`.** No `min_frac`,
+  `reciprocal` or equivalent token appears anywhere in the package, so
+  bedtools' `-f/-F/-r` must be implemented on our side by filtering on the
+  returned overlap length. This is straightforward but must not be forgotten —
+  it is a silent behaviour gap, not an error.
+- **`how="anti"` does not exist.** Compose it from an outer join plus a null
+  filter.
+
+`same_strand` must **not** be implemented as `on=['strand']` — that is the
+`.`-vs-`.` divergence measured above, which inverts the result on this
+codebase's default strandless input. Implement it as equality excluding `.`,
+with a test pinning `.` vs `.` to no match.
+
+**The backend is replaceable.** Because the adapter is three functions wide,
+the same API sits on `pybedtools` unchanged if `bioframe` proves unsuitable or
+cannot be packaged. The `bioframe` decision carries a fallback rather than
+being one-way.
 
 ## What a call site looks like
 
@@ -632,54 +745,82 @@ not contain a zero-length interval or a book-ended pair often enough to
 catch a regression. At minimum the eight already differential-tested here,
 plus their strand-aware variants.
 
-**Phase 1 — consolidation.** Collapse near-duplicate methods *before*
-layering. Every method collapsed is one that does not have to be assigned a
-layer, migrated, and reviewed — and the layer boundaries get easier to see
-once near-duplicates are gone. Behaviour-preserving, independently
-reviewable, and validated by Phase 0.
+**Phase 1 — the interval API.** Build the five functions *before* layering.
+Every method collapsed is one that does not have to be assigned a layer,
+migrated, and reviewed — and the layer boundaries get easier to see once the
+near-duplicates are gone. Validated against Phase 0.
 
-Confirmed candidate, read and verified:
+The work: create the `intervals` module, implement the five functions there
+over the existing `pybedtools` backend, make the surviving `RegionDataFrame`
+methods delegate to it, and delete the seven the API makes redundant.
 
-```
-overlaps_with_bed        -> get_overlapping_base_counts(bed)["max_counts"] > min_size
-bases_overlap_with_bed   -> get_overlapping_base_counts(bed)["counts"]
-overlaps_with_beds       -> joblib loop over overlaps_with_bed
-bases_overlap_with_beds  -> joblib loop over bases_overlap_with_bed
-```
+**The module is created here, not in Phase 3.** Phase 1 has to put the five
+functions somewhere, and putting them on the class only to move them two
+phases later would mean migrating every call site twice. Phase 3 is then the
+*remaining* extraction — geometry, binning, `FlDist` — not the creation of
+`intervals`. Phase 1 deliberately does **not** swap the backend: the functions
+wrap `pybedtools` at first, so that Phase 0's fixtures are validating a pure
+restructuring, with the backend change isolated in Phase 2. Two changes that
+would otherwise be tangled stay independently reviewable and independently
+revertible.
 
-Four methods that are thin wrappers over one, differing only in which column
-they select and whether they loop. That is one method with two parameters.
-It is also four of the joblib call sites, so this reduces the later
-consolidation surface.
+**This is replacement, not removal — and the distinction matters**, because
+this document's standing rule is that a method is removed only when it *cannot
+execute*, never because callers appear absent. That rule exists for a good
+reason: this library was extracted from a larger project that is no longer
+accessible, so an absent caller measures our visibility rather than the code's
+deadness.
 
-Unverified candidates, to be assessed rather than assumed: the six
-constructors (`from_bed`, `from_beds_merged`, `rdf_from_bed3`,
-`from_regions`, `from_random_regions`, `from_fname_s3_or_local`), the three
-splitters (`split_on_query`, `split_on_column`, `split_on_contig`), and the
+The seven deletions do not rely on that rule being relaxed. **No capability is
+withdrawn** — every one of them survives as an expression over
+`overlap_indices`, listed in the table above. `bases_overlap_with_bed` becomes
+a `groupby().sum()`; `overlaps_with_bed` becomes `overlaps`. A caller we cannot
+see loses a spelling, not a capability, and loses it loudly at import rather
+than silently at runtime.
+
+Two places where that reconciliation is genuinely imperfect, stated rather than
+glossed:
+
+- **`overlaps_with_bed(min_size=n)` compares with `>`, so `min_size=10` means
+  *at least 11* bases.** The replacement uses `min_bases` with `>=`. Any unseen
+  caller passing a non-default `min_size` shifts by one. The parameter is
+  off-by-one against its own name, so preserving it would mean preserving a
+  defect.
+- **The `*_beds` plural variants parallelised over BED files with joblib.** The
+  replacement is a list comprehension, which is serial. Parallelism becomes the
+  caller's decision. This is a deliberate loss of implicit concurrency, and it
+  removes two of the four joblib call sites ahead of the later consolidation.
+
+Remaining consolidation candidates, to be assessed rather than assumed: the six
+constructors (`from_bed`, `from_beds_merged`, `rdf_from_bed3`, `from_regions`,
+`from_random_regions`, `from_fname_s3_or_local`), the three splitters
+(`split_on_query`, `split_on_column`, `split_on_contig`), and the
 `get_*`/`attach_*` pairs already covered by the `inplace=` decision.
 
-**Removal uses one criterion only: cannot execute.** Caller counts are not
-evidence here — this library was extracted from a larger project that is no
-longer accessible, so nearly every method had callers and their absence
-measures our visibility, not the code's deadness. The defensible standard is
-code that raises on every path: `annotate_regions_with_max_tf_scores`
-(imported the removed `ravel` package) and `get_chromosome_q_arm_starts`
-(referenced undefined names) both qualified and are gone. Anything that
-merely looks unused stays.
+The cannot-execute rule still governs everything else.
+`annotate_regions_with_max_tf_scores` (imported the removed `ravel` package)
+and `get_chromosome_q_arm_starts` (referenced undefined names) qualified and
+are gone. Anything that merely looks unused stays.
 
-**Phase 2 — `bioframe` swap.** Replace `pybedtools` behind the existing
-method signatures, validated against Phase 0. Collapse the IntervalTree path
-in `overlaps_rdf` into it. If any same-strand behaviour is added, implement it
-as strand-equality **excluding `.`** — not `on=['strand']` — and pin `.` vs
-`.` to no-match with a test. See the strand table above for why.
+**Phase 2 — `bioframe` swap.** Replace `pybedtools` behind the five functions
+Phase 1 established, validated against Phase 0. Because Phase 1 already routed
+every caller through them, this phase touches three function bodies and no call
+sites. Scope includes the two non-algebra sites (`from_beds_merged`,
+`_get_fragment_coverage_sum`) — without them the `import pybedtools` survives
+and the phase delivers neither of its stated benefits. Collapse the
+IntervalTree path in `overlaps` into the backend. Implement `same_strand` as
+strand-equality **excluding `.`**, not `on=['strand']`, and pin `.` vs `.` to
+no-match with a test; see the strand table above. Implement the fraction
+thresholds on our side — `bioframe` has no equivalent.
 
 Ordered, because the last step is the one that delivers the benefit:
 
 1. Add `bioframe` to all four dependency manifests and re-measure the
    benchmark and the strand table in `biomarker_env`. Nothing below can start
    until this is done.
-2. Swap the two direct call sites — `merge_regions` and `join_on_overlap`.
-   The other seven algebra methods need no edit; they route through these.
+2. Swap the bodies of `overlap_indices`, `merge` and — if Phase 1 built them —
+   `nearest` and `cluster`. Nothing else in layer 2 changes: Phase 1 already
+   routed every caller through these.
 3. Migrate `from_beds_merged` (concat + `bioframe.merge`) and **delete**
    `bed_filter_callback` — zero callers, and its documented example never
    worked.
@@ -691,8 +832,9 @@ Ordered, because the last step is the one that delivers the benefit:
    `bedtools`-on-`PATH` hazard are the point, and both survive a partial
    migration. Treat a surviving import as a failed phase, not a follow-up.
 
-**Phase 3 — module extraction.** `intervals` module of free functions,
-`RegionDataFrame` delegating; `FlDist` moves out.
+**Phase 3 — remaining module extraction.** The rest of layer 2 — geometry,
+resizing, binning — moves out alongside the `intervals` module Phase 1
+created, with `RegionDataFrame` delegating; `FlDist` moves out.
 
 **Phase 4 — annotation protocol.** Sources, `on_resize` with `shrink_only`,
 `lift_over` invalidation.
@@ -702,19 +844,10 @@ of the above.
 
 ## Still open
 
-The strand question, previously the only open item, is closed: bedtools and
-bioframe agree on eight of nine strand combinations and diverge on `.` vs `.`,
-which is not currently reachable but is a landmine for the first strand-aware
-caller. Recorded above with the binding rule.
+Genuine design questions only. The `bioframe` dependency addition is a
+prerequisite, not an open question, and is stated under Phase 2 above.
 
-Three items remain.
-
-**1. `bioframe` is not a dependency yet.** Not installed in any env on this
-host, not declared in any of the four manifests. Phase 2 cannot start until it
-is added, and the benchmark and strand table above should be re-measured in
-`biomarker_env` once it is. Sequencing detail, but a hard gate.
-
-**2. Where `center_regions_on_tf_motif` goes.** The largest method on the class
+**1. Where `center_regions_on_tf_motif` goes.** The largest method on the class
 (~150 LOC), it needs JASPAR, a scoring model and a GPU, and defers its torch
 and motif imports to call time precisely to keep them off the import path. It
 is nominally an annotation source, but it does not fit the
@@ -725,109 +858,13 @@ Candidates: its own module outside the layer stack, invoked explicitly; or a
 the choice is safe — nothing in Phases 0-3 touches it — but Phase 4 should not
 try to force it into `on_resize`.
 
-**3. Where `intersect_with_bed` lands.** It reads a BED file (layer 1 I/O) and
-performs an overlap join (layer 2 algebra) in one method, so it belongs
-cleanly to neither. It also sits directly on the critical path, since
-`get_overlapping_base_counts` and everything under it route through it. The
-obvious split — a loader returning an `RegionDataFrame` plus a pure
-`join_on_overlap` — would change the public signature of a method with live
-callers, so it needs its own decision rather than being folded into Phase 2's
-backend swap.
+**2. Whether `nearest` and `cluster` belong in Phase 1.** Both are new code
+rather than migrations: nothing in the codebase calls them today. They are
+included because the API is incoherent without them — `nearest` is the one
+operation not derivable from the overlap primitive, and `cluster` is what makes
+`merge` non-lossy. But by this document's own standard that is a speculative
+addition, and deferring them until a caller exists is defensible.
 
 ## Not in scope
 
 Name-based source registration and config-driven pipelines.
-
-## Review Notes (2026-09-26)
-
-**Verdict**: APPROVED WITH CONDITIONS — **Grade A-**
-
-Reviewed against the 503-line copy of this document. Two of its findings were
-overtaken by commits that landed while the review ran; those are marked
-RESOLVED below with the commit that closed them. The rest stand.
-
-### Verified claims
-- Total method count (61 on `RegionDataFrame`) correct.
-- Cross-layer identification (`sort`, `lift_over`, `unique_regions`,
-  `drop_overlapping_regions`, `attach_blacklist_regions`) correct — all five
-  verified.
-- `lift_over` SRDF bug is real: no SRDF override, so an SRDF with fragment
-  arrays passes through silently. **RESOLVED by `cd7ff60`**, which makes it
-  refuse.
-- Phase 1 consolidation target (4 overlap wrappers -> 1) verified: they are
-  exactly the thin wrappers described.
-- bioframe boundary semantics match (the differential test is accepted).
-- `inplace=` pattern (`rdf = self if inplace else self.copy()`) confirmed.
-
-### Risks
-1. **Partial pybedtools migration.** Phase 2 replaces pybedtools in interval
-   algebra but leaves it imported for `from_beds_merged` (construction/IO) and
-   `_get_fragment_coverage_sum` (fragment coverage). Both call
-   `pybedtools.BedTool` directly. `from_beds_merged` additionally accepts a
-   `bed_filter_callback` documented as a pybedtools filter function, making the
-   dependency *contractual*, not merely implementational. Until these migrate,
-   the top-level `import pybedtools` stays and no import-weight reduction is
-   delivered.
-2. **`on_resize` has no concrete API.** The semantics (receives new
-   coordinates, `shrink_only` refusal) are sound; the mechanism (protocol
-   class? callback at attachment? method on the annotation object?) is
-   unspecified. Phase 4 could discover at implementation time that the
-   described semantics do not compose.
-3. ~~Strand-aware bioframe behaviour is the acknowledged unknown, and
-   `strand="." -> None` could interact with it in ways strandless differential
-   tests would not catch.~~ **RESOLVED by `a61b8eb`**, which measured all nine
-   combinations, found the single `.`-vs-`.` divergence the risk anticipated,
-   and recorded a binding rule (same-strand as equality *excluding* `.`, never
-   `on=['strand']`, pinned by a test).
-
-### Conditions
-1. Fix factual inaccuracies before implementation uses this as a reference:
-   - `SampleDataFrame` has **4** methods, not 6 (`detach_h5`, `close_handles`,
-     `dropna`, `label_balanced`).
-   - `get_overlapping_base_counts` reaches pybedtools *indirectly* (via
-     `intersect_with_bed` -> `join_on_overlap`), not directly. Two of the six
-     "transitive" methods go through `join_on_overlap`, not through GOBC.
-   - Geometry/resizing is **9** methods, not 10 (`center_on_summit` plus the
-     eight resize-related ones).
-2. Add `from_beds_merged` and `_get_fragment_coverage_sum` to Phase 2's scope,
-   or explicitly defer them with a rationale for why a partial migration is
-   acceptable.
-3. Expand "Still open" with (a) how `center_regions_on_tf_motif` (150 LOC, GPU,
-   deferred torch/motif imports) fits the annotation-source model, and (b)
-   where `intersect_with_bed` lands — it combines I/O and algebra, is used by
-   `get_overlapping_base_counts`, and fits neither layer 2 nor layer 3 alone.
-4. Specify the `on_resize` API concretely before Phase 4. Phases 0-3 can
-   proceed without it.
-
-### Disposition of the conditions (2026-09-26)
-
-All four addressed. One condition was **rejected on evidence** — recorded here
-rather than silently dropped.
-
-| # | Disposition |
-|---|---|
-| 1a | **ACCEPTED**, verified by execution. `SampleDataFrame` has 4 methods. Counts for all four classes re-measured; `SampleAndRegionDataFrame` was also wrong (16, not 15). |
-| 1b | **ACCEPTED and sharpened.** The reviewer was right that `get_overlapping_base_counts` is indirect. Reading the call sites showed the draft was wrong twice over: there are **two** direct callers, not three, and the transitive methods do not all funnel through GOBC. Replaced with a call graph. |
-| 1c | **REJECTED.** Geometry is 10, not 9. The reviewer counted `center_on_summit` plus 8 resize-related methods and stopped. Exhaustive bucketing of all 61 shows plumbing is *exactly* 8 without `region_lengths`, so `region_lengths` must be geometry for the table to sum to 61 — and `stop - start` is geometry on the merits. The doc was right; a counting rule is now stated so the next reader can check rather than re-derive. |
-| 2 | **ACCEPTED**, and the stated blocker dissolved. Both sites brought into Phase 2. `bed_filter_callback` has zero callers anywhere and its documented example is broken (`bed_filter=` vs `bed_filter_callback=`), so the "contractual" dependency never bound anything. `_get_fragment_coverage_sum` has a real streaming constraint and gets a chunked design. |
-| 3 | **ACCEPTED.** Both items added to "Still open", plus a third the review missed. |
-| 4 | **ACCEPTED.** `on_resize` specified as a `runtime_checkable` `Protocol` with a `ClassVar` `shrink_only`, up-front refusal, and an explicit no-interdependence rule that answers the hook-ordering risk by forbidding it. |
-
-**Found while addressing these, and not in the review:** `bioframe` — the
-backend this entire design selects — is installed in no env on this host and
-declared in none of the four dependency manifests. The benchmark and the
-nine-combination strand table are therefore not reproducible in the documented
-test env as things stand. Added to "Still open" as a hard gate on Phase 2.
-
-### Key tradeoffs
-- **bioframe over pybedtools**: correct. 3x faster at realistic scale, removes
-  the binary dependency and the import-time PATH hazard. The scope is wider
-  than stated (two non-algebra usages survive), but the direction is right.
-- **`on_resize` over keeping SRDF overrides**: the hook decouples layers and
-  generalises to future positional annotations. A smaller alternative — keep
-  the four overrides through Phase 3, defer the hook to its own design pass —
-  would still deliver interval-algebra importability without the hook risk.
-  The underspecification is tolerable only because Phase 4 is last.
-- **Composition-based annotation over method-per-source**: scales better and
-  enables fake sources in tests. The convenience-wrapper escape valve (methods
-  that delegate rather than implement) preserves ergonomics.
