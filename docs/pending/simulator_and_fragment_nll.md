@@ -134,7 +134,13 @@ captured**, which reads as an implementation bug rather than as a mis-specified
 anchor. This is the same failure the three normalisers exist to prevent, one level
 up: normalising over the wrong set is as wrong as not normalising.
 
-`W_D` is **computed per store**, like `|D|`, and never treated as a constant.
+**`W_D` is PER REGION, and `|D|` is not — the asymmetry matters.** `w` is
+normalised within a region (that is where the sampler draws), so `W_D` is a
+per-region quantity and the `log W_D` correction differs region to region; the
+oracle averages it over the scored fragments. `|D|` by contrast is purely
+geometric — the same count for every region at a given geometry — so `log|D|` is
+one number. Treating `W_D` as a single scalar would reintroduce exactly the
+mis-normalisation this section exists to prevent, just averaged.
 
 ## Stage 2 — generative form
 
