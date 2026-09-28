@@ -75,8 +75,18 @@ things: a tuple attribute on `DataFrameBase`, a computed `@property` on
 is also unenforced: `DataFrameBase.__init__` skips the check entirely when
 `data` is a `BlockManager`, which is every pandas-internal construction —
 slicing, copy, join, groupby — and the check is an `assert`, so `python -O`
-removes it too. The mechanism is where the `tuple + list` trap lives.
-`_metadata` stays.
+removes it too. `_metadata` stays.
+
+**This does not retire the `tuple + list` trap, and the document should not be
+read as claiming it does.** The trap lives in `_metadata` itself: it is a tuple
+on `DataFrameBase` and a list on `SampleAndRegionDataFrame`, and pandas
+concatenates the two during `concat`, where `tuple + list` raises. Dropping
+`_required_columns` removes one site that exhibited the same shape; it leaves
+`_metadata` exactly as it is. Normalising `_metadata` to a single type across
+the hierarchy is the actual fix and is **not** in scope here — it is a
+behaviour change to pickling and propagation that deserves its own pass. Until
+then the invariant stands as documented in `CLAUDE.md`: base tuple, subclass
+list, do not "tidy" either one.
 
 Note this does not fix the root cause: the `_constructor` hack that bypasses
 `__init__` will defeat *any* future invariant enforced there. Known limitation.
@@ -289,11 +299,12 @@ evaluated without instantiating or touching data. `RegionFragmentArray` sets
 it `True`; a future per-base score track that can pad with zeros would set it
 `False` and need no other change.
 
-**`lift_over` is a third category, and is silently broken today.** Verified:
-SRDF does **not** override `lift_over`, and the base implementation makes no
-reference to `fragment_array`. Lifting an SRDF with attached fragment arrays
-therefore yields new-assembly coordinates with old-assembly fragments still
-attached — no error, no warning.
+**`lift_over` is a third category.** SRDF now **refuses** to lift a frame with
+fragment arrays attached. Before that guard, the base implementation made no
+reference to `fragment_array`, so lifting produced new-assembly coordinates
+with old-assembly fragments still attached — no error, no warning. The guard
+stops the corruption but does not answer what lifting an annotated frame
+*should* do, which is what this section decides.
 
 It fits neither `on_resize` nor a positional `on_move`, because both assume
 the annotation survives and needs adjusting. Liftover changes the coordinate
@@ -303,8 +314,9 @@ shifted. It also fails per region (`pd.NA` since I20), can flip strand, and
 can split one region into several — none of which a transform hook models.
 
 The safe semantics are **invalidation**: `lift_over` drops every derived
-annotation and the caller re-attaches against the new assembly. That converts
-today's silent corruption into an explicit step.
+annotation and the caller re-attaches against the new assembly. That
+generalises the current refusal — which covers fragment arrays only — to every
+derived annotation, and turns a hard error into a defined operation.
 
 ## `pybedtools` — a decision, not an open question
 
@@ -576,7 +588,7 @@ less brittle to pin than a DataFrame with backend-dependent column order.
 
 | Need | Expression |
 |---|---|
-| joined columns | `overlap_indices(a, b)` then `.join` |
+| B's column values for each hit | `b.loc[idx.b_index]`, reindexed onto `idx.a_index` |
 | boolean mask | `overlaps(a, b)` |
 | blacklist / non-overlapping | `overlap_indices(a, b, how="anti")` |
 | overlapping bases per region | `.groupby("a_index").overlap_bases.sum()` |
@@ -628,14 +640,53 @@ signed strand-aware distance. Neither substitutes for the other.
 | **Deleted** | `get_overlapping_base_counts`, `overlaps_with_bed`, `bases_overlap_with_bed`, `overlaps_with_beds`, `bases_overlap_with_beds`, `intersect_with_bed`, `intersect_with_rdf` |
 | **Renamed / moved** | `join_on_overlap`→`overlap_indices`, `overlaps_rdf`→`overlaps`, `merge_regions`→`merge`, `drop_overlapping_regions`→ sugar for `how="anti"` |
 | **Added** | `nearest`, `cluster` |
-| **Unchanged** | `attach_blacklist_regions`, the fragment-coverage pair |
+| **Rewritten** | `attach_blacklist_regions` — see below |
+| **Unchanged** | the fragment-coverage pair |
 
-All seven deletions are dead: measured across four repos and 1022 notebooks
-(source cells only), `overlaps_with_bed`, `bases_overlap_with_bed` and both
-`*_beds` variants have **zero** callers, and `get_overlapping_base_counts`'
-only two callers are those dead wrappers. `overlaps_rdf` is the one heavily
-used member — 22 uses across 11 notebooks — which is why it survives as
-`overlaps` rather than being replaced by the bedtools boolean.
+**`attach_blacklist_regions` is the one method the primitive does not serve for
+free, and it is worth being precise about why.** It does not merely test for
+overlap: it reads B's *coordinate values* out of the join result
+(`contig_{rsuff}`, `start_{rsuff}`, `stop_{rsuff}`) to build a `Region` per
+overlapping blacklist interval. `overlap_indices` returns no B columns, so its
+~30-line body must be adapted — not deleted, and not carried over unchanged:
+
+```python
+idx = overlap_indices(rdf, blacklist)
+hits = blacklist.loc[idx.b_index]           # B's columns, via the returned index
+hits.index = idx.a_index                     # realign onto A
+regions = hits.groupby(level=0).apply(to_region_list)
+```
+
+This is the general pattern for any consumer that needs B's *values* rather
+than a count or a mask, and it is the honest test of the primitive: one real
+call site needs B's columns, and an index plus a `.loc` is enough to serve it.
+It also fixes an existing inconsistency — the method currently mutates the
+caller's frame on the empty-overlap path (`self["blacklist_regions"] = ""`)
+while returning a new frame otherwise, so one call has two aliasing contracts
+selected by the data. The rewrite returns a new frame on both paths.
+
+All seven deletions are dead. Measured over `fragmentomics_tools`,
+`biomarker-pipeline`, `biomarker-projects` and `flgc` — 1022 notebooks, source
+cells only, with the four `.claude/worktrees/` copies of `dataframe.py` and all
+`.ipynb_checkpoints` excluded, because both otherwise report this file's own
+internal wrappers as external consumers. `overlaps_with_bed`,
+`bases_overlap_with_bed` and both `*_beds` variants have **zero** callers
+anywhere; `get_overlapping_base_counts`' only two callers are those dead
+wrappers. Of the seven, only `intersect_with_rdf` is referenced externally, and
+it already raises `AttributeError`, so those callers are broken today.
+
+`overlaps_rdf` is the one heavily used member — **22 call sites across 11
+notebooks**, all in `biomarker-projects`, at exactly 2 per notebook (they are
+template-derived). That is why it survives as `overlaps` rather than being
+replaced by the bedtools boolean.
+
+**The deletion set is closed under its own call graph**, which is what makes it
+safe to remove in one step: `overlaps_with_bed` and `bases_overlap_with_bed`
+call `get_overlapping_base_counts`, which calls `intersect_with_bed`, which
+calls `join_on_overlap`; the `*_beds` pair calls the singular pair. Nothing
+outside the set calls into it. `_get_fragment_coverage_sum` is *not* part of
+it — it invokes `pybedtools` directly and never routes through
+`intersect_with_bed`.
 
 The deletions also remove a latent defect without needing a fix.
 `get_overlapping_base_counts` keys aggregation on `(contig, start, stop)`,
@@ -663,8 +714,18 @@ Two gaps confirmed by reading the source rather than assumed:
   bedtools' `-f/-F/-r` must be implemented on our side by filtering on the
   returned overlap length. This is straightforward but must not be forgotten —
   it is a silent behaviour gap, not an error.
-- **`how="anti"` does not exist.** Compose it from an outer join plus a null
-  filter.
+- **`how="anti"` does not exist, and `bioframe` will not tell you so.**
+  Measured: `bioframe.overlap(df1, df2, how="anti")` raises nothing. It
+  validates `how` not at all, and an unrecognised value falls through to the
+  non-inner branch, returning a **left join** — that is, every matching row,
+  which is the exact complement of what `anti` means. A typo therefore returns
+  the opposite result silently.
+
+  **Therefore `overlap_indices` validates `how` itself, before the backend is
+  called**, rejecting anything outside `{inner, left, right, outer, anti}` and
+  handling `anti` by composition (outer, then filter to null `b_index`) rather
+  than forwarding it. This is a one-line guard and it is not optional: it is
+  the only thing standing between a typo and an inverted blacklist filter.
 
 `same_strand` must **not** be implemented as `on=['strand']` — that is the
 `.`-vs-`.` divergence measured above, which inverts the result on this
@@ -763,6 +824,16 @@ wrap `pybedtools` at first, so that Phase 0's fixtures are validating a pure
 restructuring, with the backend change isolated in Phase 2. Two changes that
 would otherwise be tangled stay independently reviewable and independently
 revertible.
+
+**The signature is chosen for the destination backend, deliberately.**
+`(a_index, b_index, overlap_bases)` maps directly onto
+`bioframe.overlap(return_index=True)`, whereas over `pybedtools` it requires
+stuffing the index through a BED round-trip — the technique `join_on_overlap`
+already uses today, so it is proven, but it is not the shape one would pick for
+`pybedtools` alone. That is an accepted coupling, not an oversight: designing
+Phase 1 around the backend it is about to discard would mean changing the
+signature twice. If Phase 2 were abandoned, `overlap_indices` still works over
+`pybedtools` — it is merely less natural there.
 
 **This is replacement, not removal — and the distinction matters**, because
 this document's standing rule is that a method is removed only when it *cannot
