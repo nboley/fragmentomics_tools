@@ -465,42 +465,13 @@ the region set early**: it bounds the unreachable fraction, and without it a
 sub-100% result is uninterpretable. Widening L1's receptive field (or adding an
 explicit context branch) is the lever that shrinks the gap.
 
-## Cost — measured
+## Cost
 
-A10G (g5.xlarge), torch 2.5.1, `bf16` via `torch.autocast`, `B=64`, `P=2048`,
-`L` 25–256, **442,772 `(p,L)` pairs/region**, 54 fragments/example. Median of 20
-timed steps after 5 warmup, `cuda.synchronize()` around timings, peak VRAM reset
-per cell. `scripts/bench_fragment_logit_sweep.py`.
-
-fwd+bwd ms / peak VRAM, **naive** batching (map recomputed per sample):
-
-| hidden width \ L-chunk | 32 | 64 | all (232) |
-|---|---|---|---|
-| linear | 515.7 ms / 4.9 GB | 511.1 ms / 9.7 GB | **OOM** |
-| 32     | 597.6 ms / 5.4 GB | 593.0 ms / 10.6 GB | **OOM** |
-| 64     | 644.5 ms / 5.9 GB | 639.3 ms / 11.7 GB | **OOM** |
-
-- **The exact `(p,L)` sweep is affordable; no sampled softmax / NCE is needed.**
-- **`L_chunk = 32` is MANDATORY** — unchunked OOMs in all 12 configs. 32 beats
-  64: same wall time, half the VRAM (5.4 vs 10.6 GB at H=32).
-- **`H = 32` costs +16%** over a linear head (597.6 vs 515.7 ms) — take it. The
-  linear head cannot express any interaction between cut-site identity and
-  fragment length, and that interaction is strong and sign-flipping in the truth
-  (high/low-GC bias ratio 0.65 at L=24 vs 4.08 at L=75).
-- **`bf16` is for time, not memory.** Faster than fp32 at `H > 0` but peak VRAM
-  is slightly *higher* (autocast keeps fp32 masters beside bf16 copies). Do not
-  cite it as a memory saving.
-
-Two caveats that must be stated:
-
-1. The benchmark's 8–10× amortisation came from sharing one region forward
-   across 16 samples, and **training is now single-sample**, so budget the naive
-   **~9.3 ms/example** (597.6 ms ÷ 64 at H=32, `L_chunk=32`), **~1.8×** the
-   330–360 ms/batch baseline per example.
-2. The learned-per-offset interior weights need an offset-axis prefix tensor the
-   benchmark did not build, and the strand axis roughly doubles the endpoint
-   branch — neither was in the measured grid, so **re-measure** rather than
-   assuming it fits.
+**Not yet measured on the implemented model.** The prior benchmark
+(`scripts/bench_fragment_logit_sweep.py`) was run on a strandless, unfolded
+prototype that differs from this architecture on both the strand axis and the
+interior branch. `L_chunk = 32` is mandatory (unchunked OOMs). Re-measure
+before budgeting GPU time.
 
 ## Required tests
 
