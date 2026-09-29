@@ -191,8 +191,20 @@ docker-push:
 # `pytest -q | tail` never reaches EOF when the process never exits.
 # SIGKILL rather than SIGTERM: a process stuck in an uninterruptible futex
 # wait will not act on a catchable signal.
+# `flgc.model` is a RUNTIME dependency of background_model/simulator/capture.py
+# (imported unconditionally), but it lives outside this repo and is not pip
+# installed, so it is only importable when PYTHONPATH points at the biomarker
+# checkout. Supplying it here is what makes TestFitAndBuild -- the only test
+# exercising the predict-LUT guards on the production path -- actually RUN.
+# It was previously `pytest.importorskip`-ed and so skipped silently, which is
+# the repo's recurring failure mode: a guard that reads as protection and is
+# not. That test now FAILS rather than skips if flgc is missing, so if this
+# path ever breaks the suite goes red instead of quiet.
+FLGC_PYTHONPATH ?= /home/nathanboley/src/biomarker
+
 test:
-	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest $(PYTEST_ARGS); \
+	@PYTHONPATH="$(FLGC_PYTHONPATH):$$PYTHONPATH" \
+	timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \

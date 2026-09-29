@@ -454,7 +454,27 @@ class TestFitAndBuild:
 
     @pytest.fixture(autouse=True)
     def _require_flgc(self):
-        pytest.importorskip("flgc.model")
+        """`flgc` is a HARD runtime dependency -- its absence is a FAILURE.
+
+        Deliberately NOT ``pytest.importorskip``.  ``capture.py`` imports
+        ``flgc.model`` unconditionally, so the package is not optional; it is
+        merely absent from ``PYTHONPATH`` unless the Makefile supplies it.
+        An ``importorskip`` here made this test -- the ONLY one exercising the
+        H1 guards on the production path -- vanish silently from ``make test``:
+        a guard that reads as protection and is not.  The Makefile now sets
+        ``PYTHONPATH``; if that ever breaks, this must go RED, not quiet.
+        """
+        try:
+            import flgc.model  # noqa: F401
+        except ImportError as exc:  # pragma: no cover - environment failure
+            raise AssertionError(
+                "flgc.model is not importable. It is a RUNTIME dependency of "
+                "background_model.simulator.capture, not an optional extra. "
+                "`make test` sets PYTHONPATH=$(FLGC_PYTHONPATH); if running "
+                "pytest directly, export "
+                "PYTHONPATH=/home/nathanboley/src/biomarker. "
+                "This is deliberately a failure, not a skip."
+            ) from exc
 
     def test_fit_and_build_on_real_sample(self):
         """fit_and_build("RD-56670") produces valid LUT and marginal_fl."""
