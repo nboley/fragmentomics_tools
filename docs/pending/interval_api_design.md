@@ -406,13 +406,38 @@ The bump also closes a pre-existing hazard unrelated to this work: `main` is
 198 commits ahead of `v1.4.0` while `pyproject.toml` still declares `1.4.0`, so
 anything installed from `main` in that window reports a version it is not.
 
+## `wiggle` semantics — DECIDED, and it corrects an off-by-one
+
+**`wiggle` is defined as: a pair matches when the edge-to-edge gap between them
+is `<= wiggle`.** `wiggle=0` is plain overlap, where book-ended intervals do
+*not* match.
+
+This **fixes** a defect in the method it replaces rather than carrying it
+forward. `overlaps_rdf(max_distance=N)` reaches only `N-1`: it expands the
+query by `N` on each side and then tests with half-open `IntervalTree`
+semantics, so an interval expanded to start exactly where the query ends is
+book-ended and does not count. Measured on a 10 bp gap — `max_distance=10`
+returns `False`, `11` returns `True`. The docstring meanwhile promises
+"maximum distance (edge to edge)", so the code and its stated contract
+disagree. It is the half-open-plus-padding interaction, the same family as the
+`[lo, hi)` fl-band trap in CLAUDE.md.
+
+Fixing it is free, which is why it is being fixed now rather than preserved:
+**0 of the 22 `overlaps_rdf` call sites pass `max_distance`** — all 22 are the
+same copy-pasted line across 11 notebooks using the default — and at the
+default of 0 there is no expansion and the behaviour is already correct. So no
+result that exists today moves. The rename to `wiggle` in a major version is
+also the one moment where a semantics change cannot be silently inherited:
+the parameter name and the major version both change at once.
+
+**Required test, at the boundary.** A gap of exactly `G` must match at
+`wiggle == G` and must not at `wiggle == G-1`. Boundary-adjacent behaviour is
+what a reimplementation gets wrong, and asserting only the interior would pass
+against both the old and the new semantics. The Phase 0 digest for
+`overlaps_rdf_d10` pins the *old* answer and is therefore expected to move —
+that movement is this decision landing, not a regression.
+
 ## Still open
 
-- **`wiggle` off-by-one.** `overlaps_rdf(max_distance=N)` bridges a gap of only
-  `N-1` — measured: a 10 bp gap needs `max_distance=11`. The cause is
-  `IntervalTree` half-open semantics against an interval expanded by `N` on
-  each side. `wiggle` must either preserve this or fix it, and the choice
-  changes computed results, so it needs an explicit owner decision before
-  implementation.
 - Whether a per-region tabix BED fetch should return as a layer-1 loader, now
   that `Region.intersect_with_bed` is deleted.
