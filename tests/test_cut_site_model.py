@@ -75,8 +75,9 @@ class TestModelGeometry:
     def test_calc_input_region_size(self):
         m = CutSiteFragmentModel(tile_size=2048)
         l_in = m.calc_input_region_size(2048)
-        # model_input_size + 5 (width-6 conv trim)
-        assert l_in == 2048 + 256 + 5  # 2309
+        # model_input_size + 5 = 2309, rounded up to even = 2310
+        assert l_in == 2310
+        assert l_in % 2 == 0  # must be even for jitter_matrix
 
     def test_forward_output_matches_tile_size(self):
         """The model's output P dimension equals tile_size."""

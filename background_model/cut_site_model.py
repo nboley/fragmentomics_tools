@@ -159,9 +159,12 @@ class CutSiteFragmentModel(L.LightningModule):
 
     def calc_input_region_size(self, output_region_size: int) -> int:
         """One-hot sequence length needed to emit `output_region_size` scored
-        positions.  The width-6 conv trims 5, so l_in = model_input_size + 5.
+        positions.  The width-6 conv trims 5.  Rounded up to even for
+        jitter_matrix's matched-parity requirement (same pattern as
+        BackgroundModelKEN).
         """
-        return output_region_size + 2 * WINDOW_HALF + 5
+        raw = output_region_size + 2 * WINDOW_HALF + 5
+        return raw + (raw % 2)  # round up to even
 
     @property
     def model_input_size(self) -> int:
@@ -261,7 +264,10 @@ class CutSiteFragmentModel(L.LightningModule):
         L_chunk = self.hparams.L_chunk
 
         # -- L1: cut-site propensity ----------------------------------------
-        h = self.l1_act(self.l1_conv(x_onehot))  # (B, N1, model_input_size)
+        h = self.l1_act(self.l1_conv(x_onehot))  # (B, N1, l_in - 5)
+        # Trim extra position from even-parity rounding (if l_in was rounded up)
+        if h.shape[-1] > self._model_input_size:
+            h = h[..., :self._model_input_size]
 
         # -- Endpoint heads (NB loss) on centre P positions of h ------------
         h_centre = h[:, :, WINDOW_HALF:WINDOW_HALF + P]   # (B, N1, P)

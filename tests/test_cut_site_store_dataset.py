@@ -339,6 +339,7 @@ class TestDatasetCollate:
         model = CutSiteFragmentModel(
             tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
         )
+        l_in = model.calc_input_region_size(cfg.tile_size)
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
@@ -350,7 +351,7 @@ class TestDatasetCollate:
         )
         batch = cut_site_collate_fn([ds[0], ds[1]])
 
-        assert batch["x"].shape == (2, 4, model.model_input_size)
+        assert batch["x"].shape == (2, 4, l_in)
         assert batch["endpoints"].shape == (2, 2, cfg.tile_size)
         assert batch["mask"].shape == (2, cfg.tile_size)
         assert batch["frag_N"].shape == (2,)
@@ -373,12 +374,8 @@ class TestDatasetCollate:
         )
         batch = cut_site_collate_fn([ds[0], ds[1]])
 
-        # The model's forward expects (B, 4, l_in) but dataset returns
-        # (B, 4, model_input_size).  We need to pad the 5 extra bases
-        # for the conv margin.  In practice the dataset crops model_input_size
-        # and the extra 5 bases come from the wider l_seq.  For this test
-        # we just verify the shapes would work if we add 5 zeros.
-        x_padded = torch.nn.functional.pad(batch["x"], (0, 5))
-        logits, ep_shape, disp = model(x_padded)
+        # Dataset now crops to l_in (even, includes conv margin).
+        # Model forward should work directly.
+        logits, ep_shape, disp = model(batch["x"])
         assert logits.shape == (2, cfg.tile_size, N_L, 2)
         assert ep_shape.shape == (2, 2, cfg.tile_size)

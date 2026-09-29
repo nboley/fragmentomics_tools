@@ -216,8 +216,12 @@ class CutSiteFragmentDataset(Dataset):
             j = 0
 
         # ── Crop: concentric crops with shared jitter offset ─────────────
-        # Sequence → model_input_size (+ 5 for conv margin, handled by model)
-        x_tokens = jitter_matrix(seq_full, j, self.model_input_size)
+        # Sequence → l_in (model_input_size + 5, rounded up to even for
+        # jitter_matrix's matched-parity requirement).  The model trims
+        # any extra position from the rounding.
+        l_in = self.model_input_size + 5
+        l_in_even = l_in + (l_in % 2)  # round up to even
+        x_tokens = jitter_matrix(seq_full, j, l_in_even)
 
         # Mask and endpoints → tile_size
         mask = jitter_matrix(mask_full, j, self.tile_size)
@@ -255,7 +259,7 @@ class CutSiteFragmentDataset(Dataset):
         # ── One-hot encode ───────────────────────────────────────────────
         x_tokens = np.ascontiguousarray(x_tokens, dtype=np.uint8)
         onehot = one_hot_encode_sequences([x_tokens.tobytes()])[0]
-        x = np.ascontiguousarray(onehot.T, dtype=np.float32)  # (4, model_input_size)
+        x = np.ascontiguousarray(onehot.T, dtype=np.float32)  # (4, l_in_even)
 
         return {
             "x": torch.from_numpy(x),
