@@ -142,6 +142,48 @@ involved, and under the three-layer model it is layer 1. The distinction
 matters: if a per-region tabix fetch is ever wanted back, it returns as a
 loader, not as interval algebra.
 
+### Position space at the boundary — DECIDED after implementation
+
+`bioframe` reports matches as the **index labels** of whatever the input frames
+carried. `intervals` therefore normalises on entry, does all internal work in
+position space, and maps back to labels exactly once on exit.
+
+This was not the original design, and it was adopted because the alternative
+failed four times in one 527-line module. Every internal lookup independently
+had to remember not to treat labels as positions. Two instances raised
+`IndexError`; two returned plausible wrong answers, and the most-used function
+in the family — `overlaps` — silently returned an all-**False** mask for any
+frame whose index was not `0..n-1`, which is what any filter or slice produces.
+
+A parametrized label-safety test was added first, and it is kept. But detection
+only covers the entry points someone remembered to parametrize, whereas the
+boundary makes the error *unrepresentable*: inside it there are no labels to
+confuse. Labels now appear in exactly six places.
+
+Worth recording precisely because of how it hid: default-indexed frames are
+safe, `from_bed` produces one, and so unit fixtures, a 47-check review, my own
+verification, and a 964,593-region real-data run all exercised only the safe
+path.
+
+### Pair order is sorted, and that is a correctness requirement
+
+`overlap_indices` and `nearest` sort on `(a_index, b_index)` before returning.
+
+Row order was already part of the contract by design — two implementations can
+agree on the set of pairs and still differ on ordering, which silently breaks
+any caller that zips or positionally indexes. What was not known until
+implementation is that the order was **not stable across processes**: identical
+code on identical input produced a different digest in every process, while
+pinning `PYTHONHASHSEED` made them identical, so something upstream iterates a
+set or dict ordered by hash randomisation. It was stable *within* a process,
+which is exactly why every in-process check missed it.
+
+This predates the module's first commit rather than arriving with it. Its
+practical consequence was that the fixture manifest could never have worked as
+a baseline — the digests recorded for these operations were samples of a random
+variable. After sorting, the manifest is byte-identical across runs for the
+first time.
+
 ### The import graph — DECIDED, and it is the point of extracting the module
 
 **Goal: `intervals` must be importable without the heavy stack, and the
@@ -507,6 +549,13 @@ dataset has an edge-to-edge gap of exactly 10 bp. The lesson is that a
 correctness fix and an observable change are different things, and predicting
 the second from the first is a guess.
 
+**Moved again, later, for a reason worth separating from the rest:**
+`overlap_indices` (both directions) and `nearest` changed digest when pair
+ordering was made deterministic. Row counts were unaffected — 8,804, 8,804 and
+964,593. The *previous* digests for these three were not a baseline at all;
+they were single samples of a hash-seed-dependent ordering, and no two runs
+would have agreed. These are the first reproducible values.
+
 **Retired with their methods** (no replacement digest, the operation no longer
 exists): `join_on_overlap` both directions, `get_overlapping_base_counts`,
 `merge_regions` as a method.
@@ -538,10 +587,12 @@ previous two.
    Validate `how` ourselves against an explicit allowed set, raising on anything
    else — `bioframe.overlap` does not validate it at all, and an unrecognised
    value yields the inner join, so `how="anti"` returns the exact complement of
-   what it means rather than raising. Implement `anti` ourselves as an outer
-   join filtered to null right-hand rows. Implement the fraction thresholds
-   ourselves; `bioframe` has no `-f`/`-F`/`-r` equivalent. Build the two-frame
-   `cluster` as real code, not a delegation.
+   what it means rather than raising. Implement `anti` ourselves as a **left**
+   join filtered to null right-hand rows — an earlier draft of this document
+   said *outer*, which is wrong: an anti-join is over A, and an outer join
+   would additionally drag in unmatched B rows. Implement the fraction
+   thresholds ourselves; `bioframe` has no `-f`/`-F`/`-r` equivalent. Build the
+   two-frame `cluster` as real code, not a delegation.
 2. Delete the methods in the Net change table.
 3. Rewrite `attach_blacklist_regions`; reimplement `from_beds_merged` on layer 1
    plus layer-2 `merge`.
