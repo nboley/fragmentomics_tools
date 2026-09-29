@@ -361,13 +361,32 @@ signed strand-aware distance. Neither substitutes for the other.
 
 ### Net change to the thirteen
 
+Every method is named rather than paraphrased, so the table can be checked
+against the thirteen by name instead of by counting.
+
+| | Methods | of the 13 |
+|---|---|---:|
+| **Deleted** | `get_overlapping_base_counts`, `overlaps_with_bed`, `bases_overlap_with_bed`, `overlaps_with_beds`, `bases_overlap_with_beds`, `intersect_with_bed` | 6 |
+| **Renamed / moved** | `join_on_overlap`→`overlap_indices`, `merge_regions`→`merge`, `drop_overlapping_regions`→ sugar for `how="anti"` | 3 |
+| **Rewritten** | `attach_blacklist_regions` — see below | 1 |
+| **Migrated in Phase 2, signature unchanged** | `from_beds_merged` (drops `bed_filter_callback`), `_get_fragment_coverage_sum` (chunked read), `get_fragment_coverage_sum` | 3 |
+| | | **13** |
+
+Two more methods change without being among the thirteen, because neither
+reaches `bedtools` today:
+
 | | Methods |
 |---|---|
-| **Deleted** | `get_overlapping_base_counts`, `overlaps_with_bed`, `bases_overlap_with_bed`, `overlaps_with_beds`, `bases_overlap_with_beds`, `intersect_with_bed`, `intersect_with_rdf` |
-| **Renamed / moved** | `join_on_overlap`→`overlap_indices`, `overlaps_rdf`→`overlaps`, `merge_regions`→`merge`, `drop_overlapping_regions`→ sugar for `how="anti"` |
-| **Added** | `nearest`, `cluster` |
-| **Rewritten** | `attach_blacklist_regions` — see below |
-| **Unchanged** | the fragment-coverage pair |
+| **Renamed** | `overlaps_rdf`→`overlaps` — the `IntervalTree` implementation |
+| **Deleted** | `intersect_with_rdf` — already a stub that raises |
+
+And **`nearest` and `cluster` are added**, replacing nothing.
+
+`overlaps_rdf`'s rename carries a signature change: its `max_distance`
+parameter becomes `wiggle`, for the one-word-per-concept rule. All 22 call
+sites pass it positionally or not at all, so no caller breaks on the parameter
+name — but the rename is real and belongs in the release notes alongside the
+method rename.
 
 **`attach_blacklist_regions` is the one method the primitive does not serve for
 free, and it is worth being precise about why.** It does not merely test for
@@ -429,9 +448,19 @@ Verified against bioframe 0.8.0 by introspection, not from documentation.
 
 | Ours | `bioframe` | We supply |
 |---|---|---|
-| `overlap_indices` | `overlap(..., return_index=True)`, `how ∈ {left,right,outer,inner}` | `contig`→`chrom` mapping; `how="anti"` as outer + null filter; fraction thresholds; `same_strand` |
+| `overlap_indices` | `overlap(..., return_index=True)`, `how ∈ {left,right,outer,inner}` | `contig`→`chrom` mapping; **column renaming — see below**; `how="anti"` as outer + null filter; fraction thresholds; `same_strand` |
 | `nearest` | `closest(k=, ignore_overlaps=, ignore_upstream=, ignore_downstream=, return_distance=)` | signed-distance and direction convention |
 | `cluster`, `merge` | `cluster(min_dist=, return_cluster_ids=)`, `merge(min_dist=)` | `b=None` handling, label alignment |
+
+**The returned column names are ours to produce, not `bioframe`'s.** Verified
+against 0.8.0: `return_index=True` emits `index` and `index_` — a bare name and
+the same name with the default suffix — not `a_index`/`b_index`. And
+`return_overlap=True` emits `overlap_start`/`overlap_end`, the clipped
+coordinates, not a length. So `overlap_bases` is **computed by us** as
+`overlap_end - overlap_start`, not read from the backend. This is small but it
+is the kind of detail that silently produces a column of the wrong meaning:
+`overlap_end` alone is a coordinate, and treating it as a count would be
+wrong everywhere it is summed.
 
 Two gaps confirmed by reading the source rather than assumed:
 
@@ -486,6 +515,15 @@ bug. The fixtures exist to protect the code *we* write. That means:
 | the `contig`/`chrom` schema mapping, index preservation and realignment | — |
 | `overlap_bases` arithmetic where we compute rather than read it | — |
 | `wiggle` semantics being identical across all four functions | — |
+| `from_beds_merged` — concat-then-merge, and that dropping `bed_filter_callback` changes nothing | — |
+| `_get_fragment_coverage_sum` — that chunked accumulation equals the unchunked result | the streaming read itself |
+
+The last two are easy to forget because they are not interval algebra, but they
+are migrated in Phase 2 and so need a Phase 0 baseline like everything else.
+`_get_fragment_coverage_sum` needs its fixture most of all: chunking is the one
+migration in this design that changes the *shape* of the computation rather
+than its backend, so "same answer as before" is the only thing that will catch
+a boundary error.
 
 The corner cases must be written deliberately, not sampled — real data will
 not contain a zero-length interval or a book-ended pair often enough to catch a
@@ -508,7 +546,9 @@ The work: create the `intervals` module, implement the five functions there
 over the existing `pybedtools` backend, make the surviving `RegionDataFrame`
 methods delegate to it, and delete the seven the API makes redundant.
 
-**The module is created here, not in Phase 3.** Phase 1 has to put the five
+**The module is created here, not in Phase 3** (Phases 3-4 are defined in
+[`dataframe_layering_design.md`](dataframe_layering_design.md); this document
+covers 0-2). Phase 1 has to put the five
 functions somewhere, and putting them on the class only to move them two
 phases later would mean migrating every call site twice. Phase 3 is then the
 *remaining* extraction — geometry, binning, `FlDist` — not the creation of
