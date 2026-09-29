@@ -634,6 +634,15 @@ that movement is this decision landing, not a regression.
 
 - Whether a per-region tabix BED fetch should return as a layer-1 loader, now
   that `Region.intersect_with_bed` is deleted.
+- **`bias_correction/train.py` still calls `join_on_overlap` and
+  `drop_overlapping_regions`, and was deliberately not fixed.** It cannot
+  import — `from fragmentomics.data import ...` names a package that does not
+  exist anywhere — so the calls are unreachable and repairing them would be
+  cosmetic work on dead code. CLAUDE.md already marks `bias_correction/` as v1
+  and superseded. Recorded here because it is the only remaining grep hit for
+  the deleted methods inside the package, and the next person to run that grep
+  deserves the reason rather than a mystery. The real question is whether
+  `bias_correction/` should be deleted outright; that is its own decision.
 - **Whether `subtract` belongs in the API after all.** It was declined on the
   grounds that "nothing needs the clipped coordinates". That justification is
   **wrong**, and `scripts/build_inactive_regions.py` is the counter-example: it
