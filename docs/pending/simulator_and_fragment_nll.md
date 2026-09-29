@@ -45,7 +45,10 @@ Derivations: Appendix D.
   Length bins: 1 bp bins over 25–180 (156 bins, the surface's full support). GC bins: 5% bins over 0–100, contiguous,
   last inclusive. Other `fit` options default (`min_p=1e-6`, `max_weight=3.0`,
   `k_fit=25`). `save()` to `gcfl_model.json`; build a `predict` LUT over
-  `(L, gc_bin)`.
+  `(L, gc_bin)`. **Cache that LUT and hand it to Step 4 as an array to gather
+  from** — built once, reused across regions and across both the Step 5 sampler
+  and the Step 7 oracle. Step 4 records the measured cost of the per-element
+  alternative.
 - **Out:** fitted `GCFlDistModel`. `predict(L, gc_pct)` returns
   `min(1/P(seen), max_weight)`, **GC in percent**. Dividing by `predict` is
   multiplying by capture.
@@ -71,21 +74,39 @@ Derivations: Appendix D.
 
 ### Step 4 — Build `w` (`build_region_weights`)
 
-- **In:** four hexamer tables, `marginal_fl`, `predict`, per-region
-  `hex`/`cum_gc`, strand.
+- **In:** the four hexamer tables as a single `HexamerTables` (fields, in order,
+  `start_fwd`, `end_fwd`, `start_rev`, `end_rev`), `marginal_fl`, `predict`,
+  per-region `hex_fwd`/`hex_rc`/`cum_gc`, strand.
 - **Do:** per region, per strand `s`, with `c3(L) = c5 + σ·L`
   (`σ = +1` plus, `-1` minus):
 
   ```
-  S_s        = Σ_{c5} start_s[hex(c5)]
+  S_s        = Σ_{c5 : Z_s(c5) > 0} start_s[hex(c5)]
   E_s(c5,L)  = end_s[hex(c3(L))] · marginal_fl(L) / predict(L, gc(L))     L = 25..180
   Z_s(c5)    = Σ_{L=25..180} E_s(c5,L)
   w(c5,c3,s) = ½ · start_s[hex(c5)]/S_s · E_s(c5,L)/Z_s(c5)
   ```
 
+- **Hexamer track:** plus strand uses `hex = hex_fwd` for **both** `c5` and `c3`;
+  minus strand uses `hex = hex_rc` for **both**. (Stated here so Step 4 is
+  followable without Appendix D.)
+- **`S_s` range:** the sum runs only over `c5` with `Z_s(c5) > 0` — positions
+  where at least one fragment is achievable. Including `Z_s(c5) = 0` positions
+  (edge-truncated, or fully N-masked) breaks the Appendix A cancellation: the
+  strand marginal falls below ½ by exactly the dead-mass fraction. It also
+  conditions the start draw on "at least one fragment is possible here", which is
+  the correct conditional for a rejection-free sampler.
 - **Edge rule:** `Z_s(c5)` sums only those `L` whose `c3(L) = c5 + σ·L` stays in
   `[0, region_len]`; off the region `hex(c3)` is undefined. This per-`c5`
   truncation is exactly what makes `|Ω| = 2 · Σ_L (region_len − L + 1)` correct.
+- **`predict` is supplied as a cached `(L, gc_bin)` lookup table** and gathered
+  from, not called per element (owner decision, 2026-09-29). Built once and reused
+  across regions and across **both** the Step 5 sampler and the Step 7 oracle.
+  Measured motivation: the scalar `predict(L, gc)` form costs **767,052 calls and
+  0.665 s per region** at `region_len` 2560 with a *no-op* `predict` — exactly one
+  Python call per element of `Ω`. *Estimate:* ~1–2 s/region with the real
+  `GCFlDistModel`, ~4–10 h over 11,505 regions once the oracle's second pass is
+  counted.
 - **Out:** `w`, a fully normalised probability over the generative domain `Ω`:
   `Σ_Ω w = 1` **exactly**, strand marginal exactly ½. `build_region_weights`
   returns this normalised `w`.
@@ -226,6 +247,12 @@ The strand marginal is `Σ_{c5} Σ_L w = ½` for each `s`, exactly.
 
 The cancellation `Σ_L E_s(c5,L) = Z_s(c5)` holds **for any end-step factor**,
 because `Z_s(c5)` is *defined* as that sum.
+
+The step `Σ_{c5} start_s[hex(c5)]/S_s = S_s/S_s` requires that `S_s` sum over
+**exactly** the `c5` that contribute to the numerator — i.e. those with
+`Z_s(c5) > 0`, per Step 4. A `c5` with `Z_s(c5) = 0` contributes nothing above
+(its `E_s` is identically zero), so including it in `S_s` would leave
+`Σ_{Z>0} start_s / Σ_{all} start_s < 1` and the strand marginal short of ½.
 
 ### Appendix B — Sequential form, not the symmetric joint
 
