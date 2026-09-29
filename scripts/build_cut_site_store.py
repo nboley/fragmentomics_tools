@@ -30,11 +30,12 @@ import zarr
 # Bootstrap: background_model is not an installed package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import h5py
+
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
 )
-from fragmentomics_tools.fragment_array import RegionFragmentArray
 from fragmentomics_tools.region import Region, one_hot_encode_sequences
 
 log = logging.getLogger(__name__)
@@ -89,43 +90,68 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
     return valid_regions, sequences, masks
 
 
-def _extract_fragments(h5_path, region, L_min, L_max):
-    """Extract fragments from h5 for one region, filter by length and centre.
+_BIN_SIZE = 5000  # fragments_h5 index bin size
 
-    Returns (start, length, strand) arrays in region-local coords,
-    filtered to in-band lengths with centre in [0, l_target).
-    """
-    rfa = RegionFragmentArray.from_fragments_h5(h5_path, region)
-    if rfa.n_fragments == 0:
+# Per-worker h5 handle cache (one open per process, not per region)
+_worker_h5 = {}
+
+
+def _extract_worker(args_tuple):
+    """Worker for multiprocessing.Pool.map.  Opens h5 once per process."""
+    h5_path, chrom, reg_start, reg_stop, L_min, L_max = args_tuple
+
+    # Lazy per-process h5 open
+    if h5_path not in _worker_h5:
+        _worker_h5[h5_path] = h5py.File(h5_path, 'r')
+    f = _worker_h5[h5_path]
+
+    if chrom not in f['data']:
+        return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
+
+    # Use the h5 index to find the slice of fragments near this region
+    idx = f['index'][chrom]
+    d = f['data'][chrom]
+    start_bin = max(0, reg_start // _BIN_SIZE - 1)
+    end_bin = min(len(idx) - 1, reg_stop // _BIN_SIZE + 1)
+    lo = int(idx[start_bin])
+    hi = int(idx[end_bin])
+    if lo >= hi:
+        return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
+
+    # Read the candidate slice
+    starts_abs = d['starts'][lo:hi].astype(np.int64)
+    lengths = d['lengths'][lo:hi].astype(np.int64)
+    raw_strand = d['strand'][lo:hi]
+
+    # Filter: overlaps region
+    overlap = (starts_abs + lengths > reg_start) & (starts_abs < reg_stop)
+    starts_abs = starts_abs[overlap]
+    lengths = lengths[overlap]
+    raw_strand = raw_strand[overlap]
+
+    if len(starts_abs) == 0:
         return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
 
     # Region-local coordinates
-    starts = (rfa.starts - region.start).astype(np.int64)
-    lengths = rfa.lengths.astype(np.int64)
-    strands = np.array([0 if s in ('+', b'+') else 1 for s in rfa.fragment_strands],
-                       dtype=np.uint8)
+    starts = starts_abs - reg_start
 
-    # Filter to in-band lengths
+    # Encode strand: '+' or b'+' → 0, else 1
+    strands = np.where(
+        (raw_strand == b'+') | (raw_strand == '+'), 0, 1
+    ).astype(np.uint8)
+
+    # Filter: in-band length, centre in [0, l_target), start >= 0
+    l_target = reg_stop - reg_start
     keep = (lengths >= L_min) & (lengths <= L_max)
-
-    # Centre-based filter: centre in [0, l_target), start non-negative (uint16)
-    l_target = region.stop - region.start
     centres = starts + lengths // 2
     keep &= (centres >= 0) & (centres < l_target)
     keep &= (starts >= 0)
 
-    starts = starts[keep].astype(np.uint16)
-    lengths = lengths[keep].astype(np.uint16)
-    strands = strands[keep]
-
-    return starts, lengths, strands
-
-
-def _extract_worker(args_tuple):
-    """Worker for multiprocessing.Pool.map."""
-    h5_path, chrom, start, stop, L_min, L_max = args_tuple
-    region = Region(chrom, start, stop, strand=None)
-    return _extract_fragments(h5_path, region, L_min, L_max)
+    return (
+        starts[keep].astype(np.uint16),
+        lengths[keep].astype(np.uint16),
+        strands[keep],
+    )
 
 
 def build_store(args):
