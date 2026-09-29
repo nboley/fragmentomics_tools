@@ -104,10 +104,18 @@ def precompute_region(
     import pysam
 
     region_len = gstop - gstart
-    fa = pysam.FastaFile(fasta_path)
-    # Fetch with HEX_HALF flanking on each side for cut-site hexamers
-    seq = fa.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
-    fa.close()
+
+    if gstart < HEX_HALF:
+        raise ValueError(
+            f"gstart={gstart} < HEX_HALF={HEX_HALF}: cannot fetch the "
+            f"{HEX_HALF}-bp left flank needed for cut-site hexamers. "
+            f"Regions must start at least {HEX_HALF} bp from the "
+            f"chromosome start."
+        )
+
+    with pysam.FastaFile(fasta_path) as fa:
+        # Fetch with HEX_HALF flanking on each side for cut-site hexamers
+        seq = fa.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
     seq_bytes = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
 
     # Cut-site hexamers: seq_bytes[c : c+6] for c in 0..region_len

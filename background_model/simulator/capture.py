@@ -54,11 +54,11 @@ SIM_GC_BINS = [
 ] + [(int((N_GC_BINS - 1) * GC_BIN_WIDTH), 100)]
 # Result: [(0,4), (5,9), (10,14), ..., (90,94), (95,100)]
 # _bin_index uses lo <= v <= hi (inclusive), so 4.5 falls in (0,4)? No —
-# 4.5 > 4, so it misses (0,4) and hits (5,9) because 5 <= 4.5 is False.
-# Actually 4.5 < 5 so it falls between bins.  BUT: duphist GC values are
-# integers (whole-number percent), so non-integer values don't arise in the
-# fit.  The LUT's gc_bin_index (floor-based) handles non-integer GC at
-# predict time.  The fit bins only need to cover the integer grid.
+# 4.5 > 4, so it misses (0,4); and 4.5 < 5, so it also misses (5,9) —
+# it falls between bins.  BUT: duphist GC values are integers
+# (whole-number percent), so non-integer values don't arise in the fit.
+# The LUT's gc_bin_index (floor-based) handles non-integer GC at predict
+# time.  The fit bins only need to cover the integer grid.
 
 MAX_SANE_LENGTH = 1000
 
@@ -69,6 +69,9 @@ def load_duphist(sample: str, duphist_dir: str = DUPHIST_DIR) -> pd.DataFrame:
     """Load and filter a paired-end duplicate histogram.
 
     Returns rows with ``1 <= length <= MAX_SANE_LENGTH``.
+
+    Note: the ``{sample}__duphist_wg.tsv.gz`` filename pattern is hardcoded.
+    Phase 5 should wire this into the full pipeline's path resolution.
     """
     path = f"{duphist_dir}/{sample}__duphist_wg.tsv.gz"
     df = pd.read_csv(path, sep="\t")
@@ -94,6 +97,7 @@ def fit_capture_surface(
     duphist_dir: str = DUPHIST_DIR,
     min_cell_size: int = 200,
     save_path: str | None = None,
+    df: pd.DataFrame | None = None,
 ) -> "GCFlDistModel":
     """Fit a ``GCFlDistModel`` from a paired-end duphist.
 
@@ -110,6 +114,10 @@ def fit_capture_surface(
         Minimum number of unique molecules per (length, gc) cell for fitting.
     save_path : str, optional
         If provided, serialize the fitted model to this JSON path.
+    df : DataFrame, optional
+        Pre-loaded duphist.  If provided, ``sample`` and ``duphist_dir`` are
+        not used for loading (avoids a redundant gzipped-TSV read when the
+        caller already has the data).
 
     Returns
     -------
@@ -119,7 +127,8 @@ def fit_capture_surface(
     """
     from flgc.model import GCFlDistModel
 
-    df = load_duphist(sample, duphist_dir=duphist_dir)
+    if df is None:
+        df = load_duphist(sample, duphist_dir=duphist_dir)
     cell_map = build_cell_map(df)
     model = GCFlDistModel()
     model.fit(
@@ -137,7 +146,47 @@ def predict_lut_from_model(model) -> np.ndarray:
     """Build the ``(N_LENGTHS, N_GC_BINS)`` predict LUT from a fitted model.
 
     Wraps ``build_predict_lut`` with the model's ``predict`` method.
+
+    The LUT evaluates ``predict`` at bin midpoints (2.5, 7.5, ..., 97.5).
+    This is exact **only if** the model's ``predict`` is piecewise-constant
+    on those bins — true for the ZTNB method (which bins GC internally via
+    ``_bin_index``), but NOT for ``spike_grid`` (which interpolates).  The
+    assertions below enforce this precondition.
+
+    Raises
+    ------
+    ValueError
+        If the model uses ``spike_grid`` (interpolated, not piecewise-constant)
+        or if the model's ``gc_bins`` do not match ``SIM_GC_BINS``.
     """
+    # Guard 1: the model must be ZTNB, not spike_grid.
+    # GCFlDistModel._method is private — checked flgc/model.py (biomarker repo):
+    # there is no public equivalent.  _method is "ztnb" after .fit() and
+    # "spike_grid" after .from_spike_grid(); it is serialised as "method" in
+    # save()/load().  Using the private attr is the lesser evil vs. no check.
+    if getattr(model, "_method", None) == "spike_grid":
+        raise ValueError(
+            "predict_lut_from_model requires a ZTNB model (piecewise-constant "
+            "predict on GC bins), but got a spike_grid model (interpolated). "
+            "The LUT evaluates predict at bin midpoints, which is only exact "
+            "for piecewise-constant models."
+        )
+
+    # Guard 2: the model's gc_bins must match SIM_GC_BINS.
+    # If they differ, the LUT's bin midpoints don't align with the model's
+    # internal binning, and the gather silently approximates.
+    model_gc_bins = getattr(model, "gc_bins", None)
+    if model_gc_bins is not None:
+        sim_gc_tuples = [tuple(b) for b in SIM_GC_BINS]
+        model_gc_tuples = [tuple(b) for b in model_gc_bins]
+        if model_gc_tuples != sim_gc_tuples:
+            raise ValueError(
+                f"Model gc_bins do not match SIM_GC_BINS. "
+                f"Model: {model_gc_tuples[:3]}...{model_gc_tuples[-1:]}, "
+                f"Expected: {sim_gc_tuples[:3]}...{sim_gc_tuples[-1:]}. "
+                f"Mismatched bins make the LUT midpoint evaluation inexact."
+            )
+
     return build_predict_lut(model.predict)
 
 
@@ -198,6 +247,7 @@ def fit_and_build(
         duphist_dir=duphist_dir,
         min_cell_size=min_cell_size,
         save_path=save_path,
+        df=df,
     )
     lut = predict_lut_from_model(model)
     fl = build_marginal_fl(df)

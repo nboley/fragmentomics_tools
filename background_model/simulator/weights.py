@@ -79,10 +79,11 @@ def gc_bin_index(gc_pct_values: np.ndarray) -> np.ndarray:
     """Map GC-percent values to bin indices.
 
     Bins: ``[0,5), [5,10), ..., [95,100]`` — contiguous 5% bins, last
-    inclusive.  At an exact boundary (e.g. 5.0) the lower bin wins because
-    ``floor(5.0 / 5.0) = 1`` which is the ``[5,10)`` bin — correct, since
-    the boundary belongs to the next bin.  The exception is 100.0, which is
-    clamped into the last bin (index 19) by the ``last-inclusive`` rule.
+    inclusive.  At an exact boundary (e.g. 5.0) the upper bin wins:
+    ``floor(5.0 / 5.0) = 1``, placing 5.0 in the ``[5,10)`` bin —
+    correct, since ``[0,5)`` is half-open on the right.  The exception
+    is 100.0, which is clamped into the last bin (index 19) by the
+    ``last-inclusive`` rule.
 
     Boundary semantics (Appendix F):
       - ``_bin_index`` in ``flgc.model`` uses ``lo <= v <= hi`` (inclusive on

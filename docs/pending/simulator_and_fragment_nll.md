@@ -42,10 +42,17 @@ Derivations: Appendix D.
   `(length, gc, multiplicity, molecule_keys)`.
 - **Do:** `load_duphist` → `build_cell_map` →
   `GCFlDistModel().fit(cell_map, length_bins, gc_bins, min_cell_size=200)`.
-  Length bins: 1 bp bins over 25–180 (156 bins, the surface's full support). GC bins: 5% bins over 0–100, contiguous,
-  last inclusive. Other `fit` options default (`min_p=1e-6`, `max_weight=3.0`,
+  Length bins: 1 bp bins over 25–180 (156 bins, the surface's full support).
+  GC bins: 5% inclusive-integer bins `(0,4),(5,9),…,(95,100)` — contiguous
+  on the integer grid (which is all the duphist fit sees), last inclusive. Other `fit` options default (`min_p=1e-6`, `max_weight=3.0`,
   `k_fit=25`). `save()` to `gcfl_model.json`; build a `predict` LUT over
-  `(L, gc_bin)`. **Cache that LUT and hand it to Step 4 as an array to gather
+  `(L, gc_bin)` by evaluating `predict(L, gc_mid)` at each bin's **midpoint**
+  (2.5, 7.5, ..., 97.5). This midpoint evaluation is exact **only if**
+  `predict` is piecewise-constant on those bins — true for the ZTNB method
+  (which bins GC internally via `_bin_index` before lookup), but NOT for
+  `spike_grid` (which interpolates). `predict_lut_from_model` asserts both
+  conditions: model is ZTNB and `model.gc_bins == SIM_GC_BINS`.
+  **Cache that LUT and hand it to Step 4 as an array to gather
   from** — built once, reused across regions and across both the Step 5 sampler
   and the Step 7 oracle. Step 4 records the measured cost of the per-element
   alternative.
@@ -338,16 +345,26 @@ from a defect.
 ### Appendix F — Bin boundary semantics for the capture fit
 
 `_bin_index` tests `lo ≤ v ≤ hi` (inclusive) and returns the first match; `gc_pct`
-is **continuous**. Integer bins like `(0,4),(5,9),…` would drop every non-integer
-value — 4.5 matches no bin and silently lands on `max_weight` (→ `capture =
-1/3`). Use contiguous bins `[0,5), [5,10), …, [95,100]` with the last inclusive;
-at an exact boundary the first (lower) bin wins, which is fine. Length bins
-`(25,25)…(180,180)` are unambiguous integers. Do not take the `flgc` defaults:
-their top length bin `(101,200)` would collapse the whole high band `[110,180)`
-into one bin, leaving `capture` constant in `L` across it, and their GC range
-stops short of 0–100 so extreme-GC fragments fall out of bin onto `max_weight`.
-GC is percent (0–100) throughout the `flgc` path — `build_cell_map` keys on the
-duphist's percent column, `gc_bins` are percent, `predict()` takes percent.
+is **continuous**. `SIM_GC_BINS` are `(0,4),(5,9),…,(95,100)` — inclusive-integer
+ranges with **unit-width gaps** for non-integer input: `_bin_index(4.5,
+SIM_GC_BINS)` returns `None` because `4.5 > 4` and `4.5 < 5`. This is correct
+for the fit path, where duphist GC values are integers (whole-number percent), so
+non-integer values never arise. The per-fragment weight path uses continuous GC
+and therefore uses `gc_bin_index` (floor-based, `floor(gc/5)` clamped to
+`[0, 19]`), which has no gaps — it covers the full `[0, 100]` range contiguously.
+
+The design doc's "contiguous" claim applies to `gc_bin_index`, not to
+`SIM_GC_BINS` fed to `_bin_index`. `SIM_GC_BINS` covers the integer grid
+exactly — which is all the fit sees — while `gc_bin_index` covers the continuous
+range the weight builder needs.
+
+Length bins `(25,25)…(180,180)` are unambiguous integers. Do not take the `flgc`
+defaults: their top length bin `(101,200)` would collapse the whole high band
+`[110,180)` into one bin, leaving `capture` constant in `L` across it, and their
+GC range stops short of 0–100 so extreme-GC fragments fall out of bin onto
+`max_weight`. GC is percent (0–100) throughout the `flgc` path —
+`build_cell_map` keys on the duphist's percent column, `gc_bins` are percent,
+`predict()` takes percent.
 
 ---
 

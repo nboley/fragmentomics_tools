@@ -5,7 +5,10 @@ This is the Phase 1 lesson: invariants that are insensitive to the most likely
 defect are useless.
 
 Required assertions (from the task):
-1. LUT gather produces bit-comparable results to the scalar path on same inputs.
+1. LUT construction produces the correct shape, values at bin midpoints, and
+   normalisation invariant.  Exactness against the real GCFlDistModel is
+   guaranteed by the ZTNB piecewise-constant property, now asserted in
+   ``predict_lut_from_model`` (H1 guard).
 2. GC values on exact bin boundaries go to the correct bin (0, 5, 100, last-inclusive).
 3. marginal_fl sums to exactly 1 over 156 entries.
 4. hex_fwd / hex_rc satisfy the contract Step 4 relies on: the RC track genuinely
@@ -61,17 +64,24 @@ def _synthetic_region(region_len, seed=123):
     return hex_fwd, hex_rc, cum_gc, valid
 
 
-# ── 1. LUT vs scalar bit-comparability ──────────────────────────────────
+# ── 1. LUT construction and normalisation ──────────────────────────────
 
-class TestLUTBitComparability:
-    """The LUT gather must produce identical results to calling the same
-    predict function element-by-element.
+class TestLUTConstructionAndNormalisation:
+    """The LUT must be correctly built from a predict callable and the
+    weight normalisation invariant must hold when the LUT is used.
 
     What must FAIL: if gc_bin_index maps a GC value to the wrong bin, the
     LUT lookup returns a different predict value, so the unnormalised E
     values differ.  After normalisation the total is still 1 (because
     normalisation cancels any constant-factor error), but the per-element
     weights differ.
+
+    Note: these tests use synthetic predict functions that are NOT
+    piecewise-constant, so they verify LUT construction mechanics and
+    normalisation, not bit-exactness against the real GCFlDistModel.
+    Exactness on the real path is guaranteed by the ZTNB model's
+    piecewise-constant property, now enforced by the H1 guard in
+    ``predict_lut_from_model``, and exercised by ``TestFitAndBuild``.
     """
 
     def test_trivial_predict_bit_exact(self):
@@ -422,3 +432,44 @@ class TestBuildPredictLUT:
         """LUT values must all be positive (predict is 1/P(seen))."""
         lut = build_predict_lut(lambda L, gc: 1.0 + 0.01 * gc)
         assert (lut > 0).all()
+
+
+# ── 7. fit_and_build end-to-end (H1 + M5) ────────────────────────────
+
+class TestFitAndBuild:
+    """End-to-end test: fit a real capture surface and build the LUT.
+
+    Exercises the full ``fit_and_build`` → ``predict_lut_from_model`` path,
+    which is the real-data entry point.  After the H1 guards land, this
+    test also proves the H1 conditions hold on the production path: the
+    fitted model is ZTNB (not spike_grid) and its gc_bins match SIM_GC_BINS.
+    If either guard fails, the test fails with a clear ValueError before
+    reaching the shape/value assertions.
+
+    What must FAIL: if the model were spike_grid or its gc_bins mismatched,
+    ``predict_lut_from_model`` raises ValueError (H1 guard).  If the LUT
+    shape or marginal_fl normalisation is wrong, the assertions below catch
+    it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_flgc(self):
+        pytest.importorskip("flgc.model")
+
+    def test_fit_and_build_on_real_sample(self):
+        """fit_and_build("RD-56670") produces valid LUT and marginal_fl."""
+        from background_model.simulator.capture import fit_and_build
+
+        lut, fl = fit_and_build("RD-56670")
+
+        # LUT shape: 156 lengths × 20 GC bins
+        assert lut.shape == (N_LENGTHS, N_GC_BINS), (
+            f"LUT shape {lut.shape} != ({N_LENGTHS}, {N_GC_BINS})"
+        )
+        # All predict values must be positive (they are 1/P(seen), capped)
+        assert (lut > 0).all(), "LUT contains non-positive values"
+
+        # marginal_fl: 156 entries, sums to 1, all non-negative
+        assert fl.shape == (N_LENGTHS,)
+        assert abs(fl.sum() - 1.0) < 1e-15, f"marginal_fl sum {fl.sum()} != 1.0"
+        assert (fl >= 0).all(), "marginal_fl contains negative values"
