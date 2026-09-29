@@ -142,6 +142,60 @@ involved, and under the three-layer model it is layer 1. The distinction
 matters: if a per-region tabix fetch is ever wanted back, it returns as a
 loader, not as interval algebra.
 
+### The import graph — DECIDED, and it is the point of extracting the module
+
+**Goal: `intervals` must be importable without the heavy stack, and the
+dependency chains must stay clean.**
+
+This nearly did not happen. The design specified `merge(a, ...) -> RegionDataFrame`,
+which forces `intervals` to import `dataframe.py`. Measured:
+
+| import | time | modules | pulls in |
+|---|---|---|---|
+| `fragmentomics_tools.dataframe` | **6.62 s** | **2779** | pysam, pybedtools, matplotlib, sklearn, numba |
+| `pandas` + `bioframe` alone | 2.01 s | 822 | matplotlib |
+
+So the extracted module would have reproduced, exactly, the problem the
+layering document opens by describing. Four review rounds missed it because
+they checked the API surface rather than the import graph.
+
+**The types do not change** — layer 2 keeps taking and returning
+`RegionDataFrame`. The fix is that the heavy imports become *lazy*.
+
+Per-dependency, measured, with what each is actually for:
+
+| dep | cost | what for | disposition |
+|---|---|---|---|
+| `sklearn` | **2.22 s** | one `sk_shuffle` call in `label_balanced` | **gone** — the method is deleted |
+| `numba` | 0.80 s | two `@numba.njit` kernels in `fragment_array.py`, reached via `dataframe.py` importing `RegionFragmentArray` | **lazy** — import inside the fragment-attachment methods |
+| `matplotlib` | 0.45 s | `fragment_matrix.py`, `plot/` | **lazy** now; plotting moves into `plot/` in a later phase |
+| `pybedtools` | 0.44 s | interval algebra | **removed from the library** |
+| `pysam` | **0.09 s** | FASTA/tabix in `region.py`, `formats.py` | **stays eager** — it is not the problem |
+| `intervaltree` | 0.03 s | `overlaps_rdf` | removable once that method migrates; a later phase |
+
+**Correct a claim the layering document makes.** Its problem statement says
+interval arithmetic "cannot be imported without pulling in pysam, the motif
+stack, and `pybedtools`". `pysam` costs **0.09 s** — naming it first is
+misleading, and the 2.22 s dependency goes unmentioned. Cost, not count, is
+what matters here.
+
+**`dataframe.py` imports `intervals` lazily too.** Eagerly, `bioframe`'s 1.80 s
+lands on every `import fragmentomics_tools.dataframe` and consumes most of what
+the other deferrals just bought. Imported inside the delegating methods,
+`intervals` stays cheap standalone and `dataframe` pays only on first use.
+Python caches the module, so the cost is paid once.
+
+**The general rule, for anything not resolved above:** an import used by a
+method that may later be removed or relocated goes *inside that method* for
+now. That is deliberately a holding position rather than an architecture — it
+buys the import-time win immediately without pre-judging which methods survive,
+and it gets revisited in the later phases.
+
+**Explicitly not in this phase:** `fragment_matrix` is heavily used — 17 live
+notebooks, plus 8 library files including `plot/tracks.py` and `dataframe.py`.
+Replacing or removing it is its own migration with its own design, not a line
+item here.
+
 ### `bioframe` is the backend
 
 `bioframe 0.8.0` is packaged on **bioconda** (`pyhdfd78af_0`, noarch), and
@@ -256,12 +310,29 @@ and the consumer counts pulled in with them.
 | **Deleted — path-taking, dissolved by the layer rule** | `intersect_with_bed` |
 | **Deleted — dead, and removes the chunked-migration risk** | `get_fragment_coverage_sum`, `_get_fragment_coverage_sum`, `get_fragment_coverage_track` |
 | **Deleted — dead, on `Region`** | `Region.intersect_with_bed`, `Region.get_bed_coverage_array` |
+| **Deleted — NOT dead; owner accepted the break** | `label_balanced` (both definitions) — see below |
 | **Renamed / moved to layer 2** | `join_on_overlap`→`overlap_indices`, `overlaps_rdf`→`overlaps`, `merge_regions`→`merge`, `drop_overlapping_regions`→ `how="anti"` |
 | **Rewritten** | `attach_blacklist_regions` — needs B's coordinate values, which `overlap_indices` does not return; see below |
 | **Reimplemented, stays layer 1** | `from_beds_merged` — read each BED, concat, call layer-2 `merge`; `bed_filter_callback` dropped |
 | **Added** | `nearest`, `cluster` |
 
-Every deletion survives as an expression over what replaces it, per Requirement
+**`label_balanced` is the one deletion that is not dead code, and the cost is
+recorded rather than glossed.** Measured across live notebooks — excluding
+`archive/` and `.notebook_backups/` — it has **30 calls across 17 notebooks**,
+which is *more* than any other method in this change, including `overlaps_rdf`
+at 22 across 11. Owner decision, taken with those numbers in hand: delete it.
+It is downsampling-to-the-minority-class, not interval algebra, and it does not
+belong in this library.
+
+Note for whoever reads this later wondering why: deleting it was **not**
+necessary to drop `sklearn`. `sklearn` costs 2.22s at import — a third of
+`dataframe.py`'s total — for this single `sk_shuffle` call, and moving the
+import inside the method would have saved exactly the same time with no
+breakage. The deletion is a scope judgement, and the import saving is a
+consequence, not the reason.
+
+Every other deletion survives as an expression over what replaces it, per
+Requirement
 6. The replacements are one line each:
 
 | Was | Now |
@@ -387,14 +458,32 @@ look", not "there is a regression". Several will legitimately move — the
 zero-length and book-ended cases are exactly where independent implementations
 differ.
 
-The failure mode to avoid is someone editing a fixture to match new output in
-order to get a green suite. That converts the one artifact that can tell us
-what changed into a rubber stamp. **A moved digest is a decision to record, not
-a number to update.**
+**The old interface is not being preserved, and the fixtures do not constrain
+the new one.** Owner position: this is a breaking change, and the goal is a
+clean interface going forward rather than bit-compatibility with `bedtools`.
+So a moved digest is *expected*, and nobody needs to justify it against the old
+answer.
+
+What the fixtures are still good for is the narrower and more useful question:
+**did something move that nobody intended to move?** Record movements in the
+section below as they are found, so the diff is visible rather than silently
+absorbed. That costs a line per movement and is the only thing standing between
+"we changed the semantics deliberately" and "we changed them by accident".
+
+### Fixture movements — append during implementation
+
+| fixture | old | new | why it moved |
+|---|---|---|---|
+| `overlaps_rdf_d10` | (Phase 0 digest) | — | expected: `wiggle` corrects the off-by-one, so a 10 bp gap now matches at 10 rather than 11 |
 
 **Phase 1 — the interval API on `bioframe`.** One phase, collapsed from the
 previous two.
 
+0. **Preserve the `ref` equality check.** `join_on_overlap` currently asserts
+   `self.ref == other.ref`; that is what stops an hg19 frame being joined
+   against an hg38 one. Requirement 6 forbids withdrawing capability, and this
+   is a live guard against a silent wrong answer, so every two-frame function
+   keeps it. This preserves existing behaviour rather than changing it.
 1. Build the five functions in a new `intervals` module against `bioframe`.
    Validate `how` ourselves against an explicit allowed set, raising on anything
    else — `bioframe.overlap` does not validate it at all, and an unrecognised
@@ -413,7 +502,15 @@ previous two.
    the library's own suite passes with the `bedtools` binary absent from `PATH`
    — that last check is the one that proves the exercise worked. Do not assert
    the repository is free of `bedtools`; it is not, and the script is why.
-5. Update CLAUDE.md: its sanctioned-entry-point table names
+5. Delete `label_balanced` (both definitions), which removes the last
+   `sklearn` import from `dataframe.py`. Make the remaining heavy imports lazy
+   per the import-graph section — `RegionFragmentArray` inside the
+   fragment-attachment methods, `intervals` inside the delegating methods.
+   **Measure `import fragmentomics_tools.dataframe` before and after and record
+   both numbers**; the baseline is 6.62s / 2779 modules. An unmeasured claim
+   that the import got lighter is worth nothing, and this is the phase's
+   headline benefit.
+6. Update CLAUDE.md: its sanctioned-entry-point table names
    `join_on_overlap` and `drop_overlapping_regions`, and its "legitimate escape
    hatch" paragraph describes the `bedtools`-on-`PATH` hazard as a live
    constraint. Both become wrong in this phase.
@@ -487,3 +584,14 @@ that movement is this decision landing, not a regression.
 
 - Whether a per-region tabix BED fetch should return as a layer-1 loader, now
   that `Region.intersect_with_bed` is deleted.
+- **Whether `subtract` belongs in the API after all.** It was declined on the
+  grounds that "nothing needs the clipped coordinates". That justification is
+  **wrong**, and `scripts/build_inactive_regions.py` is the counter-example: it
+  builds the background model's training set as "the genome MINUS the union of
+  five exclusion sets", then samples tiles that must fit *entirely inside the
+  remainder*. That needs the remaining coordinates, not the surviving rows —
+  geometric subtraction, which `bioframe` provides and this API declines.
+  Padding with genome-end clamping (`slop`) is the same story.
+  Deferred by owner decision: the script stays on `pybedtools` for now. Revisit
+  when the script is rewritten, at which point the honest options are to expose
+  `subtract` or to leave a second interval implementation alive in `scripts/`.
