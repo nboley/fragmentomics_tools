@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import logging
+import multiprocessing as mp
 import os
 import sys
 
@@ -120,6 +121,13 @@ def _extract_fragments(h5_path, region, L_min, L_max):
     return starts, lengths, strands
 
 
+def _extract_worker(args_tuple):
+    """Worker for multiprocessing.Pool.map."""
+    h5_path, chrom, start, stop, L_min, L_max = args_tuple
+    region = Region(chrom, start, stop, strand=None)
+    return _extract_fragments(h5_path, region, L_min, L_max)
+
+
 def build_store(args):
     cfg = CutSiteStoreConfig(
         tile_size=args.tile_size,
@@ -141,17 +149,32 @@ def build_store(args):
     if T == 0:
         raise ValueError("No valid regions found")
 
-    # -- Single pass: extract fragments + compute endpoints ----------------
-    log.info("Extracting fragments from %s (%d regions)", args.sample, T)
+    # -- Extract fragments (parallel) -------------------------------------
+    n_workers = args.workers
+    log.info("Extracting fragments from %s (%d regions, %d workers)",
+             args.sample, T, n_workers)
+
+    worker_args = [
+        (args.sample, r.chrom, r.start, r.stop, cfg.L_min, cfg.L_max)
+        for r in regions
+    ]
+
+    if n_workers > 1:
+        with mp.Pool(n_workers) as pool:
+            results = pool.map(_extract_worker, worker_args)
+    else:
+        results = [_extract_worker(a) for a in worker_args]
+
+    # -- Accumulate fragments + compute endpoints (sequential, fast) ------
     frag_indptr = [0]
     all_frag_start, all_frag_length, all_frag_strand = [], [], []
     all_ep_pos, all_ep_track, all_ep_data = [], [], []
     ep_indptr = [0]
     S = 1
     N_totals = np.zeros((S, T, 2), dtype="uint32")
+    margin = (cfg.l_target - cfg.tile_size) // 2
 
-    for t, r in enumerate(regions):
-        fs, fl, fst = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
+    for t, (fs, fl, fst) in enumerate(results):
         all_frag_start.append(fs)
         all_frag_length.append(fl)
         all_frag_strand.append(fst)
@@ -164,15 +187,10 @@ def build_store(args):
                 all_ep_pos.extend(nz.tolist())
                 all_ep_track.extend([track_idx] * len(nz))
                 all_ep_data.extend(ep[track_idx, nz].astype(int).tolist())
-            margin = (cfg.l_target - cfg.tile_size) // 2
             N_totals[0, t, track_idx] = int(
                 ep[track_idx, margin:margin + cfg.tile_size].sum()
             )
         ep_indptr.append(len(all_ep_pos))
-
-        if (t + 1) % 1000 == 0:
-            log.info("  %d / %d tiles (%d frags so far)",
-                     t + 1, T, frag_indptr[-1])
 
     total_frags = frag_indptr[-1]
     log.info("Extracted %d fragments from %d regions", total_frags, T)
@@ -249,6 +267,7 @@ def main():
     p.add_argument("--rf-budget", type=int, default=133)
     p.add_argument("--L-min", type=int, default=25)
     p.add_argument("--L-max", type=int, default=179)
+    p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
     p.add_argument("--split-seed", type=int, default=42)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--test-frac", type=float, default=0.1)
