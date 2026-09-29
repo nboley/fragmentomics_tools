@@ -62,6 +62,7 @@ from background_model.simulator.emit import (
     write_manifest,
     load_manifest,
     write_bed,
+    ManifestMismatch,
 )
 
 
@@ -1015,3 +1016,108 @@ class TestPerRegionSequenceDependence:
 
         assert np.array_equal(w1.w_plus, w2.w_plus)
         assert np.array_equal(w1.w_minus, w2.w_minus)
+
+
+class TestManifestProvenanceEnforced:
+    """The manifest's hashes must be GUARDS, not documentation.
+
+    ``w`` is reconstructed from the manifest rather than stored (decision 79e),
+    so reconstruction fidelity IS the deliverable.  A manifest built against
+    one reference and reloaded against another yields different ``hex`` and
+    ``cum_gc``, therefore different ``w`` -- and ``Sum_Omega w == 1``, the
+    exact-half strand marginal and the domain size ALL still hold.  The
+    recorded hashes are the only thing that can notice.
+    """
+
+    def _write(self, d, *, script=None):
+        from background_model.simulator.emit import _hash_file
+
+        rng = np.random.default_rng(0)
+        tables = HexamerTables(
+            *[np.exp(rng.normal(0, 0.3, NHEX)) for _ in range(4)]
+        )
+        fl = np.ones(N_LENGTHS) / N_LENGTHS
+        lut = build_predict_lut(lambda L, gc: 1.0)
+
+        fa = os.path.join(d, "ref.fa")
+        with open(fa, "w") as f:
+            f.write(">c\nACGTACGTAC\n")
+        rs = os.path.join(d, "regions.bed")
+        with open(rs, "w") as f:
+            f.write("chr1\t0\t2560\n")
+        mp = os.path.join(d, "m.json")
+
+        write_manifest(
+            mp,
+            hex_tables=tables,
+            predict_lut=lut,
+            marginal_fl=fl,
+            region_set_name="regions.bed",
+            region_set_hash=_hash_file(rs),
+            reference_name="ref.fa",
+            reference_hash=_hash_file(fa),
+            region_len=2560,
+            simulator_script=script,
+        )
+        return mp, fa, rs
+
+    def test_matching_inputs_load_and_report_what_was_checked(self, tmp_path):
+        mp, fa, rs = self._write(str(tmp_path))
+        m = load_manifest(mp, fasta_path=fa, region_set_path=rs)
+        assert "reference" in m["verified"]
+        assert "region_set" in m["verified"]
+
+    def test_changed_reference_raises(self, tmp_path):
+        mp, fa, rs = self._write(str(tmp_path))
+        with open(fa, "w") as f:
+            f.write(">c\nTTTTTTTTTT\n")  # same length, different content
+        with pytest.raises(ManifestMismatch, match="reference hash mismatch"):
+            load_manifest(mp, fasta_path=fa)
+
+    def test_changed_region_set_raises(self, tmp_path):
+        mp, fa, rs = self._write(str(tmp_path))
+        with open(rs, "w") as f:
+            f.write("chr9\t0\t9999\n")
+        with pytest.raises(ManifestMismatch, match="region_set hash mismatch"):
+            load_manifest(mp, region_set_path=rs)
+
+    def test_changed_simulator_script_raises(self, tmp_path):
+        mp, _, _ = self._write(
+            str(tmp_path), script="background_model/simulator/weights.py"
+        )
+        raw = json.loads(open(mp).read())
+        assert raw["simulator_script_sha"] is not None, (
+            "a tracked script must record a git blob sha, else the guard is vacuous"
+        )
+        raw["simulator_script_sha"] = "0" * 40
+        with open(mp, "w") as f:
+            json.dump(raw, f)
+        with pytest.raises(ManifestMismatch, match="simulator script changed"):
+            load_manifest(mp)
+
+    def test_absent_inputs_are_skipped_not_silently_passed(self, tmp_path):
+        """A check that could not run must not look like a check that passed.
+
+        ``verified`` names only the checks that actually compared something, so
+        a caller cannot read ``verify=True`` as "the reference was validated"
+        when no FASTA was supplied.  That confusion would be the same
+        recorded-vs-enforced trap one level up.
+        """
+        mp, _, _ = self._write(str(tmp_path))
+        m = load_manifest(mp)
+        assert "reference" not in m["verified"]
+        assert "region_set" not in m["verified"]
+
+    def test_verify_false_bypasses_everything(self, tmp_path):
+        mp, fa, _ = self._write(str(tmp_path))
+        with open(fa, "w") as f:
+            f.write(">c\nTTTTTTTTTT\n")
+        m = load_manifest(mp, fasta_path=fa, verify=False)
+        assert m["verified"] == []
+
+    def test_untracked_script_records_none_rather_than_raising(self, tmp_path):
+        """A driver under development is not yet committed; that must not block
+        writing a manifest, but the gap must be visible rather than absent."""
+        from background_model.simulator.emit import git_blob_sha
+
+        assert git_blob_sha(str(tmp_path / "nope.py")) is None

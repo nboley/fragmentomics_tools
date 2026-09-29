@@ -219,6 +219,51 @@ def _hash_array(arr: np.ndarray) -> str:
     return hashlib.sha256(arr.tobytes()).hexdigest()
 
 
+class ManifestMismatch(RuntimeError):
+    """A manifest is being loaded into an environment it was not built against.
+
+    An error rather than a warning because ``w`` is RECONSTRUCTED from the
+    manifest rather than stored (owner decision 79e).  The hashes are the only
+    thing standing between "the same weights the sampler drew from" and
+    "different weights that still satisfy every invariant": a mismatched
+    reference or region set changes ``hex_fwd``/``hex_rc``/``cum_gc`` and
+    therefore changes ``w``, while ``Sum_Omega w == 1`` and the exact-half
+    strand marginal still hold afterwards.  Nothing downstream would notice.
+    """
+
+
+def git_blob_sha(path: str, repo_root: Optional[str] = None) -> Optional[str]:
+    """Git blob SHA of ``path`` at HEAD, or ``None`` if untracked/uncommitted.
+
+    The BLOB sha, not the repo commit sha, deliberately: a commit sha changes
+    on any commit anywhere in the repo, so verifying against it would reject
+    manifests over edits that cannot possibly affect this file.  The blob sha
+    changes if and only if this file's content changes, which is the question
+    actually being asked.
+
+    Returns ``None`` when the file is untracked or uncommitted.  That is a
+    normal state for a driver under development, so it is recorded as ``None``
+    rather than raising -- but it is recorded, so the gap is visible in the
+    manifest instead of being indistinguishable from a file that was never
+    considered.
+    """
+    if repo_root is None:
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        )))
+    rel = os.path.relpath(os.path.abspath(path), repo_root)
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", f"HEAD:{rel}"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
 def write_manifest(
     manifest_path: str,
     *,
@@ -236,6 +281,8 @@ def write_manifest(
     per_region_counts: Dict[str, int] | None = None,
     rng_seed: int | None = None,
     commit_sha: str | None = None,
+    simulator_script: str | None = None,
+    simulator_script_sha: str | None = None,
 ) -> None:
     """Write the simulation manifest to a JSON file.
 
@@ -269,23 +316,95 @@ def write_manifest(
         "per_region_counts": per_region_counts,
         "rng_seed": rng_seed,
         "commit_sha": commit_sha,
+        # Which script produced this, and the git blob sha of that exact file.
+        # `commit_sha` is repo-wide and moves on unrelated commits; this pair
+        # names one file and changes only when that file changes.
+        "simulator_script": simulator_script,
+        "simulator_script_sha": (
+            simulator_script_sha
+            if simulator_script_sha is not None
+            else (git_blob_sha(simulator_script) if simulator_script else None)
+        ),
     }
 
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
 
-def load_manifest(manifest_path: str) -> Dict[str, Any]:
-    """Load a simulation manifest and reconstruct the factor arrays.
+def load_manifest(
+    manifest_path: str,
+    *,
+    fasta_path: Optional[str] = None,
+    region_set_path: Optional[str] = None,
+    verify: bool = True,
+) -> Dict[str, Any]:
+    """Load a simulation manifest, reconstruct the factors, and VERIFY provenance.
 
-    Returns a dict with keys:
-    - ``hex_tables``: ``HexamerTables`` (reconstructed from the string-keyed DFs)
-    - ``predict_lut``: ndarray, shape (N_LENGTHS, N_GC_BINS)
-    - ``marginal_fl``: ndarray, shape (N_LENGTHS,)
-    - plus all provenance fields from the manifest.
+    Verifying, not merely recording.  ``w`` is reconstructed from this manifest
+    rather than stored (owner decision 79e), so reconstruction fidelity is the
+    deliverable.  A manifest built against one hg38 patch and reloaded against
+    another yields different ``hex``/``cum_gc`` and therefore different ``w``,
+    and every invariant -- ``Sum_Omega w == 1``, the exact-half strand marginal,
+    the domain size -- still passes.  The recorded hashes are the only detector.
+
+    Checks, each run only when it CAN be run:
+
+    - ``fasta_path`` given      -> its SHA-256 must equal ``reference_hash``
+    - ``region_set_path`` given -> its SHA-256 must equal ``region_set_hash``
+    - ``simulator_script`` recorded and tracked -> its git blob sha must equal
+      ``simulator_script_sha``
+
+    A check whose input is absent is SKIPPED, not silently passed.  The returned
+    ``"verified"`` list names exactly which checks actually ran, so a caller
+    cannot mistake "I passed verify=True" for "the reference was checked" --
+    that confusion is the same recorded-vs-enforced trap one level up.
+
+    :param verify: set False to load without checking. Explicit, so that
+        bypassing provenance is a visible decision at the call site.
+    :raises ManifestMismatch: if any check that ran disagreed.
     """
     with open(manifest_path) as f:
         raw = json.load(f)
+
+    verified: list = []
+    if verify:
+        checks = (
+            ("reference", fasta_path, raw.get("reference_hash"),
+             raw.get("reference_name")),
+            ("region_set", region_set_path, raw.get("region_set_hash"),
+             raw.get("region_set_name")),
+        )
+        for label, path, recorded, name in checks:
+            if path is None or recorded is None:
+                continue
+            actual = _hash_file(path)
+            if actual != recorded:
+                raise ManifestMismatch(
+                    f"{label} hash mismatch for {manifest_path}.\n"
+                    f"  manifest recorded : {recorded}  ({name})\n"
+                    f"  file on disk      : {actual}  ({path})\n"
+                    f"Reconstructing w against this file would give DIFFERENT "
+                    f"weights from the ones the sampler drew from, and every "
+                    f"normalisation invariant would still hold. Pass "
+                    f"verify=False only if you intend that."
+                )
+            verified.append(label)
+
+        script = raw.get("simulator_script")
+        recorded_sha = raw.get("simulator_script_sha")
+        if script and recorded_sha:
+            actual_sha = git_blob_sha(script)
+            if actual_sha is not None and actual_sha != recorded_sha:
+                raise ManifestMismatch(
+                    f"simulator script changed since this manifest was written.\n"
+                    f"  script            : {script}\n"
+                    f"  manifest recorded : {recorded_sha}\n"
+                    f"  current blob sha  : {actual_sha}\n"
+                    f"The code that produced these fragments is not the code "
+                    f"present now. Pass verify=False to load anyway."
+                )
+            if actual_sha is not None:
+                verified.append("simulator_script")
 
     # Reconstruct hex tables from string-keyed DataFrames
     hex_dfs = {
@@ -312,6 +431,11 @@ def load_manifest(manifest_path: str) -> Dict[str, Any]:
         "per_region_counts": raw.get("per_region_counts"),
         "rng_seed": raw.get("rng_seed"),
         "commit_sha": raw.get("commit_sha"),
+        "simulator_script": raw.get("simulator_script"),
+        "simulator_script_sha": raw.get("simulator_script_sha"),
+        # Which provenance checks ACTUALLY ran. Empty means nothing was
+        # compared -- either verify=False, or no paths were supplied.
+        "verified": verified,
     }
 
 
