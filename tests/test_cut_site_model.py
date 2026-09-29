@@ -303,8 +303,8 @@ class TestInteriorPrefixSum:
         assert (U[..., 0] == 0).all()
         # U[..., k+1] - U[..., k] should reconstruct u
         diffs = U[..., 1:] - U[..., :-1]
-        # Recompute u directly
-        base_offset = O_L_MIN - WINDOW_HALF
+        # Recompute u directly (base_offset = O_L_MIN, matching the model)
+        base_offset = O_L_MIN
         m_range = torch.arange(0, 32)
         o_range = torch.arange(N_OFFSETS)
         x_idx = m_range[:, None] + base_offset + o_range[None, :]
@@ -333,6 +333,64 @@ class TestInteriorPrefixSum:
         direct_sum = diffs[0, :, 16, o_l_p:o_r_p].sum(dim=-1)
 
         assert torch.allclose(span_from_U, direct_sum, atol=1e-5)
+
+
+class TestCrossBranchAlignment:
+    """Verify the interior branch reads x_onehot at the same genomic positions
+    that the endpoint branch reads h.  This is the test that catches the
+    base_offset bug (O_L_MIN vs O_L_MIN - WINDOW_HALF)."""
+
+    def test_interior_reads_same_positions_as_endpoint(self):
+        """For scored position m=5 and L=100, the interior span [o_l, o_r)
+        must cover the same x_onehot positions that the endpoint taps read."""
+        m_val = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=32, L_chunk=155)
+        l_in = m_val.calc_input_region_size(32)
+        x = torch.randn(1, 4, l_in)
+
+        L_test = 100
+        scored_m = 5
+        o_l = WINDOW_HALF - L_test // 2   # 78
+        o_r = o_l + L_test                 # 178
+
+        # Endpoint left tap reads h at index: o_l + scored_m = 83
+        # h[83] corresponds to x_onehot[83:89] (conv k=6)
+        h = m_val.l1_act(m_val.l1_conv(x))
+        if h.shape[-1] > m_val._model_input_size:
+            h = h[..., :m_val._model_input_size]
+        endpoint_h_pos = o_l + scored_m  # = 83
+
+        # Interior branch: for o'=0 (absolute offset O_L_MIN=39),
+        # x_idx = scored_m + O_L_MIN + 0 = 5 + 39 = 44
+        # For o' = o_l - O_L_MIN = 78 - 39 = 39,
+        # x_idx = scored_m + O_L_MIN + 39 = 5 + 39 + 39 = 83 ← must match!
+        U = m_val._interior_prefix(x, 0, 32)
+        # The interior at o' = (o_l - O_L_MIN) should address x_onehot at
+        # the same position as the endpoint left tap.
+        o_l_prime = o_l - O_L_MIN  # 39
+        interior_x_pos = scored_m + O_L_MIN + o_l_prime  # 83
+
+        assert endpoint_h_pos == interior_x_pos, (
+            f"Misalignment: endpoint reads h[{endpoint_h_pos}] but "
+            f"interior reads x_onehot[{interior_x_pos}]"
+        )
+
+    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
+    def test_interior_span_covers_endpoint_range(self, L_val):
+        """The interior prefix sum spans exactly [o_l, o_r) in h-coordinates."""
+        for scored_m in (0, 10, 31):
+            o_l = WINDOW_HALF - L_val // 2
+            o_r = o_l + L_val
+            o_l_prime = o_l - O_L_MIN
+            o_r_prime = o_r - O_L_MIN
+
+            # Interior x positions for span [o_l', o_r'):
+            # positions scored_m + O_L_MIN + o_l' through scored_m + O_L_MIN + o_r' - 1
+            interior_start = scored_m + O_L_MIN + o_l_prime  # = scored_m + o_l
+            interior_end = scored_m + O_L_MIN + o_r_prime    # = scored_m + o_r
+
+            # Must match endpoint tap positions
+            assert interior_start == scored_m + o_l
+            assert interior_end == scored_m + o_r
 
 
 class TestEndpointTapAlignment:

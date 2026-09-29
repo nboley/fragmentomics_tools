@@ -1,6 +1,6 @@
 # Cut-site fragment model — integration design
 
-Status: DESIGN, not implemented. Doc-only.
+Status: DESIGN COMPLETE, implemented on worktree-cut-site-model.
 
 This is the integration and plumbing spec for a model whose native output is the
 fragment weight itself — one logit per `(m, L, strand)` — trained on the
@@ -90,16 +90,16 @@ per tap (both strands) `43,520`; all four banks `87,040`.
 `K = 128` rationale: the factorisation is kept for a **statistical** reason —
 `a` pools estimation across all lengths, `B` is a small per-group correction.
 
-**A free per-`L` additive term `len_emb (H, n_L)` is required**, separate from the
+**A free per-`L` additive term `len_bias (n_L,)` is required**, separate from the
 length groups. The groups carry the length × *sequence* interaction at 15 bp
-resolution; `len_emb` carries the length distribution itself at 1 bp resolution.
+resolution; `len_bias` carries the length distribution itself at 1 bp resolution.
 These must not be conflated: the length component is worth **~0.4255 nats, about
 5× the whole sequence-bias gap of ~0.084**, so it is the dominant term in the
 likelihood, and forcing it through a piecewise-constant 15 bp approximation would
 be a large avoidable loss. At `H = 32` and `n_L = 155` this costs 4,960
 parameters. It is additive and per-`L` only, so it folds like everything else,
 and it is **shared across strand** — the FL/GC (length) term `FLGC(L, gc)` is
-strand-independent in the generative form, so there is one `len_emb`, not one per
+strand-independent in the generative form, so there is one `len_bias`, not one per
 strand.
 
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
@@ -200,7 +200,7 @@ L_chunk = 32                            l_in  = 2310 (2309 rounded to even for j
               pre[h, m, L, s]  =  f_l[s] + f_r[s]           <-- LINEAR until summed
                                 + (V_span[o_r] - V_span[o_l])
                                 + (V_mean[o_r] - V_mean[o_l]) / L
-                                + len_emb[h, L]              <-- free per-L term
+                                + len_bias[h, L]              <-- free per-L term
                         │
                         v   <-- THE ONLY PER-PAIR TENSOR
               ┌──────────────────────────────────────────────┐
@@ -251,7 +251,7 @@ span     = U[:,:,o_r] - U[:,:,o_l]
 mean     = span / L                         # both fed explicitly
 
 pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean
-             + len_emb[h, L]
+             + len_bias[h, L]
 hid          = act(pre)                                      # (B, H, P, L_chunk, 2)
 logit[m,L,s] = w_out · hid                                   # (B, P, n_L, 2)
 ep_shape     = endpoint_shape_head(h)  # (B, 2, P) trainable shape for NB loss

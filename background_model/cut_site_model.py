@@ -197,13 +197,17 @@ class CutSiteFragmentModel(L.LightningModule):
             U: (B, N2, m_count, n_offsets+1) exclusive prefix sum
         """
         # x_onehot index for scored position m and re-indexed offset o':
-        #   x_idx = m + (O_L_MIN - WINDOW_HALF) + o'
-        # h[j] = conv(x_onehot[j:j+6]), so h-coordinate j starts at x_onehot[j].
-        # The interior reads x_onehot directly at h-aligned coordinates.
+        #   x_idx = m + O_L_MIN + o'
+        # The endpoint branch reads h at index (o_l + scored_m) where
+        # o_l = WINDOW_HALF - L//2.  h[j] = conv(x_onehot[j:j+6]), so
+        # h-position j starts at x_onehot[j].  The interior branch must
+        # read x_onehot at the same h-aligned positions: for re-indexed
+        # offset o' (absolute offset o = o' + O_L_MIN), x_onehot position
+        # is scored_m + O_L_MIN + o'.
 
         B = x_onehot.shape[0]
         N2 = self.interior_F.shape[0]
-        base_offset = O_L_MIN - WINDOW_HALF  # -89 for current geometry
+        base_offset = O_L_MIN  # 39 for current geometry
 
         # Gather the x_onehot slice for all (m, o') pairs
         # Positions: for m in [m_start, m_start+m_count), o' in [0, N_OFFSETS)
