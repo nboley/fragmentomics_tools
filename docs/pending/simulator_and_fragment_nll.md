@@ -1,9 +1,26 @@
 # Simulator and per-fragment NLL
 
-Status: DESIGN, not implemented. Specifies the simulator's generative model, the
-data that informs it, and the per-fragment NLL that scores both model classes.
-The sibling doc `cut_site_fragment_model.md` owns the models and their stores;
-this doc owns the weight, the sampler, the scoring domain, and the anchors.
+Status: Phases 1–2 IMPLEMENTED; Phase 3 next. See the implementation plan at the end.
+
+**What the simulator produces (owner decision 79):**
+
+> **the per-sample fragment `h5`, plus the metadata needed to reconstruct the
+> fragment weights — and nothing else.**
+
+It does **not** build the zarr store, choose the scoring domain `D`, or compute the
+anchors. Those belong to the **model agent**, which consumes the h5 and the manifest.
+
+Everything here serves that output. The generative model (Steps 1–5) determines the
+fragments; the manifest (Step 6) is what makes the weights behind them recomputable.
+Steps 7–8 and Appendix C specify the **scoring contract the output must support** —
+they are recorded so the manifest can be shown to be sufficient, not because the
+simulator performs them.
+
+The weights are **not stored dense.** `w` factorises, so the manifest carries three
+small arrays (~154 KB) from which `build_region_weights` reconstructs `w` exactly —
+against 73.5 GB for a dense `w`. That is the central design choice of Step 6.
+
+The sibling doc `cut_site_fragment_model.md` owns the models and their stores.
 
 Written **from scratch** in `background_model/simulator/`. Reuse where useful —
 `load_duphist` / `build_cell_map` (`scripts/ztnb_from_duphist.py`), the
@@ -264,6 +281,11 @@ training-time crop budget; `tile_size` parameterises `D`. Both belong to the mod
 
 ### Step 8 — Score a model
 
+> **Owner: the MODEL AGENT** (decision 79b). Specified here only as the contract the
+> simulator's output must support — `% bias captured` is meaningless without an oracle
+> built from the same `w` the sampler drew from, so the manifest must be sufficient to
+> reconstruct it. Nothing in Step 8 is the simulator's to implement.
+
 - **In:** the store, `D`, the model's weight `w_m`.
 - **Do:** for fragment `(p, L, s)`:
 
@@ -291,14 +313,28 @@ training-time crop budget; `tile_size` parameterises `D`. Both belong to the mod
 
 ### Validation
 
+Everything here is checkable from the simulator's own output — the h5 and the
+manifest — without a store.
+
 - **No parity with the old sampler** — neither byte equality nor distributional
   equivalence; new seed lineage; spend no effort comparing.
 - **Self-consistency:** the drawn fragments' empirical distribution matches the
   weights they were drawn from, on a small region. This is what the shared
   builder guarantees; it needs no reference implementation.
 - **Realised-parameter recovery:** the generative tables are recoverable from the
-  emitted fragments (hexamer-table recovery, GC slope by length).
-- **Oracle NLL strictly below uniform** on sim data.
+  emitted fragments (hexamer-table recovery, GC slope by length). **Stronger than it
+  sounds, and it is the end-to-end check on the draw**: simulate from surface `S`,
+  re-fit from the *simulated* fragments, recover `S′`; `S′ ≈ S` exercises the whole
+  sampler and **would catch a broken draw that every normalisation invariant passes**,
+  because `Σ_Ω w = 1` is preserved by any per-element weighting.
+- **The manifest round-trips.** Reconstruct `w` from the manifest alone and confirm
+  `Σ_Ω w = 1` and the exact-½ strand marginal. **This is the load-bearing property of
+  the whole output** — if the manifest is insufficient or mis-keyed, the h5 is
+  unusable for scoring and nothing else detects it.
+- **The store is non-empty** when the model agent builds it from the h5. Cheap, and it
+  is the only thing that catches the `-1 >= 10` MAPQ trap, where each repo passes its
+  own suite and they still fail to compose.
+- **Oracle NLL strictly below uniform** on sim data *(model agent)*.
 - **`var(log Z_s(c5))` measured over the region set** (Appendix E).
 
 ---
@@ -342,6 +378,11 @@ untied tables do not guarantee. The `½` is the strand prior the sampler draws
 from.
 
 ### Appendix C — `Ω` vs `D`, `W_D`, and why `-log w` is not the oracle
+
+> **`Ω` is the simulator's; `D` and `W_D` are the model agent's** (decision 79b).
+> Kept here because `Ω` and `w` are defined by this doc and `D` is carved out of them —
+> and because **the manifest must be sufficient to compute `W_D`**, which is the
+> requirement this appendix imposes on the simulator's output.
 
 `Ω` is everything the simulator can emit, and `Σ_Ω w = 1`. `D` is the scoring
 domain: `{(m, L, strand) : m ∈ [0, P), L in band}`, centre-based — the fragment
@@ -446,7 +487,27 @@ GC range stops short of 0–100 so extreme-GC fragments fall out of bin onto
 | length marginal | `duphist_merged/<sid>__duphist_wg.tsv.gz`, deduped `molecule_keys` | `marginal_fl(L)` |
 | capture surface | same duphist → `load_duphist` → `build_cell_map` → `GCFlDistModel().fit(...)` → `save()` | `predict(L, gc)` = inverse capture |
 
-Output: one `sample_<i>.bed.gz` per sample (8 columns, sorted, tabix-indexed).
+### Output
+
+**The deliverable, per sample:**
+
+| artifact | contents |
+|---|---|
+| `sample_<i>.h5` | the fragments, via `build-fragments-h5` from an 8-column sorted, tabix-indexed `sample_<i>.bed.gz` |
+| **manifest** | everything needed to reconstruct `w` — the 4 hexamer tables (**dataframes keyed by the hexamer string**), the `(L, gc_bin)` predict LUT, `marginal_fl`; plus reference identity+hash, region-set identity+hash, `region_len`, `L` range, `FL_BANDS`, per-region counts, RNG seed, and the `build_region_weights` commit sha |
+
+The intermediate `sample_<i>.bed.gz` is a means, not a deliverable. **No store.**
+
+**Why the manifest and not the weights.** `w` is ~154 KB of factors against 73.5 GB
+dense, and storing the *realised* arrays rather than a recipe ("seed 42", "re-fit from
+sample X") makes reconstruction exact and independent of a `flgc` version, a
+reproducible fit, or NumPy's RNG stream. **The manifest is the product, as much as the
+h5 is** — an h5 without it cannot be scored, because `% bias captured` needs an oracle
+built from the same `w` the sampler drew from.
+
+**The `hexamer tables` row above is Layer 1's synthetic `build_w6`.** Real counted
+tables from `scripts/count_cut_site_hexamers.py` are a separate stream; whichever is
+used, the realised arrays go in the manifest, so the h5 stays self-describing either way.
 
 **GC source for scoring.** Simulation uses the true simulator surface; the
 real-data GC source is out of scope for Layer 1.
