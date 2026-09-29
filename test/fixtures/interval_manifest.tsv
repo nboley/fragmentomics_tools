@@ -1,4 +1,7 @@
 op	dataset	n	sha256_16	note
+input	blacklist	5867	c92e763af1727144	/efs/analytics/nathanboley/data_resources/genome/hg38-blacklist.v2.bed.gz
+input	ctcf	32708862	11a47c756f11a25c	/efs/analytics/nathanboley/interval_fixtures/ctcf.hg38.bed6.bed
+input_source	ctcf	34974234	7083e4b96742c555	/efs/analytics/lily/ssDNA/top_1000_TF/CTCF.hg38.bed (derived BED6 is rebuilt only when absent)
 load	blacklist	636	c073f5e2d8eeec99	
 load	ctcf	964593	566f1c274d74515a	
 sort	blacklist	636	de7cc0fc3346ea27	

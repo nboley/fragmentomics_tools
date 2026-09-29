@@ -79,11 +79,19 @@ def _sha(obj) -> str:
     Order is part of the behaviour under test — bedtools and a replacement
     can agree on the set of rows and still differ on what comes out first, and
     downstream code that zips or positionally indexes would silently break.
+
+    ``float_format`` is pinned even though every column captured today is
+    integer. Without it, pandas uses repr, which is not stable across pandas
+    versions or platforms for floats — so the first float column anyone adds
+    would turn this manifest into a false-alarm generator rather than a
+    regression detector, and the cause would be extremely unobvious.
     """
     if isinstance(obj, pd.DataFrame):
-        payload = obj.to_csv(index=False, sep="\t", na_rep="NA").encode()
+        payload = obj.to_csv(
+            index=False, sep="\t", na_rep="NA", float_format="%.10g"
+        ).encode()
     elif isinstance(obj, pd.Series):
-        payload = obj.to_csv(index=False, na_rep="NA").encode()
+        payload = obj.to_csv(index=False, na_rep="NA", float_format="%.10g").encode()
     elif isinstance(obj, dict):
         # get_overlapping_base_counts returns {"counts": array, "max_counts": array}
         parts = []
@@ -120,6 +128,64 @@ def build_inputs(force=False):
         "blacklist": (GENOME / "hg38-blacklist.v2.bed.gz", "hg38"),
         "ctcf": (ctcf_out, "hg38"),
     }
+
+
+def _digest_file(path):
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+            size += len(chunk)
+    return size, h.hexdigest()[:16]
+
+
+def input_provenance(datasets):
+    """Digest the INPUTS, so a manifest mismatch is diagnosable.
+
+    Without this, a changed digest has two indistinguishable causes: the code
+    regressed, or the EFS file underneath moved. Those demand opposite
+    responses — revert versus re-baseline — and guessing wrong wastes the
+    whole point of having a baseline. Recording the input digests makes the
+    question answerable by comparing two rows instead of by archaeology.
+
+    Digested by content, not mtime: EFS mtimes are not stable across restores,
+    and a file that is byte-identical after a restore has not changed in any
+    sense this fixture cares about.
+
+    The CTCF *source* is digested as well as the derived BED6, and that is not
+    redundant. ``build_inputs`` only rebuilds the derived file when it is
+    missing, so a changed source hides behind a stale derivative: every
+    downstream digest would match while the fixture silently no longer
+    describes the data it claims to. Digesting only the derivative would leave
+    exactly the blind spot this function exists to remove.
+    """
+    rows = []
+    for name, (path, ref) in sorted(datasets.items()):
+        size, digest = _digest_file(path)
+        rows.append(
+            {
+                "op": "input",
+                "dataset": name,
+                "n": size,
+                "sha256_16": digest,
+                "note": str(path),
+            }
+        )
+
+    ctcf_src = EFS / "lily/ssDNA/top_1000_TF/CTCF.hg38.bed"
+    if ctcf_src.exists():
+        size, digest = _digest_file(ctcf_src)
+        rows.append(
+            {
+                "op": "input_source",
+                "dataset": "ctcf",
+                "n": size,
+                "sha256_16": digest,
+                "note": f"{ctcf_src} (derived BED6 is rebuilt only when absent)",
+            }
+        )
+    return rows
 
 
 def capture(datasets):
@@ -209,8 +275,16 @@ def main():
         print(f"  {k:10} {p}")
     print()
 
+    print("Input provenance:")
+    provenance = input_provenance(datasets)
+    for r in provenance:
+        print(f"  {r['dataset']:10} {r['n']:>12} bytes  {r['sha256_16']}")
+    print()
+
     print("Capturing:")
-    manifest = capture(datasets)
+    manifest = pd.concat(
+        [pd.DataFrame(provenance), capture(datasets)], ignore_index=True
+    )
 
     if args.out:
         out_path = Path(args.out)

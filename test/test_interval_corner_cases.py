@@ -85,12 +85,40 @@ class TestMergeCornerCases:
         assert int(merged.start.iloc[0]) == 10
         assert int(merged.stop.iloc[0]) == 11
 
-    def test_zero_length_does_not_crash(self):
-        """[10,10) is degenerate — pin whatever the current code does."""
+    def test_zero_length_interval_survives_alone(self):
+        """[10,10) is degenerate, and the current backend keeps it.
+
+        Measured, not assumed. An earlier version of this test asserted
+        ``len(merged) >= 0``, which is true of every possible result and so
+        pinned nothing — the exact failure mode these fixtures exist to catch.
+        """
         rdf = _rdf({"contig": ["chr1"], "start": [10], "stop": [10]})
         merged = rdf.merge_regions()
-        # Zero-length intervals are unusual; just verify non-crash and pin count.
-        assert len(merged) >= 0
+        assert len(merged) == 1
+        assert int(merged.start.iloc[0]) == 10
+        assert int(merged.stop.iloc[0]) == 10
+
+    def test_zero_length_beside_a_real_interval_is_kept(self):
+        """A degenerate interval disjoint from a real one survives separately."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [10, 100], "stop": [10, 200]})
+        merged = rdf.merge_regions()
+        assert len(merged) == 2
+        assert list(map(int, merged.start)) == [10, 100]
+        assert list(map(int, merged.stop)) == [10, 200]
+
+    def test_zero_length_inside_a_real_interval_is_absorbed(self):
+        """[150,150) inside [100,200) is absorbed, leaving one interval.
+
+        The discriminating case of the three: it separates "degenerate
+        intervals are always kept" from "kept only when disjoint". A backend
+        that dropped zero-length intervals outright would pass the other two
+        and fail this one.
+        """
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [150, 100], "stop": [150, 200]})
+        merged = rdf.merge_regions()
+        assert len(merged) == 1
+        assert int(merged.start.iloc[0]) == 100
+        assert int(merged.stop.iloc[0]) == 200
 
     def test_two_contigs_stay_separate(self):
         """Intervals on different contigs never merge."""
@@ -596,6 +624,7 @@ class TestFromBedsMergedCornerCases:
                 bed_filter_callback=lambda _: True,
             )
             assert len(default) == len(explicit)
+            assert list(default.contig) == list(explicit.contig)
             assert list(default.start) == list(explicit.start)
             assert list(default.stop) == list(explicit.stop)
 
