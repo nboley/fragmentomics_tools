@@ -337,60 +337,127 @@ class TestInteriorPrefixSum:
 
 class TestCrossBranchAlignment:
     """Verify the interior branch reads x_onehot at the same genomic positions
-    that the endpoint branch reads h.  This is the test that catches the
-    base_offset bug (O_L_MIN vs O_L_MIN - WINDOW_HALF)."""
+    that the endpoint branch reads h.  These tests use MARKER INPUTS so they
+    exercise the actual model, not just arithmetic on constants."""
 
-    def test_interior_reads_same_positions_as_endpoint(self):
-        """For scored position m=5 and L=100, the interior span [o_l, o_r)
-        must cover the same x_onehot positions that the endpoint taps read."""
-        m_val = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=32, L_chunk=155)
-        l_in = m_val.calc_input_region_size(32)
-        x = torch.randn(1, 4, l_in)
+    def test_interior_responds_to_correct_position(self):
+        """Place a distinguishing base at a known position.  The interior
+        branch's prefix-sum difference for a fragment spanning that position
+        should change when the base changes — proving it reads there."""
+        P = 32
+        m = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=155)
+        l_in = m.calc_input_region_size(P)
 
+        # All-A baseline
+        x_base = torch.zeros(1, 4, l_in)
+        x_base[:, 0, :] = 1.0  # all A
+
+        # Mutant: change one base at the position the left tap of L=100
+        # at scored_m=5 should read.  Endpoint tap h-pos = o_l + scored_m.
         L_test = 100
         scored_m = 5
-        o_l = WINDOW_HALF - L_test // 2   # 78
-        o_r = o_l + L_test                 # 178
+        o_l = WINDOW_HALF - L_test // 2  # 78
+        target_x_pos = o_l + scored_m     # 83 — the position both branches should see
 
-        # Endpoint left tap reads h at index: o_l + scored_m = 83
-        # h[83] corresponds to x_onehot[83:89] (conv k=6)
-        h = m_val.l1_act(m_val.l1_conv(x))
-        if h.shape[-1] > m_val._model_input_size:
-            h = h[..., :m_val._model_input_size]
-        endpoint_h_pos = o_l + scored_m  # = 83
+        x_mut = x_base.clone()
+        x_mut[:, 0, target_x_pos] = 0.0
+        x_mut[:, 2, target_x_pos] = 1.0  # A → G at position 83
 
-        # Interior branch: for o'=0 (absolute offset O_L_MIN=39),
-        # x_idx = scored_m + O_L_MIN + 0 = 5 + 39 = 44
-        # For o' = o_l - O_L_MIN = 78 - 39 = 39,
-        # x_idx = scored_m + O_L_MIN + 39 = 5 + 39 + 39 = 83 ← must match!
-        U = m_val._interior_prefix(x, 0, 32)
-        # The interior at o' = (o_l - O_L_MIN) should address x_onehot at
-        # the same position as the endpoint left tap.
-        o_l_prime = o_l - O_L_MIN  # 39
-        interior_x_pos = scored_m + O_L_MIN + o_l_prime  # 83
+        # Run the interior prefix on both
+        U_base = m._interior_prefix(x_base, 0, P)
+        U_mut = m._interior_prefix(x_mut, 0, P)
 
-        assert endpoint_h_pos == interior_x_pos, (
-            f"Misalignment: endpoint reads h[{endpoint_h_pos}] but "
-            f"interior reads x_onehot[{interior_x_pos}]"
+        # The span covering position 83 should differ between base and mutant.
+        # For L=100: o_l'=o_l-O_L_MIN=39, o_r'=o_r-O_L_MIN=139
+        o_l_p = o_l - O_L_MIN
+        o_r_p = o_l_p + L_test
+        span_base = U_base[0, :, scored_m, o_r_p] - U_base[0, :, scored_m, o_l_p]
+        span_mut = U_mut[0, :, scored_m, o_r_p] - U_mut[0, :, scored_m, o_l_p]
+
+        assert not torch.allclose(span_base, span_mut, atol=1e-7), (
+            "Interior branch did not respond to a base change at the expected "
+            f"position {target_x_pos} — possible coordinate misalignment"
         )
 
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_interior_span_covers_endpoint_range(self, L_val):
-        """The interior prefix sum spans exactly [o_l, o_r) in h-coordinates."""
-        for scored_m in (0, 10, 31):
-            o_l = WINDOW_HALF - L_val // 2
-            o_r = o_l + L_val
-            o_l_prime = o_l - O_L_MIN
-            o_r_prime = o_r - O_L_MIN
+    def test_interior_does_not_respond_outside_span(self):
+        """A base change OUTSIDE the fragment span should NOT affect the span."""
+        P = 32
+        m = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=155)
+        l_in = m.calc_input_region_size(P)
 
-            # Interior x positions for span [o_l', o_r'):
-            # positions scored_m + O_L_MIN + o_l' through scored_m + O_L_MIN + o_r' - 1
-            interior_start = scored_m + O_L_MIN + o_l_prime  # = scored_m + o_l
-            interior_end = scored_m + O_L_MIN + o_r_prime    # = scored_m + o_r
+        x_base = torch.zeros(1, 4, l_in)
+        x_base[:, 0, :] = 1.0  # all A
 
-            # Must match endpoint tap positions
-            assert interior_start == scored_m + o_l
-            assert interior_end == scored_m + o_r
+        L_test = 50
+        scored_m = 10
+        o_l = WINDOW_HALF - L_test // 2  # 103
+        o_r = o_l + L_test                # 153
+
+        # Mutate a position BEFORE the span (o_l + scored_m - 2 in x coords)
+        outside_pos = o_l + scored_m - 2  # 111, which is < o_l + scored_m = 113
+        # Actually need to ensure it's before o_l in the re-indexed frame.
+        # The span covers x positions [o_l + scored_m, o_r + scored_m).
+        # Place mutation well before: at position 5 (way outside).
+        outside_pos = 5
+        x_mut = x_base.clone()
+        x_mut[:, 0, outside_pos] = 0.0
+        x_mut[:, 3, outside_pos] = 1.0  # A → T at position 5
+
+        U_base = m._interior_prefix(x_base, 0, P)
+        U_mut = m._interior_prefix(x_mut, 0, P)
+
+        o_l_p = o_l - O_L_MIN
+        o_r_p = o_l_p + L_test
+        span_base = U_base[0, :, scored_m, o_r_p] - U_base[0, :, scored_m, o_l_p]
+        span_mut = U_mut[0, :, scored_m, o_r_p] - U_mut[0, :, scored_m, o_l_p]
+
+        assert torch.allclose(span_base, span_mut, atol=1e-7), (
+            f"Interior branch responded to a base change at position {outside_pos} "
+            "which is outside the fragment span — coordinate misalignment"
+        )
+
+    @pytest.mark.parametrize("L_val", [25, 179])
+    def test_endpoint_and_interior_see_same_position(self, L_val):
+        """Mutate the base at the left tap position.  Both the endpoint branch
+        (via h) and the interior branch (via x_onehot) should respond."""
+        P = 32
+        m = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=155)
+        l_in = m.calc_input_region_size(P)
+
+        x_base = torch.zeros(1, 4, l_in)
+        x_base[:, 0, :] = 1.0
+
+        scored_m = 10
+        o_l = WINDOW_HALF - L_val // 2
+        tap_pos = o_l + scored_m  # position in x/h coordinates
+
+        x_mut = x_base.clone()
+        x_mut[:, 0, tap_pos] = 0.0
+        x_mut[:, 1, tap_pos] = 1.0  # A → C
+
+        # Endpoint branch: h changes at tap_pos
+        with torch.no_grad():
+            h_base = m.l1_act(m.l1_conv(x_base))
+            h_mut = m.l1_act(m.l1_conv(x_mut))
+            if h_base.shape[-1] > m._model_input_size:
+                h_base = h_base[..., :m._model_input_size]
+                h_mut = h_mut[..., :m._model_input_size]
+        # h differs at tap_pos (and its receptive field)
+        endpoint_changed = not torch.allclose(
+            h_base[0, :, tap_pos], h_mut[0, :, tap_pos], atol=1e-7
+        )
+
+        # Interior branch: prefix sum changes for spans covering tap_pos
+        U_base = m._interior_prefix(x_base, 0, P)
+        U_mut = m._interior_prefix(x_mut, 0, P)
+        o_l_p = o_l - O_L_MIN
+        o_r_p = o_l_p + L_val
+        span_base = U_base[0, :, scored_m, o_r_p] - U_base[0, :, scored_m, o_l_p]
+        span_mut = U_mut[0, :, scored_m, o_r_p] - U_mut[0, :, scored_m, o_l_p]
+        interior_changed = not torch.allclose(span_base, span_mut, atol=1e-7)
+
+        assert endpoint_changed, "Endpoint branch did not respond to mutation"
+        assert interior_changed, "Interior branch did not respond to mutation"
 
 
 class TestEndpointTapAlignment:
@@ -487,3 +554,71 @@ class TestLenBiasPlacement:
         assert torch.allclose(diff[:, :, mask, :],
                               torch.zeros_like(diff[:, :, mask, :]),
                               atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# L_chunk correctness
+# ---------------------------------------------------------------------------
+
+
+class TestLChunkCorrectness:
+    """Verify that chunked forward (L_chunk=32) produces the same logits
+    as unchunked (L_chunk=N_L)."""
+
+    def test_chunked_matches_unchunked(self):
+        P = 64
+        m_chunked = CutSiteFragmentModel(
+            N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=32,
+        )
+        m_unchunked = CutSiteFragmentModel(
+            N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=N_L,
+        )
+        # Copy weights
+        m_unchunked.load_state_dict(m_chunked.state_dict())
+
+        l_in = m_chunked.calc_input_region_size(P)
+        x = torch.randn(1, 4, l_in)
+
+        with torch.no_grad():
+            logits_c, ep_c, disp_c = m_chunked(x)
+            logits_u, ep_u, disp_u = m_unchunked(x)
+
+        assert torch.allclose(logits_c, logits_u, atol=1e-5), (
+            f"Chunked vs unchunked max diff: {(logits_c - logits_u).abs().max()}"
+        )
+        assert torch.allclose(ep_c, ep_u, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# NB loss integration
+# ---------------------------------------------------------------------------
+
+
+class TestNBLossIntegration:
+    """Verify the NB endpoint loss path runs correctly end-to-end."""
+
+    def test_nb_loss_runs_with_model_outputs(self):
+        """The NB loss should produce a finite scalar when given model outputs
+        and synthetic endpoint targets."""
+        P = 64
+        m = CutSiteFragmentModel(
+            N1=8, K=4, N2=4, H=4, tile_size=P, L_chunk=32,
+            dispersion_window_size=P,  # single window for small tile
+        )
+        l_in = m.calc_input_region_size(P)
+        x = torch.randn(2, 4, l_in)
+
+        logits, ep_shape, disp_bp = m(x)
+
+        # Synthetic endpoint targets (2 tracks)
+        endpoints = torch.randint(0, 10, (2, 2, P), dtype=torch.float32)
+        mask = torch.ones(2, P, dtype=torch.bool)
+        # _pooled_log_dispersion handles the mask expansion internally
+        log_disp = m._pooled_log_dispersion(disp_bp, mask)
+
+        # NB loss needs mask as (B, 1, P) or (B, C, P) for _prepare_mask
+        mask3 = mask[:, None, :].expand_as(endpoints)
+        nb_loss = m.nb_loss_fn(ep_shape, log_disp, endpoints, mask3)
+
+        assert torch.isfinite(nb_loss), f"NB loss is not finite: {nb_loss}"
+        assert nb_loss.requires_grad, "NB loss should have grad through ep_shape"

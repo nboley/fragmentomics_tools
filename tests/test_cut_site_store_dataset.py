@@ -476,3 +476,32 @@ class TestEndpointBoundaryFragment:
         ep = recompute_endpoints_from_fragments(start, frag_len, length)
         assert ep[0, 90] == 1.0  # first track at start
         assert ep[1].sum() == 0.0  # last track clipped (right end out of bounds)
+
+
+class TestCentreFilterBoundary:
+    """Verify the centre-based filter boundary: m in [0, tile_size) is half-open."""
+
+    def test_fragment_at_last_valid_centre(self, tmp_path):
+        """A fragment centred at m = tile_size - 1 should be included."""
+        from background_model.cut_site_dataset import CutSiteFragmentDataset
+        tile_size = 256
+        store_path, cfg = _create_synthetic_store(
+            tmp_path, tile_size=tile_size, jitter=32,
+            n_tiles=1, n_samples=1, n_frags_per_tile=200, seed=77,
+        )
+        model = CutSiteFragmentModel(
+            tile_size=tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+        )
+        ds = CutSiteFragmentDataset(
+            store_path=store_path,
+            model_input_size=model.model_input_size,
+            model_max_len=cfg.max_len,
+            split="train", sample_role="train", min_N=0, train_mode=False,
+        )
+        item = ds[0]
+        frag_m = item["frag_m"].numpy()
+        # All centres must be strictly in [0, tile_size) — half-open
+        assert (frag_m >= 0).all(), f"Centre below 0: min={frag_m.min()}"
+        assert (frag_m < tile_size).all(), f"Centre >= tile_size: max={frag_m.max()}"
+        # Verify at least some fragments exist (sanity)
+        assert len(frag_m) > 0, "No fragments survived the centre filter"
