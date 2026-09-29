@@ -7,8 +7,8 @@ this doc owns the weight, the sampler, the scoring domain, and the anchors.
 
 Written **from scratch** in `background_model/simulator/`. Reuse where useful —
 `load_duphist` / `build_cell_map` (`scripts/ztnb_from_duphist.py`), the
-`hexamer_indices` + `cum_gc` precompute, region/BED loading, the `sample_<i>.npz`
-layout, the multiprocessing scaffolding, `sim_build_store.py`. Not a refactor of
+`hexamer_indices` + `cum_gc` precompute, region/BED loading, the per-sample output
+layout, the multiprocessing scaffolding. Not a refactor of
 `sim_fragments.py`; **no parity requirement of any kind**. The existing simulator
 stays live and must keep working (KEN and Hybrid validate against it), so
 `sim_fragments.py` and its stores stay intact. This work is additive.
@@ -27,8 +27,7 @@ endpoints `p` and `p+L-1`, cut sites `p` and `p+L`.
 - **Minus strand:** the ends **swap** — `c5 = p + L`, `c3 = p` — because the 5′
   end sits at the higher coordinate; hexamers read reverse-complemented.
 - **Length** `L = |c3 - c5|`, restricted to **`L = 25..180`, 156 values** — this
-  is exactly the support of the capture surface (`p_seen` is `(156, 181)`,
-  lengths 25–180). Nothing outside it is ever drawn.
+  is exactly the support of the capture surface. Nothing outside it is ever drawn.
 - **GC** over the genomic span (strand-independent):
   `gc_pct = 100 · (cum_gc[max(c5,c3)] - cum_gc[min(c5,c3)]) / L`.
 - **Hexamer tables:** four, `{start, end} × {fwd, rev}`, **untied** (short-read
@@ -84,6 +83,9 @@ Derivations: Appendix D.
   w(c5,c3,s) = ½ · start_s[hex(c5)]/S_s · E_s(c5,L)/Z_s(c5)
   ```
 
+- **Edge rule:** `Z_s(c5)` sums only those `L` whose `c3(L) = c5 + σ·L` stays in
+  `[0, region_len]`; off the region `hex(c3)` is undefined. This per-`c5`
+  truncation is exactly what makes `|Ω| = 2 · Σ_L (region_len − L + 1)` correct.
 - **Out:** `w`, a fully normalised probability over the generative domain `Ω`:
   `Σ_Ω w = 1` **exactly**, strand marginal exactly ½. `build_region_weights`
   returns this normalised `w`.
@@ -105,25 +107,58 @@ Derivations: Appendix D.
   3. c3 ~ E_s(c5,L) / Z_s(c5)   over L = 25..180,  c3 = c5 + σ·L
   ```
 
-- **Out:** fragments `(region_idx, start, stop, strand)`, written as
-  `sample_<i>.npz`.
+- **Out:** fragments `(region_idx, start, stop, strand)` per sample, serialised
+  directly to the per-sample BED of Step 6 — no intermediate `.npz` format.
 - Related bound: Appendix E (`var(log Z_s)`).
 
-### Step 6 — Build the store
+### Step 6 — Emit fragments; production builds the store
 
-- **In:** `sample_<i>.npz`, the region set, `FL_BANDS = ((25,110),(110,180))`.
-- **Do:** `sim_build_store.py`; 12 tracks. `config.check_fl_bands` asserts the
-  recorded bands equal the code's `FL_BANDS` at construction, in **both**
-  `dataset.py` and `sim_build_store.py`, failing loudly and naming both tuples.
-  Val/test use a **centred** evaluation crop.
-- **Out:** a zarr store read by both model classes.
+The simulator's job is to generate fragments; store layout is a model-class
+concern. Emitting a BED and letting production build the store removes a second
+implementation of the store rule — the same rule that forced `sim_build_store.py`
+to be patched separately from `dataset.py` for the `FL_BANDS` guard, the
+silent-divergence failure `CLAUDE.md` names.
+
+- **In:** the drawn fragments, reference `hg38.fa`.
+- **Do:** write **one sorted BED per sample** — `sample_<i>.bed.gz`, bgzipped and
+  tabix-indexed — in the **8-column** format
+
+  ```
+  0 contig  1 start  2 stop  3 name  4 score  5 strand  6 mapq1  7 mapq2
+  ```
+
+  with **all MAPQs = 60**. **GC is not emitted** — `build-fragments-h5` computes
+  it from the FASTA via `get_g_or_c_cumsum`, so store GC comes from the real
+  reference through production code. Then hand off to production:
+
+  ```
+  build-fragments-h5 sample_<i>.bed.gz sample_<i>.h5 --fasta hg38.fa   # per sample
+  background_model preprocess + store                                  # all samples -> one store
+  ```
+
+- **One BED and one h5 per sample, not one of each overall.** The fragment h5 is a
+  per-sample artifact: `preprocess.py` calls `from_fragments_h5` once per sample and
+  the sample sheet maps samples to h5 paths. The store then holds all samples on its
+  sample axis. At `S = 1` this is a single file, but building it per-sample from the
+  start is what makes `S > 1` work without restructuring.
+
+- **Hard dependency:** columns 6–7 need a pending `fragments_h5` patch —
+  `tsv_to_fragments` currently hardcodes `mapq1=None, mapq2=None`; the two-column
+  MAPQ read is being added. This step is blocked until it lands.
+- **Why MAPQ matters (silent-failure trap):** unknown MAPQs store as `-1`;
+  `background_model/config.py` sets `min_mapq = 10` and `preprocess.py` passes it
+  to `from_fragments_h5`, and `-1 >= 10` is False — so without real MAPQs every
+  fragment is filtered and the store comes out **empty, with no error**.
+- **Out:** the fragment h5 and the zarr store, both built by production code.
 
 ### Step 7 — Compute the anchors
 
 - **In:** the store, `w` via `build_region_weights`, the scoring domain `D`.
 - **Do:**
-  - `D = {(p, L, strand)}` with the fragment entirely inside the centred
-    evaluation crop **and** `L` in band; `|D| = pairs_inband_in_crop × 2`.
+  - `D = {(m, L, s) : m ∈ [0, P), L in band, s ∈ {0,1}}`, centre-based — the
+    fragment centre `m = p + L//2` lands in the (centred, val/test) crop of width
+    `P = tile_size` (2048 for region_len 2560, 1024 for 1536). `|D_L| = P` for
+    every `L`, so `|D| = 155 · P · 2` (155 in-band lengths, 2 strands).
   - `uniform = log|D|`.
   - `oracle = mean over scored fragments of ( -log w(x) + log W_D )`, where
     `W_D = Σ_{x ∈ D} w(x)`, computed **per region**.
@@ -168,8 +203,6 @@ Derivations: Appendix D.
   builder guarantees; it needs no reference implementation.
 - **Realised-parameter recovery:** the generative tables are recoverable from the
   emitted fragments (hexamer-table recovery, GC slope by length).
-- **The shared builder is exercised by both paths in one test**, so a change to
-  one consumer cannot silently diverge from the other.
 - **Oracle NLL strictly below uniform** on sim data.
 - **`var(log Z_s(c5))` measured over the region set** (Appendix E).
 
@@ -192,10 +225,7 @@ With `E_s(c5,L)` and `Z_s(c5) = Σ_{L} E_s(c5,L)` as in Step 4,
 The strand marginal is `Σ_{c5} Σ_L w = ½` for each `s`, exactly.
 
 The cancellation `Σ_L E_s(c5,L) = Z_s(c5)` holds **for any end-step factor**,
-because `Z_s(c5)` is *defined* as that sum. The normalisation is therefore exact
-under the current end factor `end_s[hex(c3)] · marginal_fl(L) / predict(L,gc)` and
-would remain exact under any replacement of it — it does not depend on what is
-inside `E_s`.
+because `Z_s(c5)` is *defined* as that sum.
 
 ### Appendix B — Sequential form, not the symmetric joint
 
@@ -213,22 +243,22 @@ from.
 ### Appendix C — `Ω` vs `D`, `W_D`, and why `-log w` is not the oracle
 
 `Ω` is everything the simulator can emit, and `Σ_Ω w = 1`. `D` is the scoring
-domain: `{(p, L, strand)}` with the fragment entirely inside the centred
-evaluation crop **and** `L` in band — a strict subset. Strand is a dimension, so
-`|D| = pairs_inband_in_crop × 2` and `log|D|` already contains the `log 2`.
-"In-band" is part of this definition, not a filter applied after it. Three silent
-ways to get it wrong: including out-of-band pairs makes `log|D|` count cells no
-model is charged for; admitting a fragment with one endpoint outside the crop puts
-numerator and denominator on different sets; and hardcoding `|D|` — it is
+domain: `{(m, L, strand) : m ∈ [0, P), L in band}`, centre-based — the fragment
+centre `m = p + L//2` lands in the crop of width `P = tile_size` — a strict
+subset. Strand is a dimension, so `|D| = 155 · P · 2` and `log|D|` already
+contains the `log 2`. "In-band" is part of this definition, not a filter applied
+after it. Two silent ways to get it wrong: including out-of-band pairs makes
+`log|D|` count cells no model is charged for; and hardcoding `|D|` — it is
 **computed**.
 
 `|Ω|` and `|D|` differ on both axes, so neither substitutes for the other. For the
-2560 geometry, `|Ω| = 2 · Σ_{L=25}^{180}(2561-L) = 2 · 383,526 = 767,052`. `|D|` is
-strictly smaller for two independent reasons: the crop excludes fragments running
-past its edge, and **`L = 180` is drawn but is not in band** — the bands are
-`[25,110) ∪ [110,180)`, so 155 of the 156 sampled lengths are scored. That second
-point is why the in-band clause is not vacuous even though the sampler is confined
-to the capture surface's support.
+2560 geometry, `|Ω| = 2 · Σ_{L=25}^{180}(2561-L) = 2 · 383,526 = 767,052`, while
+`|D| = 155 · P · 2 = 155 · 2048 · 2 = 634,880`. `|D|` is strictly smaller for two
+independent reasons: the centre axis spans only `P = 2048 < region_len` positions
+per length (against `2561 − L` in `Ω`), and **`L = 180` is drawn but is not in
+band** — the bands are `[25,110) ∪ [110,180)`, so 155 of the 156 sampled lengths
+are scored. That second point is why the in-band clause is not vacuous even though
+the sampler is confined to the capture surface's support.
 
 Because scoring is conditional on being in `D`, the true conditional is `w/W_D`
 with `W_D = Σ_{x ∈ D} w(x) < 1`, so the oracle per-fragment NLL is
@@ -299,21 +329,16 @@ duphist's percent column, `gc_bins` are percent, `predict()` takes percent.
 | what | where | supplies |
 |---|---|---|
 | region sets | `quiet_v2_pad1200_repeats_removed_tile2560` (11,505 tiles), `..._tile1536` (66,649) | the regions; `region_len = tile_size + 2·jitter` |
+| scored crop | `P = tile_size` (2048 for region_len 2560, 1024 for 1536) | the centre axis of `D`; `|D| = 155 · P · 2` |
 | reference | `/efs/analytics/nathanboley/data_resources/genome/hg38.fa` | sequence for hexamers and `cum_gc` |
 | hexamer tables | `build_w6(seed, dynamic_range)` — synthetic, **4096 independent** log-normal draws per table | the four `{start,end}×{fwd,rev}` tables |
 | length marginal | `duphist_merged/<sid>__duphist_wg.tsv.gz`, deduped `molecule_keys` | `marginal_fl(L)` |
 | capture surface | same duphist → `load_duphist` → `build_cell_map` → `GCFlDistModel().fit(...)` → `save()` | `predict(L, gc)` = inverse capture |
-| the class | `flgc.model.GCFlDistModel`, needs `PYTHONPATH=/home/nathanboley/src/biomarker` | **runtime dependency, incl. the Batch container** |
 
-Output layout: `sample_<i>.npz` with `region_idx`, `start`, `stop`, `strand`.
+Output: one `sample_<i>.bed.gz` per sample (8 columns, sorted, tabix-indexed).
 
-**GC source for scoring.** Simulation uses the true simulator surface. The
-real-data GC source is a deferred owner decision — KEN's 34 bp receptive field
-cannot compute GC over a 175 bp span, so asking models to predict `gc_correction`
-would rank receptive fields more than bias models; the recommendation is to supply
-GC externally. Blocks real-data scoring only.
+**GC source for scoring.** Simulation uses the true simulator surface; the
+real-data GC source is out of scope for Layer 1.
 
-**Per-region counts are constant in Layer 1** (54 / 37). Matching each region's
-depth to a real sample's realised count is a named future stage, not Layer 1; the
-machinery exists (`--real-count-dir`) and is held out so recovery is first tested
-against a clean constant-count generative model.
+**Per-region counts are constant in Layer 1** (54 / 37); matching each region's
+depth to a real sample's realised count is out of scope for Layer 1.
