@@ -30,7 +30,7 @@ import zarr
 # Bootstrap: background_model is not an installed package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import h5py
+from fragments_h5 import FragmentsH5
 
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
@@ -90,52 +90,42 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
     return valid_regions, sequences, masks
 
 
-_BIN_SIZE = 5000  # fragments_h5 index bin size
-
-# Per-worker h5 handle cache (one open per process, not per region)
+# Per-worker FragmentsH5 handle cache (one open per process, not per region)
 _worker_h5 = {}
 
 
 def _extract_worker(args_tuple):
     """Worker for multiprocessing.Pool.map.  Opens h5 once per process."""
-    h5_path, chrom, reg_start, reg_stop, L_min, L_max = args_tuple
+    h5_path, chrom, reg_start, reg_stop, L_min, L_max, dedup = args_tuple
 
     # Lazy per-process h5 open
     if h5_path not in _worker_h5:
-        _worker_h5[h5_path] = h5py.File(h5_path, 'r')
-    f = _worker_h5[h5_path]
+        _worker_h5[h5_path] = FragmentsH5(h5_path)
+    fh5 = _worker_h5[h5_path]
 
-    if chrom not in f['data']:
-        return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
-
-    # Use the h5 index to find the slice of fragments near this region
-    idx = f['index'][chrom]
-    d = f['data'][chrom]
-    start_bin = max(0, reg_start // _BIN_SIZE - 1)
-    end_bin = min(len(idx) - 1, reg_stop // _BIN_SIZE + 1)
-    lo = int(idx[start_bin])
-    hi = int(idx[end_bin])
-    if lo >= hi:
-        return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
-
-    # Read the candidate slice
-    starts_abs = d['starts'][lo:hi].astype(np.int64)
-    lengths = d['lengths'][lo:hi].astype(np.int64)
-    raw_strand = d['strand'][lo:hi]
-
-    # Filter: overlaps region
-    overlap = (starts_abs + lengths > reg_start) & (starts_abs < reg_stop)
-    starts_abs = starts_abs[overlap]
-    lengths = lengths[overlap]
-    raw_strand = raw_strand[overlap]
-
+    starts_abs, stops_abs, supp = fh5.fetch_array(
+        chrom, region_start=reg_start, region_stop=reg_stop,
+        return_strand=True,
+    )
     if len(starts_abs) == 0:
         return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
 
-    # Region-local coordinates
-    starts = starts_abs - reg_start
+    lengths = (stops_abs - starts_abs).astype(np.int64)
+    raw_strand = supp['strand']
 
-    # Encode strand: '+' or b'+' → 0, else 1
+    # Dedup by (start, stop) — same key as the 12-track builder
+    if dedup:
+        _, uniq_idx = np.unique(
+            np.array([starts_abs, stops_abs]), axis=1, return_index=True
+        )
+        starts_abs = starts_abs[uniq_idx]
+        lengths = lengths[uniq_idx]
+        raw_strand = raw_strand[uniq_idx]
+
+    # Region-local coordinates
+    starts = (starts_abs - reg_start).astype(np.int64)
+
+    # Encode strand
     strands = np.where(
         (raw_strand == b'+') | (raw_strand == '+'), 0, 1
     ).astype(np.uint8)
@@ -180,8 +170,9 @@ def build_store(args):
     log.info("Extracting fragments from %s (%d regions, %d workers)",
              args.sample, T, n_workers)
 
+    dedup = not args.no_dedup
     worker_args = [
-        (args.sample, r.chrom, r.start, r.stop, cfg.L_min, cfg.L_max)
+        (args.sample, r.chrom, r.start, r.stop, cfg.L_min, cfg.L_max, dedup)
         for r in regions
     ]
 
@@ -294,6 +285,7 @@ def main():
     p.add_argument("--L-min", type=int, default=25)
     p.add_argument("--L-max", type=int, default=179)
     p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
+    p.add_argument("--no-dedup", action="store_true", help="Skip (start,stop) deduplication")
     p.add_argument("--split-seed", type=int, default=42)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--test-frac", type=float, default=0.1)
