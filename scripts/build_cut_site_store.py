@@ -36,7 +36,7 @@ from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
 )
-from fragmentomics_tools.region import Region, one_hot_encode_sequences
+from fragmentomics_tools.region import Region
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +84,7 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
             continue
         sequences.append(seq.encode())
         # Mask: all valid (blacklist handled upstream in region set)
+        # All valid — N bases become zero vectors in one_hot_encode; masking is upstream
         masks.append(np.ones(l_target, dtype=bool))
         valid_regions.append(r)
     ref.close()
