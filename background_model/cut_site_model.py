@@ -24,27 +24,35 @@ from background_model_core import (
 )
 
 # ---------------------------------------------------------------------------
-# Geometry constants derived from FL_BANDS
+# Window geometry (fixed)
 # ---------------------------------------------------------------------------
 
-L_MIN_INBAND = min(lo for lo, hi in FL_BANDS)               # 25
-L_MAX_INBAND = max(hi for lo, hi in FL_BANDS) - 1           # 179 (half-open)
-N_L = L_MAX_INBAND - L_MIN_INBAND + 1                       # 155
 WINDOW_HALF = 128                                            # W/2
 
-# Offset-axis geometry (§Geometry in design doc)
-O_L_MIN = WINDOW_HALF - L_MAX_INBAND // 2                   # 39
-O_R_MAX = O_L_MIN + L_MAX_INBAND                            # 218
-N_OFFSETS = L_MAX_INBAND                                     # 179
-
-# Length groups: 10, half-open, 15 wide from L_MIN with the last 20 wide
+# Length groups: 10, half-open, 15 wide from L_min with the last group wider
 N_LENGTH_GROUPS = 10
 LENGTH_GROUP_WIDTH = 15
 
+# ---------------------------------------------------------------------------
+# Default length bounds (from FL_BANDS, but overridable)
+# ---------------------------------------------------------------------------
 
-def length_to_group(L: torch.Tensor) -> torch.Tensor:
-    """Map fragment length to group index: g = min((L - L_MIN) // 15, 9)."""
-    return torch.clamp((L - L_MIN_INBAND) // LENGTH_GROUP_WIDTH,
+DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)               # 25
+DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1           # 179 (half-open)
+
+
+def _compute_geometry(L_min: int, L_max: int):
+    """Derive all geometry from explicit length bounds."""
+    n_L = L_max - L_min + 1
+    o_l_min = WINDOW_HALF - L_max // 2
+    o_r_max = o_l_min + L_max
+    n_offsets = L_max  # live width = L_max
+    return n_L, o_l_min, o_r_max, n_offsets
+
+
+def length_to_group(L: torch.Tensor, L_min: int) -> torch.Tensor:
+    """Map fragment length to group index: g = min((L - L_min) // 15, 9)."""
+    return torch.clamp((L - L_min) // LENGTH_GROUP_WIDTH,
                         max=N_LENGTH_GROUPS - 1)
 
 
@@ -67,6 +75,9 @@ class CutSiteFragmentModel(L.LightningModule):
 
     def __init__(
         self,
+        # Length bounds (the model's scoring domain)
+        L_min: int = DEFAULT_L_MIN,
+        L_max: int = DEFAULT_L_MAX,
         # Architecture
         N1: int = 128,
         K: int = 128,
@@ -89,6 +100,12 @@ class CutSiteFragmentModel(L.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # -- Geometry derived from L_min / L_max ----------------------------
+        n_L, o_l_min, o_r_max, n_offsets = _compute_geometry(L_min, L_max)
+        self._n_L = n_L
+        self._o_l_min = o_l_min
+        self._n_offsets = n_offsets
 
         W = 2 * WINDOW_HALF  # 256
         self._model_input_size = tile_size + W  # 2304
@@ -116,7 +133,7 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L2b: interior branch ------------------------------------------
         # F (N2, 4, n_offsets) with learned per-offset weights
         self.interior_F = nn.Parameter(
-            torch.randn(N2, 4, N_OFFSETS) * 0.01
+            torch.randn(N2, 4, n_offsets) * 0.01
         )
         self.W_span = nn.Linear(N2, H, bias=False)
         self.W_mean = nn.Linear(N2, H, bias=False)
@@ -124,7 +141,7 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L3: output head -----------------------------------------------
         self.l3_act = nn.LeakyReLU()
         self.w_out = nn.Parameter(torch.randn(H) * (H ** -0.5))
-        self.len_bias = nn.Parameter(torch.zeros(N_L))
+        self.len_bias = nn.Parameter(torch.zeros(n_L))
 
         # -- Endpoint heads for NB loss (shape + frozen dispersion) ---------
         # endpoint_shape_head: trainable, predicts per-position shape for the
@@ -145,12 +162,12 @@ class CutSiteFragmentModel(L.LightningModule):
         # Pre-compute length tensors as buffers
         self.register_buffer(
             "_L_vals",
-            torch.arange(L_MIN_INBAND, L_MAX_INBAND + 1, dtype=torch.long),
+            torch.arange(L_min, L_max + 1, dtype=torch.long),
         )
         self.register_buffer(
             "_L_groups",
             length_to_group(
-                torch.arange(L_MIN_INBAND, L_MAX_INBAND + 1, dtype=torch.long)
+                torch.arange(L_min, L_max + 1, dtype=torch.long), L_min
             ),
         )
 
@@ -207,20 +224,21 @@ class CutSiteFragmentModel(L.LightningModule):
 
         B = x_onehot.shape[0]
         N2 = self.interior_F.shape[0]
-        base_offset = O_L_MIN  # 39 for current geometry
+        n_offsets = self._n_offsets
+        base_offset = self._o_l_min
 
         # Gather the x_onehot slice for all (m, o') pairs
-        # Positions: for m in [m_start, m_start+m_count), o' in [0, N_OFFSETS)
+        # Positions: for m in [m_start, m_start+m_count), o' in [0, n_offsets)
         # x_idx = m + base_offset + o'
         m_range = torch.arange(m_start, m_start + m_count,
                                device=x_onehot.device)  # (m_count,)
-        o_range = torch.arange(N_OFFSETS, device=x_onehot.device)  # (n_offsets,)
+        o_range = torch.arange(n_offsets, device=x_onehot.device)  # (n_offsets,)
         # (m_count, n_offsets) indices into x_onehot's last dim
         x_idx = m_range[:, None] + base_offset + o_range[None, :]  # (m_count, n_offsets)
 
         # x_patch: (B, 4, m_count, n_offsets)
         x_patch = x_onehot[:, :, x_idx.reshape(-1)].reshape(
-            B, 4, m_count, N_OFFSETS
+            B, 4, m_count, n_offsets
         )
 
         # u[b,n,m,o'] = sum_c F[n,c,o'] * x_patch[b,c,m,o']
@@ -230,11 +248,11 @@ class CutSiteFragmentModel(L.LightningModule):
 
         # Exclusive prefix sum along the offset axis (last dim)
         # U[k] = sum_{o'<k} u[o'], so U[0] = 0 and U[n_offsets] = sum(u)
-        U = torch.zeros(B, N2, m_count, N_OFFSETS + 1,
+        U = torch.zeros(B, N2, m_count, n_offsets + 1,
                          device=u.device, dtype=u.dtype)
         U[..., 1:] = torch.cumsum(u, dim=-1)
 
-        return U  # (B, N2, m_count, N_OFFSETS + 1)
+        return U  # (B, N2, m_count, n_offsets + 1)
 
     # -- Forward pass -------------------------------------------------------
 
@@ -270,7 +288,7 @@ class CutSiteFragmentModel(L.LightningModule):
             disp_bp = self.dispersion_head(h_centre)         # (B, 2, P), frozen
 
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
-        U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, N_OFFSETS+1)
+        U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, n_offsets+1)
 
         # -- L2a: pre-compute M[g,s] @ h for ALL groups (cached) ------------
         # Avoids redundant matmuls when the same group spans multiple L-chunks.
@@ -290,8 +308,9 @@ class CutSiteFragmentModel(L.LightningModule):
         L_vals = self._L_vals       # (n_L,)
         L_groups = self._L_groups   # (n_L,)
 
-        for L_start_idx in range(0, N_L, L_chunk):
-            L_end_idx = min(L_start_idx + L_chunk, N_L)
+        n_L = self._n_L
+        for L_start_idx in range(0, n_L, L_chunk):
+            L_end_idx = min(L_start_idx + L_chunk, n_L)
             chunk_L = L_vals[L_start_idx:L_end_idx]        # (chunk_size,)
             chunk_g = L_groups[L_start_idx:L_end_idx]       # (chunk_size,)
             chunk_size = chunk_L.shape[0]
@@ -336,10 +355,10 @@ class CutSiteFragmentModel(L.LightningModule):
                     endpoint_feats[tap][strand] = result.permute(1, 2, 3, 0)
 
             # -- L2b span: vectorized gather from prefix sum ----------------
-            o_l_prime = o_l - O_L_MIN   # (chunk_size,)
-            o_r_prime = o_r - O_L_MIN   # (chunk_size,)
+            o_l_prime = o_l - self._o_l_min   # (chunk_size,)
+            o_r_prime = o_r - self._o_l_min   # (chunk_size,)
 
-            # U is (B, N2, P, N_OFFSETS+1). Gather at o_r' and o_l' for all
+            # U is (B, N2, P, n_offsets+1). Gather at o_r' and o_l' for all
             # chunk positions at once.
             U_r = U[:, :, :, o_r_prime.long()]  # (B, N2, P, chunk_size)
             U_l = U[:, :, :, o_l_prime.long()]  # (B, N2, P, chunk_size)

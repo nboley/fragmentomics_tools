@@ -9,16 +9,18 @@ import torch
 
 from background_model.cut_site_model import (
     CutSiteFragmentModel,
-    L_MAX_INBAND,
-    L_MIN_INBAND,
-    N_L,
+    DEFAULT_L_MIN,
+    DEFAULT_L_MAX,
     N_LENGTH_GROUPS,
-    N_OFFSETS,
-    O_L_MIN,
-    O_R_MAX,
     WINDOW_HALF,
+    _compute_geometry,
     length_to_group,
 )
+
+# Derived constants at default L_min/L_max (for tests that use defaults)
+L_MIN_INBAND = DEFAULT_L_MIN
+L_MAX_INBAND = DEFAULT_L_MAX
+N_L, O_L_MIN, O_R_MAX, N_OFFSETS = _compute_geometry(L_MIN_INBAND, L_MAX_INBAND)
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +52,14 @@ class TestGeometryConstants:
         """10 groups, 15 wide, last group is 20 wide ([160,180))."""
         assert N_LENGTH_GROUPS == 10
         # First group
-        assert length_to_group(torch.tensor(25)).item() == 0
-        assert length_to_group(torch.tensor(39)).item() == 0
+        assert length_to_group(torch.tensor(25), L_MIN_INBAND).item() == 0
+        assert length_to_group(torch.tensor(39), L_MIN_INBAND).item() == 0
         # Second group
-        assert length_to_group(torch.tensor(40)).item() == 1
+        assert length_to_group(torch.tensor(40), L_MIN_INBAND).item() == 1
         # Last group (clamped)
-        assert length_to_group(torch.tensor(160)).item() == 9
-        assert length_to_group(torch.tensor(175)).item() == 9
-        assert length_to_group(torch.tensor(179)).item() == 9
+        assert length_to_group(torch.tensor(160), L_MIN_INBAND).item() == 9
+        assert length_to_group(torch.tensor(175), L_MIN_INBAND).item() == 9
+        assert length_to_group(torch.tensor(179), L_MIN_INBAND).item() == 9
 
 
 # ---------------------------------------------------------------------------

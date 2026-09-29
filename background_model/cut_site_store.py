@@ -32,7 +32,11 @@ import numpy as np
 import zarr
 
 from background_model.tracks import FL_BANDS
-from background_model.config import check_fl_bands
+
+
+# Default length bounds (from FL_BANDS, overridable)
+_DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)    # 25
+_DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1  # 179
 
 
 # ---------------------------------------------------------------------------
@@ -46,16 +50,18 @@ class CutSiteStoreConfig:
 
     Hashed separately from PlumbingConfig so that adding max_len does NOT
     rehash the 12-track production store.
+
+    L_min / L_max define the scored fragment-length range.  These are explicit
+    parameters, NOT derived from FL_BANDS — the cut-site model is band-free.
     """
     tile_size: int = 2048
     jitter: int = 256
     rf_budget: int = 133     # WINDOW_HALF + ceil(conv_margin/2) = 128 + 5 = 133
-                             # l_seq must be >= l_in + 2*jitter; rf_budget
-                             # provides the (l_seq - l_target)/2 headroom.
     max_len: int = 256
+    L_min: int = _DEFAULT_L_MIN
+    L_max: int = _DEFAULT_L_MAX
     seed: int = 42
     n_train_samples: int = 1
-    fl_bands: Tuple[Tuple[int, int], ...] = FL_BANDS
 
     @property
     def l_target(self) -> int:
@@ -66,21 +72,15 @@ class CutSiteStoreConfig:
         return self.tile_size + 2 * (self.jitter + self.rf_budget)
 
     def config_hash(self) -> str:
-        d = asdict(self)
-        d["fl_bands"] = [list(b) for b in d["fl_bands"]]
-        canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
     def to_json(self) -> str:
-        d = asdict(self)
-        d["fl_bands"] = [list(b) for b in d["fl_bands"]]
-        return json.dumps(d, sort_keys=True, indent=2)
+        return json.dumps(asdict(self), sort_keys=True, indent=2)
 
     @classmethod
     def from_json(cls, s: str) -> "CutSiteStoreConfig":
-        d = json.loads(s)
-        d["fl_bands"] = tuple(tuple(b) for b in d["fl_bands"])
-        return cls(**d)
+        return cls(**json.loads(s))
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def open_cut_site_store(
     config: Optional[CutSiteStoreConfig] = None,
     mode: str = "r",
 ) -> zarr.Group:
-    """Open a cut-site store; optionally verify config drift and fl_bands."""
+    """Open a cut-site store; optionally verify config drift."""
     root = zarr.open_group(store_path, mode=mode)
     if config is not None:
         stored_hash = root.attrs["config_hash"]
@@ -103,10 +103,21 @@ def open_cut_site_store(
                 f"Config drift: store hash {stored_hash!r} != "
                 f"current hash {current_hash!r}. Build a new store."
             )
-    # Always check fl_bands
-    recorded_fl = json.loads(root.attrs["config_json"]).get("fl_bands")
-    check_fl_bands(recorded_fl)
     return root
+
+
+def validate_length_range(
+    store_root: zarr.Group, model_L_min: int, model_L_max: int,
+) -> None:
+    """Assert model's L_min/L_max match the store's. Fail loudly on mismatch."""
+    cfg = json.loads(store_root.attrs["config_json"])
+    store_L_min = cfg["L_min"]
+    store_L_max = cfg["L_max"]
+    if store_L_min != model_L_min or store_L_max != model_L_max:
+        raise ValueError(
+            f"Length range mismatch: model expects [{model_L_min}, {model_L_max}] "
+            f"but store has [{store_L_min}, {store_L_max}]."
+        )
 
 
 def validate_max_len(store_root: zarr.Group, model_max_len: int) -> None:

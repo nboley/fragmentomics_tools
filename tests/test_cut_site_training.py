@@ -11,11 +11,15 @@ import torch
 
 from background_model.cut_site_model import (
     CutSiteFragmentModel,
-    L_MAX_INBAND,
-    L_MIN_INBAND,
-    N_L,
+    DEFAULT_L_MIN,
+    DEFAULT_L_MAX,
     WINDOW_HALF,
+    _compute_geometry,
 )
+
+L_MIN_INBAND = DEFAULT_L_MIN
+L_MAX_INBAND = DEFAULT_L_MAX
+N_L, _, _, _ = _compute_geometry(L_MIN_INBAND, L_MAX_INBAND)
 from background_model.cut_site_dataset import (
     CutSiteFragmentDataset,
     cut_site_collate_fn,
@@ -41,7 +45,7 @@ def small_training_setup(tmp_path):
     ds = CutSiteFragmentDataset(
         store_path=store_path,
         model_input_size=model.model_input_size,
-        model_max_len=cfg.max_len,
+        model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
         split="train",
         sample_role="train",
         min_N=0,

@@ -14,7 +14,6 @@ jitter offset.  At S=1 this is moot.  Document preserved for future reference.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Dict, List, Optional
 
@@ -23,11 +22,10 @@ import torch
 import zarr
 from torch.utils.data import Dataset
 
-from background_model.config import check_fl_bands
-from background_model.cut_site_model import L_MAX_INBAND, L_MIN_INBAND, N_L, WINDOW_HALF
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     densify_endpoints,
+    validate_length_range,
     validate_max_len,
 )
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
@@ -56,6 +54,8 @@ class CutSiteFragmentDataset(Dataset):
         store_path: str,
         model_input_size: int,
         model_max_len: int,
+        model_L_min: int,
+        model_L_max: int,
         split: str,
         sample_role: str = "train",
         min_N: int = 10,
@@ -72,6 +72,8 @@ class CutSiteFragmentDataset(Dataset):
         self.store_path = store_path
         self.model_input_size = int(model_input_size)
         self.model_max_len = int(model_max_len)
+        self.L_min = int(model_L_min)
+        self.L_max = int(model_L_max)
         self.min_N = int(min_N)
         self.train_mode = bool(train_mode)
         self._seed = seed
@@ -83,8 +85,7 @@ class CutSiteFragmentDataset(Dataset):
         self.config_hash = root.attrs["config_hash"]
         self.split_version = root.attrs["split_version"]
         validate_max_len(root, model_max_len)
-        recorded_fl = json.loads(root.attrs["config_json"]).get("fl_bands")
-        check_fl_bands(recorded_fl)
+        validate_length_range(root, model_L_min, model_L_max)
 
         # ── geometry ─────────────────────────────────────────────────────
         self.tile_size = self.config.tile_size
@@ -248,12 +249,12 @@ class CutSiteFragmentDataset(Dataset):
         keep = (frag_centre >= 0) & (frag_centre < self.tile_size)
 
         # Also filter to in-band lengths
-        keep &= (frag_length >= L_MIN_INBAND) & (frag_length <= L_MAX_INBAND)
+        keep &= (frag_length >= self.L_min) & (frag_length <= self.L_max)
 
         frag_m = frag_centre[keep]
         frag_L = frag_length[keep].astype(np.int64)
         frag_s = frag_strand[keep].astype(np.int64)
-        frag_L_idx = frag_L - L_MIN_INBAND  # 0-based index into n_L
+        frag_L_idx = frag_L - self.L_min  # 0-based index into n_L
 
         # ── One-hot encode ───────────────────────────────────────────────
         x_tokens = np.ascontiguousarray(x_tokens, dtype=np.uint8)

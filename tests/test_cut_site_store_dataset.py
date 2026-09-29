@@ -12,16 +12,19 @@ import torch
 import zarr
 
 from background_model.cut_site_model import (
-    L_MAX_INBAND,
-    L_MIN_INBAND,
-    N_L,
+    DEFAULT_L_MIN,
+    DEFAULT_L_MAX,
     WINDOW_HALF,
+    _compute_geometry,
     CutSiteFragmentModel,
 )
+
+L_MIN_INBAND = DEFAULT_L_MIN
+L_MAX_INBAND = DEFAULT_L_MAX
+N_L, _, _, _ = _compute_geometry(L_MIN_INBAND, L_MAX_INBAND)
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     densify_endpoints,
-    open_cut_site_store,
     recompute_endpoints_from_fragments,
     validate_max_len,
 )
@@ -191,20 +194,19 @@ class TestDomainGuards:
         root = zarr.open_group(store_path, mode="r")
         validate_max_len(root, 256)  # should not raise
 
-    def test_fl_bands_mismatch_raises(self, tmp_path):
-        """A store with wrong fl_bands should fail to open."""
-        cfg = CutSiteStoreConfig()
-        store_path = str(tmp_path / "bad_bands.zarr")
+    def test_length_range_mismatch_raises(self, tmp_path):
+        """A store with different L_min/L_max should fail validation."""
+        from background_model.cut_site_store import validate_length_range
+        cfg = CutSiteStoreConfig(L_min=25, L_max=179)
+        store_path = str(tmp_path / "bad_range.zarr")
         root = zarr.open_group(store_path, mode="w")
-        # Write config with wrong bands
-        bad_cfg = json.loads(cfg.to_json())
-        bad_cfg["fl_bands"] = [[40, 65], [120, 175]]
-        root.attrs["config_json"] = json.dumps(bad_cfg)
-        root.attrs["config_hash"] = "fake"
+        root.attrs["config_json"] = cfg.to_json()
+        root.attrs["config_hash"] = cfg.config_hash()
         root.attrs["split_version"] = 0
 
-        with pytest.raises(ValueError, match="fl_bands mismatch"):
-            open_cut_site_store(store_path)
+        # Model expects different range
+        with pytest.raises(ValueError, match="Length range mismatch"):
+            validate_length_range(root, 30, 200)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +261,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -284,7 +286,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -310,7 +312,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -343,7 +345,7 @@ class TestDatasetCollate:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -366,7 +368,7 @@ class TestDatasetCollate:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -400,7 +402,7 @@ class TestMinNFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=10,  # 5 < 10, so all tiles should be excluded
@@ -420,7 +422,7 @@ class TestMinNFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=10,
@@ -439,14 +441,14 @@ class TestPreloadFalsePath:
         ds_pre = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0,
             train_mode=False, preload=True,
         )
         ds_no = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0,
             train_mode=False, preload=False,
         )
@@ -495,7 +497,7 @@ class TestCentreFilterBoundary:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len,
+            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0, train_mode=False,
         )
         item = ds[0]
