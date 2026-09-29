@@ -7,6 +7,6 @@ the sampler and the oracle scorer; keeping one implementation prevents the
 silent sampler/scorer drift that would invalidate every ``% captured`` number.
 """
 
-from background_model.simulator.weights import build_region_weights
+from background_model.simulator.weights import HexamerTables, build_region_weights
 
-__all__ = ["build_region_weights"]
+__all__ = ["HexamerTables", "build_region_weights"]

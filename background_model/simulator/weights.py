@@ -24,7 +24,7 @@ Hexamer index conventions:
   - Plus strand fragments read forward: both c5 and c3 use ``hex_fwd``.
   - Minus strand fragments read RC: both c5 and c3 use ``hex_rc``.
   - The four tables ``{start,end} × {fwd,rev}`` are UNTIED; strand selects
-    which ``(start_s, end_s)`` pair applies.
+    which ``(start_s, end_s)`` pair applies.  Grouped in ``HexamerTables``.
 
 Invariants (Appendix A):
   - sum_Omega w = 1 exactly.
@@ -51,6 +51,9 @@ N_LENGTHS: int = L_MAX - L_MIN + 1  # 156
 SIGMA_PLUS: int = +1
 SIGMA_MINUS: int = -1
 
+NHEX: int = 4096
+"""Number of distinct hexamer indices (4^6)."""
+
 
 # ── orientation / geometry helpers ───────────────────────────────────────
 
@@ -72,19 +75,21 @@ def fragment_base_range(c5: int, c3: int):
     return p, L
 
 
-def gc_pct(c5: int, c3: int, cum_gc: np.ndarray) -> float:
+def gc_pct(c5, c3, cum_gc):
     """GC percentage over the genomic span of a fragment.
 
     Strand-independent: always uses [min(c5,c3), max(c5,c3)) which is [p, p+L).
     ``cum_gc`` is the cumulative GC count array of length ``region_len + 1``
     where ``cum_gc[i]`` = number of G/C bases in positions [0, i).
+
+    Accepts scalar or array c5/c3 (uses ``np.minimum``/``np.maximum``).
     """
-    lo = min(c5, c3)
-    hi = max(c5, c3)
+    lo = np.minimum(c5, c3)
+    hi = np.maximum(c5, c3)
     L = hi - lo
-    if L == 0:
-        return 0.0
-    return 100.0 * (cum_gc[hi] - cum_gc[lo]) / L
+    safe_L = np.maximum(L, 1)
+    result = 100.0 * (cum_gc[hi] - cum_gc[lo]) / safe_L
+    return np.where(L == 0, 0.0, result)
 
 
 def omega_size(region_len: int, L_min: int = L_MIN, L_max: int = L_MAX) -> int:
@@ -105,6 +110,23 @@ def omega_size(region_len: int, L_min: int = L_MIN, L_max: int = L_MAX) -> int:
             break
         total += n_positions
     return 2 * total
+
+
+# ── hexamer tables ──────────────────────────────────────────────────────
+
+class HexamerTables(NamedTuple):
+    """Four hexamer weight tables: {start, end} x {fwd, rev}.
+
+    Each field is shape ``(NHEX,)`` = ``(4096,)``.  The tables are UNTIED —
+    strand selects which ``(start_s, end_s)`` pair applies:
+
+    - Plus strand: ``start_fwd``, ``end_fwd``
+    - Minus strand: ``start_rev``, ``end_rev``
+    """
+    start_fwd: np.ndarray
+    end_fwd: np.ndarray
+    start_rev: np.ndarray
+    end_rev: np.ndarray
 
 
 # ── weight builder result ────────────────────────────────────────────────
@@ -138,10 +160,7 @@ def build_region_weights(
     hex_fwd: np.ndarray,
     hex_rc: np.ndarray,
     cum_gc: np.ndarray,
-    start_fwd: np.ndarray,
-    end_fwd: np.ndarray,
-    start_rev: np.ndarray,
-    end_rev: np.ndarray,
+    hex_tables: HexamerTables,
     marginal_fl: np.ndarray,
     predict: Callable[[int, float], float],
     region_len: int,
@@ -157,10 +176,11 @@ def build_region_weights(
         Reverse-complement hexamer index at each cut site position.
     cum_gc : ndarray, shape (region_len + 1,)
         Cumulative GC count; ``cum_gc[i]`` = #(G or C) in bases [0, i).
-    start_fwd, end_fwd : ndarray, shape (4096,)
-        Hexamer weight tables for the plus strand (start and end).
-    start_rev, end_rev : ndarray, shape (4096,)
-        Hexamer weight tables for the minus strand (start and end).
+    hex_tables : HexamerTables
+        Four hexamer weight tables grouped as ``HexamerTables(start_fwd,
+        end_fwd, start_rev, end_rev)``, each shape ``(NHEX,)`` = ``(4096,)``.
+        Plus strand uses ``(start_fwd, end_fwd)``; minus strand uses
+        ``(start_rev, end_rev)``.
     marginal_fl : ndarray, shape (N_LENGTHS,)
         ``marginal_fl[li]`` = P(L = L_MIN + li), normalised to sum 1 over
         L = L_MIN..L_MAX.
@@ -172,6 +192,15 @@ def build_region_weights(
     valid : ndarray, shape (region_len + 1,), optional
         Boolean mask; False where the hexamer window contains a non-ACGT base.
         If None, all positions are treated as valid.
+
+    Notes
+    -----
+    The scalar ``predict`` signature (one Python call per element of Ω)
+    is a known cost: 767,052 calls and ~0.665 s per region at region_len
+    2560 with a no-op predict; Step 7's oracle pays the same cost again.
+    Phase 2 will vectorise this by pre-building and caching a ``(L, gc_bin)``
+    lookup table and gathering from it — that is the settled plan, not a
+    hypothetical.  Do not optimise the scalar path.
 
     Returns
     -------
@@ -186,6 +215,11 @@ def build_region_weights(
     assert marginal_fl.shape == (N_LENGTHS,), (
         f"marginal_fl shape {marginal_fl.shape} != ({N_LENGTHS},)"
     )
+    start_fwd, end_fwd, start_rev, end_rev = hex_tables
+    assert start_fwd.shape == (NHEX,), f"start_fwd shape {start_fwd.shape} != ({NHEX},)"
+    assert end_fwd.shape == (NHEX,), f"end_fwd shape {end_fwd.shape} != ({NHEX},)"
+    assert start_rev.shape == (NHEX,), f"start_rev shape {start_rev.shape} != ({NHEX},)"
+    assert end_rev.shape == (NHEX,), f"end_rev shape {end_rev.shape} != ({NHEX},)"
 
     if valid is None:
         valid = np.ones(n_sites, dtype=bool)
@@ -208,8 +242,7 @@ def build_region_weights(
         c3s = c5s + L
         vmask = valid[c5s] & valid[c3s]
         end_vals = end_fwd[hex_fwd[c3s]]
-        gc_counts = cum_gc[c3s] - cum_gc[c5s]
-        gc_pcts = 100.0 * gc_counts / L
+        gc_pcts = gc_pct(c5s, c3s, cum_gc)
         predict_vals = np.array([predict(int(L), float(g)) for g in gc_pcts])
         E = np.where(vmask, end_vals * marginal_fl[li] / predict_vals, 0.0)
         w_plus[c5s, li] = E
@@ -222,8 +255,7 @@ def build_region_weights(
         c3s = c5s - L
         vmask = valid[c5s] & valid[c3s]
         end_vals = end_rev[hex_rc[c3s]]
-        gc_counts = cum_gc[c5s] - cum_gc[c3s]
-        gc_pcts = 100.0 * gc_counts / L
+        gc_pcts = gc_pct(c5s, c3s, cum_gc)
         predict_vals = np.array([predict(int(L), float(g)) for g in gc_pcts])
         E = np.where(vmask, end_vals * marginal_fl[li] / predict_vals, 0.0)
         w_minus[c5s, li] = E
