@@ -263,6 +263,8 @@ class CutSiteFragmentModel(L.LightningModule):
 
         # -- Endpoint heads (NB loss) on centre P positions of h ------------
         h_centre = h[:, :, WINDOW_HALF:WINDOW_HALF + P]   # (B, N1, P)
+        # endpoint_shape_head must remain OUTSIDE the no_grad block below —
+        # moving it inside would silently kill gradients to the shape head.
         endpoint_shape = self.endpoint_shape_head(h_centre)  # (B, 2, P)
         with torch.no_grad():
             disp_bp = self.dispersion_head(h_centre)         # (B, 2, P), frozen
@@ -386,10 +388,10 @@ class CutSiteFragmentModel(L.LightningModule):
         self, dispersion_bp: torch.Tensor, mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Pool bp-resolution dispersion to NB window level."""
-        L = dispersion_bp.shape[-1]
+        bp_len = dispersion_bp.shape[-1]
         w = self.hparams.dispersion_window_size
-        assert L % w == 0, f"tile size {L} not divisible by dispersion_window_size {w}"
-        out_size = L // w
+        assert bp_len % w == 0, f"tile size {bp_len} not divisible by dispersion_window_size {w}"
+        out_size = bp_len // w
         if mask is not None and mask.dim() == 2:
             mask = mask[:, None, :]
         pooled = masked_mean_pool(dispersion_bp, mask, out_size)

@@ -200,7 +200,7 @@ L_chunk = 32                            l_in  = 2310 (2309 rounded to even for j
               pre[h, m, L, s]  =  f_l[s] + f_r[s]           <-- LINEAR until summed
                                 + (V_span[o_r] - V_span[o_l])
                                 + (V_mean[o_r] - V_mean[o_l]) / L
-                                + len_bias[h, L]              <-- free per-L term
+                                + len_bias[L]              <-- free per-L term
                         │
                         v   <-- THE ONLY PER-PAIR TENSOR
               ┌──────────────────────────────────────────────┐
@@ -251,7 +251,7 @@ span     = U[:,:,o_r] - U[:,:,o_l]
 mean     = span / L                         # both fed explicitly
 
 pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean
-             + len_bias[h, L]
+             + len_bias[L]
 hid          = act(pre)                                      # (B, H, P, L_chunk, 2)
 logit[m,L,s] = w_out · hid                                   # (B, P, n_L, 2)
 ep_shape     = endpoint_shape_head(h)  # (B, 2, P) trainable shape for NB loss
