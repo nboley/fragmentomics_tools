@@ -248,3 +248,49 @@ class TestBuilderIntegration:
         assert (lengths <= cfg.L_max).all()
         strands = np.asarray(root["fragments/strand"][:])
         assert set(np.unique(strands)).issubset({0, 1})
+
+
+class TestExtractWorkerVsLibrary:
+    """Verify _extract_worker produces the same fragments as the library path."""
+
+    def test_worker_matches_RegionFragmentArray(self):
+        """_extract_worker output must match RegionFragmentArray for the same region."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from scripts.build_cut_site_store import _extract_worker
+        from fragmentomics_tools.fragment_array import RegionFragmentArray
+
+        L_min, L_max = 25, 179
+        # Region that has fragments in the golden h5
+        chrom, reg_start, reg_stop = "chr6", 51512560, 51512560 + 2560
+
+        # Builder path
+        worker_starts, worker_lengths, worker_strands = _extract_worker(
+            (GOLDEN_H5, chrom, reg_start, reg_stop, L_min, L_max, True)
+        )
+
+        # Library path — same filters as the builder
+        r = Region(chrom, reg_start, reg_stop, strand=None)
+        rfa = RegionFragmentArray.from_fragments_h5(GOLDEN_H5, r)
+        if rfa.n_fragments > 0:
+            rfa = rfa.drop_duplicate_fragments()
+            lib_starts = (rfa.starts - reg_start).astype(np.int64)
+            lib_lengths = rfa.lengths.astype(np.int64)
+            keep = (lib_lengths >= L_min) & (lib_lengths <= L_max)
+            centres = lib_starts + lib_lengths // 2
+            keep &= (centres >= 0) & (centres < 2560)
+            keep &= (lib_starts >= 0)
+            lib_starts = lib_starts[keep]
+        else:
+            lib_starts = np.array([], dtype=np.int64)
+
+        # Compare counts — they should match (same h5, same region, same filters)
+        assert len(worker_starts) == len(lib_starts), (
+            f"Count mismatch: worker={len(worker_starts)}, library={len(lib_starts)}"
+        )
+        if len(worker_starts) > 0:
+            # Sort both by start for comparison
+            w_order = np.argsort(worker_starts)
+            assert np.array_equal(
+                np.sort(worker_starts), np.sort(lib_starts.astype(np.uint16))
+            ), "Start positions differ between worker and library paths"
