@@ -54,17 +54,37 @@ the API is built directly on `bioframe` in a single phase. Staging it — an
 implementation over `pybedtools` first, a backend swap second — is explicitly
 not the plan: it would build a layer already marked for deletion.
 
-The removal is contained, which is why it is affordable now. Measured:
-`pybedtools` is imported in **exactly one file**, `dataframe.py`. It is declared
-in three manifests — `environment.yml`, `pyproject.toml`, `recipe/recipe.yaml` —
-and supplies the `bedtools` binary. Nothing else needs that binary: the other
-declared externals (`htslib`, the `ucsc-*` tools) serve `formats.py`. So the
-last `import pybedtools` and all three declarations go in the same change.
+**In the library, `pybedtools` is imported in exactly one file** —
+`dataframe.py`. It is declared in three manifests — `environment.yml`,
+`pyproject.toml`, `recipe/recipe.yaml` — and supplies the `bedtools` binary.
+Nothing else in the library needs that binary: the other declared externals
+(`htslib`, the `ucsc-*` tools) serve `formats.py`.
 
-This is the point of the exercise. The `bedtools`-on-`PATH` hazard that
-CLAUDE.md documents — present in the conda env's `bin/` but absent in sandboxes
-and AWS Batch containers, and the cause of real failures — does not get
-mitigated. It stops existing.
+**But one script outside the library uses it heavily, and the naive removal
+breaks it.** `scripts/build_inactive_regions.py` (916 lines, last touched
+2026-09-09, and the generator of the committed `docs/qc/region_set_qc.md`) has
+roughly 25 `pybedtools` call sites. It is not portable to this API even in
+principle: it relies on `slop` — genome-end clamping, which this document
+declares explicitly **out of scope** — plus `sort(g=GENOME_FILE)`, `count()`
+and `set_tempdir`. It is also the code that already works around the PATH
+hazard by hand, calling `pybedtools.helpers.set_bedtools_path`.
+
+**Disposition: `pybedtools` becomes a script-only dependency.** Remove it from
+`pyproject.toml` and `recipe/recipe.yaml`, so that *installing the library* no
+longer requires `bedtools`. Keep it in `environment.yml`, the development and
+test environment where scripts run. The script is left working and unmodified.
+
+This keeps the benefit that motivates the whole exercise while paying for it
+honestly. The `bedtools`-on-`PATH` hazard CLAUDE.md documents — present in the
+conda env's `bin/` but absent in sandboxes and AWS Batch containers, and the
+cause of real failures — is what breaks *library* code in *deployed*
+environments. After this change, importing `fragmentomics_tools` cannot
+encounter it. A developer running a one-off region-building script from the
+dev env is a different situation, and one the script already handles.
+
+What this is *not* is "bedtools is gone from the repository". Claiming that
+would be false, and the difference is exactly the part that matters: the
+library's dependency closure versus a script's.
 
 ## Three layers
 
@@ -282,7 +302,7 @@ Verified against bioframe 0.8.0 by introspection, not from documentation.
 |---|---|---|
 | `overlap_indices` | `overlap(..., return_index=True)`, `how ∈ {left,right,outer,inner}` | `contig`→`chrom` mapping; **column renaming — see below**; `how="anti"` as outer + null filter; fraction thresholds; `same_strand` |
 | `nearest` | `closest(k=, ignore_overlaps=, ignore_upstream=, ignore_downstream=, return_distance=)` | signed-distance and direction convention |
-| `cluster`, `merge` | `cluster(min_dist=, return_cluster_ids=)`, `merge(min_dist=)` | `b=None` handling, label alignment |
+| `cluster`, `merge` | `cluster(min_dist=, return_cluster_ids=)`, `merge(min_dist=)` | two-frame `cluster` — see below — and label alignment |
 
 **The returned column names are ours to produce, not `bioframe`'s.** Verified
 against 0.8.0: `return_index=True` emits `index` and `index_` — a bare name and
@@ -296,17 +316,37 @@ wrong everywhere it is summed.
 
 Two gaps confirmed by reading the source rather than assumed:
 
+- **The two-frame `cluster(a, b)` is new code, not a thin wrapper.**
+  `bioframe.cluster` accepts a single frame only. The single-frame case
+  delegates; the two-frame case — label the connected components across `a` and
+  `b` together — must be built here: concatenate with provenance, cluster, then
+  split the labels back onto each input. Budget for it as an implementation
+  task rather than assuming the backend supplies it.
 - **Fraction thresholds do not exist in `bioframe`.** No `min_frac`,
   `reciprocal` or equivalent token appears anywhere in the package, so
   bedtools' `-f/-F/-r` must be implemented on our side by filtering on the
   returned overlap length. This is straightforward but must not be forgotten —
   it is a silent behaviour gap, not an error.
 - **`how="anti"` does not exist, and `bioframe` will not tell you so.**
-  Measured: `bioframe.overlap(df1, df2, how="anti")` raises nothing. It
-  validates `how` not at all, and an unrecognised value falls through to the
-  non-inner branch, returning a **left join** — that is, every matching row,
-  which is the exact complement of what `anti` means. A typo therefore returns
-  the opposite result silently.
+  Measured: `bioframe.overlap(df1, df2, how="anti")` raises nothing, and
+  `how="completely_bogus_value"` does not either — `how` is not validated at
+  all. An unrecognised value produces **exactly the inner join**. Internally
+  `_minus` recognises only `left`/`right`/`outer`, so no unpaired rows are
+  generated, and the later non-inner masking finds no sentinels to act on.
+
+  Measured on an `A` of two rows, one overlapping `B` and one not:
+
+  | `how` | rows | `A.start` |
+  |---|---|---|
+  | `inner` | 1 | `[100]` |
+  | `left` | 2 | `[100, 5000]` |
+  | **`anti`** | **1** | **`[100]`** — identical to `inner` |
+  | what `anti` should give | 1 | `[5000]` |
+
+  So it returns **the exact complement of its meaning**: every row that *does*
+  overlap, when asked for the rows that do not. For the operation this replaces
+  — `drop_overlapping_regions`, the sanctioned blacklist path — that means
+  keeping precisely the regions intended to be dropped, silently.
 
   **Therefore `overlap_indices` validates `how` itself, before the backend is
   called**, rejecting anything outside `{inner, left, right, outer, anti}` and
@@ -356,17 +396,23 @@ a number to update.**
 previous two.
 
 1. Build the five functions in a new `intervals` module against `bioframe`.
-   Validate the `how` argument ourselves — `bioframe.overlap` performs no
-   validation at all and silently treats an unrecognised `how` as a left join,
-   so `how="anti"` returns wrong results rather than raising. Implement the
-   fraction thresholds ourselves; `bioframe` has no `-f`/`-F`/`-r` equivalent.
+   Validate `how` ourselves against an explicit allowed set, raising on anything
+   else — `bioframe.overlap` does not validate it at all, and an unrecognised
+   value yields the inner join, so `how="anti"` returns the exact complement of
+   what it means rather than raising. Implement `anti` ourselves as an outer
+   join filtered to null right-hand rows. Implement the fraction thresholds
+   ourselves; `bioframe` has no `-f`/`-F`/`-r` equivalent. Build the two-frame
+   `cluster` as real code, not a delegation.
 2. Delete the methods in the Net change table.
 3. Rewrite `attach_blacklist_regions`; reimplement `from_beds_merged` on layer 1
    plus layer-2 `merge`.
-4. Remove `pybedtools` from `environment.yml`, `pyproject.toml` and
-   `recipe/recipe.yaml`; add `bioframe` from bioconda. Verify no `import
-   pybedtools` remains and that the suite passes without the `bedtools` binary
-   on `PATH` — that last check is the one that proves the exercise worked.
+4. Make `pybedtools` a script-only dependency: remove it from `pyproject.toml`
+   and `recipe/recipe.yaml`, **keep** it in `environment.yml` for
+   `scripts/build_inactive_regions.py`, and add `bioframe` from bioconda.
+   Verify no `import pybedtools` remains **in `fragmentomics_tools/`**, and that
+   the library's own suite passes with the `bedtools` binary absent from `PATH`
+   — that last check is the one that proves the exercise worked. Do not assert
+   the repository is free of `bedtools`; it is not, and the script is why.
 5. Update CLAUDE.md: its sanctioned-entry-point table names
    `join_on_overlap` and `drop_overlapping_regions`, and its "legitimate escape
    hatch" paragraph describes the `bedtools`-on-`PATH` hazard as a live
