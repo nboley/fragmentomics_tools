@@ -2,11 +2,13 @@
 
 Covers the four required invariants from the Phase 1 spec:
 
-1. sum_Omega w = 1 exactly (per region), AND the strand marginal is exactly 1/2.
-2. The minus-strand swap: c5 = p+L, c3 = p; hexamers read RC; c3(L) = c5 + sigma*L
-   with sigma = -1.  Tests both parities of L (odd and even).
-3. The Z_s edge rule: Z_s(c5) sums only L whose c3(L) stays in [0, region_len].
-   Assert |Omega| = 767,052 for region_len = 2560.
+1. ``w_plus.sum() + w_minus.sum() == 1`` exactly (per region), AND each
+   strand marginal is exactly 0.5.
+2. The minus-strand swap: ``c5 = p+L``, ``c3 = p``; hexamers read RC;
+   ``c3(L) = c5 - L``.  Tests both parities of L (odd and even).
+3. The edge rule: ``Z_s(c5)`` sums only L whose ``c3(L)`` stays in
+   ``[0, region_len]``.  The generative domain has 767,052 elements at
+   region_len 2560.
 4. L = 25..180, 156 values — exactly the capture surface's support.
 
 All synthetic — no FASTA, no torch, no EFS.
@@ -18,17 +20,20 @@ import pytest
 from background_model.simulator.weights import (
     L_MAX,
     L_MIN,
+    N_GC_BINS,
     N_LENGTHS,
     NHEX,
-    SIGMA_MINUS,
-    SIGMA_PLUS,
+    STRAND_MINUS,
+    STRAND_PLUS,
     HexamerTables,
     RegionWeights,
+    build_predict_lut,
     build_region_weights,
     c3_from_c5,
     fragment_base_range,
+    gc_bin_index,
     gc_pct,
-    omega_size,
+    generative_domain_size,
 )
 
 
@@ -83,23 +88,34 @@ def _trivial_predict(L, gc):
     return 1.0
 
 
+def _trivial_lut():
+    """LUT for the trivial (no-op) predict — all 1.0."""
+    return build_predict_lut(_trivial_predict)
+
+
 def _build_weights(region_len, tables=None, marginal_fl=None, predict=None,
-                   seed=123):
-    """Build weights with default synthetic inputs."""
+                   predict_lut=None, seed=123):
+    """Build weights with default synthetic inputs.
+
+    If ``predict_lut`` is provided it is used directly; otherwise one is
+    built from ``predict`` (defaulting to the trivial predict).
+    """
     hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed)
     if tables is None:
         tables = _uniform_tables()
     if marginal_fl is None:
         marginal_fl = _flat_marginal_fl()
-    if predict is None:
-        predict = _trivial_predict
+    if predict_lut is None:
+        if predict is None:
+            predict = _trivial_predict
+        predict_lut = build_predict_lut(predict)
     return build_region_weights(
         hex_fwd=hex_fwd,
         hex_rc=hex_rc,
         cum_gc=cum_gc,
         hex_tables=tables,
         marginal_fl=marginal_fl,
-        predict=predict,
+        predict_lut=predict_lut,
         region_len=region_len,
         valid=valid,
     )
@@ -138,10 +154,7 @@ class TestNormalisationInvariant:
         """Normalisation holds even with a non-trivial predict function."""
         tables = _random_tables(seed=55)
 
-        def gc_predict(L, gc):
-            # Non-trivial: higher GC -> higher weight (lower capture)
-            return 1.0 + 0.01 * gc
-
+        gc_predict = lambda L, gc: 1.0 + 0.01 * gc
         rw = _build_weights(2560, tables=tables, predict=gc_predict)
         total = rw.w_plus.sum() + rw.w_minus.sum()
         assert abs(total - 1.0) < 1e-12, f"sum = {total}"
@@ -178,10 +191,15 @@ class TestMinusStrandSwap:
     """c5 = p+L, c3 = p for minus strand.  Tests both parities of L."""
 
     def test_c3_formula_plus(self):
-        assert c3_from_c5(100, 50, SIGMA_PLUS) == 150
+        assert c3_from_c5(100, 50, STRAND_PLUS) == 150
 
     def test_c3_formula_minus(self):
-        assert c3_from_c5(150, 50, SIGMA_MINUS) == 100
+        assert c3_from_c5(150, 50, STRAND_MINUS) == 100
+
+    def test_c3_rejects_invalid_strand(self):
+        """Passing a numeric sign instead of a strand label raises ValueError."""
+        with pytest.raises(ValueError, match="strand must be"):
+            c3_from_c5(100, 50, +1)  # type: ignore[arg-type]
 
     def test_fragment_base_range_plus(self):
         # Plus: c5=100, c3=150 → p=100, L=50
@@ -200,6 +218,18 @@ class TestMinusStrandSwap:
         gc_plus = gc_pct(2, 8, cum)   # plus strand: c5=2, c3=8
         gc_minus = gc_pct(8, 2, cum)  # minus strand: c5=8, c3=2
         assert gc_plus == gc_minus
+
+    def test_gc_pct_zero_length_raises(self):
+        """c5 == c3 (zero-length fragment) raises ValueError."""
+        cum = np.array([0, 1, 2, 3, 4, 5], dtype=np.float64)
+        with pytest.raises(ValueError, match="zero-length fragment"):
+            gc_pct(3, 3, cum)
+
+    def test_gc_pct_zero_length_array_raises(self):
+        """Vectorised: any c5 == c3 element raises ValueError."""
+        cum = np.array([0, 1, 2, 3, 4, 5], dtype=np.float64)
+        with pytest.raises(ValueError, match="zero-length fragment"):
+            gc_pct(np.array([1, 3]), np.array([4, 3]), cum)
 
     def test_minus_strand_weight_nonzero_even_L(self):
         """Minus strand weights are populated for even L."""
@@ -234,7 +264,7 @@ class TestMinusStrandSwap:
             hex_fwd=hex_idx, hex_rc=hex_idx,  # same!
             cum_gc=cum,
             hex_tables=HexamerTables(table, table, table, table),
-            marginal_fl=fl, predict=_trivial_predict,
+            marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=np.ones(n_sites, dtype=bool),
         )
         # Both strand marginals should be 0.5
@@ -256,31 +286,35 @@ class TestAsymmetricFourTableWiring:
     """
 
     @staticmethod
-    def _reference_weight(c5, L, sigma, hex_tab, start_tab, end_tab,
-                          cum_gc, valid, fl, predict, region_len):
+    def _reference_weight(c5, L, strand, hex_tab, start_tab, end_tab,
+                          cum_gc, valid, fl, predict_lut, region_len):
         """Compute w(c5, L, strand) from the Step 4 formula, independently.
 
         ``hex_tab``, ``start_tab``, ``end_tab`` are the strand-selected arrays.
+        ``predict_lut`` is shape ``(N_LENGTHS, N_GC_BINS)``.
         """
-        c3 = c5 + sigma * L
+        sign = +1 if strand == "+" else -1
+        c3 = c5 + sign * L
         li = L - L_MIN
 
         if not (valid[c5] and valid[c3]):
             return 0.0
         gc_val = float(gc_pct(c5, c3, cum_gc))
-        E_here = end_tab[hex_tab[c3]] * fl[li] / predict(L, gc_val)
+        gi = int(gc_bin_index(np.array([gc_val]))[0])
+        E_here = end_tab[hex_tab[c3]] * fl[li] / predict_lut[li, gi]
 
         # Z_s(c5) = sum_{valid L} E_s(c5, L)
         Z = 0.0
         for l in range(L_MIN, L_MAX + 1):
-            c3_l = c5 + sigma * l
+            c3_l = c5 + sign * l
             if c3_l < 0 or c3_l > region_len:
                 continue
             if not (valid[c5] and valid[c3_l]):
                 continue
             li_l = l - L_MIN
             gc_l = float(gc_pct(c5, c3_l, cum_gc))
-            Z += end_tab[hex_tab[c3_l]] * fl[li_l] / predict(l, gc_l)
+            gi_l = int(gc_bin_index(np.array([gc_l]))[0])
+            Z += end_tab[hex_tab[c3_l]] * fl[li_l] / predict_lut[li_l, gi_l]
 
         if Z == 0:
             return 0.0
@@ -290,14 +324,15 @@ class TestAsymmetricFourTableWiring:
         for pos in range(region_len + 1):
             Z_pos = 0.0
             for l in range(L_MIN, L_MAX + 1):
-                c3_l = pos + sigma * l
+                c3_l = pos + sign * l
                 if c3_l < 0 or c3_l > region_len:
                     continue
                 if not (valid[pos] and valid[c3_l]):
                     continue
                 li_l = l - L_MIN
                 gc_l = float(gc_pct(pos, c3_l, cum_gc))
-                Z_pos += end_tab[hex_tab[c3_l]] * fl[li_l] / predict(l, gc_l)
+                gi_l = int(gc_bin_index(np.array([gc_l]))[0])
+                Z_pos += end_tab[hex_tab[c3_l]] * fl[li_l] / predict_lut[li_l, gi_l]
             if Z_pos > 0:
                 S += start_tab[hex_tab[pos]]
 
@@ -331,39 +366,40 @@ class TestAsymmetricFourTableWiring:
         sf, ef, sr, er = tables
         fl = _flat_marginal_fl()
 
+        trivial_lut = _trivial_lut()
         rw = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=HexamerTables(sf, ef, sr, er),
-            marginal_fl=fl, predict=_trivial_predict,
+            marginal_fl=fl, predict_lut=trivial_lut,
             region_len=region_len, valid=valid,
         )
 
-        # (c5, L, sigma, strand_label)
+        # (c5, L, strand)
         # Both strands x both parities of L.
         cases = [
-            (10, 30, SIGMA_PLUS, "+"),    # even L, plus
-            (10, 31, SIGMA_PLUS, "+"),    # odd L, plus
-            (40, 30, SIGMA_MINUS, "-"),   # even L, minus
-            (41, 31, SIGMA_MINUS, "-"),   # odd L, minus
+            (10, 30, "+"),    # even L, plus
+            (10, 31, "+"),    # odd L, plus
+            (40, 30, "-"),    # even L, minus
+            (41, 31, "-"),    # odd L, minus
         ]
 
-        for c5, L, sigma, slabel in cases:
+        for c5, L, strand in cases:
             li = L - L_MIN
-            w_b = rw.w_plus[c5, li] if slabel == "+" else rw.w_minus[c5, li]
+            w_b = rw.w_plus[c5, li] if strand == "+" else rw.w_minus[c5, li]
 
             # ── correct wiring ──
-            if slabel == "+":
+            if strand == "+":
                 correct = (hex_fwd, sf, ef)
             else:
                 correct = (hex_rc, sr, er)
 
             w_ref = self._reference_weight(
-                c5, L, sigma, *correct,
-                cum_gc, valid, fl, _trivial_predict, region_len,
+                c5, L, strand, *correct,
+                cum_gc, valid, fl, trivial_lut, region_len,
             )
-            assert w_ref > 0, f"s={slabel} c5={c5} L={L}: zero reference weight"
+            assert w_ref > 0, f"s={strand} c5={c5} L={L}: zero reference weight"
             assert abs(w_b - w_ref) < 1e-14, (
-                f"s={slabel} c5={c5} L={L}: builder {w_b:.18e} != ref {w_ref:.18e}"
+                f"s={strand} c5={c5} L={L}: builder {w_b:.18e} != ref {w_ref:.18e}"
             )
 
             # ── wrong wirings (one axis wrong at a time) ──
@@ -371,7 +407,7 @@ class TestAsymmetricFourTableWiring:
             # reference-equality assertion above already catches it, but only
             # probabilistically (random tables); listing it here makes the
             # distinguishability a proof rather than an overwhelming likelihood.
-            if slabel == "+":
+            if strand == "+":
                 wrongs = [
                     ((hex_rc,  sf, ef), "wrong hex"),
                     ((hex_fwd, sr, ef), "wrong start table"),
@@ -388,42 +424,41 @@ class TestAsymmetricFourTableWiring:
 
             for (wh, ws, we), label in wrongs:
                 w_wrong = self._reference_weight(
-                    c5, L, sigma, wh, ws, we,
-                    cum_gc, valid, fl, _trivial_predict, region_len,
+                    c5, L, strand, wh, ws, we,
+                    cum_gc, valid, fl, trivial_lut, region_len,
                 )
                 assert abs(w_ref - w_wrong) > 1e-14, (
-                    f"s={slabel} c5={c5} L={L} [{label}]: "
+                    f"s={strand} c5={c5} L={L} [{label}]: "
                     f"correct {w_ref:.18e} == wrong {w_wrong:.18e}"
                 )
 
 
-# ── Invariant 3: |Omega| = 767,052 for region_len = 2560 ────────────────
+# ── Invariant 3: generative domain size ───────────────────────────────────
 
-class TestOmegaSize:
-    """The Z_s edge rule: Z_s(c5) sums only L whose c3(L) stays in
-    [0, region_len].  This test verifies |Omega| via the closed form."""
+class TestGenerativeDomainSize:
+    """The edge rule: ``Z_s(c5)`` sums only L whose ``c3(L)`` stays in
+    ``[0, region_len]``.  These tests verify the domain size (``|Ω|`` in
+    the design doc) via the closed form."""
 
-    def test_omega_2560(self):
-        assert omega_size(2560) == 767_052
+    def test_domain_2560(self):
+        assert generative_domain_size(2560) == 767_052
 
-    def test_omega_1536(self):
-        # |Omega| = 2 * sum_{L=25}^{180} (1536 - L + 1)
-        # = 2 * sum_{L=25}^{180} (1537 - L)
-        # = 2 * sum_{k=1357}^{1512} k  (where k = 1537 - L)
-        # = 2 * 156 * (1357 + 1512) / 2 = 156 * 2869 = 447,564
-        assert omega_size(1536) == 447_564
+    def test_domain_1536(self):
+        # |Ω| = 2 * sum_{L=25}^{180} (1536 - L + 1) = 447,564
+        assert generative_domain_size(1536) == 447_564
 
-    def test_omega_minimum_region(self):
+    def test_domain_minimum_region(self):
         # region_len = L_MIN = 25: only L=25 fits, 1 position per strand
-        assert omega_size(25) == 2
+        assert generative_domain_size(25) == 2
 
-    def test_omega_matches_nonzero_weight_count(self):
-        """The count of non-zero w entries matches |Omega|."""
+    def test_domain_matches_nonzero_weight_count(self):
+        """The count of non-zero w entries matches the domain size."""
         region_len = 2560
         rw = _build_weights(region_len, tables=_random_tables(seed=44))
         n_nonzero = np.count_nonzero(rw.w_plus) + np.count_nonzero(rw.w_minus)
-        assert n_nonzero == omega_size(region_len), (
-            f"nonzero weights = {n_nonzero}, |Omega| = {omega_size(region_len)}"
+        expected = generative_domain_size(region_len)
+        assert n_nonzero == expected, (
+            f"nonzero weights = {n_nonzero}, domain size = {expected}"
         )
 
     def test_edge_truncation_plus(self):
@@ -499,7 +534,7 @@ class TestWeightProperties:
         rw = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=tables,
-            marginal_fl=fl, predict=_trivial_predict,
+            marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=valid,
         )
         # Position 100 as c5 should have zero weight for both strands
@@ -537,7 +572,7 @@ class TestWeightProperties:
         rw = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=tables,
-            marginal_fl=fl, predict=_trivial_predict,
+            marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=valid,
         )
         total = rw.w_plus.sum() + rw.w_minus.sum()

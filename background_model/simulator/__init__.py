@@ -7,6 +7,23 @@ the sampler and the oracle scorer; keeping one implementation prevents the
 silent sampler/scorer drift that would invalidate every ``% captured`` number.
 """
 
-from background_model.simulator.weights import HexamerTables, build_region_weights
+from background_model.simulator.weights import (
+    HexamerTables,
+    build_predict_lut,
+    build_region_weights,
+    gc_bin_index,
+    generative_domain_size,
+)
 
-__all__ = ["HexamerTables", "build_region_weights"]
+__all__ = [
+    "HexamerTables",
+    "build_predict_lut",
+    "build_region_weights",
+    "gc_bin_index",
+    "generative_domain_size",
+]
+
+# Step 1-2 (capture surface + marginal FL) and Step 3 (precompute) are
+# available via their submodules:
+#   from background_model.simulator.capture import fit_and_build
+#   from background_model.simulator.precompute import precompute_region
