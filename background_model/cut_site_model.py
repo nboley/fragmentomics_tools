@@ -268,8 +268,10 @@ class CutSiteFragmentModel(L.LightningModule):
         endpoint_shape = self.endpoint_shape_head(h_centre)  # (B, 2, P)
         disp_bp = self.dispersion_head(h_centre)             # (B, 2, P)
 
+        # -- L2b: interior prefix sum (L-independent, compute once) ----------
+        U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, N_OFFSETS+1)
+
         # -- Chunked forward over L ----------------------------------------
-        # Accumulate logits and streaming logsumexp for log Z
         all_logits = []
 
         L_vals = self._L_vals       # (n_L,)
@@ -285,9 +287,7 @@ class CutSiteFragmentModel(L.LightningModule):
             unique_groups = chunk_g.unique()
 
             # -- L2a: endpoint branch (folded) ------------------------------
-            # For each (tap, strand), compute f = M[g,s] @ h at the tap position
-            # Tap positions: o_l = 128 - L//2, o_r = o_l + L
-            # In h coordinates: h[:, :, m + o_l] and h[:, :, m + o_r]
+            # Tap positions: o_l = 128 - L//2, o_r = o_l + L (in h coords)
             o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
             o_r = o_l + chunk_L                     # (chunk_size,)
 
@@ -298,37 +298,21 @@ class CutSiteFragmentModel(L.LightningModule):
             for tap in (0, 1):
                 for strand in (0, 1):
                     bank_idx = tap * 2 + strand
-                    # Gather M @ h for each group, then select per-L
                     group_results = {}
                     for g in unique_groups.tolist():
                         M_gs = self._folded_M(bank_idx, g)  # (H, N1)
-                        group_results[g] = M_gs @ h          # (B, H, model_input_size) via broadcast
+                        group_results[g] = M_gs @ h          # (B, H, model_input_size)
 
-                    # For each L in chunk, pick its group's result and index
-                    # at the tap position
                     tap_offsets = o_l if tap == 0 else o_r  # (chunk_size,)
 
-                    # Build per-L features: for each L, index h at m + tap_offset
-                    # m ranges over [0, P), so we need h[:, :, m + tap_offset]
-                    # for all m.  h[:, :, tap_offset : tap_offset + P] gives us
-                    # the P-length slice.  But tap_offset varies per L.
                     feat_list = []
                     for i in range(chunk_size):
                         g_i = chunk_g[i].item()
                         off_i = tap_offsets[i].item()
-                        # M @ h gives (B, H, model_input_size)
-                        # Slice [off_i : off_i + P] → (B, H, P)
                         feat_list.append(
                             group_results[g_i][:, :, off_i:off_i + P]
                         )
-                    # (B, H, P, chunk_size)
                     endpoint_feats[tap][strand] = torch.stack(feat_list, dim=-1)
-
-            # -- L2b: interior branch (prefix-sum difference) ---------------
-            # We need the prefix sum U for all P positions.  Chunk over m if
-            # needed, but for now compute all P at once (this is the dominant
-            # memory cost).
-            U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, N_OFFSETS+1)
 
             # For each L: o_l' = o_l - O_L_MIN, o_r' = o_r - O_L_MIN
             o_l_prime = o_l - O_L_MIN   # (chunk_size,)
