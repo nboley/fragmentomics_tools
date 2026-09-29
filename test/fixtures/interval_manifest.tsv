@@ -1,0 +1,17 @@
+op	dataset	n	sha256_16	note
+load	blacklist	636	c073f5e2d8eeec99	
+load	ctcf	964593	566f1c274d74515a	
+sort	blacklist	636	de7cc0fc3346ea27	
+merge_regions	blacklist	636	73aa4ede82c22f38	
+unique_regions	blacklist	636	de7cc0fc3346ea27	
+sort	ctcf	964593	566f1c274d74515a	
+merge_regions	ctcf	950936	ea10500ba93aa568	
+unique_regions	ctcf	964593	566f1c274d74515a	
+join_on_overlap	ctcf_x_blacklist	8804	0c239a9e8cde3bc3	
+join_on_overlap	blacklist_x_ctcf	8804	edd5660a58c9b3ae	
+drop_overlapping_regions	ctcf_x_blacklist	955789	c57ba778dab07a9d	
+overlaps_rdf	ctcf_x_blacklist	964593	fd3767dba05a17f3	
+overlaps_rdf_d10	ctcf_x_blacklist	964593	310a0f2220058dca	max_distance=10
+overlaps_rdf	blacklist_x_ctcf	636	b75af5509fea3f8e	
+get_overlapping_base_counts	ctcf_x_blacklist	1929186	9f4ed6b486eec76a	
+from_beds_merged	all	942977	2881f8420eba3880	
