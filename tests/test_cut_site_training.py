@@ -45,7 +45,7 @@ def small_training_setup(tmp_path):
     ds = CutSiteFragmentDataset(
         store_path=store_path,
         model_input_size=model.model_input_size,
-        model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+        model_L_min=cfg.L_min, model_L_max=cfg.L_max,
         split="train",
         sample_role="train",
         min_N=0,

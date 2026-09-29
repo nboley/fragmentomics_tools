@@ -26,7 +26,7 @@ from background_model.cut_site_store import (
     CutSiteStoreConfig,
     densify_endpoints,
     recompute_endpoints_from_fragments,
-    validate_max_len,
+    validate_length_range,
 )
 from background_model.cut_site_dataset import (
     CutSiteFragmentDataset,
@@ -45,7 +45,7 @@ def _create_synthetic_store(tmp_path, tile_size=256, jitter=32, n_tiles=4,
     rf_budget = WINDOW_HALF + 3  # enough for the model
     cfg = CutSiteStoreConfig(
         tile_size=tile_size, jitter=jitter, rf_budget=rf_budget,
-        max_len=256, seed=seed, n_train_samples=n_samples,
+        seed=seed, n_train_samples=n_samples,
     )
 
     store_path = str(tmp_path / "test_store.zarr")
@@ -162,8 +162,8 @@ class TestCutSiteStoreConfig:
         assert c1.config_hash() == c2.config_hash()
 
     def test_hash_changes_on_param_change(self):
-        c1 = CutSiteStoreConfig(max_len=256)
-        c2 = CutSiteStoreConfig(max_len=300)
+        c1 = CutSiteStoreConfig(L_max=179)
+        c2 = CutSiteStoreConfig(L_max=200)
         assert c1.config_hash() != c2.config_hash()
 
     def test_json_roundtrip(self):
@@ -182,17 +182,10 @@ class TestCutSiteStoreConfig:
 
 
 class TestDomainGuards:
-    def test_max_len_mismatch_raises(self, synthetic_store):
+    def test_length_range_match_passes(self, synthetic_store):
         store_path, cfg = synthetic_store
         root = zarr.open_group(store_path, mode="r")
-        # Store has max_len=256; model expects 300 → should fail
-        with pytest.raises(ValueError, match="max_len mismatch"):
-            validate_max_len(root, 300)
-
-    def test_max_len_match_passes(self, synthetic_store):
-        store_path, cfg = synthetic_store
-        root = zarr.open_group(store_path, mode="r")
-        validate_max_len(root, 256)  # should not raise
+        validate_length_range(root, cfg.L_min, cfg.L_max)  # should not raise
 
     def test_length_range_mismatch_raises(self, tmp_path):
         """A store with different L_min/L_max should fail validation."""
@@ -261,7 +254,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -286,7 +279,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -312,7 +305,7 @@ class TestCentreBasedFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -345,7 +338,7 @@ class TestDatasetCollate:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -368,7 +361,7 @@ class TestDatasetCollate:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=0,
@@ -402,7 +395,7 @@ class TestMinNFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=10,  # 5 < 10, so all tiles should be excluded
@@ -422,7 +415,7 @@ class TestMinNFiltering:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
             sample_role="train",
             min_N=10,
@@ -441,14 +434,14 @@ class TestPreloadFalsePath:
         ds_pre = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0,
             train_mode=False, preload=True,
         )
         ds_no = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0,
             train_mode=False, preload=False,
         )
@@ -497,7 +490,7 @@ class TestCentreFilterBoundary:
         ds = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
-            model_max_len=cfg.max_len, model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train", sample_role="train", min_N=0, train_mode=False,
         )
         item = ds[0]

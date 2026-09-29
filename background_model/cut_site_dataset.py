@@ -26,7 +26,6 @@ from background_model.cut_site_store import (
     CutSiteStoreConfig,
     densify_endpoints,
     validate_length_range,
-    validate_max_len,
 )
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
@@ -53,7 +52,6 @@ class CutSiteFragmentDataset(Dataset):
         self,
         store_path: str,
         model_input_size: int,
-        model_max_len: int,
         model_L_min: int,
         model_L_max: int,
         split: str,
@@ -71,7 +69,6 @@ class CutSiteFragmentDataset(Dataset):
 
         self.store_path = store_path
         self.model_input_size = int(model_input_size)
-        self.model_max_len = int(model_max_len)
         self.L_min = int(model_L_min)
         self.L_max = int(model_L_max)
         self.min_N = int(min_N)
@@ -84,7 +81,6 @@ class CutSiteFragmentDataset(Dataset):
         self.config = CutSiteStoreConfig.from_json(root.attrs["config_json"])
         self.config_hash = root.attrs["config_hash"]
         self.split_version = root.attrs["split_version"]
-        validate_max_len(root, model_max_len)
         validate_length_range(root, model_L_min, model_L_max)
 
         # ── geometry ─────────────────────────────────────────────────────

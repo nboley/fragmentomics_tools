@@ -48,16 +48,12 @@ _DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1  # 179
 class CutSiteStoreConfig:
     """Geometry + build params for the cut-site fragment store.
 
-    Hashed separately from PlumbingConfig so that adding max_len does NOT
-    rehash the 12-track production store.
-
-    L_min / L_max define the scored fragment-length range.  These are explicit
-    parameters, NOT derived from FL_BANDS — the cut-site model is band-free.
+    L_min / L_max define the scored fragment-length range and replace max_len.
+    Only fragments with L in [L_min, L_max] are stored.
     """
     tile_size: int = 2048
     jitter: int = 256
     rf_budget: int = 133     # WINDOW_HALF + ceil(conv_margin/2) = 128 + 5 = 133
-    max_len: int = 256
     L_min: int = _DEFAULT_L_MIN
     L_max: int = _DEFAULT_L_MAX
     seed: int = 42
@@ -117,17 +113,6 @@ def validate_length_range(
         raise ValueError(
             f"Length range mismatch: model expects [{model_L_min}, {model_L_max}] "
             f"but store has [{store_L_min}, {store_L_max}]."
-        )
-
-
-def validate_max_len(store_root: zarr.Group, model_max_len: int) -> None:
-    """Assert model's max_len matches the store's.  Fail loudly on mismatch."""
-    cfg = json.loads(store_root.attrs["config_json"])
-    store_max_len = cfg["max_len"]
-    if store_max_len != model_max_len:
-        raise ValueError(
-            f"max_len mismatch: model expects {model_max_len} but store has "
-            f"{store_max_len}. The store holds a different fragment population."
         )
 
 

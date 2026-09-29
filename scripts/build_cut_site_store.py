@@ -1,0 +1,279 @@
+#!/usr/bin/env python
+"""Build a cut-site fragment store from a fragment h5 + region BED.
+
+Usage:
+    python scripts/build_cut_site_store.py \
+        --regions regions.bed \
+        --reference GRCh38.p12.genome.fa.gz \
+        --sample sample.fragments.h5 \
+        --output store.zarr \
+        --tile-size 2048 --jitter 256 \
+        --L-min 25 --L-max 179 \
+        --val-frac 0.1 --test-frac 0.1
+
+The output store is consumed by CutSiteFragmentDataset for training the
+CutSiteFragmentModel.  The interface is identical for sim and real data.
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import logging
+import os
+import sys
+
+import numpy as np
+import zarr
+
+# Bootstrap: background_model is not an installed package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from background_model.cut_site_store import (
+    CutSiteStoreConfig,
+    recompute_endpoints_from_fragments,
+)
+from fragmentomics_tools.fragment_array import RegionFragmentArray
+from fragmentomics_tools.region import Region, one_hot_encode_sequences
+
+log = logging.getLogger(__name__)
+
+_ZARR_MAJOR = int(zarr.__version__.split(".")[0])
+
+
+def _create_array(group, name, **kwargs):
+    if _ZARR_MAJOR >= 3:
+        return group.create_array(name, **kwargs)
+    return group.create_dataset(name, **kwargs)
+
+
+def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
+    """Load regions from BED, expand, extract sequences."""
+    l_target = tile_size + 2 * jitter
+    l_seq = tile_size + 2 * (jitter + rf_budget)
+
+    regions = []
+    with open(bed_path) as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            chrom, start, stop = parts[0], int(parts[1]), int(parts[2])
+            centre = (start + stop) // 2
+            regions.append(Region(chrom, centre - l_target // 2,
+                                  centre + l_target // 2, strand=None))
+
+    # Extract sequences over l_seq extent (wider than l_target for conv margin)
+    import pysam
+    ref = pysam.FastaFile(ref_path)
+    sequences = []
+    masks = []
+    valid_regions = []
+    for r in regions:
+        seq_start = r.start - (l_seq - l_target) // 2
+        seq_stop = seq_start + l_seq
+        if seq_start < 0:
+            continue
+        try:
+            seq = ref.fetch(r.chrom, seq_start, seq_stop).upper()
+        except (ValueError, KeyError):
+            continue
+        if len(seq) != l_seq:
+            continue
+        sequences.append(seq.encode())
+        # Mask: all valid (blacklist handled upstream in region set)
+        masks.append(np.ones(l_target, dtype=bool))
+        valid_regions.append(r)
+    ref.close()
+    return valid_regions, sequences, masks
+
+
+def _extract_fragments(h5_path, region, L_min, L_max):
+    """Extract fragments from h5 for one region, filter by length and centre.
+
+    Returns (start, length, strand) arrays in region-local coords,
+    filtered to in-band lengths with centre in [0, l_target).
+    """
+    rfa = RegionFragmentArray.from_fragments_h5(h5_path, region)
+    if rfa.n_fragments == 0:
+        return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
+
+    # Region-local coordinates
+    starts = (rfa.starts - region.start).astype(np.int64)
+    lengths = rfa.lengths.astype(np.int64)
+    strands = np.array([0 if s == b'+' else 1 for s in rfa.fragment_strands],
+                       dtype=np.uint8)
+
+    # Filter to in-band lengths
+    keep = (lengths >= L_min) & (lengths <= L_max)
+
+    # Centre-based filter: centre in [0, l_target), start non-negative (uint16)
+    l_target = region.stop - region.start
+    centres = starts + lengths // 2
+    keep &= (centres >= 0) & (centres < l_target)
+    keep &= (starts >= 0)
+
+    starts = starts[keep].astype(np.uint16)
+    lengths = lengths[keep].astype(np.uint16)
+    strands = strands[keep]
+
+    return starts, lengths, strands
+
+
+def build_store(args):
+    cfg = CutSiteStoreConfig(
+        tile_size=args.tile_size,
+        jitter=args.jitter,
+        rf_budget=args.rf_budget,
+        L_min=args.L_min,
+        L_max=args.L_max,
+        seed=args.split_seed,
+        n_train_samples=1,
+    )
+
+    log.info("Loading regions from %s", args.regions)
+    regions, sequences, masks = _load_regions(
+        args.regions, args.reference,
+        cfg.tile_size, cfg.jitter, cfg.rf_budget,
+    )
+    T = len(regions)
+    log.info("Loaded %d valid regions", T)
+    if T == 0:
+        raise ValueError("No valid regions found")
+
+    # -- Pass 1: count fragments per tile ----------------------------------
+    log.info("Pass 1: counting fragments per tile")
+    frag_counts = []
+    for t, r in enumerate(regions):
+        s, l, st = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
+        frag_counts.append(len(s))
+        if (t + 1) % 500 == 0:
+            log.info("  %d / %d tiles", t + 1, T)
+    total_frags = sum(frag_counts)
+    log.info("Total fragments: %d", total_frags)
+
+    # -- Assign splits -----------------------------------------------------
+    rng = np.random.default_rng(cfg.seed)
+    split_arr = np.zeros(T, dtype=np.uint8)  # 0 = train
+    perm = rng.permutation(T)
+    n_val = int(T * args.val_frac)
+    n_test = int(T * args.test_frac)
+    split_arr[perm[:n_val]] = 1        # val
+    split_arr[perm[n_val:n_val + n_test]] = 2  # test
+    log.info("Splits: train=%d, val=%d, test=%d",
+             (split_arr == 0).sum(), (split_arr == 1).sum(), (split_arr == 2).sum())
+
+    # -- Create store ------------------------------------------------------
+    S = 1
+    open_kwargs = {"mode": "w"}
+    if _ZARR_MAJOR >= 3:
+        open_kwargs["zarr_format"] = 2
+    root = zarr.open_group(args.output, **open_kwargs)
+
+    root.attrs.update({
+        "config_json": cfg.to_json(),
+        "config_hash": cfg.config_hash(),
+        "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "split_version": 0,
+    })
+
+    # /tiles/
+    tiles = root.create_group("tiles")
+    _create_array(tiles, "contig", data=np.array([r.chrom for r in regions], dtype="<U32"))
+    _create_array(tiles, "start", data=np.array([r.start for r in regions], dtype="int64"))
+    _create_array(tiles, "stop", data=np.array([r.stop for r in regions], dtype="int64"))
+    _create_array(tiles, "strand", data=np.array(["."] * T, dtype="<U1"))
+    _create_array(tiles, "region_id", data=np.array([f"r{i}" for i in range(T)], dtype="<U64"))
+    _create_array(tiles, "split", data=split_arr)
+
+    # Sequence: encode as uint8 bytes
+    seq_encoded = np.array([list(s) for s in sequences], dtype="uint8")
+    _create_array(tiles, "seq", data=seq_encoded)
+    _create_array(tiles, "mask", data=np.array(masks, dtype=bool))
+
+    # /samples/
+    samples = root.create_group("samples")
+    _create_array(samples, "library", data=np.array([os.path.basename(args.sample)], dtype="<U256"))
+    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
+    _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
+
+    # -- Pass 2: write fragments + endpoints --------------------------------
+    log.info("Pass 2: writing fragments and endpoints")
+    frag_indptr = [0]
+    all_frag_start, all_frag_length, all_frag_strand = [], [], []
+    all_ep_pos, all_ep_track, all_ep_data = [], [], []
+    ep_indptr = [0]
+    N_totals = np.zeros((S, T, 2), dtype="uint32")
+
+    for t, r in enumerate(regions):
+        fs, fl, fst = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
+        all_frag_start.append(fs)
+        all_frag_length.append(fl)
+        all_frag_strand.append(fst)
+        frag_indptr.append(frag_indptr[-1] + len(fs))
+
+        # Compute endpoints from fragments
+        ep = recompute_endpoints_from_fragments(fs, fl, cfg.l_target)
+        for track_idx in range(2):
+            nz = np.nonzero(ep[track_idx])[0]
+            for p in nz:
+                all_ep_pos.append(p)
+                all_ep_track.append(track_idx)
+                all_ep_data.append(int(ep[track_idx, p]))
+            # Centre-tile totals
+            margin = (cfg.l_target - cfg.tile_size) // 2
+            N_totals[0, t, track_idx] = int(
+                ep[track_idx, margin:margin + cfg.tile_size].sum()
+            )
+        ep_indptr.append(len(all_ep_pos))
+
+        if (t + 1) % 500 == 0:
+            log.info("  %d / %d tiles", t + 1, T)
+
+    # Write fragment CSR
+    frags = root.create_group("fragments")
+    _create_array(frags, "indptr", data=np.array(frag_indptr, dtype="int64"))
+    all_fs = np.concatenate(all_frag_start) if all_frag_start else np.empty(0, "uint16")
+    all_fl = np.concatenate(all_frag_length) if all_frag_length else np.empty(0, "uint16")
+    all_fst = np.concatenate(all_frag_strand) if all_frag_strand else np.empty(0, "uint8")
+    _create_array(frags, "start", data=all_fs)
+    _create_array(frags, "length", data=all_fl)
+    _create_array(frags, "strand", data=all_fst)
+
+    # Write endpoint CSR
+    endpoints = root.create_group("endpoints")
+    _create_array(endpoints, "indptr", data=np.array(ep_indptr, dtype="int64"))
+    _create_array(endpoints, "pos", data=np.array(all_ep_pos, dtype="uint16") if all_ep_pos else np.empty(0, "uint16"))
+    _create_array(endpoints, "track", data=np.array(all_ep_track, dtype="uint8") if all_ep_track else np.empty(0, "uint8"))
+    _create_array(endpoints, "data", data=np.array(all_ep_data, dtype="uint16") if all_ep_data else np.empty(0, "uint16"))
+
+    # /totals/
+    totals = root.create_group("totals")
+    _create_array(totals, "N", data=N_totals)
+
+    log.info("Store written to %s (%d tiles, %d fragments)", args.output, T, total_frags)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--regions", required=True, help="BED file with region centres")
+    p.add_argument("--reference", required=True, help="Reference genome FASTA")
+    p.add_argument("--sample", required=True, help="Fragment h5 file")
+    p.add_argument("--output", required=True, help="Output zarr store path")
+    p.add_argument("--tile-size", type=int, default=2048)
+    p.add_argument("--jitter", type=int, default=256)
+    p.add_argument("--rf-budget", type=int, default=133)
+    p.add_argument("--L-min", type=int, default=25)
+    p.add_argument("--L-max", type=int, default=179)
+    p.add_argument("--split-seed", type=int, default=42)
+    p.add_argument("--val-frac", type=float, default=0.1)
+    p.add_argument("--test-frac", type=float, default=0.1)
+    args = p.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    build_store(args)
+
+
+if __name__ == "__main__":
+    main()
