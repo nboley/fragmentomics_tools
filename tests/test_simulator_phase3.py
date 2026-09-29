@@ -926,3 +926,92 @@ class TestMAPQIntegration:
             f"Expected {n_frags} fragments, got {n_recovered}. "
             f"Some fragments were lost in the BED → h5 round trip."
         )
+
+
+class TestPerRegionSequenceDependence:
+    """Different regions must produce different weights.
+
+    Every other invariant in this suite is computed WITHIN a single region --
+    ``Sum_Omega w == 1``, the exact-half strand marginal, the domain size.  All
+    of them hold independently per region, so all of them would still pass if
+    the per-region precompute silently returned the same sequence for every
+    region (a stale cache, a mis-keyed lookup, a fixture reused across calls).
+    Every region would be identical and nothing would say so.
+
+    This is the per-region analogue of the relabelling hazard that decision 81
+    exists for: a defect invisible to normalisation, because normalisation is
+    computed after it and cannot see it.
+    """
+
+    def _weights_for(self, hex_fwd, hex_rc, cum_gc, region_len):
+        rng = np.random.default_rng(11)
+        tables = HexamerTables(
+            *[np.exp(rng.normal(0, 0.4, NHEX)) for _ in range(4)]
+        )
+        fl = np.ones(N_LENGTHS) / N_LENGTHS
+        lut = build_predict_lut(lambda L, gc: 1.0)
+        return build_region_weights(
+            hex_fwd=hex_fwd,
+            hex_rc=hex_rc,
+            cum_gc=cum_gc,
+            hex_tables=tables,
+            marginal_fl=fl,
+            predict_lut=lut,
+            region_len=region_len,
+        )
+
+    def test_different_sequences_give_different_weights(self):
+        """Two regions with different sequence must not yield identical w."""
+        region_len = 400
+        n = region_len + 1
+        r1 = np.random.default_rng(1)
+        r2 = np.random.default_rng(2)
+
+        hex_a = r1.integers(0, NHEX, n)
+        rc_a = r1.integers(0, NHEX, n)
+        gc_a = np.concatenate([[0], np.cumsum(r1.random(region_len) < 0.4)]).astype(float)
+
+        hex_b = r2.integers(0, NHEX, n)
+        rc_b = r2.integers(0, NHEX, n)
+        gc_b = np.concatenate([[0], np.cumsum(r2.random(region_len) < 0.6)]).astype(float)
+
+        wa = self._weights_for(hex_a, rc_a, gc_a, region_len)
+        wb = self._weights_for(hex_b, rc_b, gc_b, region_len)
+
+        # Both are still valid distributions -- this is exactly why the
+        # normalisation invariants have no power here.
+        for w in (wa, wb):
+            total = w.w_plus.sum() + w.w_minus.sum()
+            assert abs(total - 1.0) < 1e-12
+            assert abs(w.w_plus.sum() - 0.5) < 1e-12
+
+        assert not np.array_equal(wa.w_plus, wb.w_plus), (
+            "two regions with different sequence produced IDENTICAL plus-strand "
+            "weights -- the weights are not actually sequence-dependent, or the "
+            "per-region precompute is returning stale data"
+        )
+        assert not np.array_equal(wa.w_minus, wb.w_minus), (
+            "two regions with different sequence produced IDENTICAL minus-strand "
+            "weights"
+        )
+
+    def test_identical_sequence_is_reproducible(self):
+        """The converse: same sequence in, bit-identical weights out.
+
+        Without this, ``test_different_sequences_give_different_weights`` could
+        be satisfied by nondeterminism rather than by sequence dependence.
+        """
+        region_len = 400
+        n = region_len + 1
+        rng = np.random.default_rng(7)
+        hex_fwd = rng.integers(0, NHEX, n)
+        hex_rc = rng.integers(0, NHEX, n)
+        cum_gc = np.concatenate(
+            [[0], np.cumsum(rng.random(region_len) < 0.5)]
+        ).astype(float)
+
+        w1 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len)
+        w2 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len)
+
+        assert np.array_equal(w1.w_plus, w2.w_plus)
+        assert np.array_equal(w1.w_minus, w2.w_minus)
