@@ -323,8 +323,8 @@ derived annotation, and turns a hard error into a defined operation.
 
 The interval-algebra surface of layer 2 is large enough to stand alone and is
 specified in [`interval_api_design.md`](interval_api_design.md): the five
-functions that replace the thirteen `bedtools`-backed methods, the
-`pybedtools` -> `bioframe` decision, and Phases 0-2 which deliver them.
+functions that replace the thirteen `bedtools`-backed methods, the removal of
+`pybedtools` in favour of `bioframe`, and the phases which deliver them.
 
 That document is a prerequisite for this one. What remains here is the layering
 itself — the annotation protocol, orientation, the
@@ -392,10 +392,11 @@ not just syntax. It is not a precondition for anything here.
 
 All of this happens in a worktree, not on `main`.
 
-**Phases 0-2 are specified in [`interval_api_design.md`](interval_api_design.md)**
-— differential fixtures, the interval API, and the `bioframe` swap. They are
-prerequisites for what follows, and nothing below can start until the
-`intervals` module exists.
+**The interval-API phases are specified in
+[`interval_api_design.md`](interval_api_design.md)** — differential fixtures,
+then the API built directly on `bioframe`, then the `bedtools` equivalence
+document and its tests. They are prerequisites for what follows, and nothing
+below can start until the `intervals` module exists.
 
 **Phase 3 — remaining module extraction.** The rest of layer 2 — geometry,
 resizing, binning — moves out alongside the `intervals` module Phase 1
