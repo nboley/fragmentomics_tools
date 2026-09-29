@@ -45,14 +45,13 @@ deterministically and always in the same direction. The taps are exactly `L`
 apart, so they index **CUT SITES** (`p` and `p+L`), matching the simulator's
 `fwd_cut[p]` / `rc_cut[p+L]` — **not** per-base end positions.
 
-The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`. The
-offset axis is sized to the store's `max_len` (256 ⇒ 257 cut-site offsets) — a
-**store-compatibility and domain-guard** choice, **not** a spatial requirement of
-scoring. Scoring is in-band (`L ≤ 179`), so the largest offset it ever reaches is
-`o_r = 128 + ceil(179/2) = 218`; offsets 219–256 are never touched. The axis need
-only cover the maximum scored `o_r` (**219 slots** for in-band `L`), a ~15% saving
-on the dominant `(B, 32, 2048, ·)` prefix tensor. Sizing it to 257 is a generality
-choice, to be made deliberately rather than by accident.
+The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`.
+
+The interior branch's offset axis is **parameterised by `FL_BANDS`**, not sized
+to `max_len`. `n_offsets = L_max_inband` (179), spanning only the live range
+`[o_l_min, o_r_max)` where `o_l_min = 128 - L_max_inband // 2` (39). Offsets
+below `o_l_min` are dead (cancel in the prefix-sum difference) and trimmed.
+The prefix axis has `n_offsets + 1 = 180` slots.
 
 ## Model architecture
 
@@ -61,16 +60,10 @@ choice, to be made deliberately rather than by accident.
 `N1` = 128 width-6 convolutions over the one-hot sequence → a per-cut-site
 propensity track.
 
-**There MUST be a nonlinearity after the convolution.** A width-6 4-channel
-filter has 24 weights and its hexamer response is `sum_i w[base_i, i]`, i.e. a
-PWM score — and any *linear* combination of such filters is still a PWM score.
-The simulator's `build_w6` draws **4096 independent** values, so a linear path
-could only fit a 24-parameter PWM against a 4096-value target and would fail
-structurally, presenting as a training failure. The hexamer-embedding
-alternative (`one_hot_to_kmer_indices` + `nn.Embedding`, as in
-`BackgroundModelKEN`) is a free 4096-entry lookup and can represent it exactly;
-the conv form is expected to generalise better on real data, so **conv is the
-default and the embedding is a comparison arm**.
+**There MUST be a nonlinearity after the convolution.** A width-6 linear filter
+is a PWM (24 weights), and any linear combination of PWMs is still a PWM. The
+truth has 4096 independent hexamer values, so a linear path would fail
+structurally. Embedding alternative deferred to Stage 3.
 
 ### L2a — endpoint branch
 
@@ -93,14 +86,14 @@ per tap (both strands) `43,520`; all four banks `87,040`.
 **A free per-`L` additive term `len_bias (n_L,)` is required**, separate from the
 length groups. The groups carry the length × *sequence* interaction at 15 bp
 resolution; `len_bias` carries the length distribution itself at 1 bp resolution.
-These must not be conflated: the length component is worth **~0.4255 nats, about
-5× the whole sequence-bias gap of ~0.084**, so it is the dominant term in the
-likelihood, and forcing it through a piecewise-constant 15 bp approximation would
-be a large avoidable loss. At `H = 32` and `n_L = 155` this costs 4,960
-parameters. It is additive and per-`L` only, so it folds like everything else,
-and it is **shared across strand** — the FL/GC (length) term `FLGC(L, gc)` is
-strand-independent in the generative form, so there is one `len_bias`, not one per
-strand.
+The length component is worth **~0.4255 nats, about 5× the whole sequence-bias
+gap of ~0.084**, so forcing it through a piecewise-constant 15 bp approximation
+would be a large avoidable loss.
+
+**Placement: on the logit, after the nonlinearity** — not into the
+pre-activation. `logit[m,L,s] = w_out · act(pre) + len_bias[L]`. This is
+`(n_L,)` = **155 parameters**, strand-shared (the FL/GC length term is
+strand-independent).
 
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
 
@@ -113,13 +106,14 @@ Limitation: 15 bp resolution cannot isolate a sharp effect at ~167.
 
 ### L2b — interior branch
 
-A **second, separate** bank `F (N2=32, 4, 256)` with weights **learned per
-offset**. Aggregate by a prefix sum along the **filter-offset** axis:
+A **second, separate** bank `F (N2=32, 4, n_offsets=179)` with weights **learned
+per offset**, spanning the live range `[o_l_min, o_r_max)` (see §Geometry).
+Re-indexed as `o' = o - o_l_min`. Prefix sum along the re-indexed offset axis:
 
 ```
-u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]
-U        = prefix_sum(u, axis=o)          # exclusive; W+1 = 257 slots so L=256 is reachable
-span     = U[n,m,o_r] - U[n,m,o_l]
+u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # x in h-coordinates
+U          = prefix_sum(u, axis=o')       # exclusive, n_offsets+1 = 180 slots
+span       = U[n,m,o_r'] - U[n,m,o_l']   # o_l' = o_l - o_l_min, o_r' = o_r - o_l_min
 ```
 
 The centred masks are **nested**, so this is **one subtraction per pair** — not
@@ -150,9 +144,8 @@ Both branches fold to per-position tensors:
 - **L2b** folds because the span is a **difference** of two values from one
   per-`(m,o)` tensor, and `W·(span/L) = (W·span)/L` folds too.
 
-Unfolded, the per-pair concat is `e_l(128) + e_r(128) + span(32) + mean(32) =
-320` wide — exactly what §Cost's benchmark measured at 5.4 GB. Folded, the pair
-grid holds only `H = 32`.
+Unfolded, the per-pair concat would be `e_l(128) + e_r(128) + span(32) +
+mean(32) = 320` wide. Folded, the pair grid holds only `H = 32`.
 
 **CONDITION: the endpoint path must stay LINEAR until it is summed into the
 pre-activation.** A nonlinearity on the per-pair features destroys the fold-down.
@@ -169,7 +162,7 @@ L_chunk = 32                            l_in  = 2310 (2309 rounded to even for j
 
 ```
                   ┌────────────────────────────────────────────┐
- one-hot seq      │  (B, 4, 2309)                    2.4 MB    │
+ one-hot seq      │  (B, 4, 2310)                    2.4 MB    │
                   └────────────────────────────────────────────┘
                           │  L1: Conv1d(4 -> 128, k=6) + nonlinearity
                           v
@@ -180,7 +173,7 @@ L_chunk = 32                            l_in  = 2310 (2309 rounded to even for j
         ┌────────────┘                              └──────────────┐
         v  L2a                                                     v  L2b
  ── ENDPOINT BRANCH ─────────────────────        ── INTERIOR BRANCH ──────────────
- a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 256)   32,768 params
+ a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 179)   22,912 params
  B[t,s] : (128,10)  x4      5,120 params        W_span, W_mean : (32,32) each
  W[t,s] : (32,128)  x4     16,384 params
                                                  u never materialised whole;
@@ -191,23 +184,22 @@ L_chunk = 32                            l_in  = 2310 (2309 rounded to even for j
         │                                               │
         v                                               v
  ┌──────────────────────────┐                 ┌──────────────────────────────┐
- │ (B,10,2,32,2304) 378 MB  │                 │ (B, 32, 2048, 257)  4.3 GB   │
- │ x2 taps = 756 MB         │                 │ chunk over m -> 538 MB       │
+ │ (B,10,2,32,2304) 378 MB  │                 │ (B, 32, 2048, 180)  3.02 GB  │
+ │ x2 taps = 756 MB         │                 │ chunk over m -> 377 MB       │
  └──────────────────────────┘                 └──────────────────────────────┘
         │  gather at o_l, o_r                         │  difference at o_r, o_l
         └───────────────┬─────────────────────────────┘
                         v
               pre[h, m, L, s]  =  f_l[s] + f_r[s]           <-- LINEAR until summed
-                                + (V_span[o_r] - V_span[o_l])
-                                + (V_mean[o_r] - V_mean[o_l]) / L
-                                + len_bias[L]              <-- free per-L term
+                                + (V_span[o_r'] - V_span[o_l'])
+                                + (V_mean[o_r'] - V_mean[o_l']) / L
                         │
                         v   <-- THE ONLY PER-PAIR TENSOR
               ┌──────────────────────────────────────────────┐
               │ hid = act(pre)  (B,32,2048,L_chunk=32,2)     │
               │        1074 MB fp32  /  537 MB bf16          │
               └──────────────────────────────────────────────┘
-                        │  w_out : (32,)
+                        │  logit = w_out · hid + len_bias[L]
                         v
               ┌──────────────────────────────────────────────┐
               │ logit  (B, 2048, 155, 2)          strand axis │
@@ -223,39 +215,32 @@ folded *into* the prefix tensor, so the difference is taken after projecting to
 (`span = U[o_r] − U[o_l]`, then `W_span·span`); the two are the same quantity,
 `W` being the matrix and `V` the folded prefix.
 
-**Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 257)`. The
-prefix sum is cumulative over `o`, so the axis cannot be tiled (a chunk would lose
-the running sum), and in-band `o_l`/`o_r` span `o ∈ [39, 218]` — essentially the
-whole axis. So **chunk over `m`, not over `o`**.
-
-> These sizes are arithmetic, not measured, and the §Cost benchmark measured a
-> **strandless** unfolded implementation with a 320-wide per-pair concat at
-> 5.4 GB. The strand axis and the learned-per-offset interior branch both change
-> the intermediate; re-measure before budgeting on these numbers.
+**Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 180)`. The
+prefix sum is cumulative over `o'`, so the axis cannot be tiled. All 179 entries
+are live (dead offsets trimmed). **Chunk over `m`, not over `o`**.
 
 ### Forward pass
 
 ```
-h = L1(seq)                              # (B, N1, P) cut-site propensity, post-nonlinearity
+h = L1(seq)                              # (B, N1, model_input_size), post-nonlinearity
 
 # L2a endpoint (per strand s): shared tap weight + per-group gain, folded
 o_l, o_r = 128 - L//2, 128 - L//2 + L    # window offsets of the two CUT SITES
-p_l, p_r = m - L//2, m - L//2 + L        # genomic cut sites p and p+L
 g        = min((L - 25)//15, 9)          # length group
-f_l[s] = M_l[g,s] @ h ; f_r[s] = M_r[g,s] @ h   # per strand s; M_x[g,s] = W_x[s] diag(B_x[s,g]) a_x[s]
+f_l[s] = M_l[g,s] @ h ; f_r[s] = M_r[g,s] @ h   # M_x[g,s] = W_x[s] diag(B_x[s,g]) a_x[s]
 
-# L2b interior: weights learned per offset
-u[n,m,o] = sum_c F[n,c,o] * x[c, m-128+o]   # (B, N2, P, W)
-U        = prefix_sum(u, axis=o)            # (B, N2, P, W+1), exclusive
-span     = U[:,:,o_r] - U[:,:,o_l]
-mean     = span / L                         # both fed explicitly
+# L2b interior: re-indexed offsets o' = o - o_l_min
+u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # (B, N2, P, n_offsets)
+U          = prefix_sum(u, axis=o')                      # (B, N2, P, n_offsets+1), exclusive
+span       = U[:,:,o_r'] - U[:,:,o_l']
+mean       = span / L
 
-pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean
-             + len_bias[L]
-hid          = act(pre)                                      # (B, H, P, L_chunk, 2)
-logit[m,L,s] = w_out · hid                                   # (B, P, n_L, 2)
-ep_shape     = endpoint_shape_head(h)  # (B, 2, P) trainable shape for NB loss
-disp_bp      = dispersion_head(h)     # (B, 2, P) FROZEN at log_dispersion_init
+pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean   # LINEAR
+hid          = act(pre)                                         # (B, H, P, L_chunk, 2)
+logit[m,L,s] = w_out · hid + len_bias[L]                       # len_bias on the LOGIT
+
+ep_shape     = endpoint_shape_head(h_centre)  # (B, 2, P) trainable shape for NB loss
+disp_bp      = dispersion_head(h_centre)      # (B, 2, P) FROZEN at log_dispersion_init
 ```
 
 ## Store schema
@@ -317,8 +302,9 @@ silent `max_len` mismatch changes `|D|` and reinterprets every reported NLL.
 ## Dataset / dataloader
 
 This model is **sequence-only**: the `(m, L, strand)` logit map depends only on
-the tile's sequence, so **one forward serves all samples of a region**. The
-dataset therefore batches **by region**, not by `(sample, tile)`.
+the tile's sequence. At **S = 1** (current), the dataset indexes by
+`(sample, tile)`. The structure supports `S > 1` region-batching later without
+restructuring.
 
 Item = one region, yielding:
 
@@ -381,8 +367,8 @@ than inheriting it. The design changes no frozen-core statistical semantics.
 The class is a `lightning.LightningModule`. It does **not** subclass
 `_BackgroundModelMixin`, whose `_step` is hardwired to the per-track core losses
 and whose `predict_profile` softmaxes `(n_tracks, L)` over `L` — neither fits a
-`(m, L, strand)` output. It implements its own `training_step`/`validation_step`
-and its own `predict` entry point.
+`(m, L, strand)` output. It implements its own `training_step`/`validation_step`.
+A `predict` entry point will be added when correction wiring is in scope.
 
 ## Objective
 
