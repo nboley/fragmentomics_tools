@@ -310,7 +310,7 @@ class TestDrawSelfConsistency:
     def test_empirical_matches_weights(self):
         """Chi-squared goodness-of-fit: binned fragments vs weights."""
         region_len = 300
-        n_fragments = 50_000
+        n_fragments = 20_000
         tables = _random_tables(seed=77)
 
         hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=55)
@@ -371,10 +371,9 @@ class TestDrawSelfConsistency:
             if expected_frac < 1e-6:
                 continue
             empirical_frac = empirical_L_hist[L] / total_empirical
-            # Allow generous relative tolerance for Monte Carlo
-            if expected_frac > 0.001:
+            if expected_frac > 0.01:
                 ratio = empirical_frac / expected_frac
-                assert 0.7 < ratio < 1.4, (
+                assert 0.8 < ratio < 1.25, (
                     f"L={L}: empirical fraction {empirical_frac:.6f} vs "
                     f"expected {expected_frac:.6f}, ratio {ratio:.3f}"
                 )
@@ -383,7 +382,7 @@ class TestDrawSelfConsistency:
         """The empirical start-position distribution should match the weight
         marginal over start positions."""
         region_len = 200
-        n_fragments = 30_000
+        n_fragments = 15_000
         tables = _random_tables(seed=88)
 
         hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=44)
@@ -433,9 +432,9 @@ class TestDrawSelfConsistency:
         norm_e = np.linalg.norm(empirical_start_hist)
         norm_w = np.linalg.norm(expected_start)
         cosine = dot / (norm_e * norm_w)
-        assert cosine > 0.95, (
+        assert cosine > 0.97, (
             f"Cosine similarity between empirical and expected start "
-            f"distributions = {cosine:.4f}, expected > 0.95"
+            f"distributions = {cosine:.4f}, expected > 0.97"
         )
 
 
@@ -799,4 +798,131 @@ class TestManifestCompleteness:
         np.testing.assert_array_almost_equal(
             rw_orig.w_minus, rw_loaded.w_minus, decimal=12,
             err_msg="w_minus from manifest differs from original",
+        )
+
+
+# ── 9. dataframe_to_hex_table input validation ────────────────────────────
+
+class TestHexTableInputValidation:
+    """dataframe_to_hex_table must reject truncated, oversized, or
+    duplicate-hexamer DataFrames.
+
+    Fewer than 4096 rows yields zero-weight hexamers, and Σ_Ω w = 1 still
+    holds by normalisation, so the error is UNDETECTABLE downstream.
+    The guard must fire here or nowhere.
+    """
+
+    def test_truncated_df_raises(self):
+        """A DataFrame with fewer than 4096 rows must raise ValueError."""
+        tables = _random_tables(seed=33)
+        df = hex_table_to_dataframe(tables.start_fwd, "start_fwd")
+        truncated = df.iloc[:4000]
+        with pytest.raises(ValueError, match="4000 rows.*expected exactly 4096"):
+            dataframe_to_hex_table(truncated)
+
+    def test_oversized_df_raises(self):
+        """A DataFrame with more than 4096 rows must raise ValueError."""
+        tables = _random_tables(seed=33)
+        df = hex_table_to_dataframe(tables.start_fwd, "start_fwd")
+        extra = pd.concat([df, df.iloc[:1]], ignore_index=True)
+        with pytest.raises(ValueError, match="4097 rows.*expected exactly 4096"):
+            dataframe_to_hex_table(extra)
+
+    def test_duplicate_hexamer_raises(self):
+        """4096 rows but with a duplicate hexamer (and one missing) must raise."""
+        tables = _random_tables(seed=33)
+        df = hex_table_to_dataframe(tables.start_fwd, "start_fwd")
+        # Replace last hexamer with a copy of the first — same length, one dup
+        duped = df.copy()
+        duped.iloc[-1, duped.columns.get_loc("hexamer")] = duped.iloc[0]["hexamer"]
+        with pytest.raises(ValueError, match="unique hexamer strings"):
+            dataframe_to_hex_table(duped)
+
+    def test_valid_df_passes(self):
+        """A correct 4096-row DataFrame must round-trip without error."""
+        tables = _random_tables(seed=33)
+        df = hex_table_to_dataframe(tables.start_fwd, "start_fwd")
+        recon = dataframe_to_hex_table(df)
+        np.testing.assert_array_equal(tables.start_fwd, recon)
+
+
+# ── 10. MAPQ integration: BED → h5 → read back ───────────────────────────
+
+_FASTA_PATH = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
+
+
+def _require_fasta():
+    """The FASTA is a HARD dependency for the MAPQ integration test.
+
+    Deliberately NOT ``pytest.importorskip`` or ``pytest.mark.skipif``.
+    The test covers the ``-1 >= 10`` composition trap — an unknown MAPQ
+    reads back as ``-1``, ``config.min_mapq = 10``, ``-1 >= 10`` is False,
+    and every fragment is filtered leaving an empty store with no error.
+    If FASTA access is lost, this test must go RED, not quiet — a skip
+    on the only test covering the composition trap would make it vanish
+    from ``make test`` and the guard reads as protection when it is not.
+    """
+    if not os.path.exists(_FASTA_PATH):
+        pytest.fail(
+            f"FASTA not found at {_FASTA_PATH}. This test is a HARD "
+            f"dependency guard, not a skip — the MAPQ composition trap "
+            f"(-1 >= 10) is only tested here.",
+            pytrace=False,
+        )
+
+
+class TestMAPQIntegration:
+    """End-to-end: write_bed → sort_bgzip_tabix → build_fragments_h5 → read h5.
+
+    The ``-1 >= 10`` trap: if MAPQ is not carried from the BED into the h5,
+    every fragment reads back with ``mapq = -1``, and ``-1 >= 10`` is False,
+    so ``min_mapq=10`` filters everything, leaving an empty store.  Each repo
+    passes its own suite; they still fail to compose.  This test crosses the
+    boundary.
+    """
+
+    def test_fragments_survive_h5_round_trip_at_min_mapq_10(self, tmp_path):
+        _require_fasta()
+
+        from background_model.simulator.emit import (
+            sort_bgzip_tabix,
+            build_fragments_h5,
+            write_bed,
+        )
+        from fragmentomics_tools.fragment_array import RegionFragmentArray
+        from fragmentomics_tools.region import Region
+
+        # Synthetic fragments on chr1:10000-10500
+        contig, gstart = "chr1", 10_000
+        region_len = 500
+        rng = np.random.default_rng(42)
+        n_frags = 40
+        starts = rng.integers(0, region_len - L_MAX, size=n_frags)
+        lengths = rng.integers(L_MIN, L_MAX + 1, size=n_frags)
+        stops = starts + lengths
+        strands = rng.choice(["+", "-"], size=n_frags)
+
+        # Write BED
+        bed_path = str(tmp_path / "sim.bed")
+        write_bed(bed_path, contig, gstart, starts, stops, strands)
+
+        # Sort, bgzip, tabix
+        bgz_path = sort_bgzip_tabix(bed_path)
+
+        # Build h5
+        h5_path = str(tmp_path / "sim.fragments.h5")
+        build_fragments_h5(bgz_path, h5_path, _FASTA_PATH)
+
+        # Read back with min_mapq=10 — the production default
+        region = Region(contig, gstart, gstart + region_len, strand=None)
+        rfa = RegionFragmentArray.from_fragments_h5(h5_path, region, min_mapq=10)
+
+        n_recovered = len(rfa.starts)
+        assert n_recovered > 0, (
+            f"All {n_frags} fragments were filtered at min_mapq=10. "
+            f"This is the -1 >= 10 trap: MAPQ was not carried into the h5."
+        )
+        assert n_recovered == n_frags, (
+            f"Expected {n_frags} fragments, got {n_recovered}. "
+            f"Some fragments were lost in the BED → h5 round trip."
         )

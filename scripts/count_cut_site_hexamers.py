@@ -179,8 +179,8 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from background_model.config import PlumbingConfig  # noqa: E402
-from background_model.simulator.precompute import HEX_HALF, KMER, hexamer_indices  # noqa: E402
-from background_model.simulator.weights import L_MAX, L_MIN, NHEX  # noqa: E402
+from background_model.simulator.precompute import HEX_HALF, KMER, NHEX, hexamer_indices, hexamer_vocabulary  # noqa: E402
+from background_model.simulator.weights import L_MAX, L_MIN  # noqa: E402
 from fragments_h5 import FragmentsH5  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -203,38 +203,6 @@ OUTPUT_SCHEMA = pa.schema([
     ("observed", pa.int64()),
     ("background", pa.int64()),
 ])
-
-
-# ── hexamer index <-> string ─────────────────────────────────────────────
-
-def hexamer_vocabulary() -> np.ndarray:
-    """``vocab[i]`` is the 6-mer whose forward index is ``i``, as ``S6`` bytes.
-
-    Derived **from** ``hexamer_indices`` rather than by reimplementing its
-    encoding backwards.  All 4096 6-mers are laid end to end and passed through
-    the production indexer in one call; taking every 6th sliding window recovers
-    each 6-mer's own index, which is then used to place it.  A second,
-    hand-written base-4 decoder here would be exactly the shared-contract
-    problem this output format exists to remove.
-
-    >>> v = hexamer_vocabulary()
-    >>> v.shape, v[0].decode(), v[-1].decode()
-    ((4096,), 'AAAAAA', 'TTTTTT')
-    """
-    # (4096, 6) base-4 codes in lexicographic order, then to ASCII.
-    grid = np.indices((4,) * KMER).reshape(KMER, -1).T
-    letters = np.frombuffer(b"ACGT", dtype=np.uint8)[grid].astype(np.uint8)
-
-    fwd, _rc, valid = hexamer_indices(letters.reshape(-1))
-    starts = np.arange(0, NHEX * KMER, KMER)
-    idx = fwd[starts]
-    assert valid[starts].all()
-    assert np.unique(idx).size == NHEX, "hexamer index is not a bijection"
-
-    strings = np.frombuffer(letters.tobytes(), dtype=f"S{KMER}")
-    vocab = np.empty(NHEX, dtype=f"S{KMER}")
-    vocab[idx] = strings
-    return vocab
 
 
 # ── fragment-length bands ────────────────────────────────────────────────

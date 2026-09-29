@@ -26,39 +26,12 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from background_model.simulator.precompute import KMER, hexamer_indices
+from background_model.simulator.precompute import NHEX, hexamer_vocabulary
 from background_model.simulator.weights import (
     L_MAX,
     L_MIN,
-    NHEX,
     HexamerTables,
 )
-
-# ── hexamer vocabulary ───────────────────────────────────────────────────
-# Reuses the approach from scripts/count_cut_site_hexamers.py::hexamer_vocabulary
-# (design doc decision 81: "reuse its vocabulary helper").
-
-def hexamer_vocabulary() -> np.ndarray:
-    """``vocab[i]`` is the 6-mer whose forward index is ``i``, as ``S6`` bytes.
-
-    Derived from ``hexamer_indices`` rather than by reimplementing its encoding
-    backwards.  See ``scripts/count_cut_site_hexamers.py::hexamer_vocabulary``
-    for the canonical version and reasoning.
-    """
-    grid = np.indices((4,) * KMER).reshape(KMER, -1).T
-    letters = np.frombuffer(b"ACGT", dtype=np.uint8)[grid].astype(np.uint8)
-
-    fwd, _rc, valid = hexamer_indices(letters.reshape(-1))
-    starts = np.arange(0, NHEX * KMER, KMER)
-    idx = fwd[starts]
-    assert valid[starts].all()
-    assert np.unique(idx).size == NHEX, "hexamer index is not a bijection"
-
-    strings = np.frombuffer(letters.tobytes(), dtype=f"S{KMER}")
-    vocab = np.empty(NHEX, dtype=f"S{KMER}")
-    vocab[idx] = strings
-    return vocab
-
 
 # Module-level cache (computed once).
 _VOCAB: Optional[np.ndarray] = None
@@ -101,7 +74,25 @@ def dataframe_to_hex_table(df: pd.DataFrame) -> np.ndarray:
     different k-mer convention, the join will misalign and weights will be wrong,
     which is exactly what the string key exists to make detectable (a bare array
     would silently misalign).
+
+    Raises ``ValueError`` if the DataFrame does not contain exactly the 4096
+    expected hexamers (wrong length, duplicates, or unknown strings).
     """
+    if len(df) != NHEX:
+        raise ValueError(
+            f"DataFrame has {len(df)} rows, expected exactly {NHEX}. "
+            f"A truncated table yields zero-weight hexamers that are "
+            f"undetectable downstream (normalisation preserves Σ w = 1)."
+        )
+
+    hex_col = df["hexamer"]
+    n_unique = hex_col.nunique()
+    if n_unique != NHEX:
+        raise ValueError(
+            f"DataFrame has {n_unique} unique hexamer strings but expected "
+            f"{NHEX}. Duplicates or missing entries make the table silently wrong."
+        )
+
     vocab = _get_vocab()
     vocab_strs = [v.decode() for v in vocab]
     idx_map = {s: i for i, s in enumerate(vocab_strs)}

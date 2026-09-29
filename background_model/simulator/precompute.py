@@ -61,6 +61,38 @@ def hexamer_indices(seq_bytes: np.ndarray):
     return fwd.astype(np.int64), rc.astype(np.int64), valid
 
 
+NHEX: int = 4 ** KMER  # 4096
+
+
+def hexamer_vocabulary() -> np.ndarray:
+    """``vocab[i]`` is the 6-mer whose forward index is ``i``, as ``S6`` bytes.
+
+    Derived **from** ``hexamer_indices`` rather than by reimplementing its
+    encoding backwards.  All 4096 6-mers are laid end to end and passed through
+    the production indexer in one call; taking every 6th sliding window recovers
+    each 6-mer's own index, which is then used to place it.  A second,
+    hand-written base-4 decoder here would be exactly the shared-contract
+    problem this output format exists to remove.
+
+    >>> v = hexamer_vocabulary()
+    >>> v.shape, v[0].decode(), v[-1].decode()
+    ((4096,), 'AAAAAA', 'TTTTTT')
+    """
+    grid = np.indices((4,) * KMER).reshape(KMER, -1).T
+    letters = np.frombuffer(b"ACGT", dtype=np.uint8)[grid].astype(np.uint8)
+
+    fwd, _rc, valid = hexamer_indices(letters.reshape(-1))
+    starts = np.arange(0, NHEX * KMER, KMER)
+    idx = fwd[starts]
+    assert valid[starts].all()
+    assert np.unique(idx).size == NHEX, "hexamer index is not a bijection"
+
+    strings = np.frombuffer(letters.tobytes(), dtype=f"S{KMER}")
+    vocab = np.empty(NHEX, dtype=f"S{KMER}")
+    vocab[idx] = strings
+    return vocab
+
+
 # ── per-region result ─────────────────────────────────────────────────────
 
 class RegionPrecompute(NamedTuple):
