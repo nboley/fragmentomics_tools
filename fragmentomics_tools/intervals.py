@@ -102,7 +102,9 @@ def overlap_indices(
     min_frac_a, min_frac_b : float
         Minimum fraction of A (or B) that must be covered.
     reciprocal : bool
-        If True, both ``min_frac_a`` and ``min_frac_b`` must be satisfied.
+        bedtools ``-r``. If True, ``min_frac_a`` must be satisfied against
+        **both** A and B, and ``min_frac_b`` is ignored. Requires
+        ``min_frac_a > 0``.
     same_strand : bool
         If True, only match when both strands are in {"+", "-"} and equal.
         ``"."`` vs ``"."`` is **not** a match (bedtools ``-s`` convention).
@@ -120,6 +122,15 @@ def overlap_indices(
             f"how={how!r} is not valid; must be one of {sorted(_VALID_HOW)}"
         )
 
+    # Validated at entry, not inside the fraction block -- that block is
+    # guarded by `min_frac_a > 0 or min_frac_b > 0`, so a check placed there
+    # never fires for the one case it exists to catch.
+    if reciprocal and min_frac_a <= 0:
+        raise ValueError(
+            "reciprocal=True requires min_frac_a > 0; it applies min_frac_a "
+            "to both A and B (bedtools -r)"
+        )
+
     _assert_same_ref(a, b)
 
     # Wiggle: expand B intervals so a gap <= wiggle still produces an overlap.
@@ -127,8 +138,13 @@ def overlap_indices(
     # Expansion must be (wiggle + 1) because half-open overlap requires
     # strict inequality (start < end), so expanding by exactly `wiggle`
     # leaves a gap of `wiggle` as book-ended (no overlap).
-    b_orig_start = b["start"].values.copy()
-    b_orig_stop = b["stop"].values.copy()
+    # Held as label-indexed Series, NOT bare arrays. `bioframe` returns the
+    # input frames' index LABELS in `index`/`index_`, so any lookup here must
+    # align by label. Using `.values[labels]` indexes positionally and is wrong
+    # the moment a frame has a non-default index -- which is what every filter
+    # or slice produces. It raised IndexError on a frame indexed 10/20.
+    b_orig_start = b["start"].copy()
+    b_orig_stop = b["stop"].copy()
     if wiggle > 0:
         b = b.copy()
         b["start"] = b["start"] - (wiggle + 1)
@@ -161,10 +177,12 @@ def overlap_indices(
     if has_overlap.any():
         if wiggle > 0:
             # Compute actual overlap against original (un-expanded) B intervals.
-            a_starts = a["start"].values[idx.loc[has_overlap, "a_index"].values.astype(int)]
-            a_stops = a["stop"].values[idx.loc[has_overlap, "a_index"].values.astype(int)]
-            b_starts = b_orig_start[idx.loc[has_overlap, "b_index"].values.astype(int)]
-            b_stops = b_orig_stop[idx.loc[has_overlap, "b_index"].values.astype(int)]
+            a_lbl = idx.loc[has_overlap, "a_index"].values
+            b_lbl = idx.loc[has_overlap, "b_index"].values
+            a_starts = a["start"].loc[a_lbl].values
+            a_stops = a["stop"].loc[a_lbl].values
+            b_starts = b_orig_start.loc[b_lbl].values
+            b_stops = b_orig_stop.loc[b_lbl].values
             o_start = np.maximum(a_starts, b_starts)
             o_stop = np.minimum(a_stops, b_stops)
             raw = np.maximum(o_stop - o_start, 0)
@@ -191,25 +209,23 @@ def overlap_indices(
     # Fraction filters (applied on matched rows only).
     if (min_frac_a > 0 or min_frac_b > 0) and has_overlap.any():
         matched = idx[has_overlap]
-        a_lens = (a["stop"].values - a["start"].values)[
-            matched["a_index"].values.astype(int)
-        ]
-        b_lens = (b_orig_stop - b_orig_start)[
-            matched["b_index"].values.astype(int)
-        ]
+        # Label-aligned, not positional -- see the note on b_orig_start.
+        a_lens = (a["stop"] - a["start"]).loc[matched["a_index"].values].values
+        b_lens = (b_orig_stop - b_orig_start).loc[matched["b_index"].values].values
         ob = matched["overlap_bases"].values
 
-        frac_a_ok = ob >= (min_frac_a * a_lens) if min_frac_a > 0 else True
-        frac_b_ok = ob >= (min_frac_b * b_lens) if min_frac_b > 0 else True
-
+        # bedtools `-r`: the fraction requirement applies reciprocally, i.e.
+        # `min_frac_a` must be met against BOTH A and B. Without it the two
+        # thresholds are independent. An earlier version made `reciprocal`
+        # compute `frac_a_ok & frac_b_ok`, which is identical to the branch
+        # below it whenever both thresholds are set and a no-op otherwise --
+        # the flag could not change any result.
         if reciprocal:
-            keep = frac_a_ok & frac_b_ok
-        elif min_frac_a > 0 and min_frac_b > 0:
-            keep = frac_a_ok & frac_b_ok
-        elif min_frac_a > 0:
-            keep = frac_a_ok
+            keep = (ob >= (min_frac_a * a_lens)) & (ob >= (min_frac_a * b_lens))
         else:
-            keep = frac_b_ok
+            frac_a_ok = ob >= (min_frac_a * a_lens) if min_frac_a > 0 else True
+            frac_b_ok = ob >= (min_frac_b * b_lens) if min_frac_b > 0 else True
+            keep = frac_a_ok & frac_b_ok
 
         fail = has_overlap.copy()
         fail[has_overlap] = ~keep

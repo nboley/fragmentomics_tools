@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools")
+from fragmentomics_tools import intervals  # noqa: E402
 from fragmentomics_tools.contig import CONTIG_LENGTHS  # noqa: E402
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
@@ -65,8 +66,11 @@ def drop_blacklisted_windows(allsites, half):
     )
     win_rdf = RegionDataFrame(windows, ref="hg38")
     bl_rdf = RegionDataFrame.from_bed(BLACKLIST_BED, ref="hg38")
-    kept = win_rdf.drop_overlapping_regions(bl_rdf)
-    return allsites.loc[allsites.index.isin(kept.index)].reset_index(drop=True)
+    # `a_index` carries A's index LABELS, which is what the old
+    # `drop_overlapping_regions(...).index` returned, so the filter below is
+    # unchanged in meaning.
+    kept_idx = intervals.overlap_indices(win_rdf, bl_rdf, how="anti")["a_index"]
+    return allsites.loc[allsites.index.isin(kept_idx)].reset_index(drop=True)
 
 
 def main():

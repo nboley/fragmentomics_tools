@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools")
+from fragmentomics_tools import intervals  # noqa: E402
 from fragmentomics_tools.contig import CONTIG_LENGTHS  # noqa: E402
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
@@ -129,8 +130,12 @@ def drop_overlapping_bed(sites_df, other_df):
     try:
         sites_rdf = RegionDataFrame.from_bed(sp, ref="hg38")
         other_rdf = RegionDataFrame.from_bed(op, ref="hg38")
-        kept = sites_rdf.drop_overlapping_regions(other_rdf)
-        keep_idx = sorted(int(i) for i in kept.index)
+        # `a_index` carries A's index LABELS, matching what the old
+        # `drop_overlapping_regions(...).index` returned.
+        kept_idx = intervals.overlap_indices(sites_rdf, other_rdf, how="anti")[
+            "a_index"
+        ]
+        keep_idx = sorted(int(i) for i in kept_idx)
     finally:
         os.unlink(sp)
         os.unlink(op)

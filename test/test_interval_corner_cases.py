@@ -526,3 +526,107 @@ class TestFractionThresholds:
 
         result2 = overlap_indices(a, b, min_frac_b=0.1)
         assert len(result2) == 1  # 20/120 >= 0.1
+
+
+class TestNonDefaultIndex:
+    """`bioframe` returns index LABELS, so every internal lookup must align by
+    label. An earlier version indexed `.values` positionally with those labels,
+    which raised IndexError on any frame whose index is not a contiguous
+    0..n-1 range — i.e. on any frame produced by a filter or a slice.
+
+    These use a deliberately non-contiguous index. Against the positional
+    implementation they raise IndexError; the assertions are not the point,
+    reaching them is.
+    """
+
+    def _pair(self, a_idx):
+        a = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr1"],
+                    "start": [100, 5000],
+                    "stop": [200, 5100],
+                },
+                index=a_idx,
+            ),
+            ref="hg38",
+        )
+        b = _rdf({"contig": ["chr1", "chr1"], "start": [100, 5000], "stop": [200, 5100]})
+        return a, b
+
+    def test_fraction_filter_survives_a_non_default_index(self):
+        a, b = self._pair([10, 20])
+        result = overlap_indices(a, b, how="inner", min_frac_a=0.5)
+        assert len(result) == 2
+        assert sorted(int(i) for i in result["a_index"]) == [10, 20]
+
+    def test_wiggle_survives_a_non_default_index(self):
+        a = RegionDataFrame(
+            pd.DataFrame(
+                {"contig": ["chr1"], "start": [100], "stop": [200]}, index=[77]
+            ),
+            ref="hg38",
+        )
+        b = RegionDataFrame(
+            pd.DataFrame(
+                {"contig": ["chr1"], "start": [210], "stop": [300]}, index=[88]
+            ),
+            ref="hg38",
+        )
+        result = overlap_indices(a, b, how="inner", wiggle=10)
+        assert len(result) == 1
+        assert int(result["a_index"].iloc[0]) == 77
+        # Gap-bridged pairs share no bases.
+        assert int(result["overlap_bases"].iloc[0]) == 0
+
+    def test_anti_returns_labels_not_positions(self):
+        """Callers filter with `a.loc[...]`, so labels are load-bearing."""
+        a = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr1", "chr1"],
+                    "start": [100, 5000, 9000],
+                    "stop": [200, 5100, 9100],
+                },
+                index=[10, 20, 30],
+            ),
+            ref="hg38",
+        )
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [300]})
+        result = overlap_indices(a, b, how="anti")
+        assert sorted(int(i) for i in result["a_index"]) == [20, 30]
+
+
+class TestReciprocalFraction:
+    """bedtools `-r`: `min_frac_a` must hold against BOTH A and B.
+
+    An earlier version computed `frac_a_ok & frac_b_ok` under `reciprocal`,
+    which is exactly what the non-reciprocal branch already did whenever both
+    thresholds were set, and a no-op otherwise — the flag could not change any
+    result. `test_reciprocal_rejects_when_b_is_barely_covered` is the one that
+    discriminates: it passes without `reciprocal` and fails with it.
+    """
+
+    def _a_inside_b(self):
+        # A is 100bp, fully inside a 1000bp B: frac(A)=1.0, frac(B)=0.1
+        a = _rdf({"contig": ["chr1"], "start": [1000], "stop": [1100]})
+        b = _rdf({"contig": ["chr1"], "start": [500], "stop": [1500]})
+        return a, b
+
+    def test_min_frac_a_alone_accepts(self):
+        a, b = self._a_inside_b()
+        assert len(overlap_indices(a, b, min_frac_a=0.5)) == 1
+
+    def test_reciprocal_rejects_when_b_is_barely_covered(self):
+        a, b = self._a_inside_b()
+        assert len(overlap_indices(a, b, min_frac_a=0.5, reciprocal=True)) == 0
+
+    def test_reciprocal_accepts_when_both_sides_are_covered(self):
+        a = _rdf({"contig": ["chr1"], "start": [1000], "stop": [1100]})
+        b = _rdf({"contig": ["chr1"], "start": [1000], "stop": [1100]})
+        assert len(overlap_indices(a, b, min_frac_a=0.5, reciprocal=True)) == 1
+
+    def test_reciprocal_without_min_frac_a_raises(self):
+        a, b = self._a_inside_b()
+        with pytest.raises(ValueError, match="min_frac_a"):
+            overlap_indices(a, b, reciprocal=True)
