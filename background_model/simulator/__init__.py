@@ -27,3 +27,6 @@ __all__ = [
 # available via their submodules:
 #   from background_model.simulator.capture import fit_and_build
 #   from background_model.simulator.precompute import precompute_region
+# Step 5 (sampler) and Step 6 (emit) are available via:
+#   from background_model.simulator.sampler import draw_fragments_for_region
+#   from background_model.simulator.emit import write_manifest, load_manifest
