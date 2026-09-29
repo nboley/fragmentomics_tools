@@ -35,9 +35,14 @@ from background_model.simulator.weights import (
 # ── helpers ──────────────────────────────────────────────────────────────
 
 
-def _uniform_tables(seed=42):
+def _uniform_tables():
     """Four uniform hexamer tables (all 1.0) — makes the weight depend only
-    on marginal_fl and predict, simplifying invariant checks."""
+    on marginal_fl and predict, simplifying invariant checks.
+
+    Deliberately takes no seed: the tables are constant, so there is nothing
+    to randomise. Note these tables make the four-table wiring INDISTINGUISHABLE
+    — that is what TestAsymmetricFourTableWiring exists to cover.
+    """
     ones = np.ones(NHEX, dtype=np.float64)
     return HexamerTables(ones.copy(), ones.copy(), ones.copy(), ones.copy())
 
@@ -361,18 +366,24 @@ class TestAsymmetricFourTableWiring:
                 f"s={slabel} c5={c5} L={L}: builder {w_b:.18e} != ref {w_ref:.18e}"
             )
 
-            # ── three wrong wirings (one axis wrong at a time) ──
+            # ── wrong wirings (one axis wrong at a time) ──
+            # The last entry is the WITHIN-strand start<->end swap. The
+            # reference-equality assertion above already catches it, but only
+            # probabilistically (random tables); listing it here makes the
+            # distinguishability a proof rather than an overwhelming likelihood.
             if slabel == "+":
                 wrongs = [
                     ((hex_rc,  sf, ef), "wrong hex"),
                     ((hex_fwd, sr, ef), "wrong start table"),
                     ((hex_fwd, sf, er), "wrong end table"),
+                    ((hex_fwd, ef, sf), "start<->end swap"),
                 ]
             else:
                 wrongs = [
                     ((hex_fwd, sr, er), "wrong hex"),
                     ((hex_rc,  sf, er), "wrong start table"),
                     ((hex_rc,  sr, ef), "wrong end table"),
+                    ((hex_rc,  er, sr), "start<->end swap"),
                 ]
 
             for (wh, ws, we), label in wrongs:

@@ -215,7 +215,12 @@ def build_region_weights(
     assert marginal_fl.shape == (N_LENGTHS,), (
         f"marginal_fl shape {marginal_fl.shape} != ({N_LENGTHS},)"
     )
-    start_fwd, end_fwd, start_rev, end_rev = hex_tables
+    # Bind by NAME, not by position. Positional unpacking would silently
+    # re-introduce the misrouting hazard that HexamerTables exists to remove.
+    start_fwd = hex_tables.start_fwd
+    end_fwd = hex_tables.end_fwd
+    start_rev = hex_tables.start_rev
+    end_rev = hex_tables.end_rev
     assert start_fwd.shape == (NHEX,), f"start_fwd shape {start_fwd.shape} != ({NHEX},)"
     assert end_fwd.shape == (NHEX,), f"end_fwd shape {end_fwd.shape} != ({NHEX},)"
     assert start_rev.shape == (NHEX,), f"start_rev shape {start_rev.shape} != ({NHEX},)"
