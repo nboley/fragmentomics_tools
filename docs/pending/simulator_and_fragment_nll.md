@@ -369,3 +369,58 @@ real-data GC source is out of scope for Layer 1.
 
 **Per-region counts are constant in Layer 1** (54 / 37); matching each region's
 depth to a real sample's realised count is out of scope for Layer 1.
+
+---
+
+## Implementation plan
+
+Five phases, each independently testable and committed separately. Every phase
+runs the same gate sequence: **implement → implementation-review → fix ALL
+findings → EM critical review → architecture reflection → design reconciliation.**
+A- is the minimum grade to advance. Nothing merges or pushes until all five are
+done.
+
+| Phase | Steps | Scope | Status |
+|---|---|---|---|
+| **1** | 4 | `build_region_weights` + the orientation/geometry helpers | **COMPLETE** — `76e020f`, `409c683`, `5197778`, `09a9b1b` |
+| **2** | 1–3 | cached `(L, gc_bin)` `predict` LUT **first**, then capture-surface fit, `marginal_fl`, per-region precompute | IN PROGRESS |
+| **3** | 5–6 | sampler; 8-column BED per sample; `build-fragments-h5` → store, proven **non-empty** | NOT STARTED |
+| **4** | 7–8 | anchors (`uniform`, `oracle`, per-region `W_D`); model scoring | NOT STARTED |
+| **5** | — | smoke run: a few hundred regions, one sample, all invariants asserted | NOT STARTED |
+
+### Why this order
+
+**Step 4 was built first**, ahead of the Steps 1–3 that feed it. Both the Step 5
+sampler and the Step 7 oracle call `build_region_weights`, and that single shared
+call is the only thing preventing sampler/scorer drift — a drift that is silent
+and would invalidate every `% captured` number downstream. Its inputs were
+injected as parameters until Phase 2 supplied them.
+
+**Phase 2 lands the `predict` LUT before anything else it contains**, because the
+scalar interface was a known breaking change and the builder still had
+essentially one consumer. Deferring it to Phase 3 or later would have meant
+rewriting every call site plus its tests.
+
+### Standing requirements, learned from Phase 1
+
+- **Name what must FAIL, not only the invariant that must hold.** Phase 1's worst
+  finding was that `Σ_Ω w = 1`, the strand marginal, and `|Ω|` are all
+  *insensitive* to which of the four hexamer tables is used where — so 26 passing
+  tests coexisted with provably unforgeable-looking but untested wiring. The fix
+  was one test with fully asymmetric tables, mutation-tested against **9**
+  plausible misroutings (both strands × start/end × fwd/rc track), **9/9 caught**.
+- **A test claimed to catch a bug, but never observed failing, is only an
+  assertion about itself.** Demonstrate the failure: mutate → fail → restore →
+  pass.
+- **Measure both suites before and after, every phase.** Baselines move with
+  almost every commit; a quoted one is useless as the regression check it exists
+  to be.
+- **Phase 4 specifically:** `W_D` is **per region**, and `|D|` is geometric and
+  identical across regions. Computing one `W_D` store-wide reintroduces the error
+  in averaged form. This must be enforced by a **test**, not by prose — two
+  regions with different valid-position counts must yield different `W_D`.
+- **Phase 3 specifically:** unknown MAPQ reads back as `-1`, `config.min_mapq` is
+  `10`, and `-1 >= 10` is False — so if MAPQ is not carried through the 8-column
+  BED, **every fragment is filtered and the store comes out empty with no error**.
+  Assert on a non-empty store; each repo can pass its own suite and still not
+  compose.
