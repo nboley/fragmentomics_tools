@@ -139,13 +139,60 @@ Derivations: Appendix D.
   directly to the per-sample BED of Step 6 — no intermediate `.npz` format.
 - Related bound: Appendix E (`var(log Z_s)`).
 
-### Step 6 — Emit fragments; production builds the store
+### Step 6 — Emit fragments and the manifest; the model agent builds the store
 
-The simulator's job is to generate fragments; store layout is a model-class
-concern. Emitting a BED and letting production build the store removes a second
+**Scope (owner decision 79).** The simulator's deliverable is the **fragment h5 plus
+the metadata needed to reconstruct the simulated data** — and it stops there. The
+**model agent** owns store construction, the choice of the scoring domain `D`, and the
+oracle. Emitting a BED and letting production build the h5 removes a second
 implementation of the store rule — the same rule that forced `sim_build_store.py`
 to be patched separately from `dataset.py` for the `FL_BANDS` guard, the
 silent-divergence failure `CLAUDE.md` names.
+
+#### The manifest — `w` is reconstructed from factors, not stored dense
+
+`w` **factorises**. `build_region_weights` takes
+`(hex_fwd, hex_rc, cum_gc, valid, hex_tables, marginal_fl, predict_lut, region_len)`,
+and the first four come *entirely* from `precompute_region(contig, gstart, gstop, fasta)`.
+Only three small arrays are free parameters; `S_s` and `Z_s` are derived per region.
+
+| stored | size |
+|---|---|
+| 4 hexamer tables (4 × 4096) | 128 KB |
+| predict LUT (156 × 20) | 24 KB |
+| `marginal_fl` (156) | 1.2 KB |
+| **total** | **~154 KB** |
+
+against **73.5 GB** for a dense `w` at region_len 2560 × 11,505 regions. Recompute
+costs the measured 0.0675 s/region → ~13 min for the full set — affordable only
+because the Step-1 LUT landed; at the pre-LUT 0.665 s it would have been 2.1 h.
+
+**Store the *realised* tables, not the recipe.** Not "seed 42 + `build_w6`", not
+"re-fit from sample X" — the actual arrays. Recomputation is then deterministic and
+exact, with no dependence on a `flgc` version, on a fit being reproducible, or on
+NumPy's RNG stream being stable across releases.
+
+**Hexamer tables are dataframes keyed by the hexamer STRING** (owner decision 81),
+not bare 4096-element arrays ordered by an implicit integer code. A bare array makes
+the k-mer ordering and RC convention a *contract* between producer and consumer; if a
+table is ever produced under a different convention, **every weight is wrong and
+`Σ_Ω w = 1` still holds**, because normalisation cannot see a relabelling. Keyed by
+the string, a mismatched table fails to *join* rather than silently misaligning, and
+the integer code becomes a private detail on each side. The stored string is written
+5′→3′ **along the strand of the fragment that produced it**, so the `*_rev` tables
+already hold reverse-complemented 6-mers — do not RC them again on load.
+
+The manifest also carries, because `w` is irreproducible without them:
+**reference identity + hash** (`hex_fwd`/`hex_rc`/`cum_gc`/`valid` all derive from the
+FASTA — a different hg38 patch silently changes every weight); **region-set identity +
+hash** and `region_len`; the `L` range; the `FL_BANDS` in force; per-region counts; the
+RNG seed (provenance only — no longer load-bearing once the realised tables are stored);
+and the `build_region_weights` **commit sha**, since the one residual dependency is that
+the function still *behaves* the same.
+
+`jitter` and `tile_size` are **deliberately absent**: `Ω`, and therefore `w`, depends on
+`region_len` alone. `jitter` is derived (`region_len = tile_size + 2·jitter`) and is a
+training-time crop budget; `tile_size` parameterises `D`. Both belong to the model agent.
 
 - **In:** the drawn fragments, reference `hg38.fa`.
 - **Do:** write **one sorted BED per sample** — `sample_<i>.bed.gz`, bgzipped and
@@ -161,8 +208,10 @@ silent-divergence failure `CLAUDE.md` names.
 
   ```
   build-fragments-h5 sample_<i>.bed.gz sample_<i>.h5 --fasta hg38.fa   # per sample
-  background_model preprocess + store                                  # all samples -> one store
   ```
+
+  **The simulator stops here.** `background_model preprocess` and the zarr store are
+  the **model agent's** (decision 79).
 
 - **One BED and one h5 per sample, not one of each overall.** The fragment h5 is a
   per-sample artifact: `preprocess.py` calls `from_fragments_h5` once per sample and
@@ -170,16 +219,34 @@ silent-divergence failure `CLAUDE.md` names.
   sample axis. At `S = 1` this is a single file, but building it per-sample from the
   start is what makes `S > 1` work without restructuring.
 
-- **Hard dependency:** columns 6–7 need a pending `fragments_h5` patch —
-  `tsv_to_fragments` currently hardcodes `mapq1=None, mapq2=None`; the two-column
-  MAPQ read is being added. This step is blocked until it lands.
+- **The two-column MAPQ dependency is SATISFIED — verified in code, not from a
+  version string.** `fragments_h5` `tsv_to_fragments` reads `int(parts[6])` /
+  `int(parts[7])`, range-checks 0–255, and rejects 7-column input explicitly.
+  **Caution:** the env's dist-info reports **2.11.0** while the editable checkout it
+  points at is **v2.14.0** — the version *understates* the code, so a check gated on
+  `pip show` would wrongly conclude the support is missing. Resolve the `.pth` and read
+  the source.
 - **Why MAPQ matters (silent-failure trap):** unknown MAPQs store as `-1`;
   `background_model/config.py` sets `min_mapq = 10` and `preprocess.py` passes it
   to `from_fragments_h5`, and `-1 >= 10` is False — so without real MAPQs every
-  fragment is filtered and the store comes out **empty, with no error**.
-- **Out:** the fragment h5 and the zarr store, both built by production code.
+  fragment is filtered and the store comes out **empty, with no error**. Each repo can
+  pass its own suite and still fail to compose: assert on a **non-empty** store.
+- **Out:** the per-sample fragment **h5** and the **manifest**. Not the store.
 
 ### Step 7 — Compute the anchors
+
+> **Owner: the MODEL AGENT, not the simulator** (decision 79). `D` is centre-based on
+> the crop `P = tile_size`, which is store geometry, so the store's owner owns `D` and
+> the anchors built on it. Steps 7–8 are specified here because they define what the
+> simulator's output must *support*, not because the simulator performs them.
+>
+> **The one binding contract across that boundary:** the oracle MUST obtain `w` by
+> calling **`build_region_weights`** — the same function the Step-5 sampler used —
+> reconstructed from the manifest's stored factors. It must not reimplement the weight.
+> Step 4's "one implementation" constraint previously held because sampler and oracle
+> sat in one phase; it now spans an ownership line, where the failure is silent and
+> nothing enforces it. `Σ_Ω w = 1` and the exact-½ strand marginal are cheap
+> post-conditions that catch most breakages.
 
 - **In:** the store, `w` via `build_region_weights`, the scoring domain `D`.
 - **Do:**
@@ -400,10 +467,15 @@ done.
 | Phase | Steps | Scope | Status |
 |---|---|---|---|
 | **1** | 4 | `build_region_weights` + the orientation/geometry helpers | **COMPLETE** — `76e020f`, `409c683`, `5197778`, `09a9b1b` |
-| **2** | 1–3 | cached `(L, gc_bin)` `predict` LUT **first**, then capture-surface fit, `marginal_fl`, per-region precompute | IN PROGRESS |
-| **3** | 5–6 | sampler; 8-column BED per sample; `build-fragments-h5` → store, proven **non-empty** | NOT STARTED |
-| **4** | 7–8 | anchors (`uniform`, `oracle`, per-region `W_D`); model scoring | NOT STARTED |
+| **2** | 1–3 | cached `(L, gc_bin)` `predict` LUT **first**, then capture-surface fit, `marginal_fl`, per-region precompute | **COMPLETE** — `439d135`, `f7b10a3`, `277dc39` |
+| **3** | 5–6 | sampler; 8-column BED per sample; `build-fragments-h5` → **h5 + manifest**. **No store** (decision 79) | NOT STARTED |
+| **4** | 7–8 | anchors + model scoring — **MOVED to the model agent** (decision 79b). Specified above only as the contract the simulator's output must support | OUT OF SCOPE HERE |
 | **5** | — | smoke run: a few hundred regions, one sample, all invariants asserted | NOT STARTED |
+
+**Decision 79 rescoped this plan after Phase 2.** The simulator's deliverable is the
+fragment h5 plus the reconstruction manifest; store construction, the choice of `D`,
+and the oracle belong to the model agent. Phase 3 shrank accordingly and Phase 4
+largely left this stream, so Layer 1 here is Phases 1, 2, 3, 5.
 
 ### Why this order
 
