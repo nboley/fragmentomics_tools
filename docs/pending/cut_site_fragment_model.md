@@ -323,21 +323,23 @@ dataset therefore batches **by region**, not by `(sample, tile)`.
 Item = one region, yielding:
 
 ```
-x         : (4, l_in)              float32   one-hot sequence (shared)
-frag_p    : list over samples of (n_frag_s,) uint16 region-local left endpoints
-frag_L    : list over samples of (n_frag_s,) uint16 lengths
-frag_s    : list over samples of (n_frag_s,) uint8  strand
-endpoints : (S, 2, tile_size)      float32   the two NB target tracks per sample
+x         : (4, l_in)              float32   one-hot sequence
+frag_m    : (n_frag,)              int64     centre positions in crop coords
+frag_L_idx: (n_frag,)              int64     L index (0-based, L - L_MIN)
+frag_s    : (n_frag,)              int64     strand (0 or 1)
+frag_N    : scalar                 int64     total fragment count
+endpoints : (2, tile_size)         float32   the two NB target tracks
 mask      : (tile_size,)           bool      valid positions
 ```
 
 The multinomial shares one per-region `logp` map across the `S` samples:
 `NLL_s = -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s`, averaged over samples.
 
-**Crop.** The jittered centre crop is the frozen `jitter_matrix`, applied
-identically to `seq`, `mask`, the endpoint tracks, and the fragment coordinates
-(a fragment survives iff both `p` and `p+L-1` land inside the crop; its `p` is
-re-based to the crop origin). Train draws `j ∈ [-jitter, jitter]`; **val and
+**Crop.** The jittered centre crop uses `jitter_matrix` with concentric widths
+(seq → `l_in`, targets → `tile_size`). A fragment survives iff its **centre**
+`m = p + L//2` lands in `[0, tile_size)` (centre-based, not both-endpoint —
+see §Settled parameters). Its `p` is re-based to the crop origin.
+Train draws `j ∈ [-jitter, jitter]`; **val and
 test use `j = 0` (centred crop) — jitter is training-only**. `jitter_matrix`'s
 crop requires its input and output lengths to share **matched parity** (not even
 parity per se — see `calculate_start_and_stop_from_jitter`): the jittered crop
@@ -357,12 +359,8 @@ regions within a batch. Document this in the dataset docstring so it is not
 **RC augmentation is DROPPED: `rc_prob = 0`.** There is no RC-equivariance
 requirement on this model and no RC-equivariance test.
 
-**`min_N` = 0 for these stores.** The old `N.min(axis=2) ≥ min_N` filter does
-not transfer (its axis is now the 2 endpoint tracks, and training needs
-fragments, not per-track depth). Filter on **total fragment count per
-`(sample, region)`** with default **0**: keep every region a sample has any
-fragments in; regions with zero fragments for a sample contribute a zero
-multinomial term and are skipped.
+**`min_N` = 10.** Filter on **total fragment count per `(sample, region)`**:
+regions with fewer than 10 fragments for a sample are skipped.
 
 **Worker safety** is inherited verbatim: lazy per-PID zarr handle, optional
 in-memory preload with copy-on-write fork sharing, no CUDA in the dataset.
@@ -533,11 +531,17 @@ yourself (it moves per commit).
 
 ## Settled parameters
 
-- `min_N` = 0.
-- **Separate val AND test** region sets; val/test use the centred crop, jitter
-  is training-only.
-- **Two stores**, one per model class, deliberately not unified — streamlining
-  happens after a model is chosen.
+- `min_N` = 10 (total fragment count per sample×region).
+- **Centre-based fragment inclusion**: D = {(m, L, s) : m ∈ [0, P), L in-band,
+  s ∈ {0,1}}. |D_L| = P for all L — no length bias.
+- **F offset range parameterised by FL_BANDS**: `n_offsets = L_max_inband`,
+  `o_l_min = 128 - L_max_inband // 2`. Dead offsets trimmed.
+- **NB endpoint loss kept, dispersion frozen** at `log_dispersion_init`.
+- **Conv L1** (not embedding). Embedding arm is a Stage 3 improvement.
+- **len_bias (n_L,)**: scalar per-L on the logit (not per-H).
+- **S = 1 currently.** Dataset indexes by `(sample, tile)`.
+- **Separate val AND test** region sets; val/test use the centred crop.
+- **Two stores**, one per model class.
 - Simulator `max_len` = 256, with filtering to the bands before inference.
 
 ## Limitations (accepted, not solved here)

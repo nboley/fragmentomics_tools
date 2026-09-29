@@ -379,3 +379,100 @@ class TestDatasetCollate:
         logits, ep_shape, disp = model(batch["x"])
         assert logits.shape == (2, cfg.tile_size, N_L, 2)
         assert ep_shape.shape == (2, 2, cfg.tile_size)
+
+
+# ---------------------------------------------------------------------------
+# Test gaps identified in Phase 2 review
+# ---------------------------------------------------------------------------
+
+
+class TestMinNFiltering:
+    def test_regions_below_min_N_excluded(self, tmp_path):
+        """Regions with fewer than min_N fragments should be excluded."""
+        # Create store with 1 tile having only 5 fragments (below min_N=10)
+        store_path, cfg = _create_synthetic_store(
+            tmp_path, tile_size=256, jitter=32, n_tiles=2,
+            n_samples=1, n_frags_per_tile=5, seed=99,
+        )
+        model = CutSiteFragmentModel(
+            tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+        )
+        ds = CutSiteFragmentDataset(
+            store_path=store_path,
+            model_input_size=model.model_input_size,
+            model_max_len=cfg.max_len,
+            split="train",
+            sample_role="train",
+            min_N=10,  # 5 < 10, so all tiles should be excluded
+            train_mode=False,
+        )
+        assert len(ds) == 0, f"Expected 0 items but got {len(ds)}"
+
+    def test_regions_at_min_N_included(self, tmp_path):
+        """Regions with exactly min_N fragments should be included."""
+        store_path, cfg = _create_synthetic_store(
+            tmp_path, tile_size=256, jitter=32, n_tiles=2,
+            n_samples=1, n_frags_per_tile=10, seed=99,
+        )
+        model = CutSiteFragmentModel(
+            tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+        )
+        ds = CutSiteFragmentDataset(
+            store_path=store_path,
+            model_input_size=model.model_input_size,
+            model_max_len=cfg.max_len,
+            split="train",
+            sample_role="train",
+            min_N=10,
+            train_mode=False,
+        )
+        assert len(ds) == 2, f"Expected 2 items but got {len(ds)}"
+
+
+class TestPreloadFalsePath:
+    def test_preload_false_matches_preload_true(self, synthetic_store):
+        """preload=False should produce identical items to preload=True."""
+        store_path, cfg = synthetic_store
+        model = CutSiteFragmentModel(
+            tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+        )
+        ds_pre = CutSiteFragmentDataset(
+            store_path=store_path,
+            model_input_size=model.model_input_size,
+            model_max_len=cfg.max_len,
+            split="train", sample_role="train", min_N=0,
+            train_mode=False, preload=True,
+        )
+        ds_no = CutSiteFragmentDataset(
+            store_path=store_path,
+            model_input_size=model.model_input_size,
+            model_max_len=cfg.max_len,
+            split="train", sample_role="train", min_N=0,
+            train_mode=False, preload=False,
+        )
+        item_pre = ds_pre[0]
+        item_no = ds_no[0]
+        for key in ("x", "frag_m", "frag_L_idx", "frag_s", "frag_N", "endpoints", "mask"):
+            assert torch.equal(item_pre[key], item_no[key]), f"Mismatch on {key}"
+
+
+class TestEndpointBoundaryFragment:
+    def test_right_endpoint_at_boundary(self, tmp_path):
+        """A fragment whose right endpoint is at l_target-1 should be handled."""
+        from background_model.cut_site_store import recompute_endpoints_from_fragments
+        length = 100
+        start = np.array([length - 1 - 25], dtype=np.uint16)  # right end at length-1
+        frag_len = np.array([25], dtype=np.uint16)
+        ep = recompute_endpoints_from_fragments(start, frag_len, length)
+        assert ep[0, start[0]] == 1.0  # first track at start
+        assert ep[1, start[0] + frag_len[0] - 1] == 1.0  # last track at right end
+
+    def test_right_endpoint_past_boundary(self, tmp_path):
+        """A fragment whose right endpoint >= length should be clipped."""
+        from background_model.cut_site_store import recompute_endpoints_from_fragments
+        length = 100
+        start = np.array([90], dtype=np.uint16)
+        frag_len = np.array([20], dtype=np.uint16)  # right end at 109 >= 100
+        ep = recompute_endpoints_from_fragments(start, frag_len, length)
+        assert ep[0, 90] == 1.0  # first track at start
+        assert ep[1].sum() == 0.0  # last track clipped (right end out of bounds)
