@@ -469,10 +469,10 @@ class CutSiteFragmentModel(L.LightningModule):
             L_mult = torch.tensor(0.0, device=x.device)
 
         # -- NB endpoint loss (annealed) ------------------------------------
-        # Uses the real endpoint_shape_head output (B, 2, P) as shape logits,
-        # exactly as the 12-track models use their shape_head for the NB loss.
+        # _pooled_log_dispersion takes (B, P) or (B, 1, P) mask — pass 2D.
+        # The NB loss takes (B, C, P) mask via _prepare_mask.
+        log_disp = self._pooled_log_dispersion(disp_bp, mask)
         mask3 = mask[:, None, :].expand_as(endpoints) if mask is not None else None
-        log_disp = self._pooled_log_dispersion(disp_bp, mask3)
         L_NB = self.nb_loss_fn(endpoint_shape, log_disp, endpoints, mask3)
 
         # Annealing weight
