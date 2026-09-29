@@ -101,7 +101,7 @@ def _extract_fragments(h5_path, region, L_min, L_max):
     # Region-local coordinates
     starts = (rfa.starts - region.start).astype(np.int64)
     lengths = rfa.lengths.astype(np.int64)
-    strands = np.array([0 if s == b'+' else 1 for s in rfa.fragment_strands],
+    strands = np.array([0 if s in ('+', b'+') else 1 for s in rfa.fragment_strands],
                        dtype=np.uint8)
 
     # Filter to in-band lengths
@@ -141,30 +141,54 @@ def build_store(args):
     if T == 0:
         raise ValueError("No valid regions found")
 
-    # -- Pass 1: count fragments per tile ----------------------------------
-    log.info("Pass 1: counting fragments per tile")
-    frag_counts = []
+    # -- Single pass: extract fragments + compute endpoints ----------------
+    log.info("Extracting fragments from %s (%d regions)", args.sample, T)
+    frag_indptr = [0]
+    all_frag_start, all_frag_length, all_frag_strand = [], [], []
+    all_ep_pos, all_ep_track, all_ep_data = [], [], []
+    ep_indptr = [0]
+    S = 1
+    N_totals = np.zeros((S, T, 2), dtype="uint32")
+
     for t, r in enumerate(regions):
-        s, l, st = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
-        frag_counts.append(len(s))
-        if (t + 1) % 500 == 0:
-            log.info("  %d / %d tiles", t + 1, T)
-    total_frags = sum(frag_counts)
-    log.info("Total fragments: %d", total_frags)
+        fs, fl, fst = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
+        all_frag_start.append(fs)
+        all_frag_length.append(fl)
+        all_frag_strand.append(fst)
+        frag_indptr.append(frag_indptr[-1] + len(fs))
+
+        ep = recompute_endpoints_from_fragments(fs, fl, cfg.l_target)
+        for track_idx in range(2):
+            nz = np.nonzero(ep[track_idx])[0]
+            if len(nz):
+                all_ep_pos.extend(nz.tolist())
+                all_ep_track.extend([track_idx] * len(nz))
+                all_ep_data.extend(ep[track_idx, nz].astype(int).tolist())
+            margin = (cfg.l_target - cfg.tile_size) // 2
+            N_totals[0, t, track_idx] = int(
+                ep[track_idx, margin:margin + cfg.tile_size].sum()
+            )
+        ep_indptr.append(len(all_ep_pos))
+
+        if (t + 1) % 1000 == 0:
+            log.info("  %d / %d tiles (%d frags so far)",
+                     t + 1, T, frag_indptr[-1])
+
+    total_frags = frag_indptr[-1]
+    log.info("Extracted %d fragments from %d regions", total_frags, T)
 
     # -- Assign splits -----------------------------------------------------
     rng = np.random.default_rng(cfg.seed)
-    split_arr = np.zeros(T, dtype=np.uint8)  # 0 = train
+    split_arr = np.zeros(T, dtype=np.uint8)
     perm = rng.permutation(T)
     n_val = int(T * args.val_frac)
     n_test = int(T * args.test_frac)
-    split_arr[perm[:n_val]] = 1        # val
-    split_arr[perm[n_val:n_val + n_test]] = 2  # test
+    split_arr[perm[:n_val]] = 1
+    split_arr[perm[n_val:n_val + n_test]] = 2
     log.info("Splits: train=%d, val=%d, test=%d",
              (split_arr == 0).sum(), (split_arr == 1).sum(), (split_arr == 2).sum())
 
-    # -- Create store ------------------------------------------------------
-    S = 1
+    # -- Write store -------------------------------------------------------
     open_kwargs = {"mode": "w"}
     if _ZARR_MAJOR >= 3:
         open_kwargs["zarr_format"] = 2
@@ -177,7 +201,6 @@ def build_store(args):
         "split_version": 0,
     })
 
-    # /tiles/
     tiles = root.create_group("tiles")
     _create_array(tiles, "contig", data=np.array([r.chrom for r in regions], dtype="<U32"))
     _create_array(tiles, "start", data=np.array([r.start for r in regions], dtype="int64"))
@@ -185,52 +208,14 @@ def build_store(args):
     _create_array(tiles, "strand", data=np.array(["."] * T, dtype="<U1"))
     _create_array(tiles, "region_id", data=np.array([f"r{i}" for i in range(T)], dtype="<U64"))
     _create_array(tiles, "split", data=split_arr)
-
-    # Sequence: encode as uint8 bytes
-    seq_encoded = np.array([list(s) for s in sequences], dtype="uint8")
-    _create_array(tiles, "seq", data=seq_encoded)
+    _create_array(tiles, "seq", data=np.array([list(s) for s in sequences], dtype="uint8"))
     _create_array(tiles, "mask", data=np.array(masks, dtype=bool))
 
-    # /samples/
     samples = root.create_group("samples")
     _create_array(samples, "library", data=np.array([os.path.basename(args.sample)], dtype="<U256"))
     _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
     _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
 
-    # -- Pass 2: write fragments + endpoints --------------------------------
-    log.info("Pass 2: writing fragments and endpoints")
-    frag_indptr = [0]
-    all_frag_start, all_frag_length, all_frag_strand = [], [], []
-    all_ep_pos, all_ep_track, all_ep_data = [], [], []
-    ep_indptr = [0]
-    N_totals = np.zeros((S, T, 2), dtype="uint32")
-
-    for t, r in enumerate(regions):
-        fs, fl, fst = _extract_fragments(args.sample, r, cfg.L_min, cfg.L_max)
-        all_frag_start.append(fs)
-        all_frag_length.append(fl)
-        all_frag_strand.append(fst)
-        frag_indptr.append(frag_indptr[-1] + len(fs))
-
-        # Compute endpoints from fragments
-        ep = recompute_endpoints_from_fragments(fs, fl, cfg.l_target)
-        for track_idx in range(2):
-            nz = np.nonzero(ep[track_idx])[0]
-            for p in nz:
-                all_ep_pos.append(p)
-                all_ep_track.append(track_idx)
-                all_ep_data.append(int(ep[track_idx, p]))
-            # Centre-tile totals
-            margin = (cfg.l_target - cfg.tile_size) // 2
-            N_totals[0, t, track_idx] = int(
-                ep[track_idx, margin:margin + cfg.tile_size].sum()
-            )
-        ep_indptr.append(len(all_ep_pos))
-
-        if (t + 1) % 500 == 0:
-            log.info("  %d / %d tiles", t + 1, T)
-
-    # Write fragment CSR
     frags = root.create_group("fragments")
     _create_array(frags, "indptr", data=np.array(frag_indptr, dtype="int64"))
     all_fs = np.concatenate(all_frag_start) if all_frag_start else np.empty(0, "uint16")
@@ -240,14 +225,12 @@ def build_store(args):
     _create_array(frags, "length", data=all_fl)
     _create_array(frags, "strand", data=all_fst)
 
-    # Write endpoint CSR
     endpoints = root.create_group("endpoints")
     _create_array(endpoints, "indptr", data=np.array(ep_indptr, dtype="int64"))
     _create_array(endpoints, "pos", data=np.array(all_ep_pos, dtype="uint16") if all_ep_pos else np.empty(0, "uint16"))
     _create_array(endpoints, "track", data=np.array(all_ep_track, dtype="uint8") if all_ep_track else np.empty(0, "uint8"))
     _create_array(endpoints, "data", data=np.array(all_ep_data, dtype="uint16") if all_ep_data else np.empty(0, "uint16"))
 
-    # /totals/
     totals = root.create_group("totals")
     _create_array(totals, "N", data=N_totals)
 

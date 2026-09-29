@@ -52,7 +52,7 @@ def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179)
         starts = (rfa.starts - r.start).astype(np.int64)
         lengths = rfa.lengths.astype(np.int64)
         strands = np.array(
-            [0 if s == b"+" else 1 for s in rfa.fragment_strands], dtype=np.uint8
+            [0 if s in ("+", b"+") else 1 for s in rfa.fragment_strands], dtype=np.uint8
         )
         keep = (lengths >= L_min) & (lengths <= L_max)
         centres = starts + lengths // 2
