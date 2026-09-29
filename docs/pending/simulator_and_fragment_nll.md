@@ -1,361 +1,304 @@
-# Simulator design and per-fragment NLL
+# Simulator and per-fragment NLL
 
-Status: DESIGN, not implemented. Specifies the simulator's generative form and
-the per-fragment NLL metric that scores both model classes. The band widening
-The current bands and their guard are stated under "Bands" below.
+Status: DESIGN, not implemented. Specifies the simulator's generative model, the
+data that informs it, and the per-fragment NLL that scores both model classes.
 
-**This simulator is written from scratch.** Existing code may be reused where it
-is genuinely useful — `load_duphist` / `build_cell_map`
+Written **from scratch**, in `background_model/simulator/`. Existing code may be
+reused where useful — `load_duphist` / `build_cell_map`
 (`scripts/ztnb_from_duphist.py`), the `hexamer_indices` + `cum_gc` precompute,
-`empirical_length_pmf`, region/BED loading, the `sample_<i>.npz` output layout
-(`region_idx, start, stop, strand`), the multiprocessing scaffolding, and
-`sim_build_store.py` — but this is not a refactor of `sim_fragments.py`.
+`empirical_length_pmf`, region/BED loading, the `sample_<i>.npz` layout, the
+multiprocessing scaffolding, `sim_build_store.py` — but this is not a refactor of
+`sim_fragments.py`, and **there is no parity requirement of any kind**.
 
-**The existing simulator stays live and must keep working.** KEN and Hybrid
-retain their RC-tied k-mer embeddings so they can be validated against the
-current RC-symmetric simulator, which requires `sim_fragments.py` and its stores
-to remain intact. This work is **additive**, not a replacement.
+**The existing simulator stays live and must keep working.** KEN and Hybrid retain
+RC-tied k-mer embeddings so they can be validated against it, which requires
+`sim_fragments.py` and its stores intact. This work is additive.
 
-## Why
+---
 
-1. **The oracle must not be a second implementation of the generative model.**
-   An oracle that re-derives the propensity independently has to agree with the
-   sampler exactly or every "% bias captured" figure is wrong — and it has
-   already disagreed once, by a 128-position crop offset. Two implementations of
-   one rule drift silently. Writing from scratch means designing the single
-   shared implementation in from the start rather than retrofitting it.
-2. **Losses in different families are not comparable.** Multinomial and
-   `nb_offset` score on different scales, so the architecture ranking can
-   reverse between them with no way to tell why.
-3. **A comparable, real-data-computable metric is needed** — the per-fragment
-   NLL below.
+## 1. The generative model
 
-## Goals
+### The shared weight
 
-- **One implementation of the fragment weight**, consumed by both the sampler
-  and the scorer, so they cannot disagree.
-- A metric comparable across parameterisations and losses, computable on real
-  data.
-
-## Scope note
-
-Fragments longer than `max_len` = 256 are **excluded from the normalisation
-domain `D`** rather than treated as an error — applied identically to oracle and
-model, so it does not affect comparisons. Because a store built under different
-`max_len` or different bands is scored over a different domain, **state the
-domain alongside any number.**
-
-## Sizing facts this design rests on
-
-| fact | value |
-|---|---|
-| valid `(p,L)` pairs per 2560 region, `max_len` 256 | 622,720 |
-| materialised `all_w_arr`, 10k / 50k regions | 46 GB / 129 GB |
-| factorised artifact per region | **31 KB** |
-| FL mass lost to `max_len` 256 | 0.05% |
-
-The factorised artifact reconstructs the weight exactly (its only 2-D term is an
-integer-indexed GC LUT), is ~150× smaller than the materialised array, and is
-what enables the shared-builder design below.
-
-**PMF mass and realised-fragment share are different quantities**, because the
-sampler reweights `(p,L)` by the cut-site and GC terms and GC bias varies
-strongly with length (high/low-GC ratio 0.65 at L=24 vs 4.08 at L=75). The two
-differ by several points over the same bands, so **any in-band figure must say
-which of the two it is.**
-
-## Stage 1 — propensity builder
-
-Input: region set BED, reference, `w6` params, GC/FL capture model, FL PMF.
-
-Output per region — all exact, not approximations of the materialised array:
-
-| array | dtype | size |
-|---|---|---|
-| `fwd_cut` | int32 `(region_len+1,)` | 10 KB |
-| `rc_cut` | int32 `(region_len+1,)` | 10 KB |
-| `cum_gc` | int32 `(region_len+1,)` | 10 KB |
-
-Plus, once per run: `w6`, the integer-indexed GC lookup, `len_p`, `max_len`, and
-the region table.
-
-**The single shared function** `build_region_weights(region_arrays, globals,
-L_range)` returns `(p, q, w)`. Stage 2 calls it to sample; the scorer calls it
-for the truth term. That shared call is where the correctness benefit lives —
-not in the artifact format.
-
-**`w` is a fully normalised probability, not an unnormalised weight. This is
-load-bearing, not a detail.** `build_region_weights` returns
+One function, `build_region_weights`, returns the fragment probability. **Both the
+sampler and the oracle call it** — that is the only thing preventing them from
+drifting apart, and a drift here is silent.
 
 ```
 w(c5, c3, s) = 1/2 · start_s[hex(c5)]/S_s · end_s[hex(c3)] · FLGC(L, gc) / Z_s(c5)
 
-S_s     = sum_c5' start_s[hex(c5')]                          per-strand start mass
-Z_s(c5) = sum_c3' end_s[hex(c3')] · FLGC(L', gc')            per-5'-site end mass
+S_s     = sum_c5' start_s[hex(c5')]                     per-strand start mass
+Z_s(c5) = sum_c3' end_s[hex(c3')] · FLGC(L', gc')       per-5'-site end mass
 ```
 
-`c5` is the fragment's **5′ cut site** and `c3` its **3′** one. On the plus strand
-`c5 = p`, `c3 = p + L`; **on the minus strand they swap** — the 5′ end is at the
-*higher* coordinate, so `c5 = p + L` and `c3 = p`, with hexamers read
-reverse-complemented. Writing the formula in `(c5, c3)` rather than `(p, q)` is
-deliberate: an implementer coding from a `p`/`q` formula gets the minus strand
-backwards, which corrupts strand asymmetry silently.
-
-**Why all three normalisers, and not just `1/Z_s`:**
+**`w` is a fully normalised probability, not an unnormalised weight.** Each
+normaliser has a job:
 
 - `1/Z_s(c5)` makes the end step a proper conditional. Omit it and globally
   normalising `start·end·FLGC` gives the **symmetric** joint — a different model.
-- `1/S_s` makes the start step a proper conditional **per strand**. Omit it and
-  the total becomes `S_+ + S_-`, so the strand marginal comes out `∝ S_s` instead
-  of ½. That is only harmless if `S_+ = S_-`, which **untied tables do not
-  guarantee**.
-- the `1/2` is the strand prior the sampler actually draws from.
+- `1/S_s` makes the start step a proper conditional **per strand**. Omit it and the
+  total becomes `S_+ + S_-`, so the strand marginal comes out `∝ S_s` rather than ½.
+  Harmless only if `S_+ = S_-`, which **untied tables do not guarantee**.
+- the `1/2` is the strand prior the sampler draws from.
 
-With all three, **`sum_Ω w = 1` exactly over the GENERATIVE domain `Ω`** — every
-`(c5, c3, s)` the sampler can emit — and the strand marginal is exactly ½. So
-"flatten and draw" and "score" are provably the same distribution.
+With all three, `sum_Ω w = 1` exactly over the generative domain `Ω` (the sum
+telescopes: `sum_c3` of the end term is `Z_s(c5)/Z_s(c5) = 1`, leaving
+`sum_c5 start_s/S_s = 1`), and the strand marginal is exactly ½.
 
-### `Ω` and `D` are different sets — do not conflate them
-
-`Ω` is everything the simulator can emit. **`D` is the scoring domain: in-band ∧
-in-crop ∧ strand, a strict subset of `Ω`.** Write `W_D = sum_{x in D} w(x) < 1`.
-
-Because scoring is conditional on a fragment being in `D`, the true conditional is
-`w(x)/W_D`, so
+### Sampling
 
 ```
-oracle NLL  =  −log( w(x) / W_D )  =  −log w(x) + log W_D
+1. s  ~ Bernoulli(1/2)
+2. c5 ~ start_s[hex(c5)] / S_s
+3. c3 ~ end_s[hex(c3)] · FLGC(L, gc) / Z_s(c5)     over c3 giving L in range
 ```
 
-**`−log w(x)` alone is NOT the oracle.** `log W_D < 0`, so it overstates the oracle
-— i.e. makes it too weak — by exactly `|log W_D|`. A model that correctly learns
-the conditional `w/W_D` would then **beat** that number and print **above 100%
-captured**, which reads as an implementation bug rather than as a mis-specified
-anchor. This is the same failure the three normalisers exist to prevent, one level
-up: normalising over the wrong set is as wrong as not normalising.
+Sequential, with a **per-start normaliser** — not a symmetric joint over `(c5,c3)`.
 
-**`W_D` is PER REGION, and `|D|` is not — the asymmetry matters.** `w` is
-normalised within a region (that is where the sampler draws), so `W_D` is a
-per-region quantity and the `log W_D` correction differs region to region; the
-oracle averages it over the scored fragments. `|D|` by contrast is purely
-geometric — the same count for every region at a given geometry — so `log|D|` is
-one number. Treating `W_D` as a single scalar would reintroduce exactly the
-mis-normalisation this section exists to prevent, just averaged.
+**`c5` is the 5′ cut site, `c3` the 3′.** On the plus strand `c5 = p`, `c3 = p+L`;
+**on the minus strand they swap**, because the 5′ end sits at the *higher*
+coordinate — `c5 = p+L`, `c3 = p`, hexamers read reverse-complemented. The formula
+is written in `(c5, c3)` rather than `(p, q)` deliberately: an implementer coding
+from a `p`/`q` form gets the minus strand backwards, which corrupts strand
+asymmetry silently.
 
-## Stage 2 — generative form
+### Four hexamer tables
 
-The truth has **four hexamer tables**: `{start, end} × {forward, reverse}`,
-**untied** (this is short-read single-stranded data, so the two ends are not
-related by reverse complement). A fragment is drawn sequentially:
+`{start, end} × {forward, reverse}`, **untied** — this is short-read
+single-stranded data, so the two ends are not related by reverse complement.
+Strand is drawn first and selects which pair applies.
+
+### The FL/GC term
 
 ```
-1. s ~ Bernoulli(1/2)
-2. start p ~ start_s[hex(p)] / sum_p' start_s[hex(p')]
-3. end   q ~ end_s[hex(q)] * FLGC(L, gc(p,q)) / sum_q' (same), over q' giving L in range
-```
-
-**The end normaliser is per-start, `Z_s(p)` — this is a SEQUENTIAL scheme, not a
-symmetric joint over `(p, L)`.** On the minus strand the 5' end is at the
-**higher** coordinate, so for `s = -` the `start` table applies at `q` and the
-`end` table at `p`, with hexamers read reverse-complemented.
-
-The length/GC factor:
-
-```
-FLGC(L, gc)        = observed_len_p(L) * capture(L, gc) / capture_marginal(L)
+FLGC(L, gc)        = observed_len_p(L) · capture(L, gc) / capture_marginal(L)
 capture(L, gc_pct) = 1 / GCFlDistModel.predict(L, gc_pct)
+gc_pct             = 100 · (cum_gc[p + L] − cum_gc[p]) / L
 ```
 
-`GCFlDistModel.predict` is **inverse** capture: `predict(25) = 2.753` (measured
-on sample `RD-56153`) means a 25 bp fragment is seen only ~36% of the time, so
-using `predict` directly as a positive weight would invert the assay — hence the
-reciprocal. Its length profile spans only **2.58×** while that sample's observed
-length PMF spans **7.3×**, so capture alone cannot carry length structure; the
-observed PMF carries it.
+**GC uses the GENOMIC span `[p, p+L)`, not `c5`/`c3`.** GC content is a property of
+the span and is strand-independent; `c5`/`c3` are 5′/3′ *labels*, and on the minus
+strand `c5 > c3`, so `cum_gc[c3] − cum_gc[c5]` would be negative. The hexamer terms
+use `c5`/`c3` because they genuinely are strand-dependent; GC does not.
 
-`gc_pct` is a **percent**, `100 · (cum_gc[q] − cum_gc[p]) / L`, matching
-`predict()`'s contract. GC is percent throughout the `flgc` path.
+Two measured facts fix this form; neither is optional.
 
-**`capture_marginal(L)` — the hexamer-weighted marginal:**
+**Direction: `predict` is *inverse* capture.** `predict(25) = 2.753` on RD-56153
+means a 25 bp fragment is seen only ~36% of the time, so using `predict` as a
+positive weight would **invert the assay** — hence the reciprocal.
+
+**Magnitude: capture cannot carry length structure.** Its length profile spans
+**2.58×** while that sample's observed length PMF spans **7.3×**, and `end_s` is
+hexamer-indexed so it cannot manufacture length structure on average. The PMF
+carries length; capture adds GC dependence *conditional on* length.
+
+`capture_marginal(L)` is **the average capture over the length-`L` fragments the
+hexamer terms would favour, pooled across both strands.** One value per `L`.
+
+Concretely: enumerate every candidate fragment of length `L` in the region set — for
+each strand `s`, every `(c5, c3)` placement with that length, using the strand's own
+5′/3′ convention from "Sampling" above. For each such candidate define
 
 ```
-                   sum_{(c5,c3): L}  start_s[hex(c5)] · end_s[hex(c3)] · capture(L, gc)
-capture_marginal(L) = ──────────────────────────────────────────────────────────────────
-                   sum_{(c5,c3): L}  start_s[hex(c5)] · end_s[hex(c3)]
+v = start_s[hex(c5)] · end_s[hex(c3)]     its hexamer weight, with NO FLGC factor
+g = 100 · (cum_gc[p+L] − cum_gc[p]) / L    ITS OWN GC, over the genomic span
 ```
 
-**summed over both strands as well as over cut-site pairs** at that length in the
-region set being simulated — i.e. the free `s` on the right-hand side is bound by
-pooling, `sum_{(c5,c3,s): L}`, giving **one value per `L`**.
+then
 
-That pooling is a deliberate choice and worth stating, because `capture(L, gc)`
-itself is strand-independent but the *weights* `start_s`/`end_s` are not: the
-tables are untied, so a per-strand weighted average would generally differ between
-strands. Pooling makes the ratio `capture/capture_marginal` average to 1 over the
-**strand-pooled** measure rather than within each strand separately. Since strand
-is drawn 50/50 and enters symmetrically, the per-strand residual is small and of
-the same second-order character as the one-pass approximation below. Computed once
-per `(region set, L)` and cached beside `gcfl_model.json`.
+```
+                       sum over all candidates of  v · capture(L, g)
+capture_marginal(L) = ───────────────────────────────────────────────
+                       sum over all candidates of  v
+```
+
+`g` varies candidate to candidate — that is the whole point. If `capture` were
+constant across the sum the ratio would be identically 1 and the term would do
+nothing.
+
+Computed once per `(region set, L)` and cached beside `gcfl_model.json`.
+
+**It does not cancel out of `w`.** `Z_s(c5)` sums `end_s · FLGC` over `c3`, hence
+over *different* lengths `L'`, so `capture_marginal(L')` varies inside that sum and
+cannot be simplified away. Anyone "tidying" it will change the distribution.
 
 **It is a one-pass approximation, deliberately.** The measure the sampler actually
-realises at length `L` also includes `FLGC` itself and the `1/Z_s(c5)` factor —
-and `FLGC` contains `capture/capture_marginal`, so the exact quantity is a fixed
-point requiring iteration. Weighting by `start·end` only is one pass and
-non-circular; the residual is second-order, the covariance between `capture` and
-`FLGC`'s own GC tilt at fixed `L`. Written down so nobody "fixes" it by iterating
-without knowing what that buys. One fixed-point iteration would close most of the
+realises also includes `FLGC` itself and `1/Z_s(c5)`, and `FLGC` contains
+`capture/capture_marginal` — so the exact quantity is a fixed point needing
+iteration. Weighting by `start·end` alone is one pass and non-circular; the
+residual is second-order (the covariance between `capture` and `FLGC`'s own GC tilt
+at fixed `L`, plus a per-strand term from pooling). Recorded so nobody "fixes" it
+by iterating without knowing what that buys. One iteration would close most of the
 remaining gap if it ever matters.
 
-**Capture fit bins.** FL in **1 bp** bins, GC in **5% bins covering 0–100**. Do
-not take the `flgc` defaults: their top length bin is `(101,200)`, which would
-collapse the entire high band `[110,180)` into one bin and leave `capture`
-constant in `L` across it; and their GC range stops short of 0–100, so extreme-GC
-fragments would fall out of bin and receive `max_weight` (→ `capture = 1/3`)
-rather than a fitted value. The fit covers lengths 25–180 INCLUSIVE (156 bins, one
-wider than the 155-length scoring band) x 20 GC bins = 3,120 cells,
-of which 2,057 fit at `MIN_CELL_SIZE = 200` and the starved remainder holds
-**0.0333% of molecule mass** — measured, so the unfitted floor is immaterial.
+### Per-region counts
 
-**Bin boundaries must be contiguous.** `flgc`'s `_bin_index` tests `lo ≤ v ≤ hi`
-and `gc_pct` is **continuous** (`100·Δcum_gc/L`), so integer bins like
-`(0,4),(5,9),…` would drop every non-integer value — 4.5 matches no bin and
-silently lands on `max_weight`, which is the exact failure the range choice above
-avoids. Use `[0,5), [5,10), …, [95,100]` semantics with the last bin inclusive.
-Length bins are `(25,25)…(180,180)`, unambiguous because `L` is an integer.
+**Constant in Layer 1**: 54 fragments per 2560 bp region, 37 per 1536 bp.
+
+Matching each region's depth to a real sample's realised count — which introduces
+per-region depth variation correlated with region features — is a **named future
+stage**, not Layer 1. The machinery exists (`--real-count-dir`), and is held out so
+recovery is first tested against a clean constant-count generative model.
+
+`max_len` = 256 for simulation, then filter to the bands before inference. The
+out-of-band fragments consume counts, so the **retained** per-region count varies
+even though the sampled count is constant. The store-build filter lands at
+`config.max_frag_len = max(hi for fl_bands) = 180`.
+
+### Bands
+
+`FL_BANDS = ((25,110), (110,180))`, and the track count stays 12 — so a store built
+under other bands is caught not by any shape check but by `config.check_fl_bands`,
+asserted at construction in **both** `dataset.py` and `sim_build_store.py`, failing
+loudly and naming both tuples.
+
+---
+
+## 2. Data that informs it
+
+| what | where | supplies |
+|---|---|---|
+| region sets | `quiet_v2_pad1200_repeats_removed_tile2560` (11,505 tiles), `..._tile1536` (66,649) | the regions; `region_len = tile_size + 2·jitter` |
+| reference | `/efs/analytics/nathanboley/data_resources/genome/hg38.fa` | sequence for hexamers and `cum_gc` |
+| hexamer tables | `build_w6(seed, dynamic_range)` — synthetic, **4096 independent** log-normal draws per table | the four `{start,end}×{fwd,rev}` tables |
+| length PMF | `empirical_length_pmf(h5)` | `observed_len_p(L)` |
+| capture surface | `duphist_merged/<sid>__duphist_wg.tsv.gz` → `load_duphist` → `build_cell_map` → `GCFlDistModel().fit(...)` → `save()` | `capture(L, gc)` |
+| the class | `flgc.model.GCFlDistModel`, needs `PYTHONPATH=/home/nathanboley/src/biomarker` | **runtime dependency, including in the Batch container** |
+
+**Fit bins: FL in 1 bp bins, GC in 5% bins covering 0–100.** Do not take the `flgc`
+defaults — their top length bin is `(101,200)`, which would collapse the whole high
+band `[110,180)` into one bin and leave `capture` constant in `L` across it, and
+their GC range stops short of 0–100 so extreme-GC fragments would fall out of bin
+onto `max_weight` (→ `capture = 1/3`). Fit covers lengths 25–180 **inclusive** (156
+bins, one wider than the 155-length scoring band) × 20 GC bins = 3,120 cells, of
+which 2,057 fit at `MIN_CELL_SIZE = 200`; the starved remainder holds **0.0333% of
+molecule mass**, so the unfitted floor is immaterial. Other `fit` options take the
+defaults (`MIN_P=1e-6`, `MAX_WEIGHT=3.0`, `K_FIT=25`).
+
+**Bin boundaries must be contiguous.** `_bin_index` tests `lo ≤ v ≤ hi` and
+`gc_pct` is **continuous**, so integer bins like `(0,4),(5,9),…` would drop every
+non-integer value — 4.5 matches no bin and silently lands on `max_weight`, the
+exact failure the 0–100 range was chosen to avoid. Use `[0,5), [5,10), …, [95,100]`
+with the last inclusive. Length bins `(25,25)…(180,180)` are unambiguous.
+
+**GC is percent (0–100) throughout the `flgc` path** — `build_cell_map` keys on the
+duphist's percent column, `gc_bins` are percent, `predict()` takes percent.
 
 Output layout: `sample_<i>.npz` with `region_idx`, `start`, `stop`, `strand`.
-Overdispersion is a count-drawing option on top of the shared propensity, which
-is what the "can excess variance be learned" question needs.
 
-## Bands
+---
 
-`FL_BANDS = ((25,110), (110,180))`, and the track count stays 12 — so a store
-built under other bands is caught not by any shape check but by
-`config.check_fl_bands`, asserted at construction in **both** `dataset.py` and
-`sim_build_store.py`, failing loudly and naming both tuples.
+## 3. The metric
 
-## Per-fragment NLL
-
-For fragment `(p, L, s)` in region `r`, under model `m`:
+For fragment `(p, L, s)` under model `m`:
 
 ```
-NLL = -log( w_m[p, L, s] / sum_{(p',L',s') in D} w_m[p', L', s'] )
+NLL = -log( w_m[p,L,s] / sum_{(p',L',s') in D} w_m[p',L',s'] )
 ```
 
-The weight `w_m` is **model-class specific**:
+`w_m` is **model-class specific**:
 
 - **Track models** (12-track / KEN / Hybrid):
-  `w_m = first_m[p] · last_m[p+L-1] · gc_correction(L, GC%)`, with `first_m`/
-  `last_m` taken from the fragment's FL band. **No `len_p` factor is supplied** —
-  see below.
+  `w_m = first_m[p] · last_m[p+L-1] · gc_correction(L, GC%)`, with `first_m`/`last_m`
+  from the fragment's band and strand. **No `len_p` is supplied.**
 - **Cut-site model**: its own `log_softmax` logits over `D`. It needs no external
-  `len_p` or GC factor; the logit already carries both. Applying the track-model
-  product to it would double-count length.
+  `len_p` or GC factor — the logit carries both, and applying the track-model
+  product would double-count length.
 
-where `first_m`, `last_m` are the model's per-base track predictions for the
-fragment's band and strand.
+`midpoint` is **not** a factor for either. All three coverage types are
+deterministic functions of the same fragment, so multiplying them triple-counts one
+piece of evidence. It stays available as a consistency check.
 
-**Index spaces — state the mapping, then test it.** The simulator weight uses
-`w6[rc_cut[p+L]]` and the model weight uses `last_m[p+L-1]`; these are different
-subscripts because they are different spaces. `fwd_cut`/`rc_cut` have length
-`region_len+1` and index **between-base cut sites**; `first_m`/`last_m` are
-**per-base tracks** of length `region_len`. Convention: a fragment occupying
-bases `[p, p+L)` has left endpoint at base `p`, right endpoint at base `p+L-1`,
-and its cut sites are `p` and `p+L`.
+### `Ω` and `D` are different sets
 
-**Required test:** assert the endpoint bases the scorer indexes are the same
-genomic positions as the cut sites the sampler drew from, over a small region
-with known fragments. A silent 1 bp offset corrupts every NLL, so a
-shift-correlation proof is owed on every geometry change.
+`Ω` is everything the simulator can emit, and `sum_Ω w = 1`. **`D` is the scoring
+domain: `{(p, L, strand)}` with the fragment entirely inside the centred evaluation
+crop AND `L` in band** — a strict subset. Strand is a dimension, so
+`|D| = pairs_inband_in_crop × 2` and `log|D|` already contains the `log 2`.
 
-- `midpoint` is **not** a factor. All three coverage types are deterministic
-  functions of the same fragment; multiplying them would triple-count one piece
-  of evidence. It remains available as a consistency check.
-- `len_p[L]` is not a constant offset — it varies with `L`, so omitting it
-  changes the distribution rather than shifting it. Taken from the empirical
-  PMF, identical across models.
+`D` **is** the set that is scored; "in-band only" is this definition, not a filter
+applied after it. Three ways to get it wrong, all silent:
 
-### Reporting conventions
+- including out-of-band pairs makes `log|D|` count cells no model is ever charged for;
+- admitting a fragment with one endpoint outside the crop puts numerator and
+  denominator on different sets;
+- hardcoding `|D|` — it is **computed**, and in particular is **not** the 622,720
+  figure, which is the *sampling* count over all `L ∈ [1,256]` across the full
+  2560 bp region.
 
-| convention | value |
-|---|---|
-| strand `log 2` term | **INCLUDED** |
-| which fragments are scored | **IN-BAND ONLY** (`L` in at least one FL band) |
+### The anchors
 
-**Strand `log 2` is INCLUDED** because strand is modelled and observed.
-Simulator strand is exactly 50/50, so oracle, uniform and model all gain the
-same `log 2`, and it **cancels in `(uniform − model)/(uniform − oracle)`** — %
-captured is invariant and only the absolute nats move.
-
-**In-band only** because out-of-band fragments have no `first_m`/`last_m` track
-prediction — the weight is undefined, not merely inconvenient. Consequence to
-state with every number: the denominator changes when the bands change, so a
-per-fragment NLL under one banding is **not** comparable to one under another,
-even on identical data. Report the bands with the number, always.
-
-**Normalisation domain `D`** `= {(p, L, strand)}` such that the fragment lies
-*entirely* inside the centred evaluation crop **AND** `L` is in band. Strand is a
-dimension of `D`, so `|D| = pairs_inband_in_crop × 2` and `log|D|` already
-contains the `log 2`.
-
-`D` is **exactly the set that is scored** — the in-band rule above is this same
-definition, not a filter applied after it. Two ways to get this wrong, both
-silent: including out-of-band pairs makes `log|D|` count cells no model is ever
-charged for, and admitting a fragment with one endpoint outside the crop puts
-numerator and denominator on different sets.
-
-**`|D|` is computed, never a constant.** In particular it is **not** the 622,720
-figure in the sizing table: that is the *sampling* count — all `L ∈ [1,256]` over
-the full 2560 bp region — whereas `D` is in-band lengths over the 2048 crop,
-times 2 for strand. Hardcoding 622,720 as `|D|` is precisely the wrong-constant
-error this doc warns about.
-
-### The two anchors
-
-`% bias captured = (uniform − model) / (uniform − oracle)`. The per-fragment NLL
-is an absolute number in nats, so it needs both anchors in its own units.
+`% bias captured = (uniform − model) / (uniform − oracle)`, all three in
+per-fragment nats.
 
 | anchor | definition |
 |---|---|
-| **uniform** | `log\|D\|` — every cell in `D` equally likely |
+| **uniform** | `log\|D\|` |
 | **oracle** | `−log w(x) + log W_D`, the true weights **renormalised over `D`** |
 
-The oracle anchor is cheap because the true weights are exactly what the shared
-`build_region_weights` returns — the same call the sampler makes, so the anchor
-cannot drift from the generative model. **But it must be renormalised over `D`
-before use**: `w` is normalised over `Ω`, and `D ⊂ Ω`, so the `log W_D` term is
-required. Using `−log w` directly is the mis-normalisation that lets a model print
-above 100% (see "`Ω` and `D` are different sets").
+`W_D = sum_{x in D} w(x) < 1`. Because scoring is conditional on being in `D`, the
+true conditional is `w/W_D`. **`−log w` alone is NOT the oracle**: `log W_D < 0`, so
+it overstates the oracle — makes it too weak — by exactly `|log W_D|`, and a model
+that correctly learns the conditional then **prints above 100% captured**, which
+reads as an implementation bug rather than a mis-specified anchor.
+
+**`W_D` is PER REGION; `|D|` is not.** `w` is normalised within a region, so `W_D`
+differs region to region and the oracle averages it over scored fragments. `|D|` is
+purely geometric — identical for every region at a given geometry — so `log|D|` is
+one number. Treating `W_D` as a single scalar reintroduces the same
+mis-normalisation, averaged.
 
 **Both anchors are recomputed per store and never carried across.** Under the
-per-track metric, uniform's deficit below `log(tile_size)` tracks the empty-mass
-fraction and has ranged over a 33× spread across stores; a carried baseline
-silently misstates every percentage.
+per-track metric, uniform's deficit below `log(tile_size)` tracked the empty-mass
+fraction over a ~33× spread across stores; a carried baseline silently misstates
+every percentage.
 
-**GC source.** For simulation the oracle uses the **true simulator surface**
-(available now, unblocks sim scoring). The real-data GC source is a deferred
-owner decision (KEN's 34 bp receptive field cannot compute GC over a 175 bp
-span, so asking models to predict `gc_correction` would rank receptive fields
-more than anything else — the recommendation is to supply GC externally); it
-blocks only real-data scoring.
+**Strand `log 2` is INCLUDED.** Simulator strand is exactly 50/50, so oracle,
+uniform and model all gain the same `log 2` and it **cancels** in the ratio — %
+captured is invariant, only absolute nats move.
 
-**Cost.** The sampler's `log Z` sums ~622,720 `(p,L)` pairs per 2560 bp region
-(all lengths, full region); the metric's denominator is the smaller in-band
-in-crop `|D|`. Factorised, both are a few vector ops per length — affordable for
-validation, and measured affordable as a training loss.
+**Report the bands with every number.** The denominator changes when the bands
+change, so an NLL under one banding is not comparable to one under another even on
+identical data.
 
-## Validation
+**GC source for scoring.** Simulation uses the true simulator surface. The
+real-data GC source is a deferred owner decision — KEN's 34 bp receptive field
+cannot compute GC over a 175 bp span, so asking models to predict `gc_correction`
+would rank receptive fields more than bias models; the recommendation is to supply
+GC externally. Blocks real-data scoring only.
 
-- **No parity requirement of any kind.** Written from scratch, this owes the old
-  sampler neither byte equality nor distributional equivalence. New seed lineage;
-  spend no effort comparing against the old output.
-- **Self-consistency instead:** the drawn fragments' empirical distribution must
-  match the weights they were drawn from, on a small region. This is the property
-  the shared-builder design exists to guarantee, and it is checkable without
-  reference to any previous implementation.
-- Realised-parameter recovery: the generative tables must be recoverable from the
-  emitted fragments (realised hexamer-table recovery, GC slope by length).
-- The shared builder must be exercised by **both** paths in one test, so a
-  change to one consumer cannot silently diverge from the other.
-- The oracle's own fragment NLL must come in strictly below `uniform` on sim
-  data.
+### Index spaces — the ±1 trap
+
+The simulator weight uses `hex(c3)` at a **cut site**; a track model's weight uses
+`last_m[p+L-1]`, a **per-base** track. These are different subscripts because they
+are different spaces: `fwd_cut`/`rc_cut` have length `region_len+1` and index
+between-base cut sites, while `first_m`/`last_m` are per-base of length
+`region_len`.
+
+Convention: a fragment occupying bases `[p, p+L)` has endpoints at bases `p` and
+`p+L-1`, and cut sites at `p` and `p+L`.
+
+**Required test:** assert the endpoint bases the scorer indexes are the same
+genomic positions as the cut sites the sampler drew from, on a small region with
+known fragments. A silent 1 bp offset corrupts every NLL, so a shift-correlation
+proof is owed on **every** geometry change.
+
+---
+
+## 4. Validation
+
+- **No parity with the old sampler** — neither byte equality nor distributional
+  equivalence. New seed lineage; spend no effort comparing.
+- **Self-consistency:** the drawn fragments' empirical distribution must match the
+  weights they were drawn from, on a small region. This is the property the shared
+  builder exists to guarantee, and it needs no reference implementation.
+- **Realised-parameter recovery:** the generative tables must be recoverable from
+  the emitted fragments — realised hexamer-table recovery, GC slope by length.
+- **The shared builder exercised by both paths in one test**, so a change to one
+  consumer cannot silently diverge from the other.
+- **The oracle's own fragment NLL must come in strictly below uniform** on sim data.
+- **`var(log Z_s(p))` measured over the region set.** A joint log-linear model
+  absorbs `−log Z_s(p)` only through a per-position term, and a width-6 L1 sees 6 bp
+  while `Z_s(p)` depends on ~256 bp — so `% captured` is capped below 100 before
+  training starts. This variance bounds the unreachable fraction; without it a
+  sub-100% result cannot be distinguished from a defect.
