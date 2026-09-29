@@ -260,7 +260,8 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- Endpoint heads (NB loss) on centre P positions of h ------------
         h_centre = h[:, :, WINDOW_HALF:WINDOW_HALF + P]   # (B, N1, P)
         endpoint_shape = self.endpoint_shape_head(h_centre)  # (B, 2, P)
-        disp_bp = self.dispersion_head(h_centre)             # (B, 2, P)
+        with torch.no_grad():
+            disp_bp = self.dispersion_head(h_centre)         # (B, 2, P), frozen
 
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
         U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, N_OFFSETS+1)
@@ -289,7 +290,10 @@ class CutSiteFragmentModel(L.LightningModule):
             chunk_g = L_groups[L_start_idx:L_end_idx]       # (chunk_size,)
             chunk_size = chunk_L.shape[0]
 
-            # -- L2a: endpoint branch (folded, from cache) ------------------
+            # Unique groups in this chunk
+            unique_groups = chunk_g.unique()
+
+            # -- L2a: endpoint branch (folded, from cache, vectorized) --------
             o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
             o_r = o_l + chunk_L                     # (chunk_size,)
 
@@ -299,28 +303,41 @@ class CutSiteFragmentModel(L.LightningModule):
                     bank_idx = tap * 2 + strand
                     tap_offsets = o_l if tap == 0 else o_r
 
-                    feat_list = []
-                    for i in range(chunk_size):
-                        g_i = chunk_g[i].item()
-                        off_i = tap_offsets[i].item()
-                        feat_list.append(
-                            _Mh_cache[(bank_idx, g_i)][:, :, off_i:off_i + P]
-                        )
-                    endpoint_feats[tap][strand] = torch.stack(feat_list, dim=-1)
+                    # Build a (chunk_size, B, H, P) tensor by stacking the
+                    # correct group's Mh slice for each L.  Vectorized: build
+                    # index arrays once, gather with one advanced-index op per
+                    # unique group.
+                    result = torch.empty(
+                        chunk_size, B, H, P, device=h.device, dtype=h.dtype
+                    )
+                    for g in unique_groups.tolist():
+                        g_mask = (chunk_g == g)
+                        if not g_mask.any():
+                            continue
+                        Mh_g = _Mh_cache[(bank_idx, g)]  # (B, H, model_input_size)
+                        offsets_g = tap_offsets[g_mask]     # (n_g,)
+                        # Build (n_g, P) position indices
+                        pos_idx = offsets_g[:, None] + torch.arange(
+                            P, device=h.device
+                        )[None, :]  # (n_g, P)
+                        # Gather: Mh_g[:, :, pos_idx] → (B, H, n_g, P)
+                        gathered = Mh_g[:, :, pos_idx.long()]  # (B, H, n_g, P)
+                        # Scatter into result at the right chunk positions
+                        g_indices = g_mask.nonzero(as_tuple=True)[0]
+                        result[g_indices] = gathered.permute(2, 0, 1, 3)
 
-            # For each L: o_l' = o_l - O_L_MIN, o_r' = o_r - O_L_MIN
+                    # result is (chunk_size, B, H, P) → (B, H, P, chunk_size)
+                    endpoint_feats[tap][strand] = result.permute(1, 2, 3, 0)
+
+            # -- L2b span: vectorized gather from prefix sum ----------------
             o_l_prime = o_l - O_L_MIN   # (chunk_size,)
             o_r_prime = o_r - O_L_MIN   # (chunk_size,)
 
-            # span[b,n,m,i] = U[b,n,m,o_r'[i]] - U[b,n,m,o_l'[i]]
-            # Gather from U's last dim
-            span_parts = []
-            for i in range(chunk_size):
-                olp = o_l_prime[i].item()
-                orp = o_r_prime[i].item()
-                span_i = U[:, :, :, orp] - U[:, :, :, olp]  # (B, N2, P)
-                span_parts.append(span_i)
-            span = torch.stack(span_parts, dim=-1)  # (B, N2, P, chunk_size)
+            # U is (B, N2, P, N_OFFSETS+1). Gather at o_r' and o_l' for all
+            # chunk positions at once.
+            U_r = U[:, :, :, o_r_prime.long()]  # (B, N2, P, chunk_size)
+            U_l = U[:, :, :, o_l_prime.long()]  # (B, N2, P, chunk_size)
+            span = U_r - U_l                    # (B, N2, P, chunk_size)
 
             # Project span and mean = span / L
             # W_span: (N2) → (H), W_mean: (N2) → (H)
@@ -401,20 +418,30 @@ class CutSiteFragmentModel(L.LightningModule):
         B, P, n_L, _ = logits.shape
         flat_logits = logits.reshape(B, -1)  # (B, P * n_L * 2)
         log_probs = torch.log_softmax(flat_logits, dim=-1)
-        log_probs = log_probs.reshape(B, P, n_L, 2)
+        log_probs_flat = log_probs.reshape(B, P * n_L * 2)
 
-        # Gather log probs for observed fragments
-        multinomial_nll = torch.zeros(B, device=x.device)
-        for i in range(B):
-            if frag_N[i] == 0:
-                continue
-            m_i = frag_m[i]         # (n_frag,) centre positions
-            l_i = frag_L_idx[i]     # (n_frag,) L index (0-based into n_L)
-            s_i = frag_s[i]         # (n_frag,) strand (0 or 1)
-            lp = log_probs[i, m_i, l_i, s_i]  # (n_frag,)
-            multinomial_nll[i] = -lp.sum() / frag_N[i].float()
-
-        L_mult = multinomial_nll.mean()
+        # Pad variable-length fragment lists to a single tensor for vectorized gather.
+        # Flat index: m * (n_L * 2) + L_idx * 2 + s
+        max_n = max(f.shape[0] for f in frag_m) if B > 0 else 0
+        if max_n > 0:
+            flat_idx = torch.zeros(B, max_n, dtype=torch.long, device=x.device)
+            frag_mask = torch.zeros(B, max_n, dtype=torch.bool, device=x.device)
+            for i in range(B):
+                n_i = frag_m[i].shape[0]
+                if n_i > 0:
+                    flat_idx[i, :n_i] = (
+                        frag_m[i] * (n_L * 2) + frag_L_idx[i] * 2 + frag_s[i]
+                    )
+                    frag_mask[i, :n_i] = True
+            # Gather: (B, max_n)
+            gathered_lp = log_probs_flat.gather(1, flat_idx)
+            gathered_lp = gathered_lp * frag_mask  # zero out padding
+            # Per-sample NLL: -sum(lp) / N
+            nll_sum = -gathered_lp.sum(dim=1)  # (B,)
+            N_float = frag_N.float().clamp(min=1.0)
+            L_mult = (nll_sum / N_float).mean()
+        else:
+            L_mult = torch.tensor(0.0, device=x.device)
 
         # -- NB endpoint loss (annealed) ------------------------------------
         # Uses the real endpoint_shape_head output (B, 2, P) as shape logits,

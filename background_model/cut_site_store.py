@@ -49,7 +49,9 @@ class CutSiteStoreConfig:
     """
     tile_size: int = 2048
     jitter: int = 256
-    rf_budget: int = 133     # (model_input_size - tile_size)//2 + conv_margin//2
+    rf_budget: int = 133     # WINDOW_HALF + ceil(conv_margin/2) = 128 + 5 = 133
+                             # l_seq must be >= l_in + 2*jitter; rf_budget
+                             # provides the (l_seq - l_target)/2 headroom.
     max_len: int = 256
     seed: int = 42
     n_train_samples: int = 1
