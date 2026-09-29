@@ -148,6 +148,13 @@ forward.
   uses it to orient minus-strand CTCF sites, so do not delete it when refactoring
   the track models.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.
+- **Never identify tqdm's monitor thread by name.** `TMonitor` is named
+  `tqdm_monitor` only from tqdm **4.69.0**; the pinned env has 4.67.1, where it
+  is an anonymous `Thread-N`. Two `parallel_apply` guard tests asserted the
+  name and so failed here while passing wherever they were written. Use the
+  `monitor` attribute tqdm stores on the class that built the bar. Related:
+  tqdm creates a new monitor only when the inherited one is absent or dead, so
+  a subclass shares the base's unless you clear it first.
 - **Store/zarr pinning**: the zarr store is v2 format; `zarr==2.18.3` with
   `numcodecs==0.13.1`. Newer numcodecs privatized symbols zarr 2.18 imports,
   which breaks at import time — pin both together.
