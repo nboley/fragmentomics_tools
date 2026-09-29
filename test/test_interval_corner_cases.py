@@ -715,3 +715,59 @@ def test_overlaps_does_not_return_all_false_on_a_labelled_index():
     mask = overlaps(a, b)
     assert list(mask.values) == [True, False, False]
     assert list(mask.index) == [10, 20, 30]
+
+
+class TestDeterministicOrder:
+    """Pair results must come back in a stable, sorted order.
+
+    Row order is part of the contract by design: two implementations can agree
+    on the set of pairs and still differ on ordering, which silently breaks any
+    caller that zips or positionally indexes the result.
+
+    Before this was enforced, order was not stable ACROSS PROCESSES. Three runs
+    of identical code on identical input (964,593 CTCF regions vs the hg38
+    blacklist) produced three different digests; pinning PYTHONHASHSEED made
+    them identical, so something upstream iterates a set or dict ordered by
+    Python's hash randomisation. It was stable *within* a process, which is
+    what made it invisible to every in-process test.
+
+    Cross-process instability cannot be asserted from inside one process, so
+    these pin the sortedness that produces it instead.
+    """
+
+    def _many(self):
+        # Enough rows, and deliberately not pre-sorted, so an unsorted
+        # implementation is very unlikely to come back ordered by luck.
+        starts = [900, 100, 500, 300, 700, 200, 800, 400, 600, 1000]
+        a = _rdf({
+            "contig": ["chr1"] * len(starts),
+            "start": starts,
+            "stop": [s + 50 for s in starts],
+        })
+        b = _rdf({
+            "contig": ["chr1"] * 6,
+            "start": [120, 320, 520, 720, 920, 1020],
+            "stop": [140, 340, 540, 740, 940, 1040],
+        })
+        return a, b
+
+    def test_overlap_indices_is_sorted(self):
+        a, b = self._many()
+        r = overlap_indices(a, b)
+        assert len(r) > 1, "fixture must produce several pairs to be meaningful"
+        keys = list(zip(r["a_index"], r["b_index"]))
+        assert keys == sorted(keys)
+
+    def test_nearest_is_sorted(self):
+        a, b = self._many()
+        r = nearest(a, b)
+        assert len(r) > 1
+        keys = list(zip(r["a_index"], r["b_index"]))
+        assert keys == sorted(keys)
+
+    def test_repeated_calls_agree(self):
+        """Within a process this always held; it is the floor, not the ceiling."""
+        a, b = self._many()
+        first = overlap_indices(a, b)
+        for _ in range(3):
+            assert overlap_indices(a, b).equals(first)

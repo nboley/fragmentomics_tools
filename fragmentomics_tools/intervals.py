@@ -46,10 +46,9 @@ def _strand_mask(a, b, idx, same_strand: bool) -> pd.Series:
     if not same_strand:
         return pd.Series(True, index=idx.index)
 
-    # `.loc`, not `.values[...]`: a_index/b_index hold index LABELS, so
-    # positional indexing is wrong for any frame not indexed 0..n-1.
-    a_strand = a["strand"].loc[idx["a_index"].values].values
-    b_strand = b["strand"].loc[idx["b_index"].values].values
+    # Positional: callers pass frames already normalised by `_positional`.
+    a_strand = a["strand"].values[idx["a_index"].values.astype(int)]
+    b_strand = b["strand"].values[idx["b_index"].values.astype(int)]
 
     stranded_a = (a_strand == "+") | (a_strand == "-")
     stranded_b = (b_strand == "+") | (b_strand == "-")
@@ -57,6 +56,69 @@ def _strand_mask(a, b, idx, same_strand: bool) -> pd.Series:
         stranded_a & stranded_b & (a_strand == b_strand),
         index=idx.index,
     )
+
+
+def _positional(*frames):
+    """Return positionally-indexed copies plus their original index objects.
+
+    **This is the module's central invariant.** `bioframe` reports matches as
+    the *labels* of whatever index the input frames carried. Mixing those with
+    positional array access is the defect that occurred four separate times in
+    this module before the boundary was made explicit — twice raising
+    `IndexError`, and twice returning a plausible wrong answer, which is worse.
+    `overlaps` silently handed back an all-False mask.
+
+    The rule that replaces remembering: **normalise on entry, work entirely in
+    position space, and map back to labels exactly once on exit** via
+    `_to_labels`. Inside the boundary there are no labels to confuse, so the
+    error becomes unrepresentable rather than merely tested for.
+
+    Default-indexed frames hide the whole problem, and `from_bed` produces
+    one — which is why unit fixtures, a 47-check review and a 964,593-region
+    real-data run all missed it.
+    """
+    out = []
+    for f in frames:
+        out.append(f.reset_index(drop=True))
+        out.append(f.index)
+    return tuple(out)
+
+
+def _deterministic_order(idx):
+    """Sort pair results by ``(a_index, b_index)`` and renumber.
+
+    Row order here is **not** incidental. The Phase 0 design made it part of
+    the contract deliberately: two implementations can agree on the set of
+    pairs and still differ on ordering, which silently breaks any caller that
+    zips or positionally indexes the result.
+
+    Without this, the order is **not stable across processes**. Measured on
+    964,593 CTCF regions against the hg38 blacklist: three runs of identical
+    code on identical input produced three different digests, while pinning
+    `PYTHONHASHSEED` made them identical — so something upstream iterates a
+    set or dict whose order follows Python's hash randomisation. It is stable
+    *within* a process, which is exactly what makes it easy to miss.
+
+    This predates the position-space refactor: the original implementation
+    shows the same instability. A library that returns rows in a different
+    order on every run cannot be used as a baseline and cannot be reasoned
+    about, so it is sorted here rather than documented as a caveat.
+
+    Sorted in POSITION space, before labels are restored, so the keys are
+    plain integers with no mixed-type comparison.
+    """
+    return idx.sort_values(
+        ["a_index", "b_index"], na_position="last", kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _to_labels(positions, labels):
+    """Map a nullable position column back to the caller's index labels."""
+    mapped = pd.array([pd.NA] * len(positions), dtype="object")
+    present = positions.notna().values
+    if present.any():
+        mapped[present] = labels.values[positions[present].values.astype(int)]
+    return mapped
 
 
 def _wiggle_to_min_dist(wiggle: int) -> int:
@@ -140,13 +202,12 @@ def overlap_indices(
     # Expansion must be (wiggle + 1) because half-open overlap requires
     # strict inequality (start < end), so expanding by exactly `wiggle`
     # leaves a gap of `wiggle` as book-ended (no overlap).
-    # Held as label-indexed Series, NOT bare arrays. `bioframe` returns the
-    # input frames' index LABELS in `index`/`index_`, so any lookup here must
-    # align by label. Using `.values[labels]` indexes positionally and is wrong
-    # the moment a frame has a non-default index -- which is what every filter
-    # or slice produces. It raised IndexError on a frame indexed 10/20.
-    b_orig_start = b["start"].copy()
-    b_orig_stop = b["stop"].copy()
+    # Enter position space. Everything below indexes positionally, which is
+    # correct BECAUSE of this line -- see _positional.
+    a, a_labels, b, b_labels = _positional(a, b)
+
+    b_orig_start = b["start"].values.copy()
+    b_orig_stop = b["stop"].values.copy()
     if wiggle > 0:
         b = b.copy()
         b["start"] = b["start"] - (wiggle + 1)
@@ -179,12 +240,12 @@ def overlap_indices(
     if has_overlap.any():
         if wiggle > 0:
             # Compute actual overlap against original (un-expanded) B intervals.
-            a_lbl = idx.loc[has_overlap, "a_index"].values
-            b_lbl = idx.loc[has_overlap, "b_index"].values
-            a_starts = a["start"].loc[a_lbl].values
-            a_stops = a["stop"].loc[a_lbl].values
-            b_starts = b_orig_start.loc[b_lbl].values
-            b_stops = b_orig_stop.loc[b_lbl].values
+            a_pos = idx.loc[has_overlap, "a_index"].values.astype(int)
+            b_pos = idx.loc[has_overlap, "b_index"].values.astype(int)
+            a_starts = a["start"].values[a_pos]
+            a_stops = a["stop"].values[a_pos]
+            b_starts = b_orig_start[b_pos]
+            b_stops = b_orig_stop[b_pos]
             o_start = np.maximum(a_starts, b_starts)
             o_stop = np.minimum(a_stops, b_stops)
             raw = np.maximum(o_stop - o_start, 0)
@@ -211,9 +272,10 @@ def overlap_indices(
     # Fraction filters (applied on matched rows only).
     if (min_frac_a > 0 or min_frac_b > 0) and has_overlap.any():
         matched = idx[has_overlap]
-        # Label-aligned, not positional -- see the note on b_orig_start.
-        a_lens = (a["stop"] - a["start"]).loc[matched["a_index"].values].values
-        b_lens = (b_orig_stop - b_orig_start).loc[matched["b_index"].values].values
+        a_lens = (a["stop"].values - a["start"].values)[
+            matched["a_index"].values.astype(int)
+        ]
+        b_lens = (b_orig_stop - b_orig_start)[matched["b_index"].values.astype(int)]
         ob = matched["overlap_bases"].values
 
         # bedtools `-r`: the fraction requirement applies reciprocally, i.e.
@@ -245,7 +307,11 @@ def overlap_indices(
         idx["b_index"] = pd.NA
         idx["overlap_bases"] = 0
 
-    idx = idx.reset_index(drop=True)
+    idx = _deterministic_order(idx)
+
+    # Leave position space. The ONLY place labels re-enter this function.
+    idx["a_index"] = _to_labels(idx["a_index"], a_labels)
+    idx["b_index"] = _to_labels(idx["b_index"], b_labels)
     return idx
 
 
@@ -320,6 +386,9 @@ def nearest(
 
     _assert_same_ref(a, b)
 
+    # Enter position space -- same invariant as overlap_indices.
+    a, a_labels, b, b_labels = _positional(a, b)
+
     bf_kwargs = dict(
         k=k,
         ignore_overlaps=ignore_overlaps,
@@ -355,7 +424,12 @@ def nearest(
             fail = has_match & ~strand_ok.reindex(idx.index, fill_value=True)
             idx = idx[~fail]
 
-    return idx.reset_index(drop=True)
+    idx = _deterministic_order(idx)
+
+    # Leave position space.
+    idx["a_index"] = _to_labels(idx["a_index"], a_labels)
+    idx["b_index"] = _to_labels(idx["b_index"], b_labels)
+    return idx
 
 
 # ── cluster ──────────────────────────────────────────────────────────
