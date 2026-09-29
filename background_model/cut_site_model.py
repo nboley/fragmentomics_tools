@@ -16,7 +16,6 @@ from typing import Optional, Tuple
 import lightning as L
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from background_model.tracks import FL_BANDS
 from background_model_core import (
@@ -197,21 +196,10 @@ class CutSiteFragmentModel(L.LightningModule):
         Returns:
             U: (B, N2, m_count, n_offsets+1) exclusive prefix sum
         """
-        # For each m in [m_start, m_start+m_count), each offset o' in [0, n_offsets):
-        #   u[n,m,o'] = sum_c F[n,c,o'] * x[c, m - 128 + o_l_min + o']
-        # The x index is: m + (o_l_min - 128) + o' = m - 89 + o'  (for current geometry)
-        # But x is in the PRE-conv frame (l_in = model_input_size + 5), and h is in
-        # the POST-conv frame.  The conv trims 5 bases.  For consistency with the
-        # tap indices (which address h), we need to read x at positions that align
-        # with h's coordinate system.  h[j] corresponds to x[j:j+6], so the "centre"
-        # of h[j]'s receptive field is x[j+2..j+3].  The design says "x in h's
-        # post-conv frame", meaning we use h-coordinates directly.  So:
-        #   x_offset = m + (O_L_MIN - WINDOW_HALF)  in h-coordinates
-        # But x_onehot is in the pre-conv frame, which is h-coordinates + some offset.
-        # Since h = conv(x_onehot) with k=6 padding=0, h[j] = f(x_onehot[j:j+6]).
-        # So h-coordinate j corresponds to x_onehot starting at j.
-        # The interior branch reads the one-hot at base offsets, not h features.
-        # x[c, m - 128 + o_l_min + o'] in h's frame → x_onehot[c, m + O_L_MIN - WINDOW_HALF + o']
+        # x_onehot index for scored position m and re-indexed offset o':
+        #   x_idx = m + (O_L_MIN - WINDOW_HALF) + o'
+        # h[j] = conv(x_onehot[j:j+6]), so h-coordinate j starts at x_onehot[j].
+        # The interior reads x_onehot directly at h-aligned coordinates.
 
         B = x_onehot.shape[0]
         N2 = self.interior_F.shape[0]
@@ -277,6 +265,18 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
         U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, N_OFFSETS+1)
 
+        # -- L2a: pre-compute M[g,s] @ h for ALL groups (cached) ------------
+        # Avoids redundant matmuls when the same group spans multiple L-chunks.
+        # _Mh_cache[(bank_idx, g)] = (B, H, model_input_size)
+        _Mh_cache = {}
+        all_groups = self._L_groups.unique().tolist()
+        for tap in (0, 1):
+            for strand in (0, 1):
+                bank_idx = tap * 2 + strand
+                for g in all_groups:
+                    M_gs = self._folded_M(bank_idx, g)  # (H, N1)
+                    _Mh_cache[(bank_idx, g)] = M_gs @ h  # (B, H, model_input_size)
+
         # -- Chunked forward over L ----------------------------------------
         all_logits = []
 
@@ -289,34 +289,22 @@ class CutSiteFragmentModel(L.LightningModule):
             chunk_g = L_groups[L_start_idx:L_end_idx]       # (chunk_size,)
             chunk_size = chunk_L.shape[0]
 
-            # Unique groups in this chunk (usually 2-3)
-            unique_groups = chunk_g.unique()
-
-            # -- L2a: endpoint branch (folded) ------------------------------
-            # Tap positions: o_l = 128 - L//2, o_r = o_l + L (in h coords)
+            # -- L2a: endpoint branch (folded, from cache) ------------------
             o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
             o_r = o_l + chunk_L                     # (chunk_size,)
 
-            # Pre-compute M[g,s] @ h for needed groups
-            # endpoint_feats[tap][strand] → (B, H, P, chunk_size)
             endpoint_feats = [[None, None], [None, None]]
-
             for tap in (0, 1):
                 for strand in (0, 1):
                     bank_idx = tap * 2 + strand
-                    group_results = {}
-                    for g in unique_groups.tolist():
-                        M_gs = self._folded_M(bank_idx, g)  # (H, N1)
-                        group_results[g] = M_gs @ h          # (B, H, model_input_size)
-
-                    tap_offsets = o_l if tap == 0 else o_r  # (chunk_size,)
+                    tap_offsets = o_l if tap == 0 else o_r
 
                     feat_list = []
                     for i in range(chunk_size):
                         g_i = chunk_g[i].item()
                         off_i = tap_offsets[i].item()
                         feat_list.append(
-                            group_results[g_i][:, :, off_i:off_i + P]
+                            _Mh_cache[(bank_idx, g_i)][:, :, off_i:off_i + P]
                         )
                     endpoint_feats[tap][strand] = torch.stack(feat_list, dim=-1)
 
@@ -397,9 +385,7 @@ class CutSiteFragmentModel(L.LightningModule):
         self._step(batch, "val")
 
     def _step(self, batch, prefix: str) -> torch.Tensor:
-        """Shared train/val step.  Batch structure defined by the dataset."""
-        # Unpack — Phase 3 will flesh this out with the actual dataset format.
-        # For now, define the interface the dataset must provide.
+        """Shared train/val step.  Batch from CutSiteFragmentDataset + collate."""
         x = batch["x"]                    # (B, 4, l_in)
         frag_m = batch["frag_m"]          # list of B tensors, each (n_frag,)
         frag_L_idx = batch["frag_L_idx"]  # list of B tensors, each (n_frag,)

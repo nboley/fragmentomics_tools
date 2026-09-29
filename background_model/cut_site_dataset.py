@@ -30,7 +30,7 @@ from background_model.cut_site_store import (
     densify_endpoints,
     validate_max_len,
 )
-from background_model_core import jitter_matrix
+from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 
 # Split and role codes (same as 12-track dataset)
@@ -234,7 +234,6 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── Fragment coordinates: centre-based crop filter ───────────────
         # Crop origin in l_target coordinates
-        from background_model_core import calculate_start_and_stop_from_jitter
         crop_start, _ = calculate_start_and_stop_from_jitter(
             self.l_target, self.tile_size, j
         )

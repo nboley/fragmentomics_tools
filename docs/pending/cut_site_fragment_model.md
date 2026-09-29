@@ -164,7 +164,7 @@ B    = 64     regions per step          N1  = 128   L1 cut-site bank
 P    = 2048   scored centres m (crop)   K   = 128   L2a bank dim (x4 banks)
 n_L  = 155    in-band L = 25..179       N2  = 32    L2b interior bank
 W    = 256    window bases (257 cuts)   H   = 32    hidden width
-L_chunk = 32                            l_in  = P + 256 + 5 = 2309 (pre-conv)
+L_chunk = 32                            l_in  = 2310 (2309 rounded to even for jitter_matrix)
 ```
 
 ```
@@ -254,7 +254,8 @@ pre[h,m,L,s] = f_l[s] + f_r[s] + W_span·span + W_mean·mean
              + len_emb[h, L]
 hid          = act(pre)                                      # (B, H, P, L_chunk, 2)
 logit[m,L,s] = w_out · hid                                   # (B, P, n_L, 2)
-disp_bp      = dispersion_head(h)   # (B, 2, P) per-position, seq-indexed, FROZEN
+ep_shape     = endpoint_shape_head(h)  # (B, 2, P) trainable shape for NB loss
+disp_bp      = dispersion_head(h)     # (B, 2, P) FROZEN at log_dispersion_init
 ```
 
 ## Store schema
@@ -340,13 +341,10 @@ re-based to the crop origin). Train draws `j ∈ [-jitter, jitter]`; **val and
 test use `j = 0` (centred crop) — jitter is training-only**. `jitter_matrix`'s
 crop requires its input and output lengths to share **matched parity** (not even
 parity per se — see `calculate_start_and_stop_from_jitter`): the jittered crop
-runs from the stored tile to the **even** `model_input_size = P + W = 2304`, and
-the width-6 convolution's 5 bp margin is added **outside** that crop, so the
-crop's input and output parities match. The odd `l_in = 2309` (§Shapes) is
-therefore the pre-convolution fetch width — `model_input_size + 5`, the one-hot
-actually handed to L1 — **not** a crop target; it does not enter the parity
-assertion, which covers only the even `tile_size` / `l_target` / store `l_seq` /
-`model_input_size`.
+crops the sequence to `l_in = 2310` (`model_input_size + 5`, rounded up to even
+for matched parity). The model trims the extra position after the width-6 conv
+(same pattern as `BackgroundModelKEN`). The parity assertion covers `tile_size` /
+`l_target` / `l_seq` / `l_in`.
 
 **Shared-jitter coupling.** Because one sequence forward serves all `S` samples,
 all samples of a region in a step share one jitter offset — the crop defines the
