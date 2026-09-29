@@ -64,6 +64,7 @@ from pathlib import Path
 import numpy
 import pandas as pd
 
+from fragmentomics_tools import intervals
 from fragmentomics_tools.dataframe import RegionDataFrame
 
 EFS = Path("/efs/analytics")
@@ -216,38 +217,39 @@ def capture(datasets):
     # ── Per-dataset ops ───────────────────────────────────────────────
     for name, rdf in loaded.items():
         record("sort", name, rdf.sort())
-        record("merge_regions", name, rdf.merge_regions())
+        record("merge", name, intervals.merge(rdf))
         record("unique_regions", name, rdf.unique_regions())
+        record("cluster", name, intervals.cluster(rdf))
 
     # ── Pairwise: CTCF × blacklist ────────────────────────────────────
     if "blacklist" in loaded and "ctcf" in loaded:
         bl, ctcf = loaded["blacklist"], loaded["ctcf"]
 
-        # join_on_overlap (both directions — order matters for the index)
-        record("join_on_overlap", "ctcf_x_blacklist",
-               ctcf.join_on_overlap(bl))
-        record("join_on_overlap", "blacklist_x_ctcf",
-               bl.join_on_overlap(ctcf))
+        # Both directions — A's identity drives the result, so order matters.
+        record("overlap_indices", "ctcf_x_blacklist",
+               intervals.overlap_indices(ctcf, bl))
+        record("overlap_indices", "blacklist_x_ctcf",
+               intervals.overlap_indices(bl, ctcf))
 
-        # drop_overlapping_regions
-        record("drop_overlapping_regions", "ctcf_x_blacklist",
-               ctcf.drop_overlapping_regions(bl))
+        # The replacement for drop_overlapping_regions.
+        record("overlap_indices_anti", "ctcf_x_blacklist",
+               intervals.overlap_indices(ctcf, bl, how="anti"))
 
-        # overlaps_rdf (IntervalTree path, both with and without wiggle)
-        record("overlaps_rdf", "ctcf_x_blacklist",
-               ctcf.overlaps_rdf(bl))
-        record("overlaps_rdf_d10", "ctcf_x_blacklist",
-               ctcf.overlaps_rdf(bl, max_distance=10),
-               note="max_distance=10")
-        record("overlaps_rdf", "blacklist_x_ctcf",
-               bl.overlaps_rdf(ctcf))
+        record("overlaps", "ctcf_x_blacklist", intervals.overlaps(ctcf, bl))
+        record("overlaps_w10", "ctcf_x_blacklist",
+               intervals.overlaps(ctcf, bl, wiggle=10),
+               note="wiggle=10")
+        record("overlaps", "blacklist_x_ctcf", intervals.overlaps(bl, ctcf))
 
-        # get_overlapping_base_counts
-        # This uses the raw blacklist path (bed_file argument), not the loaded RDF.
-        # Captures the strand-collision bug faithfully.
-        record("get_overlapping_base_counts", "ctcf_x_blacklist",
-               ctcf.get_overlapping_base_counts(
-                   str(datasets["blacklist"][0])))
+        # What get_overlapping_base_counts used to return, now a groupby over
+        # the primitive. Note this is the CORRECTED answer: the old method
+        # keyed aggregation on (contig, start, stop) with strand excluded, so
+        # rows sharing coordinates collided.
+        pairs = intervals.overlap_indices(ctcf, bl)
+        record("overlap_bases_sum", "ctcf_x_blacklist",
+               pairs.groupby("a_index")["overlap_bases"].sum())
+
+        record("nearest", "ctcf_x_blacklist", intervals.nearest(ctcf, bl))
 
     # ── from_beds_merged ──────────────────────────────────────────────
     if len(datasets) >= 2:

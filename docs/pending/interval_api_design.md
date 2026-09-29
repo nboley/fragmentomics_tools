@@ -472,9 +472,48 @@ absorbed. That costs a line per movement and is the only thing standing between
 
 ### Fixture movements — append during implementation
 
-| fixture | old | new | why it moved |
+Measured by re-running `scripts/capture_interval_fixtures.py` on the real data
+(hg38 blacklist, 636 regions; CTCF, 964,593) after the migration.
+
+**Unchanged — the replacement reproduces the old answer exactly:**
+
+| operation | n | note |
+|---|---|---|
+| `overlaps_rdf` -> `overlaps`, ctcf x blacklist | 964,593 | **byte-identical digest** |
+| `overlaps_rdf` -> `overlaps`, blacklist x ctcf | 636 | **byte-identical** |
+| `overlaps_rdf_d10` -> `overlaps_w10` | 964,593 | **byte-identical** |
+| `merge_regions` -> `merge`, blacklist | 636 | **byte-identical** |
+| `sort`, `unique_regions`, `load`, inputs | — | unchanged |
+
+`overlaps` reproducing `overlaps_rdf` bit-for-bit across 964,593 regions in both
+directions is the strongest evidence in this change that the bioframe swap is
+faithful — far stronger than the synthetic tests, which only probe constructed
+edge cases.
+
+**Moved:**
+
+| operation | old | new | why |
 |---|---|---|---|
-| `overlaps_rdf_d10` | (Phase 0 digest) | — | expected: `wiggle` corrects the off-by-one, so a 10 bp gap now matches at 10 rather than 11 |
+| `merge`, ctcf | 950,936 | **951,528** (+592) | `wiggle=0` does not merge book-ended intervals; bedtools `merge` did. Decided semantics. |
+| `from_beds_merged` | 942,977 | **943,554** (+577) | same cause — it now delegates to `merge(wiggle=0)` |
+| `drop_overlapping_regions` -> `overlap_indices_anti` | 955,789 | 955,789 | **same row count**, digest differs only because the return shape changed from rows to index pairs. The matching count is an independent check that the anti-join replacement is correct. |
+
+**A prediction of mine that was wrong, corrected here rather than left
+standing.** This table previously asserted that `overlaps_rdf_d10` would move,
+because `wiggle` fixes an off-by-one that made `max_distance=N` reach only
+`N-1`. The fix is real and is pinned by a discriminating unit test — but the
+real-data digest is **identical**, because no CTCF/blacklist pair in this
+dataset has an edge-to-edge gap of exactly 10 bp. The lesson is that a
+correctness fix and an observable change are different things, and predicting
+the second from the first is a guess.
+
+**Retired with their methods** (no replacement digest, the operation no longer
+exists): `join_on_overlap` both directions, `get_overlapping_base_counts`,
+`merge_regions` as a method.
+
+**New coverage added:** `cluster` (both datasets), `nearest`,
+`overlap_bases_sum` (the `groupby` that replaces
+`get_overlapping_base_counts`), `overlap_indices` both directions.
 | `merge_book_ended` | 1 merged row | 2 separate rows | `merge(wiggle=0)` does not merge book-ended; this is the decided semantics (wiggle=0 = strict overlap only) |
 | `from_beds_merged_book_ended` | 1 merged row | 2 separate rows | `from_beds_merged` now delegates to `merge(wiggle=0)`; same reason as above |
 | `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
