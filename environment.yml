@@ -18,6 +18,7 @@ dependencies:
   - h5py
   - pysam
   - pybedtools
+  - bioframe
   - pybigwig
   # External binaries the library and test suite shell out to. pybedtools
   # supplies `bedtools`; everything below was previously undeclared.

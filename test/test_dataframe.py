@@ -94,9 +94,7 @@ def test_split_on_contig():
 def test_intersect_region_dataframe():
     """Intersection of two synthetic RDFs returns expected overlapping regions.
 
-    NOTE: join_on_overlap defaults to wa=True, wb=True (bedtools -wa -wb),
-    so it returns whole A intervals that overlap B rather than the geometric
-    intersection.  This test asserts that behaviour.
+    intersect_region_dataframes keeps A rows that overlap B.
     """
     rdf_1 = RegionDataFrame.from_regions(
         [Region("chr1", 1000, 1500), Region("chr1", 2000, 2100)], ref="hg19"
@@ -108,16 +106,9 @@ def test_intersect_region_dataframe():
     intersection_rdf = intersect_region_dataframes([rdf_1, rdf_2])
     assert isinstance(intersection_rdf, RegionDataFrame)
     intersection_regions = list(intersection_rdf.iter_regions())
-    # With wa=True, whole A intervals are returned (not geometric clips):
+    # Both A intervals overlap B's chr1:1300-2100:
     assert intersection_regions[0] == Region("chr1", 1000, 1500, ref="hg19")
     assert intersection_regions[1] == Region("chr1", 2000, 2100, ref="hg19")
-
-    # The two entry-points agree with each other.
-    for region_1, region_2 in zip(
-        rdf_1.join_on_overlap(rdf_2).iter_regions(),
-        intersect_region_dataframes([rdf_1, rdf_2]).iter_regions(),
-    ):
-        assert region_1 == region_2, f"{region_1}, {region_2}"
 
 
 def test_lift_over_no_id_column():

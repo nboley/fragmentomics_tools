@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from fragmentomics_tools.dataframe import RegionDataFrame
+from fragmentomics_tools.intervals import merge, overlap_indices, overlaps
 
 
 @pytest.fixture
@@ -24,14 +25,10 @@ def blacklist_bed():
         yield path
 
 
-class TestMergeRegions:
-    """bedtools merge emits BED3 unless -c/-o aggregation is requested."""
+class TestMerge:
+    """Test the new intervals.merge function."""
 
     def test_merge_does_not_produce_all_nan_columns(self):
-        # Regression: merge_regions passed names=list(self.columns) to
-        # to_dataframe(). bedtools merge only emits 3 columns, so every extra
-        # name became an all-NaN column -- silent data corruption rather than
-        # an error.
         rdf = RegionDataFrame(
             pd.DataFrame(
                 {
@@ -45,8 +42,7 @@ class TestMergeRegions:
             ),
             ref="hg38",
         )
-        merged = rdf.merge_regions()
-
+        merged = merge(rdf)
         all_nan = [c for c in merged.columns if merged[c].isna().all()]
         assert all_nan == [], f"columns became all-NaN after merge: {all_nan}"
 
@@ -61,7 +57,7 @@ class TestMergeRegions:
             ),
             ref="hg38",
         )
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
 
         # chr1:100-200 and chr1:150-300 overlap and collapse into one interval
         assert len(merged) == 2
@@ -70,68 +66,9 @@ class TestMergeRegions:
         assert int(chr1.iloc[0]["start"]) == 100
         assert int(chr1.iloc[0]["stop"]) == 300
 
-    def test_merge_keeps_aggregated_columns(self):
-        rdf = RegionDataFrame(
-            pd.DataFrame(
-                {
-                    "contig": ["chr1", "chr1"],
-                    "start": [100, 150],
-                    "stop": [200, 300],
-                    "strand": [".", "."],
-                    "name": ["a", "b"],
-                }
-            ),
-            ref="hg38",
-        )
-        # -c/-o makes bedtools emit a 4th column; it must survive.
-        merged = rdf.merge_regions(c=5, o="collapse")
-        assert len(merged.columns) >= 4
-        assert not merged[merged.columns[3]].isna().all()
-
-
-class TestGetOverlappingBaseCounts:
-    """This method raised TypeError on every call before the fix.
-
-    It passes wao=True through intersect_with_bed to join_on_overlap, whose
-    signature did not accept **intersect_kwargs even though its docstring
-    documented them.
-    """
-
-    @pytest.fixture
-    def anno_bed(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "anno.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t150\t180\n")  # 30bp inside chr1:100-200
-                fh.write("chr1\t190\t260\n")  # 10bp inside chr1:100-200
-                fh.write("chr2\t500\t600\n")  # covers chr2:500-600 entirely
-            yield path
-
-    def test_counts_are_correct(self, anno_bed):
-        rdf = RegionDataFrame(
-            pd.DataFrame(
-                {
-                    "contig": ["chr1", "chr1", "chr2"],
-                    "start": [100, 700, 500],
-                    "stop": [200, 800, 600],
-                }
-            ),
-            ref="hg38",
-        )
-        res = rdf.get_overlapping_base_counts(anno_bed)
-
-        # chr1:100-200 overlaps 30bp + 10bp; chr1:700-800 overlaps nothing;
-        # chr2:500-600 is fully covered.
-        assert list(res["counts"]) == [40, 0, 100]
-        # the longest single overlapping interval per region
-        assert list(res["max_counts"]) == [30, 0, 100]
-
 
 class TestSplitOnColumn:
     def test_splits_on_the_named_column(self):
-        # Regression: the query string was the literal "column_name in @values",
-        # so it looked for a column actually called "column_name" and ignored
-        # the parameter entirely. The method could never have worked.
         rdf = RegionDataFrame(
             pd.DataFrame(
                 {
@@ -153,10 +90,6 @@ class TestAttachBlacklistRegions:
     def test_attaches_blacklist_coordinates_not_query_coordinates(
         self, blacklist_bed
     ):
-        # Regression: this used iter_regions(), which reads contig/start/stop.
-        # On the intersection result those columns belong to *self*, so every
-        # query region was annotated with itself instead of the overlapping
-        # blacklist interval.
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
             ref="hg38",
@@ -187,7 +120,6 @@ class TestAttachBlacklistRegions:
         assert by_start[900] == ""
 
     def test_multiple_blacklist_hits_are_all_attached(self, blacklist_bed):
-        # a query spanning both blacklist intervals should collect both
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [600]}),
             ref="hg38",
@@ -198,113 +130,29 @@ class TestAttachBlacklistRegions:
         spans = sorted((r.start, r.stop) for r in attached)
         assert spans == [(150, 180), (500, 520)]
 
+    def test_does_not_mutate_self(self, blacklist_bed):
+        """attach_blacklist_regions must always return a new frame."""
+        rdf = RegionDataFrame(
+            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+            ref="hg38",
+        )
+        assert "blacklist_regions" not in rdf.columns
+        out = rdf.attach_blacklist_regions(blacklist_bed)
+        assert "blacklist_regions" in out.columns
+        assert "blacklist_regions" not in rdf.columns
 
-class TestGetFragmentCoverageSum:
-    """R3: _get_fragment_coverage_sum returned a length-0 array on an empty
-    BED intersection, where a length-len(self) zero array was expected."""
-
-    @pytest.fixture
-    def empty_bed(self):
-        """A BED file with one region that does not overlap any test query."""
+    def test_empty_blacklist(self):
+        """No overlaps: every row gets empty string."""
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "empty.bed")
             with open(path, "w") as fh:
                 fh.write("chrX\t9000\t9999\n")
-            yield path
-
-    def test_empty_intersection_returns_correct_shape(self, empty_bed):
-        rdf = RegionDataFrame(
-            pd.DataFrame(
-                {
-                    "contig": ["chr1", "chr2"],
-                    "start": [100, 200],
-                    "stop": [150, 250],
-                    "id": ["a", "b"],
-                }
-            ),
-            ref="hg38",
-        )
-        result = rdf._get_fragment_coverage_sum(empty_bed)
-        assert len(result) == len(rdf), (
-            f"expected length {len(rdf)}, got {len(result)}"
-        )
-        assert (result == 0).all()
-
-
-class TestIntersectWithRdfReturnType:
-    """I4: join_on_overlap (formerly intersect_with_rdf) returned a plain
-    DataFrame when the intersection was empty, but a RegionDataFrame
-    otherwise. Callers chaining RDF methods hit AttributeError only on
-    the empty path."""
-
-    def test_empty_intersection_returns_subclass(self):
-        rdf1 = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
-            ref="hg38",
-        )
-        rdf2 = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
-            ref="hg38",
-        )
-        result = rdf1.join_on_overlap(rdf2)
-        assert isinstance(result, RegionDataFrame), (
-            f"expected RegionDataFrame, got {type(result).__name__}"
-        )
-
-    def test_empty_and_nonempty_have_same_columns(self):
-        rdf1 = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
-            ref="hg38",
-        )
-        # non-overlapping
-        rdf_far = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr2"], "start": [500], "stop": [600]}),
-            ref="hg38",
-        )
-        empty = rdf1.join_on_overlap(rdf_far)
-
-        # overlapping
-        rdf_near = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
-            ref="hg38",
-        )
-        nonempty = rdf1.join_on_overlap(rdf_near)
-
-        assert set(empty.columns) == set(nonempty.columns)
-
-
-class TestIntersectWithRdfRaises:
-    """F9: intersect_with_rdf was renamed to join_on_overlap because the old
-    name implied geometric intersection, which it never performed.  The old
-    name must raise so that stale callers break loudly."""
-
-    def test_old_name_raises_with_guidance(self):
-        rdf = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
-            ref="hg38",
-        )
-        other = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
-            ref="hg38",
-        )
-        with pytest.raises(AttributeError, match="join_on_overlap"):
-            rdf.intersect_with_rdf(other)
-
-    def test_new_name_works(self):
-        rdf = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
-            ref="hg38",
-        )
-        other = RegionDataFrame(
-            pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
-            ref="hg38",
-        )
-        result = rdf.join_on_overlap(other)
-        assert isinstance(result, RegionDataFrame)
-        assert len(result) == 1
-        # Returns whole A interval, not geometric intersection
-        assert int(result.start.iloc[0]) == 100
-        assert int(result.stop.iloc[0]) == 200
+            rdf = RegionDataFrame(
+                pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
+                ref="hg38",
+            )
+            out = rdf.attach_blacklist_regions(path)
+            assert out["blacklist_regions"].iloc[0] == ""
 
 
 class TestEqSemantics:
@@ -316,7 +164,6 @@ class TestEqSemantics:
             pd.DataFrame({"contig": ["chr1"], "start": [100], "stop": [200]}),
             ref="hg38",
         )
-        # pandas __eq__ should return a DataFrame of booleans, not a scalar
         result = rdf == rdf
         assert isinstance(result, pd.DataFrame), (
             f"expected DataFrame from ==, got {type(result).__name__}"
@@ -340,9 +187,6 @@ class TestEqSemantics:
 
 
 class TestCenterOnSummit:
-    """I11: center_on_summit used summit <= stop, but half-open [start, stop)
-    means a summit equal to stop is outside the region."""
-
     def test_summit_at_stop_is_rejected(self):
         rdf = RegionDataFrame(
             pd.DataFrame({
@@ -350,7 +194,6 @@ class TestCenterOnSummit:
             }),
             ref="hg38",
         )
-        # summit == stop is outside the half-open interval
         with pytest.raises(ValueError, match="summits must either be within"):
             rdf.center_on_summit()
 
@@ -363,11 +206,9 @@ class TestCenterOnSummit:
         )
         result = rdf.center_on_summit()
         assert "summit" not in result.columns
-        # region length preserved
         assert int(result.stop.iloc[0]) - int(result.start.iloc[0]) == 100
 
     def test_does_not_mutate_self_by_default(self):
-        """I21: center_on_summit mutated self in place with no inplace param."""
         rdf = RegionDataFrame(
             pd.DataFrame({
                 "contig": ["chr1"], "start": [100], "stop": [200], "summit": [120]
@@ -376,16 +217,12 @@ class TestCenterOnSummit:
         )
         original_start = int(rdf.start.iloc[0])
         result = rdf.center_on_summit()
-        assert int(rdf.start.iloc[0]) == original_start, (
-            "center_on_summit mutated self without inplace=True"
-        )
-        # result should be different
+        assert int(rdf.start.iloc[0]) == original_start
         assert int(result.start.iloc[0]) != original_start
 
 
-class TestOverlapsRdf:
-    """I16: overlaps_rdf raised KeyError when self had a contig absent from
-    the query's interval dict."""
+class TestOverlapsWithMissingContig:
+    """Replacing the old TestOverlapsRdf with the new API."""
 
     def test_missing_contig_returns_false(self):
         rdf = RegionDataFrame(
@@ -400,15 +237,11 @@ class TestOverlapsRdf:
             pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
             ref="hg38",
         )
-        result = rdf.overlaps_rdf(query)
-        # chr1 overlaps, chr2 does not (contig absent from query)
+        result = overlaps(rdf, query)
         assert list(result) == [True, False]
 
 
 class TestAndAndConcat:
-    """I17: __and__ hardcoded RegionDataFrame, dropping subclass identity.
-    I19: concat([]) crashed with IndexError instead of a useful error."""
-
     def test_concat_empty_raises_valueerror(self):
         with pytest.raises(ValueError, match="at least one"):
             RegionDataFrame.concat([])
@@ -428,9 +261,6 @@ class TestAndAndConcat:
 
 
 class TestLiftOver:
-    """I18: lift_over crashed on empty RDF (zip(*[]) can't unpack).
-    I20: failed liftover regions got -1 coordinates instead of NA."""
-
     def test_empty_rdf_does_not_crash(self):
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": [], "start": [], "stop": []}),
@@ -452,29 +282,21 @@ class TestLiftOver:
             ref="hg38",
         )
         result = rdf.lift_over("hg19", remove_non_liftoverable_regions=False)
-        assert pd.isna(result.start.iloc[0]), (
-            f"expected NA for failed liftover, got {result.start.iloc[0]}"
-        )
+        assert pd.isna(result.start.iloc[0])
 
 
 class TestFromBed:
-    """I6: from_bed crashed with IndexError on an empty file.
-    I22: dead has_header computation removed."""
-
     def test_empty_bed_returns_empty_rdf(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "empty.bed")
             with open(path, "w") as fh:
-                pass  # empty file
+                pass
             rdf = RegionDataFrame.from_bed(path, ref="hg38")
             assert len(rdf) == 0
             assert isinstance(rdf, RegionDataFrame)
 
 
 class TestUniqueRegions:
-    """I23: unique_regions sorted coordinates descending, which is unusual
-    and changes which duplicate survives in edge cases."""
-
     def test_output_is_ascending_by_default(self):
         rdf = RegionDataFrame(
             pd.DataFrame({
@@ -485,35 +307,12 @@ class TestUniqueRegions:
             ref="hg38",
         )
         result = rdf.unique_regions()
-        # should be ascending coordinate order
         assert list(result.contig) == ["chr1", "chr1", "chr2"]
         assert list(result.start) == [100, 300, 200]
 
 
-class TestGetIntervalDict:
-    """I5: get_interval_dict rejected unstranded regions with expand."""
-
-    def test_unstranded_with_expand_does_not_crash(self):
-        rdf = RegionDataFrame(
-            pd.DataFrame({
-                "contig": ["chr1"],
-                "start": [100],
-                "stop": [200],
-                "strand": ["."],
-            }),
-            ref="hg38",
-        )
-        d = rdf.get_interval_dict(
-            data_cols=None, expand_upstream=10, expand_downstream=10
-        )
-        tree = d["chr1"]
-        # unstranded: symmetric expand by max(10, 10) = 10 in both directions
-        assert len(tree[90:210]) > 0
-        assert len(tree[89:90]) == 0  # just outside
-
-
-class TestDropOverlappingRegions:
-    """I7: drop_overlapping_regions hardcoded assert ref == 'hg38'."""
+class TestAntiJoinReplacement:
+    """Replaces TestDropOverlappingRegions — uses intervals.overlap_indices."""
 
     def test_works_with_non_hg38_reference(self):
         rdf = RegionDataFrame(
@@ -528,19 +327,14 @@ class TestDropOverlappingRegions:
             pd.DataFrame({"contig": ["chr1"], "start": [150], "stop": [250]}),
             ref="hg19",
         )
-        result = rdf.drop_overlapping_regions(blacklist)
-        # chr1:100-200 overlaps blacklist, chr1:500-600 does not
-        assert len(result) == 1
-        assert int(result.start.iloc[0]) == 500
+        idx = overlap_indices(rdf, blacklist, how="anti")
+        kept = rdf.iloc[idx["a_index"].values.astype(int)]
+        assert len(kept) == 1
+        assert int(kept.start.iloc[0]) == 500
 
 
 class TestResizeBoundaryConditions:
-    """R8: _resize_region_boundaries with inplace+discard corrupted self.
-    R11: resize_regions warned even when 0 regions were discarded.
-    R14: truncate_regions allowed start >= stop."""
-
     def test_discard_does_not_corrupt_self(self):
-        """R8: invalid coordinates were written to self before filtering."""
         rdf = RegionDataFrame(
             pd.DataFrame({
                 "contig": ["chr1", "chr1"],
@@ -550,19 +344,12 @@ class TestResizeBoundaryConditions:
             ref="hg38",
         )
         original_starts = list(rdf.start)
-        # inplace=True is the path that corrupted self: the old code set
-        # rdf = self and wrote the new (possibly invalid) coordinates into it
-        # before filtering. Without inplace=True both old and new code take a
-        # copy, so the assertion cannot fail and the test proves nothing.
         rdf._resize_region_boundaries(
             left=-50, inplace=True, discard_invalid_resizes=True
         )
-        assert list(rdf.start) == original_starts, (
-            "self was corrupted by discard_invalid_resizes"
-        )
+        assert list(rdf.start) == original_starts
 
     def test_no_warning_when_zero_discarded(self, caplog):
-        """R11: warning logged even when nothing was discarded."""
         import logging
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [2000]}),
@@ -571,12 +358,9 @@ class TestResizeBoundaryConditions:
         with caplog.at_level(logging.WARNING, logger="fragmentomics_tools.dataframe"):
             rdf.resize_regions(500, discard_invalid_resizes=True)
         discard_msgs = [r for r in caplog.records if "Discarded" in r.message]
-        assert len(discard_msgs) == 0, (
-            f"spurious discard warning: {discard_msgs[0].message}"
-        )
+        assert len(discard_msgs) == 0
 
     def test_truncate_beyond_region_length_raises(self):
-        """R14: truncation producing start >= stop was silently accepted."""
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [1100]}),
             ref="hg38",
@@ -586,10 +370,6 @@ class TestResizeBoundaryConditions:
 
 
 class TestBinRegionsIntoWindows:
-    """R10: region shorter than stride in valid mode gave an opaque error.
-    R4: valid mode with stride < window_size produced windows overshooting
-    the original region."""
-
     def test_short_region_valid_mode_gives_clear_error(self):
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [1020]}),
@@ -599,17 +379,14 @@ class TestBinRegionsIntoWindows:
             rdf.bin_regions_into_windows(window_size=100, mode="valid", stride=50)
 
     @pytest.mark.parametrize("window_size,stride,expected_n", [
-        (100, 100, 10),   # stride == window_size: no overlap, 10 windows
-        (200, 100, 9),    # stride < window_size: 9 windows fit
-        (400, 100, 7),    # bigger window: 7 windows fit
-        (1000, 100, 1),   # window == region: 1 window
+        (100, 100, 10),
+        (200, 100, 9),
+        (400, 100, 7),
+        (1000, 100, 1),
     ])
     def test_valid_mode_windows_stay_within_region(
         self, window_size, stride, expected_n
     ):
-        """R4: every window produced by valid mode must lie within the
-        original region.  Before the fix, stride < window_size caused the
-        last window to overshoot by window_size - stride."""
         rdf = RegionDataFrame(
             pd.DataFrame({"contig": ["chr1"], "start": [1000], "stop": [2000]}),
             ref="hg38",
@@ -618,33 +395,19 @@ class TestBinRegionsIntoWindows:
             window_size=window_size, mode="valid", stride=stride,
         )
         assert len(result) == expected_n
-        assert result["start"].min() >= 1000, "window starts before region"
-        assert result["stop"].max() <= 2000, "window extends past region"
+        assert result["start"].min() >= 1000
+        assert result["stop"].max() <= 2000
 
     @pytest.mark.parametrize("region_len,window_size,expected", [
-        # 1000 / 300 -> 3 windows of 300 = 900; remainder 100 split 50/50
         (1000, 300, [(1050, 1350), (1350, 1650), (1650, 1950)]),
-        # 999 / 100 -> 9 windows of 100 = 900; remainder 99 -> floor(99/2) = 49
         (999, 100, [(1049, 1149), (1149, 1249), (1249, 1349), (1349, 1449),
                     (1449, 1549), (1549, 1649), (1649, 1749), (1749, 1849),
                     (1849, 1949)]),
-        # exact multiple: no remainder, so no shift
         (1000, 250, [(1000, 1250), (1250, 1500), (1500, 1750), (1750, 2000)]),
     ])
     def test_valid_mode_default_stride_stays_centred(
         self, region_len, window_size, expected
     ):
-        """R4 guard: fixing the overshoot must NOT re-anchor the window grid.
-
-        When the region is not an exact multiple of window_size, the remainder
-        is dropped equally from BOTH ends, so the window grid stays centred on
-        the region. Start-anchoring instead drops the whole remainder off the
-        right, shifting every window -- which silently decentres meta-profiles
-        built as center_on_summit().resize_regions(N).bin_regions_into_windows().
-
-        These are exact coordinates, deliberately. Asserting only window counts
-        and in-bounds-ness passes under BOTH anchorings and cannot catch this.
-        """
         rdf = RegionDataFrame(
             pd.DataFrame(
                 {"contig": ["chr1"], "start": [1000], "stop": [1000 + region_len]}

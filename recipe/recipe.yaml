@@ -37,7 +37,7 @@ requirements:
     - seaborn
     - h5py
     - pysam
-    - pybedtools
+    - bioframe
     - pybigwig
     - bx-python
     - smart_open

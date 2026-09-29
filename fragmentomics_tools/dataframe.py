@@ -3,7 +3,7 @@ import math
 import copy
 import logging
 import warnings
-from collections import defaultdict, Counter
+from collections import defaultdict
 from functools import reduce
 from itertools import chain
 from typing import Dict, List, Union, Optional, Sequence, Iterable, Tuple
@@ -13,9 +13,6 @@ import numpy
 import numpy as np
 import pandas
 import pandas as pd
-import pybedtools
-from intervaltree import IntervalTree
-from sklearn.utils import shuffle as sk_shuffle
 from smart_open import open
 from scipy.stats.mstats import trimmed_std
 
@@ -34,7 +31,8 @@ import traceback
 # from tqdm.contrib.concurrent import process_map
 # from p_tqdm import p_map
 
-import seaborn as sns
+
+# seaborn imported lazily inside FlDist.plot to avoid matplotlib at import time.
 
 import pysam
 import logging
@@ -59,11 +57,10 @@ from fragmentomics_tools.util.liftover import RegionLiftOver
 logger = logging.getLogger(__name__)
 
 
-from fragmentomics_tools import (
-    RegionFragmentArray,
-    FragmentArray,
-    merge_fragment_arrays,
-)
+
+# RegionFragmentArray, FragmentArray, merge_fragment_arrays are imported lazily
+# inside the methods that need them, to avoid pulling numba (0.80s) at import
+# time.  See docs/pending/interval_api_design.md §import-graph.
 
 
 NUM_CORES = -1
@@ -139,39 +136,6 @@ def _error_if_not_main_thread():
             "to stay in-process."
         )
 
-
-def get_indices_of_balanced_labels(labels, random_state=None):
-    """
-    >>> labels = np.array([1, 0, 0, 0, 1])
-    >>> idxs = get_indices_of_balanced_labels(labels, random_state=1)
-    >>> idxs
-    array([0, 1, 3, 4])
-    >>> sorted(Counter(labels[idxs]).values())  # balanced: equal counts
-    [2, 2]
-    >>> get_indices_of_balanced_labels([])
-    array([], dtype=int64)
-    >>> get_indices_of_balanced_labels([1])
-    array([0])
-    >>> get_indices_of_balanced_labels([0,1,2,2], random_state=1)
-    array([0, 1, 2])
-    """
-    if len(labels) == 0:
-        return np.array([], int)
-
-    labels = np.array(labels)
-    counts = Counter(labels)
-    min_count = min(counts.values())
-
-    keep_idxs = []
-    for label in counts.keys():
-        label_idxs = np.where(labels == label)[0]
-        keep_label_idxs = sk_shuffle(label_idxs, random_state=random_state)[:min_count]
-        keep_idxs += keep_label_idxs.tolist()
-
-    # sanity check
-    assert len(set(Counter(labels[keep_idxs]).values())) == 1
-
-    return np.array(sorted(keep_idxs))
 
 
 def windowed_range(start, stop, window_size):
@@ -565,132 +529,45 @@ class RegionDataFrame(DataFrameBase):
         return cls(df, ref=ref)
 
     @classmethod
-    def from_beds_merged(cls, in_bed_files, ref, chroms=None, bed_filter_callback=None):
-        """
-        Reads in multiple beds, concatenates and merges them, safely truncating to get rid of strand
-        :param in_bed_files: a BED file or list of BED files
+    def from_beds_merged(cls, in_bed_files, ref, chroms=None):
+        """Read one or more BED files, concatenate and merge.
+
+        :param in_bed_files: a BED file path or list of BED file paths
         :param ref: reference genome
-        :param chroms: A list of chromosomes to keep, STANDARD_CHROMS by default
-        :param bed_filter_callback: A pybedtools filter function (https://daler.github.io/pybedtools/filtering.html)
-         This is a function that operates on each feature of the bedtool object and returns a True/False
-         For example, to get scores above some threshold:
-            def bed_filter(region):
-                return int(region.score) >= 100
-            RegionDataFrame.from_beds_merged(in_bed_files, bed_filter=bed_filter)
-        :return: a RegionDataframe
+        :param chroms: chromosomes to keep (None = all)
+        :return: a RegionDataFrame with merged intervals
         """
-        if bed_filter_callback is None:
-
-            def filter_func(_):
-                return True
-
-        else:
-            filter_func = bed_filter_callback
-
         if isinstance(in_bed_files, str):
             in_bed_files = [in_bed_files]
 
         assert isinstance(in_bed_files, list) and all(
-            isinstance(in_bed_file, str) for in_bed_file in in_bed_files
+            isinstance(f, str) for f in in_bed_files
         ), "Must pass a peak BED file or a list of BED files"
         assert numpy.all(
             [
-                in_bed_file.lower().endswith(
+                f.lower().endswith(
                     (".bed", ".bed.gz", ".bed.npk.gz", ".narrowpeak")
                 )
-                for in_bed_file in in_bed_files
+                for f in in_bed_files
             ]
         ), "All files must be BED files"
         assert len(in_bed_files) != 0, "Empty list of BED files"
-        if len(in_bed_files) == 1:
-            df = cls.from_bed(in_bed_files[0], ref)
-        else:
-            bedtool_files = [
-                pybedtools.BedTool(in_bed_file).filter(filter_func)
-                for in_bed_file in in_bed_files
-            ]
-            merged_bedtool = bedtool_files[0].cat(
-                *bedtool_files[1:], postmerge=True, force_truncate=True
-            )
-            df = cls(
-                merged_bedtool.to_dataframe(names=["contig", "start", "stop"]), ref=ref
-            )
+
+        rdfs = [cls.from_bed(f, ref) for f in in_bed_files]
+        combined = cls.concat(rdfs)
 
         if chroms is not None:
-            df = df.query("contig == @chroms")
+            combined = combined.query("contig == @chroms")
 
-        return df
+        if len(combined) == 0:
+            return combined
+
+        from fragmentomics_tools.intervals import merge
+        return merge(combined)
 
     @property
     def region_lengths(self):
         return self.stop - self.start
-
-    def get_interval_dict(
-        self,
-        data_cols: Optional[List[str]] = ["id"],
-        expand_upstream: int = 0,
-        expand_downstream: int = 0,
-    ) -> Dict[str, IntervalTree]:
-        """
-        :param data_cols: if None, use dataframe's row index as the return
-            value, otherwise use the columns defined in data_cols.
-        :param expand_upstream: basepairs upstream to expand each interval
-        :param expand_downstream: basepairs downstream to expand each interval
-        :return: per chromosome (dict by chromosome name) IntervalTree
-        """
-        interval_dict = defaultdict(IntervalTree)
-        for idx, row in self.iterrows():
-            if data_cols is None:
-                data = idx
-            else:
-                data = tuple(row.loc[data_cols].tolist())
-            if expand_upstream != 0 or expand_downstream != 0:
-                strand = row["strand"]
-                if strand == "+":
-                    start = row["start"] - expand_upstream
-                    stop = row["stop"] + expand_downstream
-                elif strand == "-":
-                    start = row["start"] - expand_downstream
-                    stop = row["stop"] + expand_upstream
-                else:
-                    # Unstranded: expand symmetrically in both directions
-                    expand = max(expand_upstream, expand_downstream)
-                    start = row["start"] - expand
-                    stop = row["stop"] + expand
-            else:
-                start = row["start"]
-                stop = row["stop"]
-            interval_dict[row["contig"]][start:stop] = data
-        return dict(interval_dict)
-
-    def overlaps_rdf(
-        self, query: "RegionDataFrame", max_distance: int = 0
-    ) -> pd.Series:
-        """Returns a boolean series of which regions overlap the other dataframe
-
-        :param query: the query dataframe
-        :param max_distance: maximum distance (>=0) (edge to edge) to an item in the
-            query dataframe to consider a row an overlap
-        :return: pd.Series[bool] of whether each row overlaps.
-        """
-        assert max_distance >= 0
-
-        query_intervals = query.get_interval_dict(
-            data_cols=None,
-            expand_upstream=max_distance,
-            expand_downstream=max_distance,
-        )
-
-        def is_olap(row: pd.Series) -> bool:
-            contig = row["contig"]
-            start = row["start"]
-            stop = row["stop"]
-            tree = query_intervals.get(contig)
-            if tree is None:
-                return False
-            return len(tree[start:stop]) > 0
-
-        return self.apply(is_olap, axis=1)
 
     def center_on_summit(self, inplace=False):
         """Center regions on summit, resize the regions, and then drop the summit column."""
@@ -946,115 +823,9 @@ class RegionDataFrame(DataFrameBase):
             ref=ref,
         )
 
-    def merge_regions(self, **kwargs):
-        bedtool = pybedtools.BedTool.from_dataframe(self).sort()
-        # bedtools merge emits BED3 (chrom/start/end) unless column aggregation
-        # is requested via -c/-o, so the output column set is decided by
-        # bedtools, not by self.columns. Passing `names=list(self.columns)`
-        # here silently produced an all-NaN column for every field beyond the
-        # first three -- merging a frame with strand/name/score returned those
-        # three columns entirely NaN rather than dropping them.
-        merged_df = bedtool.merge(**kwargs).to_dataframe()
-        merged_df.columns = ["contig", "start", "stop"] + list(merged_df.columns[3:])
-        return type(self)(merged_df, ref=self.ref)
-
-    def join_on_overlap(self, other, sorted=False, rsuff="other", **intersect_kwargs):
-        """Join two RegionDataFrames on genomic overlap, returning whole intervals.
-
-        This is NOT a geometric intersection.  By default (wa=True, wb=True) it
-        returns the entire A interval for each A/B overlap, plus B's columns
-        suffixed with ``rsuff``.  For example, A=[1000,1500) overlapping
-        B=[1300,2100) returns A's full interval chr1:1000-1500, not the
-        geometric clip chr1:1300-1500.
-
-        :param other: other RegionDataFrame
-        :param sorted: RegionDataFrames are both sorted -- use Bedtools chromsweep algorithm
-        :param rsuff: Suffix to append to other dataframe
-        :param intersect_kwargs: Bedtools intersect kwargs, such as wa, wo, etc. For more info, consult
-            https://daler.github.io/pybedtools/autodocs/pybedtools.bedtool.BedTool.intersect.html
-        :return: RegionDataFrame with one row per A/B overlap pair
-        """
-
-        def reordered_columns(rdf):
-            bed_columns = ["contig", "start", "stop", "strand"]
-            return bed_columns + [c for c in rdf.columns if c not in bed_columns]
-
-        # assert isinstance(other, RegionDataFrame)
-        assert (
-            self.ref == other.ref
-        ), f"RegionDataFrames must have the same reference: {self.ref, other.ref}"
-
-        self_index = self.index
-        self = self.reset_index()
-        this_bed_df = self[reordered_columns(self)]
-        this_bed_df["index"] = self_index
-        this_bedtool = pybedtools.BedTool.from_dataframe(this_bed_df)
-        other_bedtool = pybedtools.BedTool.from_dataframe(
-            other[reordered_columns(other)]
-        )
-        other_column_names = [(f"{c}_{rsuff}" if c in this_bed_df.columns else c) for c in reordered_columns(other)]
-
-        # `intersect_kwargs` was documented in the docstring but not accepted,
-        # so any caller using it died with TypeError -- which is why
-        # get_overlapping_base_counts (which passes wao=True) could never run.
-        # -wo/-wao already imply writing both A and B, so only default to
-        # wa/wb when the caller has not chosen its own output mode.
-        bedtools_kwargs = dict(intersect_kwargs)
-        if not any(k in bedtools_kwargs for k in ("wa", "wb", "wo", "wao", "u", "c")):
-            bedtools_kwargs.update(wa=True, wb=True)
-
-        names = this_bed_df.columns.tolist() + other_column_names
-        # -wo/-wao append a trailing column holding the overlap length.
-        if bedtools_kwargs.get("wo") or bedtools_kwargs.get("wao"):
-            names = names + ["overlap"]
-
-        intersection_rdf = pd.DataFrame(
-            this_bedtool.intersect(
-                other_bedtool, sorted=sorted, **bedtools_kwargs
-            ).to_dataframe(names=names),
-        )
-        if len(intersection_rdf) == 0:
-            return type(self)(
-                pd.DataFrame(columns=names).drop(columns=["index"]),
-                ref=self.ref,
-            )
-
-        intersection_rdf = intersection_rdf.set_index("index")
-        return type(self)(intersection_rdf, ref=self.ref)
-
-    def intersect_with_rdf(self, *args, **kwargs):
-        """Removed: this method never returned geometric intersections.
-
-        Use ``join_on_overlap`` instead — it has the same signature and
-        behaviour, but the name accurately reflects what it does: a join
-        of whole A intervals against B, keyed on overlap.
-        """
-        raise AttributeError(
-            "intersect_with_rdf has been renamed to join_on_overlap.  "
-            "The old name was misleading: the method never returned "
-            "geometric intersections.  Update your call site."
-        )
-
-    def intersect_with_bed(
-        self, bed_file_path, sorted=False, rsuff="other", **intersect_kwargs
-    ):
-        """
-        Finds intersection between RegionDataFrame and some bed file
-        :param bed_file_path: A BED file path, for example a blacklist or repeat annotation
-        :param rsuff: Suffix to append to fields of bed file
-        :param sorted: Whether BED is sorted
-        :return: a RegionDataFrame with all intersections, adding addition columns demarcated "_bed"
-        """
-        other_rdf = RegionDataFrame.from_bed(bed_file_path, ref=self.ref)
-        overlap_rdf = self.join_on_overlap(
-            other_rdf, sorted=sorted, rsuff=rsuff, **intersect_kwargs
-        )
-
-        return overlap_rdf
-
     def sort(self, inplace=False):
         """
-        Sorts dataframe by contig, start, and stop (same as pybedtools)
+        Sorts dataframe by contig, start, and stop
         :param inplace: sort in place
         :return: None or sorted RegionDataFrame
         """
@@ -1106,122 +877,44 @@ class RegionDataFrame(DataFrameBase):
             rv = rv.query("not contig.isnull()")
         return rv
 
-    def get_overlapping_base_counts(self, bed_file, rsuff="bed", sorted=False):
-        """
-        Returning the number of overlapping bases in an intersection between a RDF and bed file
-        :param bed_file: A BED file, for example a blacklist or repeat annotation
-        :param rsuff: suffix to use in bedtools region intersection
-        :param sorted: whether BED file is sorted
-        :return: a dict with "counts" corresponding to the total overlap between the rdf and annotation,
-         "max_counts" corresponding to the longest interval that overlaps rdf
-        """
-        counts = numpy.zeros(len(self), dtype=int)
-        max_counts = numpy.zeros(len(self), dtype=int)
+    def attach_blacklist_regions(self, bed_fname):
+        """Attach a list of overlapping blacklist regions to each row.
 
-        region2idx = {
-            (x.contig, x.start, x.stop): pp for pp, x in enumerate(self.itertuples())
-        }
-        counts_column_key = "overlap"
-        for region, overlaps in self.intersect_with_bed(
-            bed_file,
-            rsuff=rsuff,
-            sorted=sorted,
-            wao=True,
-        ).groupby(["contig", "start", "stop"]):
-            inner_counts = overlaps[counts_column_key]
-            max_counts[region2idx[region]] = inner_counts.max()
-            counts[region2idx[region]] = inner_counts.sum()
-
-        return {"counts": counts, "max_counts": max_counts}
-
-    def overlaps_with_bed(self, bed_file, invert=False, min_size=0):
+        Always returns a new frame (never mutates *self*).
         """
-        Finds intersection between RegionDataFrame and some bed file, returning a True/False array
-        :param bed_file: A BED file, for example a blacklist or repeat annotation
-        :param invert: Whether to invert intersection.
-         If invert==False, regions that overlap bed return True
-         If invert==True, regions that overlap bed return False
-        :param min_size: Minimum size of overlap to mark as overlapping
-        :return: Returns whether or not the rdf overlaps with a bed file with no more than a min_size region
-        """
-        max_counts = self.get_overlapping_base_counts(bed_file)["max_counts"]
-        mask = max_counts > min_size
-        if invert:
-            mask = numpy.logical_not(mask)
-        return mask
+        from fragmentomics_tools.intervals import overlap_indices
 
-    def overlaps_with_beds(self, bed_files, num_cores=1, *args, **kwargs):
-        """
-        Finds intersection between RegionDataFrame and a list of bed files, returning a list of True/False arrays
-        :param bed_files: A list of BED files, for example a blacklist or repeat annotation
-        :param num_cores: Number of threads
-        :return: Returns whether or not the rdf overlaps with a bed file with no more than a min_size region
-        """
-        if isinstance(bed_files, str):
-            bed_files = [bed_files]
-        overlap_per_bed = Parallel(num_cores)(
-            delayed(self.overlaps_with_bed)(bed_file, *args, **kwargs)
-            for bed_file in bed_files
-        )
-        return overlap_per_bed
+        blacklist = RegionDataFrame.from_bed(bed_fname, ref=self.ref)
+        idx = overlap_indices(self, blacklist, how="left")
 
-    def bases_overlap_with_bed(self, bed_file):
-        """
-        Finds intersection between RegionDataFrame and some bed file, returning the number of overlapping bases
-        :param bed_file: A BED file, for example a blacklist or repeat annotation
-        :return: Gets the total number of bases that rdf overlaps with a bed file
-        """
-        return self.get_overlapping_base_counts(bed_file)["counts"]
+        has_match = idx["b_index"].notna()
+        if not has_match.any():
+            result = self.copy()
+            result["blacklist_regions"] = ""
+            return result
 
-    def bases_overlap_with_beds(self, bed_files, num_cores=1):
-        """
-        Finds intersection between RDF and a list of bed files, returning list of number of overlapping bases
-        :param bed_files: A list of BED files, for example a blacklist or repeat annotation
-        :return: Gets the total number of bases that rdf overlaps with a bed file
-        """
-        if isinstance(bed_files, str):
-            bed_files = [bed_files]
-        bases_overlap_per_bed = Parallel(num_cores)(
-            delayed(self.bases_overlap_with_bed)(bed_file) for bed_file in bed_files
-        )
-        return bases_overlap_per_bed
+        matched = idx[has_match]
+        bl_regions = [
+            Region(
+                blacklist["contig"].iloc[int(bi)],
+                int(blacklist["start"].iloc[int(bi)]),
+                int(blacklist["stop"].iloc[int(bi)]),
+                ref=self.ref,
+            )
+            for bi in matched["b_index"]
+        ]
 
-    def drop_overlapping_regions(self, other_rdf):
-        """Return a copy with regions that overlap other_rdf removed."""
-        tmp = self.join_on_overlap(other_rdf)
-        return self.loc[self.index.difference(tmp.index), :]
+        pairs = pd.DataFrame({
+            "a_index": matched["a_index"].values,
+            "bl_region": bl_regions,
+        })
+        grouped = pairs.groupby("a_index")["bl_region"].apply(list)
+        grouped.index = self.index[grouped.index.astype(int)]
+        grouped.name = "blacklist_regions"
 
-    def attach_blacklist_regions(self, bed_fname, rsuff="other"):
-        tmp = self.join_on_overlap(
-            RegionDataFrame.from_bed(bed_fname, ref=self.ref), rsuff=rsuff
-        )
-        if len(tmp) == 0:
-            self["blacklist_regions"] = ""
-            return self
-
-        # NOTE: iter_regions() reads the contig/start/stop columns, which on
-        # the intersection result belong to *self*, not to the blacklist. Using
-        # it here attached each query region to itself instead of the
-        # overlapping blacklist interval -- silently, with no error. The
-        # blacklist coordinates live in the `_{rsuff}`-suffixed columns that
-        # join_on_overlap produces.
-        def _blacklist_regions_for(group):
-            return [
-                Region(
-                    row[f"contig_{rsuff}"],
-                    row[f"start_{rsuff}"],
-                    row[f"stop_{rsuff}"],
-                    ref=self.ref,
-                )
-                for _, row in group.iterrows()
-            ]
-
-        blacklist_regions = (
-            tmp.groupby(tmp.index.names)
-            .apply(_blacklist_regions_for)
-            .rename("blacklist_regions")
-        )
-        return self.join(blacklist_regions).fillna("")
+        result = self.copy()
+        result = result.join(grouped).fillna("")
+        return result
 
     @property
     def bed_df(self):
@@ -1248,126 +941,6 @@ class RegionDataFrame(DataFrameBase):
             #    data = None
             data = None
             yield Region(r.contig, r.start, r.stop, strand, ref=self.ref, data=data)
-
-    def _get_fragment_coverage_track(self, in_fname: str):
-        """
-        :param in_fname: a bigwig or fragments h5 file
-        :return: coverage profiles over regions in self
-        """
-        if in_fname.lower().endswith((".bw", ".bigwig")):
-            with BigWigReader(in_fname) as reader:
-                numpy.warnings.filterwarnings(
-                    "ignore", category=numpy.VisibleDeprecationWarning
-                )
-                return numpy.array(
-                    [
-                        reader.values(region.chrom, region.start, region.stop)
-                        for region in self.iter_regions()
-                    ]
-                )
-        # For fragment H5s, get the fragment matrix and make a coverage track
-        elif in_fname.lower().endswith(".h5"):
-            frag_h5 = FragmentsH5(in_fname)
-            fms = self.apply(
-                lambda row: RegionFragmentMatrix.from_fragments_h5(
-                    frag_h5,
-                    Region(row["contig"], row["start"], row["stop"], ref=self.ref),
-                ),
-                axis=1,
-            ).values
-            return numpy.array([fm.get_fragment_coverage_array() for fm in fms])
-        else:
-            raise NotImplementedError(f"{in_fname} is not supported")
-
-    def get_fragment_coverage_track(
-        self, in_fnames: Union[List, str], num_cores=NUM_CORES, verbose=0
-    ):
-        """
-        :param in_fnames: file or list of bigwig or fragment h5 files
-        :return: coverage profiles over regions in self
-        """
-        if isinstance(in_fnames, str):
-            in_fnames = [in_fnames]
-
-        return numpy.array(
-            Parallel(num_cores, verbose=verbose)(
-                delayed(self._get_fragment_coverage_track)(in_fname)
-                for in_fname in in_fnames
-            )
-        )
-
-    def _get_fragment_coverage_sum(self, in_fname: str, sorted=False):
-        """
-        For each region, get the fragment coverage for in_fname, which is a fragment coverage bigwig or fragment bed
-        """
-
-        def get_column_names(bed_file):
-            default_cols = [
-                "chrom_1",
-                "start_1",
-                "end_1",
-                "name_1",
-                "score_1",
-                "strand_1",
-            ]
-            with open(bed_file) as infile:
-                num_fields = len(infile.readline().split())
-            return default_cols[:num_fields]
-
-        if in_fname.lower().endswith((".bw", ".bigwig")):
-            return numpy.array(
-                [track.sum() for track in self._get_fragment_coverage_track(in_fname)]
-            )
-        elif in_fname.lower().endswith((".bed", ".bed.gz")):
-            # Use pybedtools to intersect the read / fragment beds with the regions
-            bed_columns = get_column_names(in_fname)
-            rdf_columns = [col + "_2" for col in self.columns]
-            intersect_df = (
-                pybedtools.BedTool(in_fname)
-                .intersect(
-                    pybedtools.BedTool.from_dataframe(self),
-                    wa=True,
-                    wb=True,
-                    sorted=sorted,
-                )
-                .to_dataframe(names=bed_columns + rdf_columns)
-            )
-            # This is just to map back to an array
-            peak2idx = {peak: pp for pp, peak in enumerate(self.id)}
-
-            counts_vect = numpy.zeros(len(self))
-            if intersect_df.shape[0] == 0:
-                return counts_vect
-            for peak, group in intersect_df.groupby("id_2"):
-                counts_vect[peak2idx[peak]] = len(group)
-            return counts_vect
-        elif in_fname.lower().endswith(".h5"):
-            frag_h5 = FragmentsH5(in_fname)
-            return self.apply(
-                lambda row: frag_h5.fetch_counts(
-                    row["contig"], row["start"], row["stop"]
-                ),
-                axis=1,
-            ).values
-        else:
-            raise NotImplementedError(f"{in_fname} is not supported")
-
-    def get_fragment_coverage_sum(
-        self, in_fnames: Union[List, str], num_cores=NUM_CORES, sorted=False, verbose=0
-    ):
-        """
-        For each region, return the sum of the number of reads in in_fnames
-        If in_fnames is a list, returns the sum over all files for each region
-        """
-        if isinstance(in_fnames, str):
-            in_fnames = [in_fnames]
-
-        return numpy.array(
-            Parallel(num_cores, verbose=verbose)(
-                delayed(self._get_fragment_coverage_sum)(in_fname, sorted=sorted)
-                for in_fname in in_fnames
-            )
-        )
 
     @staticmethod
     def _error_on_invalid_new_starts(new_start):
@@ -1852,23 +1425,6 @@ class RegionDataFrame(DataFrameBase):
 
         return sub_rdfs
 
-    ###############################################################################################
-    # #  These are methods that require a label column
-    # #  this should probably be split into a subclass
-
-    def label_balanced(self, column_name, random_state=None):
-        """Return a copy of self with balanced labels."""
-        if not hasattr(self, column_name):
-            raise ValueError(f"The data frame must have column '{column_name}'")
-
-        keep_idxs = get_indices_of_balanced_labels(
-            self[column_name], random_state=random_state
-        )
-
-        return self.iloc[keep_idxs].copy()
-
-    # #  END -- These are methods that require a label column
-    ###############################################################################################
 
 
 
@@ -1965,6 +1521,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         assert self.index.is_unique
         # reset the progress bar
         tqdm._instances.clear()
+
+        from fragmentomics_tools import RegionFragmentArray
 
         def get_fa(record):
             region = Region(record.contig, record.start, record.stop, record.strand, ref=self.ref)
@@ -2260,6 +1818,7 @@ class FlDist:
 
 
     def plot(self, figsize=(20, 8), legend=False, max_frag_len=None, include_reference=True):
+        import seaborn as sns
         sns.set(rc={"figure.figsize": figsize})
 
         # add the reference
@@ -2310,16 +1869,7 @@ class SampleDataFrame(DataFrameBase):
     def dropna(self, *args, **kwargs):
         return type(self)(self.df.dropna(*args, **kwargs))
 
-    def label_balanced(self, column_name, random_state=None):
-        """Return a copy of self with balanced labels."""
-        if not hasattr(self, column_name):
-            raise ValueError(f"The data frame must have column '{column_name}'")
 
-        keep_idxs = get_indices_of_balanced_labels(
-            self[column_name], random_state=random_state
-        )
-
-        return self.iloc[keep_idxs].copy()
 
 
 def str_concat_columns(input_df, agg_column_names):
@@ -2352,12 +1902,14 @@ def str_concat_columns(input_df, agg_column_names):
 
 
 def intersect_region_dataframes(region_dataframes, sort=False):
-    """
-    Finds the intersection of a list of RegionDataFrames
-    :param region_dataframes: a list of region_dataframes
+    """Return regions from the first frame that overlap every subsequent frame.
+
+    :param region_dataframes: a list of RegionDataFrames
     :param sort: pre-sort RegionDataFrames before intersecting
-    :return: A RegionDataFrame that is the intersection of all passed region_dataframes
+    :return: A RegionDataFrame containing the surviving subset
     """
+    from fragmentomics_tools.intervals import overlap_indices
+
     if isinstance(region_dataframes, RegionDataFrame):
         return region_dataframes
     assert isinstance(region_dataframes, (list, tuple)) and all(
@@ -2369,7 +1921,9 @@ def intersect_region_dataframes(region_dataframes, sort=False):
         )
     if sort:
         region_dataframes = [rdf.sort() for rdf in region_dataframes]
-    intersected_rdf = region_dataframes[0]
+    result = region_dataframes[0]
     for rdf in region_dataframes[1:]:
-        intersected_rdf = intersected_rdf.join_on_overlap(rdf, sorted=sort)
-    return intersected_rdf
+        idx = overlap_indices(result, rdf, how="inner")
+        keep = sorted(set(idx["a_index"].dropna().values.astype(int)))
+        result = result.iloc[keep]
+    return result

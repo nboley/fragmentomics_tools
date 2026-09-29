@@ -29,7 +29,7 @@ dependencies = [
     "seaborn",
     "h5py",
     "pysam",
-    "pybedtools",
+    "bioframe",
     "pyBigWig",
     "bx-python",
     "smart_open",

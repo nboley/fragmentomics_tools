@@ -302,25 +302,6 @@ class Region(DataClassMixin):
             ["repeat_masker", "anshul_blacklist"]
         ).astype(bool)
 
-    def intersect_with_bed(self, bed_path):
-        # Prevents circular import
-        from fragmentomics_tools.formats import TabixBedReader
-
-        if bed_path not in CACHED_READERS:
-            # Create a new reader
-            CACHED_READERS[(bed_path, self.ref)] = TabixBedReader(bed_path)
-        for record in CACHED_READERS[(bed_path, self.ref)].fetch(
-            self.chrom, self.start, self.stop
-        ):
-            yield record
-
-    def get_bed_coverage_array(self, bed_path) -> numpy.ndarray:
-        """
-        :param bed_path:
-        :returns:
-        """
-        return self.get_coverage_array(self.intersect_with_bed(bed_path))
-
     def plot_annotations(self, annotation_names: List[str] = None):
         """
         Plots annotation tracks over this region

@@ -55,18 +55,20 @@ Sanctioned entry points:
 |---|---|
 | Load a BED | `RegionDataFrame.from_bed(path, ref=...)` — `ref` is **required** |
 | Merge several BEDs | `RegionDataFrame.from_beds_merged(...)` |
-| Blacklist / exclusion filtering | `.drop_overlapping_regions(other_rdf)` |
-| Join on overlap | `.join_on_overlap(other)` — returns whole A intervals, NOT geometric intersections |
+| Blacklist / exclusion filtering | `intervals.overlap_indices(a, b, how="anti")` |
+| Boolean overlap mask | `intervals.overlaps(a, b)` |
+| Overlap index pairs | `intervals.overlap_indices(a, b)` |
+| Merge overlapping intervals | `intervals.merge(rdf)` |
+| Nearest neighbours | `intervals.nearest(a, b)` |
+| Connected components | `intervals.cluster(a)` or `intervals.cluster(a, b)` |
 | Resize / pad regions | `.expand_regions(...)`, `.resize_regions(...)` |
 | Attach fragments to regions | `SampleAndRegionDataFrame.attach_fragment_arrays(...)` |
 | Per-region fragment loading | `RegionFragmentArray.from_fragments_h5(...)` |
 
-**Legitimate escape hatch, with a condition:** some interval ops go through
-`pybedtools`, which needs the `bedtools` binary on `PATH`. It ships in the
-conda env's `bin/` but is frequently *not* on `PATH` in sandboxes and AWS Batch
-containers, and this has caused real failures. If that forces a hand-rolled
-fallback, **write down why in the code** — an unexplained divergence reads as
-an accident and gets "fixed" later by someone without the context.
+The interval algebra lives in `fragmentomics_tools.intervals`, backed by
+`bioframe`. The library no longer imports `pybedtools` — it is kept only in
+`environment.yml` for `scripts/build_inactive_regions.py`, which uses it
+directly and handles the `bedtools`-on-`PATH` hazard itself.
 
 ## Superseded code — do not build on it
 

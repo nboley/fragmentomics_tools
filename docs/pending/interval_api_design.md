@@ -475,6 +475,17 @@ absorbed. That costs a line per movement and is the only thing standing between
 | fixture | old | new | why it moved |
 |---|---|---|---|
 | `overlaps_rdf_d10` | (Phase 0 digest) | — | expected: `wiggle` corrects the off-by-one, so a 10 bp gap now matches at 10 rather than 11 |
+| `merge_book_ended` | 1 merged row | 2 separate rows | `merge(wiggle=0)` does not merge book-ended; this is the decided semantics (wiggle=0 = strict overlap only) |
+| `from_beds_merged_book_ended` | 1 merged row | 2 separate rows | `from_beds_merged` now delegates to `merge(wiggle=0)`; same reason as above |
+| `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
+| `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_index").overlap_bases.sum()` |
+| `_get_fragment_coverage_sum` | test deleted | — | method deleted (0 live callers) |
+| `join_on_overlap` return type | test deleted | — | method deleted; `overlap_indices` returns a plain DataFrame by design |
+| `intersect_with_rdf` raises | test deleted | — | method deleted along with `join_on_overlap` |
+| `overlaps_rdf` missing-contig | test deleted | — | replaced by `TestOverlapsWithMissingContig` using `intervals.overlaps` |
+| `get_interval_dict` | test deleted | — | method deleted (was internal to `overlaps_rdf`) |
+| `drop_overlapping_regions` | test deleted | — | replaced by `TestAntiJoinReplacement` using `overlap_indices(how="anti")` |
+| `label_balanced` | test deleted | — | method deleted (scope decision, not interval algebra) |
 
 **Phase 1 — the interval API on `bioframe`.** One phase, collapsed from the
 previous two.

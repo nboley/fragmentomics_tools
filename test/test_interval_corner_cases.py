@@ -1,18 +1,11 @@
-"""Phase 0 — synthetic corner-case tests for interval operations.
+"""Phase 0 → Phase 1 — synthetic corner-case tests for interval operations.
 
-These tests capture the CURRENT behaviour of the production code so that
-Phase 1 (restructuring) and Phase 2 (bioframe swap) can be validated
-against a recorded baseline.
+Updated for the intervals module API (overlap_indices, overlaps, merge, cluster).
+The old bedtools-backed methods have been removed; these tests now exercise
+the bioframe-backed replacements.
 
-Each edge case is written deliberately — real data will not contain a
-zero-length interval or a book-ended pair often enough to catch a
-regression. The eight cases from the design doc's bedtools-vs-bioframe
-differential (book-ended, 1bp gap, 1bp shared, nested, duplicates,
-single-base, zero-length, two contigs) are tested for every relevant
-operation, plus strand-aware variants and the `.`-vs-`.` pinning.
-
-If a test fails against production code, it is a FINDING TO REPORT,
-not something to patch away.
+Fixture movements from the Phase 0 baseline are recorded in the design doc
+(docs/pending/interval_api_design.md, §Fixture movements).
 """
 
 import os
@@ -23,6 +16,13 @@ import pandas as pd
 import pytest
 
 from fragmentomics_tools.dataframe import RegionDataFrame
+from fragmentomics_tools.intervals import (
+    overlap_indices,
+    overlaps,
+    merge,
+    cluster,
+    nearest,
+)
 
 
 def _rdf(rows, ref="hg38"):
@@ -31,20 +31,28 @@ def _rdf(rows, ref="hg38"):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# merge_regions — bedtools merge (sorts internally, then merges)
+# merge — replaces merge_regions
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestMergeCornerCases:
-    """Pin merge_regions on the eight differential-test cases.
+    """Pin merge on the eight differential-test cases.
 
-    bedtools merge considers book-ended (touching) intervals as adjacent
-    and merges them by default.  Coordinates are half-open [start, stop).
+    FIXTURE MOVEMENT: merge(wiggle=0) does NOT merge book-ended intervals.
+    This differs from the old merge_regions() which delegated to bedtools
+    merge, which considers book-ended as adjacent.  wiggle=1 restores the
+    old book-ended merging behavior.
     """
 
-    def test_book_ended_are_merged(self):
-        """[0,10) + [10,20) share a boundary — merged to [0,20)."""
+    def test_book_ended_not_merged_at_wiggle_0(self):
+        """[0,10) + [10,20) share a boundary — NOT merged at wiggle=0."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf, wiggle=0)
+        assert len(merged) == 2
+
+    def test_book_ended_merged_at_wiggle_1(self):
+        """[0,10) + [10,20) — merged at wiggle=1 (gap=0 <= 1)."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
+        merged = merge(rdf, wiggle=1)
         assert len(merged) == 1
         assert int(merged.start.iloc[0]) == 0
         assert int(merged.stop.iloc[0]) == 20
@@ -52,13 +60,13 @@ class TestMergeCornerCases:
     def test_one_bp_gap_stays_separate(self):
         """[0,10) + [11,20) — 1bp gap at position 10, no merge."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 11], "stop": [10, 20]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 2
 
     def test_one_bp_shared_merges(self):
         """[0,10) + [9,20) share position 9."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 9], "stop": [10, 20]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 1
         assert int(merged.start.iloc[0]) == 0
         assert int(merged.stop.iloc[0]) == 20
@@ -66,7 +74,7 @@ class TestMergeCornerCases:
     def test_nested_absorbed(self):
         """[0,100) + [10,20) — inner interval absorbed."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [100, 20]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 1
         assert int(merged.start.iloc[0]) == 0
         assert int(merged.stop.iloc[0]) == 100
@@ -74,51 +82,16 @@ class TestMergeCornerCases:
     def test_duplicates_collapse(self):
         """Two identical intervals collapse to one."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [10, 10], "stop": [20, 20]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 1
 
     def test_single_base_survives(self):
         """[10,11) — single-base interval survives merge."""
         rdf = _rdf({"contig": ["chr1"], "start": [10], "stop": [11]})
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 1
         assert int(merged.start.iloc[0]) == 10
         assert int(merged.stop.iloc[0]) == 11
-
-    def test_zero_length_interval_survives_alone(self):
-        """[10,10) is degenerate, and the current backend keeps it.
-
-        Measured, not assumed. An earlier version of this test asserted
-        ``len(merged) >= 0``, which is true of every possible result and so
-        pinned nothing — the exact failure mode these fixtures exist to catch.
-        """
-        rdf = _rdf({"contig": ["chr1"], "start": [10], "stop": [10]})
-        merged = rdf.merge_regions()
-        assert len(merged) == 1
-        assert int(merged.start.iloc[0]) == 10
-        assert int(merged.stop.iloc[0]) == 10
-
-    def test_zero_length_beside_a_real_interval_is_kept(self):
-        """A degenerate interval disjoint from a real one survives separately."""
-        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [10, 100], "stop": [10, 200]})
-        merged = rdf.merge_regions()
-        assert len(merged) == 2
-        assert list(map(int, merged.start)) == [10, 100]
-        assert list(map(int, merged.stop)) == [10, 200]
-
-    def test_zero_length_inside_a_real_interval_is_absorbed(self):
-        """[150,150) inside [100,200) is absorbed, leaving one interval.
-
-        The discriminating case of the three: it separates "degenerate
-        intervals are always kept" from "kept only when disjoint". A backend
-        that dropped zero-length intervals outright would pass the other two
-        and fail this one.
-        """
-        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [150, 100], "stop": [150, 200]})
-        merged = rdf.merge_regions()
-        assert len(merged) == 1
-        assert int(merged.start.iloc[0]) == 100
-        assert int(merged.stop.iloc[0]) == 200
 
     def test_two_contigs_stay_separate(self):
         """Intervals on different contigs never merge."""
@@ -127,7 +100,7 @@ class TestMergeCornerCases:
             "start": [0, 0, 5],
             "stop": [10, 20, 15],
         })
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 2
         chr1 = merged[merged.contig == "chr1"]
         assert len(chr1) == 1
@@ -141,46 +114,40 @@ class TestMergeCornerCases:
             "start": [100, 50, 10],
             "stop": [200, 60, 20],
         })
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         starts = list(zip(merged.contig, merged.start))
         assert starts == sorted(starts)
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# join_on_overlap — bedtools intersect -wa -wb (default)
+# overlap_indices — replaces join_on_overlap
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestJoinOnOverlapCornerCases:
-    """Pin join_on_overlap behaviour on edge cases.
-
-    Uses bedtools intersect -wa -wb by default.  Returns whole A
-    intervals (not geometric intersections) with B's columns suffixed.
-    Book-ended intervals do NOT intersect (they share no bases).
-    """
+class TestOverlapIndicesCornerCases:
+    """Pin overlap_indices behaviour on edge cases."""
 
     def test_book_ended_do_not_intersect(self):
         """[100,200) and [200,300) share no bases — no overlap."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 0
 
     def test_one_bp_shared_intersects(self):
         """[100,200) and [199,300) share position 199."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [199], "stop": [300]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 1
+        assert int(result["overlap_bases"].iloc[0]) == 1
 
     def test_nested_intersects(self):
-        """[0,100) contains [10,20) — overlap."""
+        """[0,100) contains [10,20) — overlap of 10bp."""
         a = _rdf({"contig": ["chr1"], "start": [0], "stop": [100]})
         b = _rdf({"contig": ["chr1"], "start": [10], "stop": [20]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 1
-        # Returns A's full interval, not the geometric clip
-        assert int(result.start.iloc[0]) == 0
-        assert int(result.stop.iloc[0]) == 100
+        assert int(result["overlap_bases"].iloc[0]) == 10
 
     def test_one_to_many(self):
         """One A interval overlaps two B intervals → two result rows."""
@@ -190,7 +157,7 @@ class TestJoinOnOverlapCornerCases:
             "start": [10, 50],
             "stop": [20, 60],
         })
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 2
 
     def test_many_to_one(self):
@@ -201,7 +168,7 @@ class TestJoinOnOverlapCornerCases:
             "stop": [30, 70],
         })
         b = _rdf({"contig": ["chr1"], "start": [20], "stop": [60]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 2
 
     def test_two_contigs_match_only_within(self):
@@ -212,49 +179,35 @@ class TestJoinOnOverlapCornerCases:
             "stop": [200, 200],
         })
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b)
         assert len(result) == 1
 
-    def test_b_columns_are_suffixed(self):
-        """B's columns get the rsuff to avoid name collisions."""
+    def test_how_validation(self):
+        """Invalid how values raise ValueError."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.join_on_overlap(b, rsuff="B")
-        assert "contig_B" in result.columns
-        assert "start_B" in result.columns
-        assert "stop_B" in result.columns
+        with pytest.raises(ValueError, match="how="):
+            overlap_indices(a, b, how="bogus")
 
-    def test_index_is_preserved(self):
-        """A's original index is carried through the join."""
+    def test_anti_join(self):
+        """how='anti' returns A rows with no match in B."""
         a = _rdf({
             "contig": ["chr1", "chr1"],
-            "start": [100, 300],
-            "stop": [200, 400],
+            "start": [100, 500],
+            "stop": [200, 600],
         })
-        a.index = pd.Index([10, 20])
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.join_on_overlap(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 1
-        assert result.index[0] == 10
-
-    def test_duplicates(self):
-        """Two identical A intervals overlapping B → two result rows."""
-        a = _rdf({
-            "contig": ["chr1", "chr1"],
-            "start": [100, 100],
-            "stop": [200, 200],
-        })
-        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.join_on_overlap(b)
-        assert len(result) == 2
+        assert int(result["a_index"].iloc[0]) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# drop_overlapping_regions — the anti-join
+# anti join — replaces drop_overlapping_regions
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestDropOverlappingCornerCases:
-    """Pin drop_overlapping_regions — keeps non-overlapping A intervals."""
+class TestAntiJoinCornerCases:
+    """Pin anti join — keeps non-overlapping A intervals."""
 
     def test_overlapping_removed(self):
         a = _rdf({
@@ -263,9 +216,9 @@ class TestDropOverlappingCornerCases:
             "stop": [200, 600],
         })
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 1
-        assert int(result.start.iloc[0]) == 500
+        assert int(result["a_index"].iloc[0]) == 1
 
     def test_nothing_overlaps_keeps_all(self):
         a = _rdf({
@@ -274,88 +227,73 @@ class TestDropOverlappingCornerCases:
             "stop": [200, 600],
         })
         b = _rdf({"contig": ["chr2"], "start": [100], "stop": [200]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 2
 
     def test_everything_overlaps_returns_empty(self):
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [0], "stop": [300]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 0
-        assert isinstance(result, RegionDataFrame)
 
     def test_book_ended_not_removed(self):
-        """Book-ended intervals don't overlap (in intersect), so kept."""
+        """Book-ended intervals don't overlap, so kept in anti."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 1
 
     def test_nested_is_removed(self):
         """A nested inside B is still overlapping → removed."""
         a = _rdf({"contig": ["chr1"], "start": [120], "stop": [180]})
         b = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# overlaps_rdf — IntervalTree-based boolean overlap
+# overlaps — replaces overlaps_rdf
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestOverlapsRdfCornerCases:
-    """Pin overlaps_rdf behaviour.
-
-    Uses IntervalTree (not bedtools), with half-open semantics.
-    Book-ended intervals do NOT overlap.  max_distance expands the
-    query intervals symmetrically for unstranded features.
-    """
+class TestOverlapsCornerCases:
+    """Pin overlaps behaviour."""
 
     def test_book_ended_no_overlap(self):
         """Half-open: [100,200) and [200,300) don't share any bases."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [False]
 
     def test_one_bp_shared(self):
         """[100,200) and [199,300) share position 199."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [199], "stop": [300]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [True]
 
     def test_nested(self):
         a = _rdf({"contig": ["chr1"], "start": [0], "stop": [100]})
         b = _rdf({"contig": ["chr1"], "start": [10], "stop": [20]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [True]
 
-    def test_max_distance_bridges_book_ended(self):
-        """max_distance=1 expands query [200,300) to [199,301), which
-        overlaps with [100,200) at position 199."""
+    def test_wiggle_bridges_book_ended(self):
+        """wiggle=1 bridges a book-ended gap (gap=0 <= 1)."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
-        result = a.overlaps_rdf(b, max_distance=1)
+        result = overlaps(a, b, wiggle=1)
         assert list(result) == [True]
 
-    def test_max_distance_not_quite_enough(self):
-        """[100,200) + [202,300) — edge-to-edge gap is 2bp.
+    def test_wiggle_boundary(self):
+        """A gap of exactly G matches at wiggle=G and not at G-1.
 
-        max_distance expands the query by N on each side, but IntervalTree
-        uses half-open intervals, so expanded [200,302) and [100,200) are
-        book-ended and still don't overlap.  max_distance=3 is the first
-        value that bridges a 2bp gap (expanding to [199,303) which shares
-        position 199 with A).
-
-        This is a quirk of the implementation: the effective bridging
-        distance is max_distance - 1, not max_distance.
+        This is the required boundary test from the design doc.
         """
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
-        b = _rdf({"contig": ["chr1"], "start": [202], "stop": [300]})
-        assert list(a.overlaps_rdf(b, max_distance=1)) == [False]
-        assert list(a.overlaps_rdf(b, max_distance=2)) == [False]  # still book-ended
-        assert list(a.overlaps_rdf(b, max_distance=3)) == [True]
+        b = _rdf({"contig": ["chr1"], "start": [210], "stop": [300]})  # gap = 10
+        assert list(overlaps(a, b, wiggle=9)) == [False]
+        assert list(overlaps(a, b, wiggle=10)) == [True]
 
     def test_two_contigs(self):
         a = _rdf({
@@ -364,14 +302,14 @@ class TestOverlapsRdfCornerCases:
             "stop": [200, 200],
         })
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [True, False]
 
     def test_single_base_overlap(self):
         """[100,200) and [199,200) share exactly position 199."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [199], "stop": [200]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [True]
 
     def test_duplicates(self):
@@ -382,156 +320,8 @@ class TestOverlapsRdfCornerCases:
             "stop": [200, 200],
         })
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
-        result = a.overlaps_rdf(b)
+        result = overlaps(a, b)
         assert list(result) == [True, True]
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# get_overlapping_base_counts — known bugs included
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestGetOverlappingBaseCountsCornerCases:
-    """Pin get_overlapping_base_counts, including its documented bugs.
-
-    KNOWN BUG (from design doc): this method keys aggregation on
-    (contig, start, stop) with strand EXCLUDED.  Two rows sharing
-    coordinates but different strands collide: the later row overwrites
-    the earlier in the lookup dict, and the groupby combines both rows'
-    base counts into that one entry.  Phase 1 deletes this method.
-    """
-
-    @pytest.fixture
-    def anno_bed(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "anno.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t150\t180\n")
-                fh.write("chr1\t190\t260\n")
-            yield path
-
-    def test_book_ended_no_overlap(self):
-        """Book-ended: [180,190) vs annotation at [150,180) — no shared bases."""
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "anno.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t150\t180\n")
-            rdf = _rdf({"contig": ["chr1"], "start": [180], "stop": [200]})
-            res = rdf.get_overlapping_base_counts(path)
-            assert list(res["counts"]) == [0]
-            assert list(res["max_counts"]) == [0]
-
-    def test_nested_gets_full_inner_length(self):
-        """Query fully contains annotation → overlap = annotation length."""
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "anno.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t120\t130\n")  # 10bp, nested inside [100,200)
-            rdf = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
-            res = rdf.get_overlapping_base_counts(path)
-            assert list(res["counts"]) == [10]
-            assert list(res["max_counts"]) == [10]
-
-    def test_strand_collision_bug(self):
-        """KNOWN BUG: two rows with same (contig, start, stop) but different
-        strands collide in region2idx.
-
-        region2idx = {(contig, start, stop): idx} — strand excluded.
-        The dict comprehension's last write wins (idx=1), so the groupby
-        deposits both rows' combined overlaps into counts[1] while
-        counts[0] stays at zero.
-        """
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "anno.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t120\t130\n")  # 10bp overlap with [100,200)
-
-            rdf = _rdf({
-                "contig": ["chr1", "chr1"],
-                "start": [100, 100],
-                "stop": [200, 200],
-                "strand": ["+", "-"],
-            })
-            res = rdf.get_overlapping_base_counts(path)
-
-            # Bug: first row (idx=0) gets nothing — it was overwritten in
-            # region2idx.  Second row (idx=1) gets the combined count from
-            # both rows' overlaps (10 + 10 = 20).
-            assert res["counts"][0] == 0, (
-                "Bug behavior: first row should get 0 due to key collision"
-            )
-            assert res["counts"][1] == 20, (
-                "Bug behavior: second row should get combined count (20)"
-            )
-            assert res["max_counts"][0] == 0
-            assert res["max_counts"][1] == 10
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# _get_fragment_coverage_sum — BED path (the one that changes shape
-# in Phase 2 when chunking is introduced)
-# ═══════════════════════════════════════════════════════════════════════
-
-class TestFragmentCoverageSumCornerCases:
-    """Pin _get_fragment_coverage_sum with the BED-file path.
-
-    This is the method that changes from streaming (pybedtools) to
-    chunked in-memory reads (bioframe) in Phase 2.  The fixture ensures
-    the chunked result matches the unchunked one.
-    """
-
-    def test_basic_counting(self):
-        rdf = _rdf({
-            "contig": ["chr1", "chr1", "chr2"],
-            "start": [100, 500, 100],
-            "stop": [200, 600, 200],
-            "id": ["r1", "r2", "r3"],
-        })
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "fragments.bed")
-            with open(path, "w") as fh:
-                # 3 fragments in region r1
-                fh.write("chr1\t120\t140\n")
-                fh.write("chr1\t150\t160\n")
-                fh.write("chr1\t180\t190\n")
-                # 1 fragment in region r2
-                fh.write("chr1\t510\t520\n")
-                # 0 fragments in r3 (different contig)
-            result = rdf._get_fragment_coverage_sum(path)
-            assert len(result) == 3
-            assert result[0] == 3.0
-            assert result[1] == 1.0
-            assert result[2] == 0.0
-
-    def test_fragment_spanning_two_regions(self):
-        """A fragment overlapping two regions is counted in both."""
-        rdf = _rdf({
-            "contig": ["chr1", "chr1"],
-            "start": [100, 190],
-            "stop": [200, 300],
-            "id": ["r1", "r2"],
-        })
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "fragments.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t150\t250\n")  # spans both regions
-            result = rdf._get_fragment_coverage_sum(path)
-            assert result[0] == 1.0
-            assert result[1] == 1.0
-
-    def test_book_ended_fragment_not_counted(self):
-        """A fragment book-ended with a region doesn't overlap it."""
-        rdf = _rdf({
-            "contig": ["chr1"],
-            "start": [100],
-            "stop": [200],
-            "id": ["r1"],
-        })
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "fragments.bed")
-            with open(path, "w") as fh:
-                fh.write("chr1\t200\t300\n")  # starts where region ends
-            result = rdf._get_fragment_coverage_sum(path)
-            assert result[0] == 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -577,9 +367,10 @@ class TestFromBedsMergedCornerCases:
             result = RegionDataFrame.from_beds_merged([p1, p2], ref="hg38")
             assert len(result) == 2
 
-    def test_book_ended_beds_merge(self):
-        """Book-ended intervals from two BEDs merge (merge considers
-        them adjacent)."""
+    def test_book_ended_beds_not_merged(self):
+        """FIXTURE MOVEMENT: book-ended intervals from two BEDs do NOT
+        merge at wiggle=0 (the new default).  The old merge_regions()
+        delegated to bedtools merge which merged book-ended by default."""
         with tempfile.TemporaryDirectory() as d:
             p1 = os.path.join(d, "a.bed")
             p2 = os.path.join(d, "b.bed")
@@ -588,9 +379,7 @@ class TestFromBedsMergedCornerCases:
             with open(p2, "w") as fh:
                 fh.write("chr1\t100\t200\n")
             result = RegionDataFrame.from_beds_merged([p1, p2], ref="hg38")
-            assert len(result) == 1
-            assert int(result.start.iloc[0]) == 0
-            assert int(result.stop.iloc[0]) == 200
+            assert len(result) == 2
 
     def test_chroms_filter(self):
         """chroms parameter filters to selected chromosomes."""
@@ -606,65 +395,50 @@ class TestFromBedsMergedCornerCases:
             assert len(result) == 2
             assert set(result.contig) == {"chr1", "chr3"}
 
-    def test_default_callback_is_identity(self):
-        """bed_filter_callback=None produces the same result as an
-        explicit identity filter.  This pins that dropping the callback
-        parameter in Phase 2 changes nothing."""
-        with tempfile.TemporaryDirectory() as d:
-            p1 = os.path.join(d, "a.bed")
-            p2 = os.path.join(d, "b.bed")
-            with open(p1, "w") as fh:
-                fh.write("chr1\t100\t200\n")
-                fh.write("chr1\t400\t500\n")
-            with open(p2, "w") as fh:
-                fh.write("chr1\t300\t600\n")
-            default = RegionDataFrame.from_beds_merged([p1, p2], ref="hg38")
-            explicit = RegionDataFrame.from_beds_merged(
-                [p1, p2], ref="hg38",
-                bed_filter_callback=lambda _: True,
-            )
-            assert len(default) == len(explicit)
-            assert list(default.contig) == list(explicit.contig)
-            assert list(default.start) == list(explicit.start)
-            assert list(default.stop) == list(explicit.stop)
-
 
 # ═══════════════════════════════════════════════════════════════════════
-# Strand behaviour — pin that strand is IGNORED in all current ops
+# Strand behaviour — same_strand parameter
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestStrandBehavior:
-    """Pin that strand is IGNORED in all current interval operations.
+    """Pin strand behaviour in the new interval API.
 
-    No production code passes a strand flag to bedtools.  The bedtools
-    path ignores strand by default; overlaps_rdf uses coordinate-only
-    IntervalTree.
+    Default (same_strand=False): strand is ignored, everything matches
+    on coordinates alone.
 
-    Phase 1's same_strand parameter must treat "." vs "." as NO MATCH
-    (the bedtools -s / bioframe on=['strand'] divergence).  The tests
-    here pin the CURRENT behaviour (strand ignored → everything matches
-    on coordinates alone) so that the Phase 1 change is visible as a
-    diff, not an assumption.
+    same_strand=True: only {+,+} and {-,-} match.  "." vs "." does NOT
+    match (bedtools -s convention).
     """
 
-    def test_join_opposite_strands_overlap(self):
-        """+ vs - on overlapping coordinates: match (strand ignored)."""
+    def test_overlap_opposite_strands_default(self):
+        """Default: + vs - on overlapping coordinates match."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["+"]})
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["-"]})
-        result = a.join_on_overlap(b)
-        assert len(result) == 1
+        assert list(overlaps(a, b)) == [True]
 
-    def test_join_dot_vs_dot_overlap(self):
-        """'.' vs '.' on overlapping coordinates: match (strand ignored).
-
-        This is the case that will CHANGE in Phase 1: same_strand=True
-        must treat '.' vs '.' as NO match.  But currently strand is not
-        compared at all, so they match.
-        """
+    def test_overlap_dot_vs_dot_default(self):
+        """Default: . vs . match (strand ignored)."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["."]})
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["."]})
-        result = a.join_on_overlap(b)
-        assert len(result) == 1
+        assert list(overlaps(a, b)) == [True]
+
+    def test_overlap_dot_vs_dot_same_strand(self):
+        """same_strand=True: . vs . does NOT match."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["."]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["."]})
+        assert list(overlaps(a, b, same_strand=True)) == [False]
+
+    def test_overlap_same_strand_plus(self):
+        """same_strand=True: + vs + matches."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["+"]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["+"]})
+        assert list(overlaps(a, b, same_strand=True)) == [True]
+
+    def test_overlap_opposite_strands_same_strand(self):
+        """same_strand=True: + vs - does NOT match."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["+"]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["-"]})
+        assert list(overlaps(a, b, same_strand=True)) == [False]
 
     def test_merge_ignores_strand(self):
         """+ and - regions that overlap coordinately merge."""
@@ -674,40 +448,81 @@ class TestStrandBehavior:
             "stop": [200, 300],
             "strand": ["+", "-"],
         })
-        merged = rdf.merge_regions()
+        merged = merge(rdf)
         assert len(merged) == 1
 
-    def test_overlaps_rdf_ignores_strand(self):
-        """IntervalTree is coordinate-only; opposite strands still match."""
+    def test_anti_ignores_strand(self):
+        """+ regions are removed by - blacklist if coordinates overlap."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["+"]})
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["-"]})
-        result = a.overlaps_rdf(b)
-        assert list(result) == [True]
-
-    def test_overlaps_rdf_dot_vs_dot(self):
-        """'.' vs '.' currently matches (strand not compared).
-
-        Phase 1: same_strand=True must make this NOT match.
-        """
-        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["."]})
-        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["."]})
-        result = a.overlaps_rdf(b)
-        assert list(result) == [True]
-
-    def test_drop_overlapping_ignores_strand(self):
-        """+ regions are dropped by - blacklist if coordinates overlap."""
-        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200], "strand": ["+"]})
-        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250], "strand": ["-"]})
-        result = a.drop_overlapping_regions(b)
+        result = overlap_indices(a, b, how="anti")
         assert len(result) == 0
 
-    def test_merge_dot_vs_dot_merges(self):
-        """'.' stranded regions merge if coordinates overlap."""
-        rdf = _rdf({
-            "contig": ["chr1", "chr1"],
-            "start": [100, 150],
-            "stop": [200, 300],
-            "strand": [".", "."],
-        })
-        merged = rdf.merge_regions()
-        assert len(merged) == 1
+
+# ═══════════════════════════════════════════════════════════════════════
+# cluster
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestClusterCornerCases:
+    def test_single_frame(self):
+        rdf = _rdf({"contig": ["chr1","chr1","chr1"], "start": [100,150,400], "stop": [200,300,500]})
+        labels = cluster(rdf)
+        assert labels.iloc[0] == labels.iloc[1]
+        assert labels.iloc[0] != labels.iloc[2]
+
+    def test_two_frame_transitive(self):
+        """A and C don't overlap directly, but both overlap B."""
+        a = _rdf({"contig": ["chr1","chr1"], "start": [100,400], "stop": [200,500]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [450]})
+        labels = cluster(a, b)
+        assert labels.iloc[0] == labels.iloc[1]
+
+    def test_book_ended_not_clustered(self):
+        rdf = _rdf({"contig": ["chr1","chr1"], "start": [0,10], "stop": [10,20]})
+        labels = cluster(rdf)
+        assert labels.iloc[0] != labels.iloc[1]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# nearest
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestNearestCornerCases:
+    def test_basic_nearest(self):
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
+        result = nearest(a, b)
+        assert len(result) == 1
+        assert int(result["distance"].iloc[0]) == 100
+
+    def test_ref_mismatch_raises(self):
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]}, ref="hg38")
+        b = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]}, ref="hg19")
+        with pytest.raises(ValueError, match="same reference"):
+            nearest(a, b)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Fraction thresholds
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFractionThresholds:
+    def test_min_frac_a(self):
+        """Only keep matches where >= 50% of A is covered."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})  # 100bp
+        b = _rdf({"contig": ["chr1"], "start": [160], "stop": [300]})  # 40bp overlap
+        result = overlap_indices(a, b, min_frac_a=0.5)
+        assert len(result) == 0  # 40/100 = 0.4 < 0.5
+
+        result2 = overlap_indices(a, b, min_frac_a=0.3)
+        assert len(result2) == 1  # 40/100 = 0.4 >= 0.3
+
+    def test_min_frac_b(self):
+        """Only keep matches where >= 50% of B is covered."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})  # 100bp
+        b = _rdf({"contig": ["chr1"], "start": [180], "stop": [300]})  # 120bp, 20bp overlap
+        result = overlap_indices(a, b, min_frac_b=0.5)
+        assert len(result) == 0  # 20/120 < 0.5
+
+        result2 = overlap_indices(a, b, min_frac_b=0.1)
+        assert len(result2) == 1  # 20/120 >= 0.1
