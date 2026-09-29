@@ -630,3 +630,88 @@ class TestReciprocalFraction:
         a, b = self._a_inside_b()
         with pytest.raises(ValueError, match="min_frac_a"):
             overlap_indices(a, b, reciprocal=True)
+
+
+# ── label/position safety ────────────────────────────────────────────
+
+def _labelled(rows, idx):
+    return RegionDataFrame(pd.DataFrame(rows, index=idx), ref="hg38")
+
+
+_A_ROWS = {
+    "contig": ["chr1", "chr1", "chr1"],
+    "start": [100, 5000, 9000],
+    "stop": [200, 5100, 9100],
+    "strand": ["+", "+", "-"],
+}
+_B_ROWS = {
+    "contig": ["chr1", "chr1"],
+    "start": [150, 9050],
+    "stop": [300, 9200],
+    "strand": ["+", "+"],
+}
+
+# Every public entry point, including the parameter paths that have their own
+# internal lookups (wiggle, same_strand and the fraction filter each index
+# back into the input frames separately).
+_ENTRY_POINTS = {
+    "overlap_indices_inner": lambda a, b: overlap_indices(a, b),
+    "overlap_indices_anti": lambda a, b: overlap_indices(a, b, how="anti"),
+    "overlap_indices_left": lambda a, b: overlap_indices(a, b, how="left"),
+    "overlap_indices_wiggle": lambda a, b: overlap_indices(a, b, wiggle=50),
+    "overlap_indices_same_strand": lambda a, b: overlap_indices(a, b, same_strand=True),
+    "overlap_indices_min_frac": lambda a, b: overlap_indices(a, b, min_frac_a=0.3),
+    "overlaps": lambda a, b: overlaps(a, b),
+    "overlaps_wiggle": lambda a, b: overlaps(a, b, wiggle=50),
+    "overlaps_same_strand": lambda a, b: overlaps(a, b, same_strand=True),
+    "nearest": lambda a, b: nearest(a, b),
+    "cluster_one_frame": lambda a, b: cluster(a),
+    "cluster_two_frames": lambda a, b: cluster(a, b),
+    "merge": lambda a, b: merge(a),
+}
+
+
+def _values_only(result):
+    """Compare by values, ignoring the index labels themselves."""
+    if isinstance(result, pd.Series):
+        return list(result.values)
+    if isinstance(result, pd.DataFrame):
+        cols = [c for c in result.columns if c not in ("a_index", "b_index")]
+        return [len(result)] + [list(result[c].values) for c in cols]
+    return result
+
+
+@pytest.mark.parametrize("name", sorted(_ENTRY_POINTS))
+def test_entry_point_is_indifferent_to_index_labels(name):
+    """Results must not depend on whether the index is 0..n-1 or arbitrary.
+
+    `bioframe` returns index LABELS in its `index`/`index_` columns. Any
+    internal lookup that treats those as POSITIONS breaks on frames produced
+    by a filter or a slice — which is most real frames. This has been found
+    four separate times in this module: the wiggle path, the fraction filter,
+    `overlaps`, and `_strand_mask`.
+
+    Two of those four raised IndexError, which is survivable. The other two
+    returned a plausible WRONG ANSWER — `overlaps` handed back an all-False
+    mask — which is not. Default-indexed fixtures cannot catch either, and
+    `from_bed` produces a default index, so even the real-data manifest run
+    exercises only the safe path.
+    """
+    fn = _ENTRY_POINTS[name]
+    default = fn(_labelled(_A_ROWS, [0, 1, 2]), _labelled(_B_ROWS, [0, 1]))
+    labelled = fn(_labelled(_A_ROWS, [10, 20, 30]), _labelled(_B_ROWS, [77, 88]))
+    assert _values_only(default) == _values_only(labelled)
+
+
+def test_overlaps_does_not_return_all_false_on_a_labelled_index():
+    """The specific silent failure, pinned on its own.
+
+    The parametrized test above would also catch this, but only by comparing
+    against the default-index run. This asserts the true answer directly, so
+    a future change that broke BOTH paths identically could not slip through.
+    """
+    a = _labelled(_A_ROWS, [10, 20, 30])
+    b = _labelled({"contig": ["chr1"], "start": [150], "stop": [300]}, [0])
+    mask = overlaps(a, b)
+    assert list(mask.values) == [True, False, False]
+    assert list(mask.index) == [10, 20, 30]

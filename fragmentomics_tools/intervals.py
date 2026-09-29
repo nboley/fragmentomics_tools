@@ -46,8 +46,10 @@ def _strand_mask(a, b, idx, same_strand: bool) -> pd.Series:
     if not same_strand:
         return pd.Series(True, index=idx.index)
 
-    a_strand = a["strand"].values[idx["a_index"].values]
-    b_strand = b["strand"].values[idx["b_index"].values]
+    # `.loc`, not `.values[...]`: a_index/b_index hold index LABELS, so
+    # positional indexing is wrong for any frame not indexed 0..n-1.
+    a_strand = a["strand"].loc[idx["a_index"].values].values
+    b_strand = b["strand"].loc[idx["b_index"].values].values
 
     stranded_a = (a_strand == "+") | (a_strand == "-")
     stranded_b = (b_strand == "+") | (b_strand == "-")
@@ -274,9 +276,12 @@ def overlaps(
     pd.Series[bool], index-aligned to *a*.
     """
     idx = overlap_indices(a, b, how="inner", wiggle=wiggle, same_strand=same_strand)
-    matched = set(idx["a_index"].dropna().values)
+    # `a_index` holds index LABELS. Testing `range(len(a))` against them
+    # compares positions to labels, which silently returns an all-False mask
+    # for any frame whose index is not 0..n-1 -- i.e. any filtered or sliced
+    # frame. `Index.isin` is both label-correct and vectorised.
     return pd.Series(
-        [i in matched for i in range(len(a))],
+        a.index.isin(idx["a_index"].dropna().values),
         index=a.index,
         dtype=bool,
     )
