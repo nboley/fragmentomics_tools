@@ -11,6 +11,10 @@ dependencies:
   - setuptools >=61
   - numpy >=1.26
   - pandas
+  # Parquet I/O for scripts/count_cut_site_hexamers.py. Was already present in
+  # the dev env as a transitive dep, but undeclared -- which would have failed
+  # at import time in a Batch container built from this file.
+  - pyarrow
   - scipy
   - scikit-learn
   - matplotlib

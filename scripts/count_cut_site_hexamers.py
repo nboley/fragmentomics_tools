@@ -91,13 +91,59 @@ Filters and de-duplication
   choice is visible rather than hidden.
   The h5 does *not* pre-de-duplicate; the measured rate is in the output.
 
-Output
-------
-A single self-describing ``.npz``: the four observed tables, the four background
-tables, the band edges, and a ``meta`` JSON blob carrying region-set identity
-(path + md5 + region count), sample/h5 identity, ``min_mapq``, the dedup rule,
-the geometry constants and every fragment tally.  A count table without that
-provenance is unusable six weeks later.
+Output: a dataframe keyed by the hexamer STRING
+-----------------------------------------------
+A single self-describing Parquet file in long form, one row per
+``(hexamer, table, band)``::
+
+    hexamer  table      band_lo  band_hi  observed  background
+    AAAAAA   start_fwd       25       35       137     1092341
+    ...
+
+The key is the literal 6-mer, **not** an integer code, and that is the point.
+A bare 4096-element array ordered by an implicit integer code makes the k-mer
+ordering and the RC convention a *contract* between producer and consumer.  If
+a table is ever produced under a different convention every downstream weight
+is wrong, and the normalisation invariant ``sum_Omega w == 1`` still holds,
+because normalisation cannot see a relabelling of the table -- a silent failure
+with no detector.  Keyed by the string, that failure is not expressible: a
+consumer builds its own index-ordered array by looking each string up through
+its own indexer, so a mismatched table fails to *join* rather than silently
+misaligning.  The integer code is now a private implementation detail on each
+side rather than a shared contract.
+
+**Which strand the string is written in.**  The string removes the *index*
+ambiguity; it does not by itself remove the *orientation* one.  In every table
+the 6-mer is written **5'->3' along the strand of the fragment that produced
+it**:
+
+* ``start_fwd`` / ``end_fwd`` -- plus-strand fragments, so the string is the
+  reference-forward 6-mer spanning the cut site.
+* ``start_rev`` / ``end_rev`` -- minus-strand fragments, so the string is the
+  **reverse complement** of the reference-forward 6-mer at that cut site
+  (these tables index ``hex_rc``).
+
+So ``start_rev`` row ``"AAAAAA"`` counts cut sites whose *reference* sequence
+is ``TTTTTT``.  Do not reverse-complement these tables again when joining.
+
+**Long, not wide.**  A wide layout -- 4096 hexamer columns, or one column per
+``(table, band)`` -- would push the table name and the band edges back out of
+the data and into *column names*, which is the same implicit schema contract
+the string key was adopted to remove.  In long form every row carries its own
+``(hexamer, table, band_lo, band_hi)`` as values, a band re-scheme changes no
+schema, and ``pyarrow``'s dictionary encoding makes the repeated strings nearly
+free.
+
+Both count columns are ``int64``.  ``background`` is accumulated in float64
+only because ``np.bincount`` weights are float64; the values are exact integers
+by construction and the writer refuses to write a non-integral one rather than
+rounding it.
+
+Provenance travels in the Parquet file-level metadata under the key
+``count_cut_site_hexamers_meta``: region-set identity (path + md5 + region
+count), sample/h5 identity, ``min_mapq``, the dedup rule, the in-region rule,
+the geometry constants and every fragment tally.  A count table without that is
+unusable six weeks later.  ``read_output(path)`` returns ``(dataframe, meta)``.
 
 Example
 -------
@@ -107,7 +153,7 @@ Example
         --fragments-h5 /efs/.../<md5>-RD-56413-Lib1.hg38.fragments.h5 \\
         --regions-bed data/region_sets/quiet_v2_pad1200_repeats_removed_tile2560.bed \\
         --fasta /efs/analytics/nathanboley/data_resources/genome/hg38.fa \\
-        --output /efs/.../RD-56413-Lib1.cut_site_hexamers.npz
+        --output /efs/.../RD-56413-Lib1.cut_site_hexamers.parquet
 """
 from __future__ import annotations
 
@@ -120,6 +166,9 @@ import sys
 import time
 
 import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # ``background_model`` is not an installed package -- it is importable only with
 # the repo root on sys.path.  Pin it to THIS FILE's repo at position 0 rather
@@ -130,7 +179,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from background_model.config import PlumbingConfig  # noqa: E402
-from background_model.simulator.precompute import HEX_HALF, hexamer_indices  # noqa: E402
+from background_model.simulator.precompute import HEX_HALF, KMER, hexamer_indices  # noqa: E402
 from background_model.simulator.weights import L_MAX, L_MIN, NHEX  # noqa: E402
 from fragments_h5 import FragmentsH5  # noqa: E402
 
@@ -139,6 +188,53 @@ logger = logging.getLogger(__name__)
 DEFAULT_BAND_WIDTH = 10
 
 TABLE_NAMES = ("start_fwd", "end_fwd", "start_rev", "end_rev")
+
+META_KEY = b"count_cut_site_hexamers_meta"
+
+#: The written schema, stated once so that ``write_output`` cannot drift from
+#: the module docstring by accident.  ``band_lo``/``band_hi`` are the half-open
+#: edges of the row's band, repeated on every row so that the band scheme is a
+#: *value* in the data rather than a naming convention on columns.
+OUTPUT_SCHEMA = pa.schema([
+    ("hexamer", pa.string()),
+    ("table", pa.string()),
+    ("band_lo", pa.int32()),
+    ("band_hi", pa.int32()),
+    ("observed", pa.int64()),
+    ("background", pa.int64()),
+])
+
+
+# ── hexamer index <-> string ─────────────────────────────────────────────
+
+def hexamer_vocabulary() -> np.ndarray:
+    """``vocab[i]`` is the 6-mer whose forward index is ``i``, as ``S6`` bytes.
+
+    Derived **from** ``hexamer_indices`` rather than by reimplementing its
+    encoding backwards.  All 4096 6-mers are laid end to end and passed through
+    the production indexer in one call; taking every 6th sliding window recovers
+    each 6-mer's own index, which is then used to place it.  A second,
+    hand-written base-4 decoder here would be exactly the shared-contract
+    problem this output format exists to remove.
+
+    >>> v = hexamer_vocabulary()
+    >>> v.shape, v[0].decode(), v[-1].decode()
+    ((4096,), 'AAAAAA', 'TTTTTT')
+    """
+    # (4096, 6) base-4 codes in lexicographic order, then to ASCII.
+    grid = np.indices((4,) * KMER).reshape(KMER, -1).T
+    letters = np.frombuffer(b"ACGT", dtype=np.uint8)[grid].astype(np.uint8)
+
+    fwd, _rc, valid = hexamer_indices(letters.reshape(-1))
+    starts = np.arange(0, NHEX * KMER, KMER)
+    idx = fwd[starts]
+    assert valid[starts].all()
+    assert np.unique(idx).size == NHEX, "hexamer index is not a bijection"
+
+    strings = np.frombuffer(letters.tobytes(), dtype=f"S{KMER}")
+    vocab = np.empty(NHEX, dtype=f"S{KMER}")
+    vocab[idx] = strings
+    return vocab
 
 
 # ── fragment-length bands ────────────────────────────────────────────────
@@ -514,14 +610,83 @@ def count_sample(
     return obs, bg, stats
 
 
+def _exact_int64(name: str, values: np.ndarray) -> np.ndarray:
+    """``values`` as int64, refusing to round.
+
+    ``bg`` is float64 only because ``np.bincount`` weights are; its entries are
+    counts and so exact integers.  If one is ever not, that is a bug upstream
+    and silently truncating it here would hide it.
+    """
+    if not np.all(values == np.rint(values)):
+        bad = values[values != np.rint(values)][:3]
+        raise ValueError(
+            f"{name} holds non-integral counts (e.g. {bad.tolist()}); refusing "
+            f"to round them into the int64 output column"
+        )
+    if values.size and values.max() > np.iinfo(np.int64).max:
+        raise ValueError(f"{name} overflows int64")
+    return values.astype(np.int64)
+
+
+def build_dataframe(obs, bg, band_edges) -> pd.DataFrame:
+    """The long-form table: one row per ``(hexamer, table, band)``.
+
+    Row order is table-major, then band, then forward hexamer index -- but that
+    is an implementation detail and a consumer must join on the ``hexamer``
+    *string*, never on row position.  Rebuilding an index-ordered array by
+    looking each string up through the consumer's own indexer is what turns a
+    convention mismatch into a failed join instead of a silent relabelling.
+    """
+    vocab = hexamer_vocabulary().astype("U")
+    n_bands = len(band_edges)
+    n_tables = len(TABLE_NAMES)
+    band_edges = np.asarray(band_edges)
+
+    return pd.DataFrame({
+        "hexamer": np.tile(vocab, n_tables * n_bands),
+        "table": np.repeat(np.asarray(TABLE_NAMES), n_bands * NHEX),
+        "band_lo": np.tile(np.repeat(band_edges[:, 0], NHEX), n_tables),
+        "band_hi": np.tile(np.repeat(band_edges[:, 1], NHEX), n_tables),
+        "observed": np.concatenate(
+            [_exact_int64(f"obs[{k}]", obs[k]).reshape(-1) for k in TABLE_NAMES]
+        ),
+        "background": np.concatenate(
+            [_exact_int64(f"bg[{k}]", bg[k]).reshape(-1) for k in TABLE_NAMES]
+        ),
+    })
+
+
 def write_output(out_path, obs, bg, band_edges, meta):
-    arrays = {f"obs_{k}": obs[k] for k in TABLE_NAMES}
-    arrays.update({f"bg_{k}": bg[k] for k in TABLE_NAMES})
-    arrays["band_edges"] = band_edges
-    arrays["meta"] = np.array(json.dumps(meta, indent=2, sort_keys=True))
+    """Write the long-form Parquet file, with ``meta`` as file-level metadata."""
+    table = pa.Table.from_pandas(
+        build_dataframe(obs, bg, band_edges),
+        schema=OUTPUT_SCHEMA,
+        preserve_index=False,
+    ).replace_schema_metadata(
+        {META_KEY: json.dumps(meta, indent=2, sort_keys=True).encode("utf-8")}
+    )
     out_dir = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(out_dir, exist_ok=True)
-    np.savez_compressed(out_path, **arrays)
+    pq.write_table(table, out_path, compression="zstd")
+
+
+def read_output(path):
+    """Read a file written by this script: ``(dataframe, meta)``.
+
+    The metadata is not optional.  A Parquet file of these columns without the
+    provenance block is not one of ours -- it could have been produced under a
+    different region set, MAPQ cut or hexamer convention -- so this raises
+    rather than returning counts whose origin is unknown.
+    """
+    table = pq.read_table(path)
+    metadata = table.schema.metadata or {}
+    if META_KEY not in metadata:
+        raise ValueError(
+            f"{path} carries no {META_KEY.decode()} file-level metadata, so its "
+            f"region set, MAPQ cut and geometry are unknown. Refusing to return "
+            f"counts without their provenance."
+        )
+    return table.to_pandas(), json.loads(metadata[META_KEY])
 
 
 def main():
@@ -531,7 +696,7 @@ def main():
     parser.add_argument("--fragments-h5", required=True)
     parser.add_argument("--regions-bed", required=True)
     parser.add_argument("--fasta", required=True)
-    parser.add_argument("--output", required=True, help="Output .npz path")
+    parser.add_argument("--output", required=True, help="Output .parquet path")
     parser.add_argument(
         "--sample-name", default=None,
         help="Identity recorded in the output; defaults to the h5 basename.",
@@ -598,6 +763,13 @@ def main():
             "hex at cut site c spans seq[c-3:c+3] (3 in / 3 out); "
             "plus: c5=p,c3=p+L via hex_fwd; minus: c5=p+L,c3=p via hex_rc; "
             "counted only when valid[c5] and valid[c3]"
+        ),
+        "hexamer_orientation": (
+            "the 'hexamer' column is written 5'->3' along the strand of the "
+            "fragment that produced it: start_fwd/end_fwd are reference-forward, "
+            "start_rev/end_rev are the REVERSE COMPLEMENT of the "
+            "reference-forward 6-mer at that cut site. Do not reverse-complement "
+            "them again when joining."
         ),
         "background_domain": (
             "all (c5, c3, strand) with L in [l_min, l_max] and both cut sites "

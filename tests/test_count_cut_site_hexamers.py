@@ -490,3 +490,278 @@ def test_hexamer_track_matches_the_independent_encoder():
         assert len(six) == 6
         assert hex_fwd[c] == hidx(six), f"fwd at cut site {c}"
         assert hex_rc[c] == hidx(rc(six)), f"rc at cut site {c}"
+
+
+# ── the docstring examples are tests, and nothing else runs them ─────────
+
+def test_every_docstring_example_in_the_script_runs():
+    """``make test --doctest-modules`` covers ``test/`` and
+    ``fragmentomics_tools/``, not ``scripts/`` -- and ``scripts/`` cannot simply
+    be added, because three unrelated scripts there fail to even import.  So
+    this module's examples were never executed, and one of them was stale:
+    numpy 2.x reprs a bytes scalar as ``np.bytes_(b'AAAAAA')``, so the
+    ``hexamer_vocabulary`` example could not have passed.  Run them here.
+    """
+    import doctest
+
+    results = doctest.testmod(csh, verbose=False)
+    assert results.attempted >= 3, "the examples stopped being collected"
+    assert results.failed == 0, (
+        f"{results.failed} of {results.attempted} doctests failed"
+    )
+
+
+# ── the hexamer vocabulary ───────────────────────────────────────────────
+
+def test_vocabulary_inverts_the_independent_encoder():
+    """``vocab[i]`` must be the 6-mer the test's own encoder sends to ``i``.
+
+    This is the property the whole output format rests on. It is checked
+    against ``hidx`` -- plain string arithmetic written here -- rather than
+    against the production indexer, so agreement is evidence and not a
+    tautology.
+    """
+    vocab = csh.hexamer_vocabulary()
+    assert vocab.shape == (NHEX,)
+    assert len(set(vocab.tolist())) == NHEX, "vocabulary is not a bijection"
+    for i, word in enumerate(vocab.astype("U")):
+        assert hidx(word) == i, f"vocab[{i}] = {word!r}, but hidx says {hidx(word)}"
+
+
+# ── round trip: write, read, join on the STRING ──────────────────────────
+
+def _distinct_tables(n_bands, seed=11):
+    """``(obs, bg)`` whose every element is distinct, so a permutation shows.
+
+    Counts that were all equal, or equal within a band, would let a scrambled
+    hexamer column round-trip "successfully". Every one of the
+    ``4 x n_bands x 4096`` entries here is a different number.
+    """
+    rng = np.random.default_rng(seed)
+    flat = rng.permutation(len(TABLE_NAMES) * n_bands * NHEX).reshape(
+        len(TABLE_NAMES), n_bands, NHEX
+    )
+    obs = {k: flat[i].astype(np.int64) for i, k in enumerate(TABLE_NAMES)}
+    # background is float64 upstream (np.bincount weights), but integral.
+    bg = {k: (flat[i] * 7 + 3).astype(np.float64) for i, k in enumerate(TABLE_NAMES)}
+    return obs, bg
+
+
+def _consumer_rebuild(df, n_bands, band_edges):
+    """Rebuild index-ordered ``(n_bands, NHEX)`` arrays the way a consumer must.
+
+    Deliberately uses this file's own ``hidx`` encoder and nothing from the
+    producer: each row's hexamer *string* is looked up to get a position. If
+    the producer ever changed its internal ordering this still lands every
+    count in the right bin; if it changed its RC or string convention, the
+    lookup misses and the assertions below fail.
+    """
+    hexamers = df["hexamer"].to_numpy()
+    hex_lut = {s: hidx(s) for s in set(hexamers.tolist())}
+    idx = np.fromiter(
+        (hex_lut[s] for s in hexamers), dtype=np.int64, count=len(hexamers),
+    )
+
+    band_lut = {(int(lo), int(hi)): b for b, (lo, hi) in enumerate(band_edges)}
+    band = np.fromiter(
+        (band_lut[(lo, hi)]
+         for lo, hi in zip(df["band_lo"].tolist(), df["band_hi"].tolist())),
+        dtype=np.int64, count=len(df),
+    )
+
+    names = df["table"].to_numpy()
+    out = {}
+    for k in TABLE_NAMES:
+        m = names == k
+        cells = {}
+        for col in ("observed", "background"):
+            # -1 fill: a cell no row reached stays negative, so a dropped row
+            # leaves a hole rather than a plausible zero.
+            a = np.full((n_bands, NHEX), -1, dtype=np.int64)
+            a[band[m], idx[m]] = df[col].to_numpy()[m]
+            cells[col] = a
+        out[k] = cells
+    return out
+
+
+def test_round_trip_joins_on_the_hexamer_string(tmp_path):
+    """Write, read back, join by string: every count must survive exactly.
+
+    Not "the totals agree" -- element for element, through a rebuild that
+    never sees the producer's integer code.
+    """
+    band_edges = csh.make_band_edges(25, 180, 10)
+    n_bands = len(band_edges)
+    obs, bg = _distinct_tables(n_bands)
+    meta = {"sample_name": "synthetic", "min_mapq": 10, "stats": {"n_counted": 7}}
+
+    path = tmp_path / "rt.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, meta)
+    df, got_meta = csh.read_output(str(path))
+
+    assert got_meta == meta
+    assert list(df.columns) == [
+        "hexamer", "table", "band_lo", "band_hi", "observed", "background",
+    ]
+    assert len(df) == len(TABLE_NAMES) * n_bands * NHEX
+    # the key really is a key: no (hexamer, table, band) appears twice
+    assert not df.duplicated(["hexamer", "table", "band_lo", "band_hi"]).any()
+
+    rebuilt = _consumer_rebuild(df, n_bands, band_edges)
+    for k in TABLE_NAMES:
+        np.testing.assert_array_equal(
+            rebuilt[k]["observed"], obs[k], err_msg=f"observed {k}",
+        )
+        np.testing.assert_array_equal(
+            rebuilt[k]["background"], bg[k].astype(np.int64),
+            err_msg=f"background {k}",
+        )
+        # -1 is the fill: every cell must have been reached by some row.
+        assert (rebuilt[k]["observed"] >= 0).all()
+
+
+def test_round_trip_detects_a_permuted_hexamer_column(tmp_path):
+    """The failure the string key exists to make detectable, made to happen.
+
+    A relabelling of the table is invisible to totals and to any normalisation
+    -- so it is asserted here that the *join* catches it. Without this, the
+    round-trip test above only proves that writing and reading are mutually
+    consistent, which they would be under a scrambled convention too.
+    """
+    band_edges = csh.make_band_edges(25, 180, 10)
+    n_bands = len(band_edges)
+    obs, bg = _distinct_tables(n_bands)
+    path = tmp_path / "rt.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, {"sample_name": "synthetic"})
+    df, _ = csh.read_output(str(path))
+
+    # Roll the hexamer column by one within each (table, band) block: totals
+    # and every normalisation are untouched, the file still parses, and the
+    # row count is identical.
+    scrambled = df.copy()
+    blocks = []
+    for start in range(0, len(df), NHEX):
+        block = df["hexamer"].to_numpy()[start:start + NHEX]
+        blocks.append(np.roll(block, 1))
+    scrambled["hexamer"] = np.concatenate(blocks)
+    assert scrambled["observed"].sum() == df["observed"].sum()
+    assert len(scrambled) == len(df)
+
+    rebuilt = _consumer_rebuild(scrambled, n_bands, band_edges)
+    mismatched = [
+        k for k in TABLE_NAMES
+        if not np.array_equal(rebuilt[k]["observed"], obs[k])
+    ]
+    assert mismatched == list(TABLE_NAMES), (
+        "a permuted hexamer column round-tripped undetected -- the string key "
+        "is not actually load-bearing"
+    )
+
+
+def test_round_trip_detects_a_mislabelled_table(tmp_path):
+    """Swapping two table labels must also fail the join, not just the totals."""
+    band_edges = csh.make_band_edges(25, 180, 10)
+    n_bands = len(band_edges)
+    obs, bg = _distinct_tables(n_bands)
+    path = tmp_path / "rt.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, {"sample_name": "synthetic"})
+    df, _ = csh.read_output(str(path))
+
+    swap = {"start_fwd": "start_rev", "start_rev": "start_fwd"}
+    mislabelled = df.copy()
+    mislabelled["table"] = df["table"].map(lambda t: swap.get(t, t))
+    assert mislabelled["observed"].sum() == df["observed"].sum()
+
+    rebuilt = _consumer_rebuild(mislabelled, n_bands, band_edges)
+    assert not np.array_equal(rebuilt["start_fwd"]["observed"], obs["start_fwd"])
+    assert not np.array_equal(rebuilt["start_rev"]["observed"], obs["start_rev"])
+    # ...and the untouched tables still match, so the assertion above is about
+    # the swap and not about the rebuild being broken generally.
+    np.testing.assert_array_equal(rebuilt["end_fwd"]["observed"], obs["end_fwd"])
+
+
+def test_round_trip_detects_a_dropped_row(tmp_path):
+    """A short table must be visible, not silently padded."""
+    band_edges = csh.make_band_edges(25, 180, 10)
+    n_bands = len(band_edges)
+    obs, bg = _distinct_tables(n_bands)
+    path = tmp_path / "rt.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, {"sample_name": "synthetic"})
+    df, _ = csh.read_output(str(path))
+
+    truncated = df.drop(index=df.index[3]).reset_index(drop=True)
+    rebuilt = _consumer_rebuild(truncated, n_bands, band_edges)
+    missing = [k for k in TABLE_NAMES if (rebuilt[k]["observed"] < 0).any()]
+    assert missing, "a dropped row left no hole -- the rebuild is not complete"
+
+
+# ── provenance ───────────────────────────────────────────────────────────
+
+def test_every_provenance_field_survives_the_round_trip(tmp_path):
+    """Nothing the npz carried may be lost by the format change."""
+    band_edges = csh.make_band_edges(25, 40, 5)
+    obs, bg = _distinct_tables(len(band_edges))
+    meta = {
+        "script": "count_cut_site_hexamers.py",
+        "sample_name": "RD-00000-Lib1",
+        "fragments_h5": "/efs/x/y.h5",
+        "regions_bed": "/repo/data/regions.bed",
+        "regions_bed_md5": "0" * 32,
+        "n_regions_in_bed": 11505,
+        "fasta": "/efs/hg38.fa",
+        "min_mapq": 10,
+        "mapq_rule": "min(mapq_read1, mapq_read2) >= min_mapq (inclusive)",
+        "dedup_rule": "collapse (contig, start, stop); strand NOT in the key",
+        "in_region_rule": "fully contained: gstart <= start and stop <= gstop",
+        "l_min": 25, "l_max_inclusive": 180, "band_width": 5,
+        "n_bands": len(band_edges), "n_hexamers": NHEX,
+        "background_included": True,
+        "duplicate_rate": 0.7863620858508819,
+        "stats": {"n_fetched": 5991138, "n_counted": 857675, "elapsed_s": 187.2},
+    }
+    path = tmp_path / "prov.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, meta)
+    _, got = csh.read_output(str(path))
+    assert got == meta
+    # floats must not have been stringified or rounded on the way through
+    assert got["duplicate_rate"] == meta["duplicate_rate"]
+    assert got["stats"]["n_fetched"] == 5991138
+
+
+def test_reading_a_parquet_without_provenance_raises(tmp_path):
+    """Counts of unknown origin must not be returned as if they were ours."""
+    band_edges = csh.make_band_edges(25, 40, 5)
+    obs, bg = _distinct_tables(len(band_edges))
+    path = tmp_path / "bare.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, {"sample_name": "x"})
+
+    stripped = tmp_path / "stripped.parquet"
+    table = csh.pq.read_table(str(path)).replace_schema_metadata({})
+    csh.pq.write_table(table, str(stripped))
+    with pytest.raises(ValueError, match="provenance"):
+        csh.read_output(str(stripped))
+
+
+def test_the_band_columns_carry_the_edges_as_values(tmp_path):
+    """The band scheme must be recoverable from the data, not from the schema."""
+    band_edges = csh.make_band_edges(25, 180, 10)
+    obs, bg = _distinct_tables(len(band_edges))
+    path = tmp_path / "bands.parquet"
+    csh.write_output(str(path), obs, bg, band_edges, {"sample_name": "x"})
+    df, _ = csh.read_output(str(path))
+    got = (
+        df[["band_lo", "band_hi"]].drop_duplicates()
+        .sort_values("band_lo").to_numpy()
+    )
+    np.testing.assert_array_equal(got, band_edges)
+
+
+def test_a_non_integral_background_is_refused_not_rounded(tmp_path):
+    """int64 columns must not silently truncate a float that is not a count."""
+    band_edges = csh.make_band_edges(25, 40, 5)
+    obs, bg = _distinct_tables(len(band_edges))
+    bg["end_rev"][0, 17] += 0.5
+    with pytest.raises(ValueError, match="non-integral"):
+        csh.write_output(
+            str(tmp_path / "bad.parquet"), obs, bg, band_edges, {"sample_name": "x"},
+        )
