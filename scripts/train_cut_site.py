@@ -3,6 +3,7 @@
 import argparse, os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import torch
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
@@ -38,6 +39,8 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {n_params:,}")
 
+    torch.set_float32_matmul_precision("high")
+
     train_ds = CutSiteFragmentDataset(
         store_path=args.store, model_input_size=model.model_input_size,
         model_L_min=args.L_min, model_L_max=args.L_max,
@@ -65,6 +68,7 @@ def main():
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="auto", devices=1,
+        precision="bf16-mixed",
         logger=logger,
         enable_checkpointing=True,
         default_root_dir=args.run_dir,
