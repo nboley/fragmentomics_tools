@@ -165,9 +165,12 @@ the draw.
 Enrichment = `observed / background` per hexamer, summed across all 16 FL
 bands before dividing (count-weighted collapse). Normalised within each table
 to mean 1 so that enrichment is a relative quantity. The synthetic comparison
-uses `build_w6(seed, dynamic_range=4.0)` from `scripts/sim_fragments.py` — the
-same function and default the simulator uses. Four independent synthetic draws
-(one per table) are generated to match the four real tables.
+uses `build_hexamer_tables(seed, dynamic_range=4.0)` from
+`scripts/run_simulator.py` — the function and default the **current** simulator
+uses. It draws four tables in sequence from one generator, untied by design.
+(`scripts/sim_fragments.py::build_w6` is the retired sampler's equivalent and
+is *not* what runs; it is unimportable anyway, since `scripts/` is not a package
+and importing it drags in the whole old simulator.)
 
 **What the band collapse hides:** any fragment-length-dependent variation in
 hexamer preference. A hexamer favoured at short lengths but not long ones gets
@@ -196,9 +199,10 @@ min/max dynamic range of the start tables (253--276x) dwarfs the synthetic
 (18--19x), but min/max is driven by extreme hexamers and is noisy; p95/p5 is
 the stable measure.
 
-**Start/end asymmetry is the dominant structural gap.** Start-site bias
-(5' cut) has ~50% more spread in log-space than end-site bias (3' cut). The
-simulator uses one shared `w6` table for all four, which cannot represent this.
+**Start/end asymmetry is a structural gap.** Start-site bias (5' cut) has ~50%
+more spread in log-space than end-site bias (3' cut). The simulator draws all
+four tables with a single `dynamic_range`, so every table gets log-SD ~0.42 and
+the asymmetry is absent by construction.
 
 ### 2. Shape
 
@@ -241,9 +245,23 @@ than it is between the 5' and 3' cuts. The across-end correlations are nearly
 identical regardless of strand pairing (same-strand ~0.64, cross-strand ~0.64),
 so the 5'/3' distinction is the real axis of variation, not strand.
 
-The simulator's single shared table (r = 1.0 across all four) overstates
-table coupling and cannot test whether a model recovers the within-end vs
-across-end distinction.
+**The simulator sits at the opposite extreme.** `build_hexamer_tables` in
+`scripts/run_simulator.py` draws four tables in sequence from one generator —
+untied by design — so they are mutually **independent**: measured mean |r|
+**0.011** (seed 42) and **0.013** (seed 1337) across all six pairs, i.e. zero
+within noise.
+
+| | within-end r | across-end r |
+|---|---|---|
+| real | 0.81 – 0.90 | ~0.64 |
+| simulator | ~0.01 | ~0.01 |
+
+So the sim **understates** table coupling rather than overstating it. Real
+tables share substantial structure — even the most distant pair sits at 0.64 —
+while the sim gives a model no shared structure to find. A model that exploits
+cross-table correlation earns no credit in sim, and the within-end vs
+across-end distinction cannot be tested there at all, because in sim there is
+no distinction to recover.
 
 ### 4. Sample-to-sample variability
 
