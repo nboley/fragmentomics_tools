@@ -93,16 +93,7 @@ import torch
 from scipy.sparse import coo_matrix
 from scipy.stats import betabinom, nbinom
 
-def _centre_crop_start(current_size: int, new_size: int, strand=None) -> int:
-    """Centre-crop offset. For strandless (the background model path), this is
-    just ``(current_size - new_size) // 2``.  Minus-strand parity adjustments
-    preserved from Region.get_resize_start for completeness."""
-    mid = current_size // 2
-    if strand == "-" and current_size % 2 == 0 and new_size % 2 == 1:
-        return mid - (new_size // 2) - 1
-    elif strand == "-" and current_size % 2 == 1 and new_size % 2 == 0:
-        return mid - (new_size // 2) + 1
-    return mid - new_size // 2
+from fragmentomics_tools.region import Region
 
 
 # --------------------------------------------------------------------------
@@ -185,7 +176,9 @@ def calculate_start_and_stop_from_jitter(
             f"input array (len {input_length}) is not wide enough for an output "
             f"of length {output_length} with jitter_value {jitter_value}"
         )
-    resize_start = _centre_crop_start(input_length, output_length, strand)
+    resize_start = Region.get_resize_start(
+        start=0, current_size=input_length, new_size=output_length, strand=strand
+    )
     jitter_start = resize_start + jitter_value
     return jitter_start, jitter_start + output_length
 

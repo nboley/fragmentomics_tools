@@ -28,14 +28,7 @@ from background_model.cut_site_store import (
     validate_length_range,
 )
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
-def _one_hot_encode(seq_bytes: bytes) -> np.ndarray:
-    """One-hot encode a DNA sequence. Returns (4, L) float32. N→all-zero."""
-    _LUT = np.zeros((256, 4), dtype=np.float32)
-    for i, b in enumerate(b"ACGT"):
-        _LUT[b, i] = 1.0
-        _LUT[b + 32, i] = 1.0  # lowercase
-    arr = np.frombuffer(seq_bytes, dtype=np.uint8)
-    return _LUT[arr].T
+from fragmentomics_tools.region import one_hot_encode_sequences
 
 # Split and role codes (same as 12-track dataset)
 _SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
@@ -261,9 +254,8 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── One-hot encode ───────────────────────────────────────────────
         x_tokens = np.ascontiguousarray(x_tokens, dtype=np.uint8)
-        x = np.ascontiguousarray(
-            _one_hot_encode(x_tokens.tobytes()), dtype=np.float32
-        )  # (4, l_in_even)
+        onehot = one_hot_encode_sequences([x_tokens.tobytes()])[0]
+        x = np.ascontiguousarray(onehot.T, dtype=np.float32)  # (4, l_in_even)
 
         return {
             "x": torch.from_numpy(x),

@@ -36,6 +36,8 @@ from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
 )
+from fragmentomics_tools.region import Region
+
 log = logging.getLogger(__name__)
 
 _ZARR_MAJOR = int(zarr.__version__.split(".")[0])
@@ -52,9 +54,6 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
     l_target = tile_size + 2 * jitter
     l_seq = tile_size + 2 * (jitter + rf_budget)
 
-    from collections import namedtuple
-    _Region = namedtuple("_Region", ["chrom", "start", "stop"])
-
     regions = []
     with open(bed_path) as f:
         for line in f:
@@ -63,8 +62,8 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
             parts = line.strip().split("\t")
             chrom, start, stop = parts[0], int(parts[1]), int(parts[2])
             centre = (start + stop) // 2
-            regions.append(_Region(chrom, centre - l_target // 2,
-                                   centre + l_target // 2))
+            regions.append(Region(chrom, centre - l_target // 2,
+                                  centre + l_target // 2, strand=None))
 
     # Extract sequences over l_seq extent (wider than l_target for conv margin)
     import pysam
@@ -84,6 +83,7 @@ def _load_regions(bed_path, ref_path, tile_size, jitter, rf_budget):
         if len(seq) != l_seq:
             continue
         sequences.append(seq.encode())
+        # Mask: all valid (blacklist handled upstream in region set)
         # All valid — N bases become zero vectors in one_hot_encode; masking is upstream
         masks.append(np.ones(l_target, dtype=bool))
         valid_regions.append(r)

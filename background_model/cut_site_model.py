@@ -115,11 +115,20 @@ class CutSiteFragmentModel(L.LightningModule):
         self.l1_act = nn.LeakyReLU()
 
         # -- L2a: endpoint banks (4 = 2 taps × 2 strands) ------------------
-        # Stacked tensors indexed by bank_idx = tap * 2 + strand
-        # where tap ∈ {0=left, 1=right}, strand ∈ {0=+, 1=-}
-        self.bank_a = nn.Parameter(torch.randn(4, K, N1) * (N1 ** -0.5))
-        self.bank_B = nn.Parameter(torch.randn(4, K, N_LENGTH_GROUPS) * 0.01)
-        self.bank_W = nn.Parameter(torch.randn(4, H, K) * (K ** -0.5))
+        # Each bank: a (K, N1), B (K, n_groups), W_proj (H, K)
+        # Index: [tap][strand] where tap ∈ {0=left, 1=right}, strand ∈ {0=+, 1=-}
+        self.bank_a = nn.ParameterList([
+            nn.Parameter(torch.randn(K, N1) * (N1 ** -0.5))
+            for _ in range(4)
+        ])
+        self.bank_B = nn.ParameterList([
+            nn.Parameter(torch.randn(K, N_LENGTH_GROUPS) * 0.01)
+            for _ in range(4)
+        ])
+        self.bank_W = nn.ParameterList([
+            nn.Parameter(torch.randn(H, K) * (K ** -0.5))
+            for _ in range(4)
+        ])
 
         # -- L2b: interior branch ------------------------------------------
         # F (N2, 4, n_offsets) with learned per-offset weights
@@ -184,25 +193,10 @@ class CutSiteFragmentModel(L.LightningModule):
 
         This is the folded endpoint matrix for one (tap, strand, group).
         """
-        a = self.bank_a[bank_idx]              # (K, N1)
-        b_g = self.bank_B[bank_idx, :, group]  # (K,)
-        w = self.bank_W[bank_idx]              # (H, K)
-        return w @ (b_g[:, None] * a)          # (H, N1)
-
-    def _folded_M_all_groups(self, bank_idx: int) -> torch.Tensor:
-        """Compute M for ALL groups at once → (n_groups, H, N1).
-
-        Vectorized version of _folded_M that avoids Python loops over groups,
-        enabling torch.compile to trace without recompilation.
-        """
-        a = self.bank_a[bank_idx]        # (K, N1)
-        B_all = self.bank_B[bank_idx]    # (K, n_groups)
-        w = self.bank_W[bank_idx]        # (H, K)
-        # (K, n_groups, N1) = B_all[:, :, None] * a[:, None, :]
-        scaled = B_all[:, :, None] * a[:, None, :]  # (K, n_groups, N1)
-        # (H, n_groups, N1) = w @ scaled (matmul over K dim)
-        M_all = torch.einsum('hk, kgn -> hgn', w, scaled)
-        return M_all.permute(1, 0, 2)   # (n_groups, H, N1)
+        a = self.bank_a[bank_idx]          # (K, N1)
+        b_g = self.bank_B[bank_idx][:, group]  # (K,)
+        w = self.bank_W[bank_idx]          # (H, K)
+        return w @ (b_g[:, None] * a)      # (H, N1)
 
     # -- Interior branch ----------------------------------------------------
 
@@ -296,15 +290,17 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
         U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, n_offsets+1)
 
-        # -- L2a: pre-compute M[g,s] @ h for ALL groups (vectorized) ---------
-        # _Mh_cache[bank_idx] = (n_groups, B, H, model_input_size)
+        # -- L2a: pre-compute M[g,s] @ h for ALL groups (cached) ------------
+        # Avoids redundant matmuls when the same group spans multiple L-chunks.
+        # _Mh_cache[(bank_idx, g)] = (B, H, model_input_size)
         _Mh_cache = {}
-        for bank_idx in range(4):
-            M_all = self._folded_M_all_groups(bank_idx)  # (n_groups, H, N1)
-            # (n_groups, H, N1) @ (B, N1, S) → use einsum for batch
-            _Mh_cache[bank_idx] = torch.einsum(
-                'ghn, bns -> gbhs', M_all, h
-            )  # (n_groups, B, H, model_input_size)
+        all_groups = self._L_groups.unique().tolist()
+        for tap in (0, 1):
+            for strand in (0, 1):
+                bank_idx = tap * 2 + strand
+                for g in all_groups:
+                    M_gs = self._folded_M(bank_idx, g)  # (H, N1)
+                    _Mh_cache[(bank_idx, g)] = M_gs @ h  # (B, H, model_input_size)
 
         # -- Chunked forward over L ----------------------------------------
         all_logits = []
@@ -327,33 +323,35 @@ class CutSiteFragmentModel(L.LightningModule):
             o_r = o_l + chunk_L                     # (chunk_size,)
 
             endpoint_feats = [[None, None], [None, None]]
-            p_range = torch.arange(P, device=h.device)  # (P,)
             for tap in (0, 1):
                 for strand in (0, 1):
                     bank_idx = tap * 2 + strand
                     tap_offsets = o_l if tap == 0 else o_r
-                    Mh_all = _Mh_cache[bank_idx]  # (n_groups, B, H, model_input_size)
 
-                    # For each L in the chunk, gather from the correct group's
-                    # Mh at the correct offset. chunk_g maps each L to its group.
-                    # pos_idx: (chunk_size, P) position indices into model_input_size
-                    pos_idx = tap_offsets[:, None] + p_range[None, :]  # (chunk_size, P)
+                    # Build a (chunk_size, B, H, P) tensor by stacking the
+                    # correct group's Mh slice for each L.  Vectorized: build
+                    # index arrays once, gather with one advanced-index op per
+                    # unique group.
+                    result = torch.empty(
+                        chunk_size, B, H, P, device=h.device, dtype=h.dtype
+                    )
+                    for g in unique_groups.tolist():
+                        g_mask = (chunk_g == g)
+                        if not g_mask.any():
+                            continue
+                        Mh_g = _Mh_cache[(bank_idx, g)]  # (B, H, model_input_size)
+                        offsets_g = tap_offsets[g_mask]     # (n_g,)
+                        # Build (n_g, P) position indices
+                        pos_idx = offsets_g[:, None] + torch.arange(
+                            P, device=h.device
+                        )[None, :]  # (n_g, P)
+                        # Gather: Mh_g[:, :, pos_idx] → (B, H, n_g, P)
+                        gathered = Mh_g[:, :, pos_idx.long()]  # (B, H, n_g, P)
+                        # Scatter into result at the right chunk positions
+                        g_indices = g_mask.nonzero(as_tuple=True)[0]
+                        result[g_indices] = gathered.permute(2, 0, 1, 3)
 
-                    # Gather using chunk_g as group index:
-                    # Mh_all[chunk_g] → (chunk_size, B, H, model_input_size)
-                    Mh_selected = Mh_all[chunk_g.long()]  # (chunk_size, B, H, model_input_size)
-
-                    # Gather positions: for each L, select the P positions
-                    # Mh_selected[i, b, h, pos_idx[i]] → (chunk_size, B, H, P)
-                    result = torch.gather(
-                        Mh_selected,
-                        dim=3,
-                        index=pos_idx[:, None, None, :].expand(
-                            chunk_size, B, H, P
-                        ).long(),
-                    )  # (chunk_size, B, H, P)
-
-                    # (chunk_size, B, H, P) → (B, H, P, chunk_size)
+                    # result is (chunk_size, B, H, P) → (B, H, P, chunk_size)
                     endpoint_feats[tap][strand] = result.permute(1, 2, 3, 0)
 
             # -- L2b span: vectorized gather from prefix sum ----------------
