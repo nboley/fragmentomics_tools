@@ -23,6 +23,43 @@ from background_model_core import (
     masked_mean_pool,
 )
 
+
+# ---------------------------------------------------------------------------
+# Custom autograd for contiguous-range gather
+# ---------------------------------------------------------------------------
+
+
+class EndpointGather(torch.autograd.Function):
+    """Gather P-length contiguous ranges from the last dimension of a tensor.
+
+    Forward: ``out[..., i, j] = Mh[..., pos_idx[i, j]]``
+    where ``pos_idx[i, j] = offset[i] + j`` (contiguous per row).
+
+    Backward: exploits the contiguous structure to replace the generic
+    scatter_add with slice accumulation, avoiding the full-size zero-tensor
+    allocation that IndexBackward0 performs.
+    """
+
+    @staticmethod
+    def forward(ctx, Mh, pos_idx):
+        ctx.save_for_backward(pos_idx)
+        ctx.Mh_shape = Mh.shape
+        return Mh[..., pos_idx]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (pos_idx,) = ctx.saved_tensors
+        grad_Mh = grad_output.new_zeros(ctx.Mh_shape)
+
+        n_g, P = pos_idx.shape
+        offsets = pos_idx[:, 0]
+
+        for i in range(n_g):
+            start = offsets[i].item()
+            grad_Mh[..., start:start + P] += grad_output[..., i, :]
+
+        return grad_Mh, None
+
 # ---------------------------------------------------------------------------
 # Window geometry (fixed)
 # ---------------------------------------------------------------------------
@@ -370,13 +407,13 @@ class CutSiteFragmentModel(L.LightningModule):
 
             # Left-tap banks (0=left_fwd, 1=left_rev): ONE gather for both
             Mh_left = torch.stack([_Mh_cache[(0, g)], _Mh_cache[(1, g)]])  # (2, B, H, S)
-            gathered_l = Mh_left[:, :, :, pos_l.long()]  # (2, B, H, n_g, P)
+            gathered_l = EndpointGather.apply(Mh_left, pos_l.long())  # (2, B, H, n_g, P)
             all_results[0, g_indices] = gathered_l[0].permute(2, 0, 1, 3)
             all_results[1, g_indices] = gathered_l[1].permute(2, 0, 1, 3)
 
             # Right-tap banks (2=right_fwd, 3=right_rev): ONE gather for both
             Mh_right = torch.stack([_Mh_cache[(2, g)], _Mh_cache[(3, g)]])  # (2, B, H, S)
-            gathered_r = Mh_right[:, :, :, pos_r.long()]  # (2, B, H, n_g, P)
+            gathered_r = EndpointGather.apply(Mh_right, pos_r.long())  # (2, B, H, n_g, P)
             all_results[2, g_indices] = gathered_r[0].permute(2, 0, 1, 3)
             all_results[3, g_indices] = gathered_r[1].permute(2, 0, 1, 3)
 

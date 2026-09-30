@@ -11,6 +11,7 @@ from background_model.cut_site_model import (
     CutSiteFragmentModel,
     DEFAULT_L_MIN,
     DEFAULT_L_MAX,
+    EndpointGather,
     N_LENGTH_GROUPS,
     WINDOW_HALF,
     _compute_geometry,
@@ -624,3 +625,52 @@ class TestNBLossIntegration:
 
         assert torch.isfinite(nb_loss), f"NB loss is not finite: {nb_loss}"
         assert nb_loss.requires_grad, "NB loss should have grad through ep_shape"
+
+
+# ---------------------------------------------------------------------------
+# EndpointGather custom autograd
+# ---------------------------------------------------------------------------
+
+
+class TestEndpointGather:
+    """Verify the custom autograd Function for contiguous-range gather."""
+
+    def test_gradcheck_non_overlapping(self):
+        """gradcheck with non-overlapping contiguous ranges."""
+        Mh = torch.randn(2, 4, 100, dtype=torch.float64, requires_grad=True)
+        pos = torch.tensor([[10, 11, 12, 13, 14], [20, 21, 22, 23, 24]])
+        assert torch.autograd.gradcheck(
+            EndpointGather.apply, (Mh, pos), eps=1e-6, atol=1e-4,
+        )
+
+    def test_gradcheck_overlapping(self):
+        """gradcheck with overlapping contiguous ranges (like real L groups)."""
+        Mh = torch.randn(2, 4, 50, dtype=torch.float64, requires_grad=True)
+        # Ranges [10,20) and [11,21) overlap in [11,20)
+        pos = torch.stack([
+            torch.arange(10, 20),
+            torch.arange(11, 21),
+        ])
+        assert torch.autograd.gradcheck(
+            EndpointGather.apply, (Mh, pos), eps=1e-6, atol=1e-4,
+        )
+
+    def test_gradcheck_4d(self):
+        """gradcheck with 4D tensor matching real usage (2, B, H, S)."""
+        Mh = torch.randn(2, 3, 4, 80, dtype=torch.float64, requires_grad=True)
+        pos = torch.stack([
+            torch.arange(5, 15),
+            torch.arange(6, 16),
+            torch.arange(30, 40),
+        ])
+        assert torch.autograd.gradcheck(
+            EndpointGather.apply, (Mh, pos), eps=1e-6, atol=1e-4,
+        )
+
+    def test_forward_matches_fancy_indexing(self):
+        """EndpointGather.apply must produce the same output as plain indexing."""
+        Mh = torch.randn(2, 3, 4, 100)
+        pos = torch.stack([torch.arange(10, 25), torch.arange(40, 55)])
+        result = EndpointGather.apply(Mh, pos)
+        expected = Mh[..., pos]
+        assert torch.equal(result, expected)
