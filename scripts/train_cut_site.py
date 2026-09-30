@@ -22,6 +22,10 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--nb-w0", type=float, default=1.0)
     p.add_argument("--nb-T-anneal", type=int, default=5)
+    p.add_argument("--mult-weight", type=float, default=1.0,
+                   help="Weight on multinomial loss (0=NB-only)")
+    p.add_argument("--precision", default="bf16-mixed",
+                   choices=["32", "bf16-mixed", "16-mixed"])
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--min-N", type=int, default=10)
     args = p.parse_args()
@@ -33,6 +37,7 @@ def main():
         N1=128, K=128, N2=32, H=32, L_chunk=32,
         dispersion_window_size=256,
         learning_rate=args.lr, nb_w0=args.nb_w0, nb_T_anneal=args.nb_T_anneal,
+        mult_weight=args.mult_weight,
         lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
     )
     n_params = sum(p.numel() for p in model.parameters())
@@ -65,6 +70,7 @@ def main():
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="auto", devices=1,
+        precision=args.precision,
         logger=logger,
         enable_checkpointing=True,
         default_root_dir=args.run_dir,

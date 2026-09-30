@@ -134,6 +134,7 @@ class CutSiteFragmentModel(L.LightningModule):
         clamp_margin: float = 1.0,
         nb_w0: float = 1.0,
         nb_T_anneal: int = 5,
+        mult_weight: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -534,7 +535,8 @@ class CutSiteFragmentModel(L.LightningModule):
         w0 = self.hparams.nb_w0
         w_t = w0 * max(0.0, 1.0 - t / T_anneal) if T_anneal > 0 else 0.0
 
-        loss = L_mult + w_t * L_NB
+        mw = self.hparams.mult_weight
+        loss = mw * L_mult + w_t * L_NB
 
         self.log(f"{prefix}_loss", loss, prog_bar=True, sync_dist=True)
         self.log(f"{prefix}_mult_nll", L_mult, sync_dist=True)
