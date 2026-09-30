@@ -17,7 +17,7 @@ coordinates (0-based half-open ``[start, stop)``), ready for serialisation.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -26,6 +26,7 @@ from background_model.simulator.weights import (
     L_MIN,
     N_LENGTHS,
     HexamerTables,
+    RegionWeights,
     build_region_weights,
 )
 
@@ -42,6 +43,7 @@ def draw_fragments_for_region(
     region_len: int,
     n_fragments: int,
     rng: np.random.Generator,
+    region_weights: Optional[RegionWeights] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Draw ``n_fragments`` from the generative model for one region.
 
@@ -64,6 +66,23 @@ def draw_fragments_for_region(
         Number of fragments to draw.
     rng : numpy Generator
         RNG instance for reproducibility.
+    region_weights : RegionWeights, optional
+        An already-built ``RegionWeights`` for THIS region, to sample from
+        instead of rebuilding it.  ``build_region_weights`` is ~63 ms per
+        call at ``region_len`` 2560 and dominates the simulator: a caller
+        that already built ``w`` (to check the ``Sum_Omega w = 1``
+        invariants, say) would otherwise pay for a second, identical build,
+        which measured as 40% of the whole per-region cost.
+
+        Passing it is purely an elision of recomputation -- the object is
+        the same one this function would have constructed -- so the draw is
+        bit-identical, including the RNG stream.  It is the caller's
+        responsibility that the weights were built from the same
+        ``hex_fwd`` / ``hex_rc`` / ``cum_gc`` / ``valid`` / tables as are
+        passed here; a mismatch would sample from one region's weights
+        while reporting another's coordinates, and no normalisation
+        invariant would notice (``Sum_Omega w = 1`` is a property of the
+        weights, not of the draw).
 
     Returns
     -------
@@ -74,16 +93,45 @@ def draw_fragments_for_region(
     strands : ndarray, shape (n_fragments,), str
         ``"+"`` or ``"-"`` for each fragment.
     """
-    rw = build_region_weights(
-        hex_fwd=hex_fwd,
-        hex_rc=hex_rc,
-        cum_gc=cum_gc,
-        hex_tables=hex_tables,
-        marginal_fl=marginal_fl,
-        predict_lut=predict_lut,
-        region_len=region_len,
-        valid=valid,
-    )
+    if region_weights is None:
+        rw = build_region_weights(
+            hex_fwd=hex_fwd,
+            hex_rc=hex_rc,
+            cum_gc=cum_gc,
+            hex_tables=hex_tables,
+            marginal_fl=marginal_fl,
+            predict_lut=predict_lut,
+            region_len=region_len,
+            valid=valid,
+        )
+    else:
+        rw = region_weights
+        # Guard: verify the pre-built weights are consistent with the
+        # arrays passed to this call.  A mismatch means the caller built
+        # weights from one region and is drawing fragments for another —
+        # the draw would sample from one region's distribution while
+        # reporting another region's coordinates, and Sum_Omega w = 1 (a
+        # property of the weights) would not notice.
+        n_sites = region_len + 1
+        if rw.w_plus.shape != (n_sites, N_LENGTHS):
+            raise ValueError(
+                f"region_weights.w_plus has shape {rw.w_plus.shape} but "
+                f"region_len={region_len} requires ({n_sites}, {N_LENGTHS}). "
+                f"The weights were built for a different region."
+            )
+        # S_plus/S_minus depend on hex_fwd, hex_rc, valid, and the hex
+        # tables — all of which are region-specific.  A mismatch here
+        # catches the case where weights from region A are passed with
+        # arrays from region B.
+        start_vals_plus_check = np.where(valid, hex_tables.start_fwd[hex_fwd], 0.0)
+        Z_plus_check = rw.w_plus.sum(axis=1)
+        S_plus_check = float(start_vals_plus_check[Z_plus_check > 0].sum())
+        if abs(S_plus_check - rw.S_plus) > 1e-10:
+            raise ValueError(
+                f"region_weights.S_plus={rw.S_plus} but the provided "
+                f"hex_fwd/hex_tables/valid arrays give S_plus={S_plus_check}. "
+                f"The weights were built for a different region."
+            )
 
     # Precompute per-strand sampling distributions from the weight factors.
     # For plus: start_vals_plus[c5] = start_fwd[hex_fwd[c5]] (zeroed where invalid)
