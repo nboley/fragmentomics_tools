@@ -380,24 +380,20 @@ class CutSiteFragmentModel(L.LightningModule):
         unique_groups = chunk_g.unique()
 
         # -- L2a: endpoint branch (fused tap×strand gather) ----------------
-        # Instead of 4 separate gathers per group (tap × strand), stack all
-        # 4 banks' Mh and do ONE gather per group. Reduces backward
-        # scatter-adds from 4× to 1× per group.
+        # Groups are contiguous within each chunk (L values are sorted, groups
+        # are consecutive L ranges). We gather per group and concatenate —
+        # no scatter into a pre-allocated buffer, eliminating CopySlices backward.
         o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
         o_r = o_l + chunk_L                     # (chunk_size,)
         p_range = torch.arange(P, device=h.device)
 
-        # Pre-allocate all 4 results: (4, chunk_size, B, H, P)
-        all_results = torch.empty(
-            4, chunk_size, B, H, P, device=h.device, dtype=h.dtype
-        )
+        # Collect per-group gathered results in order, then cat
+        gathered_parts = [[] for _ in range(4)]  # one list per bank
 
         for g in unique_groups.tolist():
             g_mask = (chunk_g == g)
             if not g_mask.any():
                 continue
-            g_indices = g_mask.nonzero(as_tuple=True)[0]
-            n_g = g_indices.shape[0]
 
             # Build position indices for left and right taps
             offsets_l = o_l[g_mask]  # (n_g,)
@@ -405,25 +401,27 @@ class CutSiteFragmentModel(L.LightningModule):
             pos_l = offsets_l[:, None] + p_range[None, :]  # (n_g, P)
             pos_r = offsets_r[:, None] + p_range[None, :]  # (n_g, P)
 
-            # Left-tap banks (0=left_fwd, 1=left_rev): ONE gather for both
-            Mh_left = torch.stack([_Mh_cache[(0, g)], _Mh_cache[(1, g)]])  # (2, B, H, S)
+            # Left-tap banks (0=left_fwd, 1=left_rev)
+            Mh_left = torch.stack([_Mh_cache[(0, g)], _Mh_cache[(1, g)]])
             gathered_l = EndpointGather.apply(Mh_left, pos_l.long())  # (2, B, H, n_g, P)
-            all_results[0, g_indices] = gathered_l[0].permute(2, 0, 1, 3)
-            all_results[1, g_indices] = gathered_l[1].permute(2, 0, 1, 3)
+            # permute n_g to first dim: (n_g, B, H, P)
+            gathered_parts[0].append(gathered_l[0].permute(2, 0, 1, 3))
+            gathered_parts[1].append(gathered_l[1].permute(2, 0, 1, 3))
 
-            # Right-tap banks (2=right_fwd, 3=right_rev): ONE gather for both
-            Mh_right = torch.stack([_Mh_cache[(2, g)], _Mh_cache[(3, g)]])  # (2, B, H, S)
-            gathered_r = EndpointGather.apply(Mh_right, pos_r.long())  # (2, B, H, n_g, P)
-            all_results[2, g_indices] = gathered_r[0].permute(2, 0, 1, 3)
-            all_results[3, g_indices] = gathered_r[1].permute(2, 0, 1, 3)
+            # Right-tap banks (2=right_fwd, 3=right_rev)
+            Mh_right = torch.stack([_Mh_cache[(2, g)], _Mh_cache[(3, g)]])
+            gathered_r = EndpointGather.apply(Mh_right, pos_r.long())
+            gathered_parts[2].append(gathered_r[0].permute(2, 0, 1, 3))
+            gathered_parts[3].append(gathered_r[1].permute(2, 0, 1, 3))
 
-        # Unpack: bank_idx = tap * 2 + strand
-        # all_results[bank] is (chunk_size, B, H, P) → (B, H, P, chunk_size)
+        # Concatenate along the L dim (groups are contiguous, so cat = correct order)
+        # Each: (chunk_size, B, H, P) → permute to (B, H, P, chunk_size)
         endpoint_feats = [[None, None], [None, None]]
         for tap in (0, 1):
             for strand in (0, 1):
                 bank_idx = tap * 2 + strand
-                endpoint_feats[tap][strand] = all_results[bank_idx].permute(1, 2, 3, 0)
+                stacked = torch.cat(gathered_parts[bank_idx], dim=0)  # (chunk_size, B, H, P)
+                endpoint_feats[tap][strand] = stacked.permute(1, 2, 3, 0)
 
         # -- L2b span: vectorized gather from prefix sum ----------------
         o_l_prime = o_l - self._o_l_min
