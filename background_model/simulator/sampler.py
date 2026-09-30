@@ -1,11 +1,18 @@
 """Fragment sampler — Step 5 of the simulator.
 
-Draws fragments from ``build_region_weights``'s factors using the sequential
-sampling procedure from the design doc (§ Step 5):
+Draws fragments from ``build_region_weights``'s factors:
 
     1. s  ~ Bernoulli(½)
     2. c5 ~ start_s[hex(c5)] / S_s
-    3. c3 ~ E_s(c5,L) / Z_s(c5)   over L = 25..180,  c3 = c5 + σ·L
+    3. L  ~ E_s(c5,L) / Z_s(c5)   over L = 25..180
+
+The draw is vectorised: all strand choices are drawn first, then all
+plus-strand (c5, L) pairs, then all minus-strand pairs.  This consumes
+the RNG stream in a different order from the original per-fragment loop
+(commit ``c7848e5``), so outputs are **not** bit-identical given the same
+seed, but the joint distribution ``P(s) · P(c5|s) · P(L|c5,s)`` is
+identical — each fragment is drawn independently from the same
+conditional distributions.
 
 The sampler draws from the SAME factors that ``build_region_weights`` computes,
 not a reimplementation.  This single shared call is the only thing preventing
@@ -188,34 +195,47 @@ def draw_fragments_for_region(
 
     Ls = np.arange(L_MIN, L_MAX + 1)  # (N_LENGTHS,)
 
+    # ── Vectorised draw ────────────────────────────────────────────────
+    # All strand choices, then all plus-strand (c5, L), then minus.
+    # Each fragment is drawn independently from the same conditional
+    # distributions as the original per-fragment loop.
+
     starts = np.empty(n_fragments, dtype=np.int64)
     stops = np.empty(n_fragments, dtype=np.int64)
     strands = np.empty(n_fragments, dtype="U1")
 
-    for i in range(n_fragments):
-        # 1. s ~ Bernoulli(1/2)
-        is_plus = rng.random() < 0.5
+    # 1. s ~ Bernoulli(½) for all fragments at once
+    is_plus = rng.random(n_fragments) < 0.5
+    n_plus = int(is_plus.sum())
+    n_minus = n_fragments - n_plus
 
-        if is_plus:
-            # 2. c5 ~ start_fwd[hex_fwd[c5]] / S_plus
-            c5 = rng.choice(n_sites, p=start_prob_plus)
-            # 3. L ~ E_plus(c5, L) / Z_plus(c5)
-            li = rng.choice(N_LENGTHS, p=cond_L_plus[c5])
-            L = Ls[li]
-            # Plus: c5 = p, c3 = p + L => start=c5, stop=c5+L
-            starts[i] = c5
-            stops[i] = c5 + L
-            strands[i] = "+"
-        else:
-            # 2. c5 ~ start_rev[hex_rc[c5]] / S_minus
-            c5 = rng.choice(n_sites, p=start_prob_minus)
-            # 3. L ~ E_minus(c5, L) / Z_minus(c5)
-            li = rng.choice(N_LENGTHS, p=cond_L_minus[c5])
-            L = Ls[li]
-            # Minus: c5 = p+L, c3 = p => start=c5-L, stop=c5
-            starts[i] = c5 - L
-            stops[i] = c5
-            strands[i] = "-"
+    # 2-3. Plus strand: c5 ~ start_prob_plus, then L ~ cond_L_plus[c5]
+    if n_plus > 0:
+        c5_plus = rng.choice(n_sites, size=n_plus, p=start_prob_plus)
+        # CDF inversion: draw uniform, find first CDF bin that exceeds it.
+        # (cum <= u).sum() matches numpy's searchsorted(side='right').
+        u_L = rng.random(n_plus)
+        cum = np.cumsum(cond_L_plus[c5_plus], axis=1)
+        li_plus = np.minimum(
+            (cum <= u_L[:, np.newaxis]).sum(axis=1), N_LENGTHS - 1
+        )
+        L_plus = Ls[li_plus]
+        starts[is_plus] = c5_plus
+        stops[is_plus] = c5_plus + L_plus
+        strands[is_plus] = "+"
+
+    # 2-3. Minus strand: c5 ~ start_prob_minus, then L ~ cond_L_minus[c5]
+    if n_minus > 0:
+        c5_minus = rng.choice(n_sites, size=n_minus, p=start_prob_minus)
+        u_L = rng.random(n_minus)
+        cum = np.cumsum(cond_L_minus[c5_minus], axis=1)
+        li_minus = np.minimum(
+            (cum <= u_L[:, np.newaxis]).sum(axis=1), N_LENGTHS - 1
+        )
+        L_minus = Ls[li_minus]
+        starts[~is_plus] = c5_minus - L_minus
+        stops[~is_plus] = c5_minus
+        strands[~is_plus] = "-"
 
     return starts, stops, strands
 
