@@ -328,17 +328,24 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
         U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, n_offsets+1)
 
-        # -- L2a: pre-compute M[g,s] @ h for ALL groups (cached) ------------
-        # Avoids redundant matmuls when the same group spans multiple L-chunks.
-        # _Mh_cache[(bank_idx, g)] = (B, H, model_input_size)
-        _Mh_cache = {}
+        # -- L2a: pre-compute M[g,s] @ h for ALL groups (batched) -----------
+        # Stack all 40 M matrices into (40, H, N1), do one batched matmul
+        # with h expanded to (40, N1, S), then unpack into dict.
         all_groups = self._L_groups.unique().tolist()
-        for tap in (0, 1):
-            for strand in (0, 1):
-                bank_idx = tap * 2 + strand
-                for g in all_groups:
-                    M_gs = self._folded_M(bank_idx, g)  # (H, N1)
-                    _Mh_cache[(bank_idx, g)] = M_gs @ h  # (B, H, model_input_size)
+        n_groups = len(all_groups)
+        M_list = []
+        _cache_keys = []
+        for bank_idx in range(4):
+            for g in all_groups:
+                M_list.append(self._folded_M(bank_idx, g))  # (H, N1)
+                _cache_keys.append((bank_idx, g))
+        M_stacked = torch.stack(M_list)  # (4*n_groups, H, N1)
+
+        # Batched matmul: (4*n_groups, H, N1) @ (B, N1, S) → per-batch
+        # Use einsum to handle the batch dim: 'khn, bns -> kbhs'
+        Mh_all = torch.einsum('khn, bns -> kbhs', M_stacked, h)  # (40, B, H, S)
+
+        _Mh_cache = {k: Mh_all[i] for i, k in enumerate(_cache_keys)}
 
         # -- Chunked forward over L ----------------------------------------
         all_logits = []
@@ -438,18 +445,20 @@ class CutSiteFragmentModel(L.LightningModule):
         mean_t = span_t / L_float[None, None, :, None]
         interior_mean = self.W_mean(mean_t)
 
-        # -- Assemble pre-activation per (m, L, strand) -----------------
-        pre = torch.zeros(B, P, chunk_size, H, 2, device=h.device, dtype=h.dtype)
+        # -- Fused pre-activation + nonlinearity + output per strand -----
+        # Compute per-strand logits directly without materializing the full
+        # (B, P, chunk, H, 2) pre-activation tensor. Each strand is half
+        # the size, and we contract over H immediately after the nonlinearity.
+        logit_parts = []
         for strand in (0, 1):
-            f_l = endpoint_feats[0][strand].permute(0, 2, 3, 1)
+            f_l = endpoint_feats[0][strand].permute(0, 2, 3, 1)  # (B, P, chunk, H)
             f_r = endpoint_feats[1][strand].permute(0, 2, 3, 1)
-            pre[:, :, :, :, strand] = (
-                f_l + f_r + interior_span + interior_mean
-            )
+            pre_s = f_l + f_r + interior_span + interior_mean     # (B, P, chunk, H)
+            hid_s = self.l3_act(pre_s)                            # (B, P, chunk, H)
+            logit_s = (hid_s * self.w_out).sum(dim=-1)            # (B, P, chunk)
+            logit_parts.append(logit_s)
 
-        # -- L3: nonlinearity + output ----------------------------------
-        hid = self.l3_act(pre)
-        logit_chunk = torch.einsum('bplhs, h -> bpls', hid, self.w_out)
+        logit_chunk = torch.stack(logit_parts, dim=-1)  # (B, P, chunk, 2)
         lb = self.len_bias[L_start_idx:L_end_idx]
         logit_chunk = logit_chunk + lb[None, None, :, None]
 
