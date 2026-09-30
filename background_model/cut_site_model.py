@@ -345,8 +345,7 @@ class CutSiteFragmentModel(L.LightningModule):
         # Use einsum to handle the batch dim: 'khn, bns -> kbhs'
         Mh_all = torch.einsum('khn, bns -> kbhs', M_stacked, h)  # (40, B, H, S)
 
-        # Reshape to (4, n_groups, B, H, S) for direct indexing in chunks
-        Mh_by_bank = Mh_all.reshape(4, n_groups, B, H, -1)
+        _Mh_cache = {k: Mh_all[i] for i, k in enumerate(_cache_keys)}
 
         # -- Chunked forward over L ----------------------------------------
         all_logits = []
@@ -364,13 +363,13 @@ class CutSiteFragmentModel(L.LightningModule):
             if use_checkpoint:
                 logit_chunk = torch.utils.checkpoint.checkpoint(
                     self._compute_chunk,
-                    h, U, Mh_by_bank, chunk_L, chunk_g,
+                    h, U, _Mh_cache, chunk_L, chunk_g,
                     L_start_idx, L_end_idx, B, P, H,
                     use_reentrant=False,
                 )
             else:
                 logit_chunk = self._compute_chunk(
-                    h, U, Mh_by_bank, chunk_L, chunk_g,
+                    h, U, _Mh_cache, chunk_L, chunk_g,
                     L_start_idx, L_end_idx, B, P, H,
                 )
             all_logits.append(logit_chunk)  # (B, P, chunk_size, 2)
@@ -379,7 +378,7 @@ class CutSiteFragmentModel(L.LightningModule):
         return logits, endpoint_shape, disp_bp
 
     def _compute_chunk(
-        self, h, U, Mh_by_bank, chunk_L, chunk_g,
+        self, h, U, _Mh_cache, chunk_L, chunk_g,
         L_start_idx, L_end_idx, B, P, H,
     ):
         """Compute logits for one L-chunk. Extracted for gradient checkpointing."""
@@ -389,7 +388,9 @@ class CutSiteFragmentModel(L.LightningModule):
         unique_groups = chunk_g.unique()
 
         # -- L2a: endpoint branch (fused tap×strand gather) ----------------
-        # Mh_by_bank is (4, n_groups, B, H, S) — index directly, no dict/stack.
+        # Groups are contiguous within each chunk (L values are sorted, groups
+        # are consecutive L ranges). We gather per group and concatenate —
+        # no scatter into a pre-allocated buffer, eliminating CopySlices backward.
         o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
         o_r = o_l + chunk_L                     # (chunk_size,)
         p_range = torch.arange(P, device=h.device)
@@ -408,28 +409,27 @@ class CutSiteFragmentModel(L.LightningModule):
             pos_l = offsets_l[:, None] + p_range[None, :]  # (n_g, P)
             pos_r = offsets_r[:, None] + p_range[None, :]  # (n_g, P)
 
-            # Left-tap banks: Mh_by_bank[0:2, g] already (2, B, H, S)
-            Mh_left = Mh_by_bank[0:2, g]  # (2, B, H, S) — view, no copy
+            # Left-tap banks (0=left_fwd, 1=left_rev)
+            Mh_left = torch.stack([_Mh_cache[(0, g)], _Mh_cache[(1, g)]])
             gathered_l = EndpointGather.apply(Mh_left, pos_l.long())  # (2, B, H, n_g, P)
-            # Target layout: (B, P, n_g, H) — one permute instead of three
-            gathered_parts[0].append(gathered_l[0].permute(0, 3, 2, 1))  # (B, P, n_g, H)
-            gathered_parts[1].append(gathered_l[1].permute(0, 3, 2, 1))
+            # permute n_g to first dim: (n_g, B, H, P)
+            gathered_parts[0].append(gathered_l[0].permute(2, 0, 1, 3))
+            gathered_parts[1].append(gathered_l[1].permute(2, 0, 1, 3))
 
-            # Right-tap banks: Mh_by_bank[2:4, g]
-            Mh_right = Mh_by_bank[2:4, g]  # (2, B, H, S) — view, no copy
+            # Right-tap banks (2=right_fwd, 3=right_rev)
+            Mh_right = torch.stack([_Mh_cache[(2, g)], _Mh_cache[(3, g)]])
             gathered_r = EndpointGather.apply(Mh_right, pos_r.long())
-            gathered_parts[2].append(gathered_r[0].permute(0, 3, 2, 1))
-            gathered_parts[3].append(gathered_r[1].permute(0, 3, 2, 1))
+            gathered_parts[2].append(gathered_r[0].permute(2, 0, 1, 3))
+            gathered_parts[3].append(gathered_r[1].permute(2, 0, 1, 3))
 
-        # Concatenate along the L dim (dim=2 in the (B, P, n_g, H) layout)
-        # Result: (B, P, chunk_size, H) — already in pre-activation layout
+        # Concatenate along the L dim (groups are contiguous, so cat = correct order)
+        # Each: (chunk_size, B, H, P) → permute to (B, H, P, chunk_size)
         endpoint_feats = [[None, None], [None, None]]
         for tap in (0, 1):
             for strand in (0, 1):
                 bank_idx = tap * 2 + strand
-                endpoint_feats[tap][strand] = torch.cat(
-                    gathered_parts[bank_idx], dim=2
-                )  # (B, P, chunk_size, H)
+                stacked = torch.cat(gathered_parts[bank_idx], dim=0)  # (chunk_size, B, H, P)
+                endpoint_feats[tap][strand] = stacked.permute(1, 2, 3, 0)
 
         # -- L2b span: vectorized gather from prefix sum ----------------
         o_l_prime = o_l - self._o_l_min
@@ -451,9 +451,9 @@ class CutSiteFragmentModel(L.LightningModule):
         # the size, and we contract over H immediately after the nonlinearity.
         logit_parts = []
         for strand in (0, 1):
-            # endpoint_feats already in (B, P, chunk, H) layout
-            pre_s = (endpoint_feats[0][strand] + endpoint_feats[1][strand]
-                     + interior_span + interior_mean)               # (B, P, chunk, H)
+            f_l = endpoint_feats[0][strand].permute(0, 2, 3, 1)  # (B, P, chunk, H)
+            f_r = endpoint_feats[1][strand].permute(0, 2, 3, 1)
+            pre_s = f_l + f_r + interior_span + interior_mean     # (B, P, chunk, H)
             hid_s = self.l3_act(pre_s)                            # (B, P, chunk, H)
             logit_s = (hid_s * self.w_out).sum(dim=-1)            # (B, P, chunk)
             logit_parts.append(logit_s)
