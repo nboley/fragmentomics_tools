@@ -364,3 +364,63 @@ cannot test whether a model recovers these distinctions.
 - Start-table recovery percentages (too easy in sim)
 - Any conclusion about start/end differentiation (sim has no asymmetry)
 - Absolute "% bias captured" as a proxy for real-data performance
+
+---
+
+## Sparsity, and feeding these tables into the simulator
+
+Both mismatches above would be fixed by using the real tables as the
+simulator's input, since spread and correlation are properties of the data.
+The obstacle is count depth.
+
+**Per sample, collapsed over all 16 FL bands:**
+
+| table | obs == 0 | obs < 10 | obs < 100 | median | CV at median |
+|---|---|---|---|---|---|
+| start_fwd | 22 | 505 | 2,545 | 69 | 12.0% |
+| start_rev | 16 | 495 | 2,567 | 69 | 12.0% |
+| end_fwd | 6 | 434 | 2,344 | 86 | 10.8% |
+| end_rev | 16 | 458 | 2,317 | 86 | 10.8% |
+
+About **60% of hexamers carry under 100 counts** in a single sample.
+
+**Pooled over all 5 samples:**
+
+| table | obs == 0 | obs < 10 | median | CV at median |
+|---|---|---|---|---|
+| start_fwd | 1 | 58 | 270 | 6.1% |
+| start_rev | 0 | 49 | 271 | 6.1% |
+| end_fwd | 0 | 34 | 347 | 5.4% |
+| end_rev | 1 | 37 | 348 | 5.4% |
+
+The only hexamers reaching zero when pooled are `CGCGTA` and `CGTACG` —
+CpG-dense, so plausibly real depletion rather than undersampling.
+
+**Band-resolved tables are not usable.** A single FL band has 570–1,184 zero
+hexamers and up to 3,928 under 10 counts. Only the band-collapsed form has the
+depth to support a per-hexamer estimate.
+
+`background == 0` never occurs, so `observed / background` is always defined —
+every hexamer does occur in the region set.
+
+### What this implies for using them
+
+Architecturally the swap is already supported: the manifest stores the
+**realised** tables rather than a recipe, so real tables travel in the h5 the
+same way synthetic ones do, and `HexamerTables` is just four arrays.
+
+**Table scale does not need solving.** `start_s` enters `w` as `start_s[h]/S_s`
+and `end_s` via `E/Z`, so both are scale-invariant by the Appendix-A structure;
+only relative values matter.
+
+Two things do need deciding, and both are statistical rather than plumbing:
+
+- **Zeros.** A zero-count hexamer yields zero weight, making that cut site
+  undrawable — a structural hole the synthetic tables do not have.
+- **Per-sample noise.** At 12% CV, per-sample tables used raw would bake our own
+  sampling error into the simulation as if it were biology.
+
+The thinning null above bounds the answer: real between-sample variation is
+small (disattenuated r 0.97–0.99), so a pooled prior with per-sample posteriors
+should shrink hard, leaving per-sample tables as small perturbations. A prior
+also dissolves the zeros. Design pending.
