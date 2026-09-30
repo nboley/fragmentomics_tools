@@ -1097,11 +1097,17 @@ class TestManifestProvenanceEnforced:
             load_manifest(mp, fasta_path=fa, region_set_path=rs)
 
     def test_absent_inputs_raise_not_silently_skip(self, tmp_path):
-        """A check the manifest claims to support MUST receive its input.
+        """A MANDATORY check the manifest claims to support MUST receive its input.
 
-        Previously absent inputs were silently skipped.  Now they raise
-        ``ManifestVerificationIncomplete`` — a skipped check is
-        unrepresentable rather than merely visible.
+        Covers the mandatory tier only (``reference``, ``region_set``): the
+        caller always has access to these files, so omitting one is a caller
+        error and raises ``ManifestVerificationIncomplete``. For that tier a
+        skipped check is genuinely unrepresentable.
+
+        This says nothing about ``simulator_script``, which is best-effort:
+        when git cannot resolve it the check does not run and
+        ``"simulator_script:unresolvable"`` is recorded instead. Do not read
+        this test as a guarantee covering all three checks.
         """
         from background_model.simulator.emit import ManifestVerificationIncomplete
         mp, _, _ = self._write(str(tmp_path))
