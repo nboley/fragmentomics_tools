@@ -13,6 +13,7 @@ import pytest
 import zarr
 
 from background_model.cut_site_model import CutSiteFragmentModel, _compute_geometry
+from background_model.store import _create_array
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
@@ -84,26 +85,26 @@ def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179)
 
     # /tiles/ — synthetic sequence (random ACGT), real mask
     tiles = root.create_group("tiles")
-    tiles.create_dataset("contig", data=np.array([r.chrom for r in valid_regions], dtype="<U32"))
-    tiles.create_dataset("start", data=np.array([r.start for r in valid_regions], dtype="int64"))
-    tiles.create_dataset("stop", data=np.array([r.stop for r in valid_regions], dtype="int64"))
-    tiles.create_dataset("strand", data=np.array(["."] * T, dtype="<U1"))
-    tiles.create_dataset("region_id", data=np.array([f"r{i}" for i in range(T)], dtype="<U64"))
+    _create_array(tiles, "contig", data=np.array([r.chrom for r in valid_regions], dtype="<U32"))
+    _create_array(tiles, "start", data=np.array([r.start for r in valid_regions], dtype="int64"))
+    _create_array(tiles, "stop", data=np.array([r.stop for r in valid_regions], dtype="int64"))
+    _create_array(tiles, "strand", data=np.array(["."] * T, dtype="<U1"))
+    _create_array(tiles, "region_id", data=np.array([f"r{i}" for i in range(T)], dtype="<U64"))
     split_arr = np.zeros(T, dtype="uint8")
     if T > 1:
         split_arr[T - 1] = 1  # last region is val
-    tiles.create_dataset("split", data=split_arr)
+    _create_array(tiles, "split", data=split_arr)
     # Synthetic sequence: random ACGT bytes
     seq = rng.choice(list(b"ACGT"), size=(T, cfg.l_seq)).astype(np.uint8)
-    tiles.create_dataset("seq", data=seq)
-    tiles.create_dataset("mask", data=np.ones((T, cfg.l_target), dtype=bool))
+    _create_array(tiles, "seq", data=seq)
+    _create_array(tiles, "mask", data=np.ones((T, cfg.l_target), dtype=bool))
 
     # /samples/
     samples = root.create_group("samples")
-    samples.create_dataset("library", data=np.array(["golden_chr6"], dtype="<U256"))
-    samples.create_dataset("role", data=np.zeros(S, dtype="uint8"))
+    _create_array(samples, "library", data=np.array(["golden_chr6"], dtype="<U256"))
+    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
     total_frags = sum(len(fd[0]) for fd in frag_data)
-    samples.create_dataset("total_fragments", data=np.array([total_frags], dtype="uint64"))
+    _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
 
     # /fragments/ + /endpoints/
     frag_indptr = [0]
@@ -132,19 +133,19 @@ def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179)
         ep_indptr.append(len(all_ep_pos))
 
     frags = root.create_group("fragments")
-    frags.create_dataset("indptr", data=np.array(frag_indptr, dtype="int64"))
-    frags.create_dataset("start", data=np.concatenate(all_fs) if all_fs else np.empty(0, "uint16"))
-    frags.create_dataset("length", data=np.concatenate(all_fl) if all_fl else np.empty(0, "uint16"))
-    frags.create_dataset("strand", data=np.concatenate(all_fst) if all_fst else np.empty(0, "uint8"))
+    _create_array(frags, "indptr", data=np.array(frag_indptr, dtype="int64"))
+    _create_array(frags, "start", data=np.concatenate(all_fs) if all_fs else np.empty(0, "uint16"))
+    _create_array(frags, "length", data=np.concatenate(all_fl) if all_fl else np.empty(0, "uint16"))
+    _create_array(frags, "strand", data=np.concatenate(all_fst) if all_fst else np.empty(0, "uint8"))
 
     endpoints = root.create_group("endpoints")
-    endpoints.create_dataset("indptr", data=np.array(ep_indptr, dtype="int64"))
-    endpoints.create_dataset("pos", data=np.array(all_ep_pos, dtype="uint16") if all_ep_pos else np.empty(0, "uint16"))
-    endpoints.create_dataset("track", data=np.array(all_ep_track, dtype="uint8") if all_ep_track else np.empty(0, "uint8"))
-    endpoints.create_dataset("data", data=np.array(all_ep_data, dtype="uint16") if all_ep_data else np.empty(0, "uint16"))
+    _create_array(endpoints, "indptr", data=np.array(ep_indptr, dtype="int64"))
+    _create_array(endpoints, "pos", data=np.array(all_ep_pos, dtype="uint16") if all_ep_pos else np.empty(0, "uint16"))
+    _create_array(endpoints, "track", data=np.array(all_ep_track, dtype="uint8") if all_ep_track else np.empty(0, "uint8"))
+    _create_array(endpoints, "data", data=np.array(all_ep_data, dtype="uint16") if all_ep_data else np.empty(0, "uint16"))
 
     totals = root.create_group("totals")
-    totals.create_dataset("N", data=N_totals)
+    _create_array(totals, "N", data=N_totals)
 
     return store_path, cfg, T, total_frags
 
