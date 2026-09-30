@@ -1,0 +1,67 @@
+{
+  "n_regions": 2000,
+  "region_len": 2560,
+  "frags_per_region": 1000,
+  "total_frags": 2000000,
+  "total_plus": 999167,
+  "total_minus": 1000833,
+  "seed": 20260930,
+  "w6_seed": 42,
+  "w6_dynamic_range": 4.0,
+  "runtime_s": 353.22461473662406,
+  "ms_per_region": 176.61230736831203,
+  "results": {
+    "start_fwd": {
+      "pearson_r": 0.9731745617385607,
+      "max_abs_dev": 0.0002020089536565302,
+      "rms_dev": 2.535969837242315e-05,
+      "n_valid": 4096,
+      "n_zero_bg": 0,
+      "min_obs": 1,
+      "median_obs": 198.0,
+      "noise_cv": 0.07106690545187015,
+      "expected_r": 0.9731329248389347
+    },
+    "start_rev": {
+      "pearson_r": 0.9734097526057784,
+      "max_abs_dev": 0.00023374323756943647,
+      "rms_dev": 2.572422618938596e-05,
+      "n_valid": 4096,
+      "n_zero_bg": 0,
+      "min_obs": 0,
+      "median_obs": 196.0,
+      "noise_cv": 0.07142857142857142,
+      "expected_r": 0.9733687721049924
+    },
+    "dist_start_fwd": {
+      "pearson_r": 0.9975318563764415,
+      "max_residual": 101.62487675812667,
+      "chi2": 4092.6993639547736,
+      "dof": 4095,
+      "chi2_per_dof": 0.9994381841159399
+    },
+    "dist_start_rev": {
+      "pearson_r": 0.9977420637916905,
+      "max_residual": 145.13084342692832,
+      "chi2": 3966.2804606000873,
+      "dof": 4095,
+      "chi2_per_dof": 0.9685666570451984
+    },
+    "dist_end_fwd": {
+      "pearson_r": 0.997604591955672,
+      "max_residual": 108.6020273211443,
+      "chi2": 4220.484330586962,
+      "dof": 4095,
+      "chi2_per_dof": 1.0306433041726402
+    },
+    "dist_end_rev": {
+      "pearson_r": 0.9976820551747223,
+      "max_residual": 86.46019540507768,
+      "chi2": 4115.916956301065,
+      "dof": 4095,
+      "chi2_per_dof": 1.0051079258366458
+    },
+    "verdict": "PASS \u2014 simulator draws from the correct distribution. All four hexamer marginals match model predictions within sampling noise (\u03c7\u00b2/dof \u2208 [0.97, 1.03]). Start-table parameters are recovered with r consistent with the Poisson noise floor."
+  },
+  "verdict": "PASS \u2014 simulator draws from the correct distribution. All four hexamer marginals match model predictions within sampling noise (\u03c7\u00b2/dof \u2208 [0.97, 1.03]). Start-table parameters are recovered with r consistent with the Poisson noise floor."
+}
