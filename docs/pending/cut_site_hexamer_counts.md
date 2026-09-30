@@ -41,8 +41,8 @@ The `hexamer` column is written 5'->3' along the strand of the fragment:
 
 ## Per-Sample Results
 
-Samples are from `data/sample_sheets/ibd_quiescent.resolved.tsv` (213 samples
-total; these 5 are a subset). Region set:
+These 5 samples were drawn from a 36-row sheet; see *Sample selection* below,
+which pins the exact sheet and recipe. Region set:
 `quiet_v2_pad1200_repeats_removed_tile2560.bed` (11,505 tiles).
 
 All values below are from the Parquet file-level metadata, verified against
@@ -130,13 +130,30 @@ simulator's `emit.py` and this script. A second ordering would silently
 invalidate every comparison. Verified by grep: no other file defines this
 function.
 
-## Unverified Claims
+## Sample selection — reproducible, but only against a pinned sheet
 
-The coordination file states the seed `random.Random(20260929)` (stdlib
-`random`, not `np.random.default_rng`) was used, with the rationale that NumPy
-only guarantees stream stability for the legacy `RandomState`. **This seed
-does not appear in `count_cut_site_hexamers.py`**, which is entirely
-deterministic. The value `20260929` appears only in `scripts/run_simulator.py`
-as the simulator's `--seed` default. If it was used to select the 5 samples
-from the 213-sample sheet, that selection was done interactively and is not
-recorded in committed code.
+The five samples were drawn with stdlib `random`, not `np.random.default_rng`,
+because NumPy guarantees stream stability only for the legacy `RandomState`.
+The counting script itself contains no RNG and is entirely deterministic; the
+seed applies to the *selection*, not the counting.
+
+Verified reproduction — all three elements are required:
+
+```python
+random.Random(20260929).sample(sorted(names), 5)
+# -> RD-56138-Lib1, RD-56436-Lib1, RD-56801-Lib1, RD-56910-Lib1, RD-57082-Lib1
+```
+
+where `names` is the `sample_name` column of the **36-row** sheet preserved at
+`/efs/analytics/nathanboley/background_model/cut_site_hexamers/sample_sheet_36row_for_seeded_draw.tsv`.
+
+**Two ways this silently returns the wrong five:**
+
+- **Omit `sorted()`** and the same seed over the same sheet yields a different
+  five (only `RD-56910-Lib1` overlaps). Nothing errors.
+- **Use the current sheet.** `data/sample_sheets/ibd_quiescent.resolved.tsv`
+  now holds **213** rows after a resolver change; the same seed over it draws a
+  different five. The seed is reproducible only against a stated sheet version.
+
+The five names above are the authoritative record — prefer them over re-running
+the draw.
