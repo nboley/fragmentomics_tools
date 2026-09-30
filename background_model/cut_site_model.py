@@ -307,99 +307,117 @@ class CutSiteFragmentModel(L.LightningModule):
 
         L_vals = self._L_vals       # (n_L,)
         L_groups = self._L_groups   # (n_L,)
+        use_checkpoint = self.training and torch.is_grad_enabled()
 
         n_L = self._n_L
         for L_start_idx in range(0, n_L, L_chunk):
             L_end_idx = min(L_start_idx + L_chunk, n_L)
             chunk_L = L_vals[L_start_idx:L_end_idx]        # (chunk_size,)
             chunk_g = L_groups[L_start_idx:L_end_idx]       # (chunk_size,)
-            chunk_size = chunk_L.shape[0]
 
-            # Unique groups in this chunk
-            unique_groups = chunk_g.unique()
-
-            # -- L2a: endpoint branch (folded, from cache, vectorized) --------
-            o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
-            o_r = o_l + chunk_L                     # (chunk_size,)
-
-            endpoint_feats = [[None, None], [None, None]]
-            for tap in (0, 1):
-                for strand in (0, 1):
-                    bank_idx = tap * 2 + strand
-                    tap_offsets = o_l if tap == 0 else o_r
-
-                    # Build a (chunk_size, B, H, P) tensor by stacking the
-                    # correct group's Mh slice for each L.  Vectorized: build
-                    # index arrays once, gather with one advanced-index op per
-                    # unique group.
-                    result = torch.empty(
-                        chunk_size, B, H, P, device=h.device, dtype=h.dtype
-                    )
-                    for g in unique_groups.tolist():
-                        g_mask = (chunk_g == g)
-                        if not g_mask.any():
-                            continue
-                        Mh_g = _Mh_cache[(bank_idx, g)]  # (B, H, model_input_size)
-                        offsets_g = tap_offsets[g_mask]     # (n_g,)
-                        # Build (n_g, P) position indices
-                        pos_idx = offsets_g[:, None] + torch.arange(
-                            P, device=h.device
-                        )[None, :]  # (n_g, P)
-                        # Gather: Mh_g[:, :, pos_idx] → (B, H, n_g, P)
-                        gathered = Mh_g[:, :, pos_idx.long()]  # (B, H, n_g, P)
-                        # Scatter into result at the right chunk positions
-                        g_indices = g_mask.nonzero(as_tuple=True)[0]
-                        result[g_indices] = gathered.permute(2, 0, 1, 3)
-
-                    # result is (chunk_size, B, H, P) → (B, H, P, chunk_size)
-                    endpoint_feats[tap][strand] = result.permute(1, 2, 3, 0)
-
-            # -- L2b span: vectorized gather from prefix sum ----------------
-            o_l_prime = o_l - self._o_l_min   # (chunk_size,)
-            o_r_prime = o_r - self._o_l_min   # (chunk_size,)
-
-            # U is (B, N2, P, n_offsets+1). Gather at o_r' and o_l' for all
-            # chunk positions at once.
-            U_r = U[:, :, :, o_r_prime.long()]  # (B, N2, P, chunk_size)
-            U_l = U[:, :, :, o_l_prime.long()]  # (B, N2, P, chunk_size)
-            span = U_r - U_l                    # (B, N2, P, chunk_size)
-
-            # Project span and mean = span / L
-            # W_span: (N2) → (H), W_mean: (N2) → (H)
-            # span is (B, N2, P, chunk_size), need to apply linear on dim=1
-            span_t = span.permute(0, 2, 3, 1)  # (B, P, chunk_size, N2)
-            interior_span = self.W_span(span_t)  # (B, P, chunk_size, H)
-            L_float = chunk_L.float().to(span.device)  # (chunk_size,)
-            mean_t = span_t / L_float[None, None, :, None]
-            interior_mean = self.W_mean(mean_t)   # (B, P, chunk_size, H)
-
-            # -- Assemble pre-activation per (m, L, strand) -----------------
-            # pre[h,m,L,s] = f_l[s][:,h,m,L] + f_r[s][:,h,m,L]
-            #              + interior_span[:,m,L,h] + interior_mean[:,m,L,h]
-            # Shape target: (B, H, P, chunk_size, 2) for the 2 strands
-
-            pre = torch.zeros(B, P, chunk_size, H, 2, device=h.device, dtype=h.dtype)
-            for strand in (0, 1):
-                # endpoint_feats[tap][strand] is (B, H, P, chunk_size)
-                f_l = endpoint_feats[0][strand].permute(0, 2, 3, 1)  # (B, P, chunk_size, H)
-                f_r = endpoint_feats[1][strand].permute(0, 2, 3, 1)
-                pre[:, :, :, :, strand] = (
-                    f_l + f_r + interior_span + interior_mean
+            if use_checkpoint:
+                logit_chunk = torch.utils.checkpoint.checkpoint(
+                    self._compute_chunk,
+                    h, U, _Mh_cache, chunk_L, chunk_g,
+                    L_start_idx, L_end_idx, B, P, H,
+                    use_reentrant=False,
                 )
-
-            # -- L3: nonlinearity + output ----------------------------------
-            hid = self.l3_act(pre)  # (B, P, chunk_size, H, 2)
-            # logit = w_out · hid + len_bias[L]
-            # w_out: (H,), dot over H dim
-            logit_chunk = torch.einsum('bplhs, h -> bpls', hid, self.w_out)
-            # Add len_bias: (chunk_size,) broadcast over (B, P, ·, 2)
-            lb = self.len_bias[L_start_idx:L_end_idx]  # (chunk_size,)
-            logit_chunk = logit_chunk + lb[None, None, :, None]
-
+            else:
+                logit_chunk = self._compute_chunk(
+                    h, U, _Mh_cache, chunk_L, chunk_g,
+                    L_start_idx, L_end_idx, B, P, H,
+                )
             all_logits.append(logit_chunk)  # (B, P, chunk_size, 2)
 
         logits = torch.cat(all_logits, dim=2)  # (B, P, n_L, 2)
         return logits, endpoint_shape, disp_bp
+
+    def _compute_chunk(
+        self, h, U, _Mh_cache, chunk_L, chunk_g,
+        L_start_idx, L_end_idx, B, P, H,
+    ):
+        """Compute logits for one L-chunk. Extracted for gradient checkpointing."""
+        chunk_size = chunk_L.shape[0]
+
+        # Unique groups in this chunk
+        unique_groups = chunk_g.unique()
+
+        # -- L2a: endpoint branch (fused tap×strand gather) ----------------
+        # Instead of 4 separate gathers per group (tap × strand), stack all
+        # 4 banks' Mh and do ONE gather per group. Reduces backward
+        # scatter-adds from 4× to 1× per group.
+        o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
+        o_r = o_l + chunk_L                     # (chunk_size,)
+        p_range = torch.arange(P, device=h.device)
+
+        # Pre-allocate all 4 results: (4, chunk_size, B, H, P)
+        all_results = torch.empty(
+            4, chunk_size, B, H, P, device=h.device, dtype=h.dtype
+        )
+
+        for g in unique_groups.tolist():
+            g_mask = (chunk_g == g)
+            if not g_mask.any():
+                continue
+            g_indices = g_mask.nonzero(as_tuple=True)[0]
+            n_g = g_indices.shape[0]
+
+            # Build position indices for left and right taps
+            offsets_l = o_l[g_mask]  # (n_g,)
+            offsets_r = o_r[g_mask]  # (n_g,)
+            pos_l = offsets_l[:, None] + p_range[None, :]  # (n_g, P)
+            pos_r = offsets_r[:, None] + p_range[None, :]  # (n_g, P)
+
+            # Left-tap banks (0=left_fwd, 1=left_rev): ONE gather for both
+            Mh_left = torch.stack([_Mh_cache[(0, g)], _Mh_cache[(1, g)]])  # (2, B, H, S)
+            gathered_l = Mh_left[:, :, :, pos_l.long()]  # (2, B, H, n_g, P)
+            all_results[0, g_indices] = gathered_l[0].permute(2, 0, 1, 3)
+            all_results[1, g_indices] = gathered_l[1].permute(2, 0, 1, 3)
+
+            # Right-tap banks (2=right_fwd, 3=right_rev): ONE gather for both
+            Mh_right = torch.stack([_Mh_cache[(2, g)], _Mh_cache[(3, g)]])  # (2, B, H, S)
+            gathered_r = Mh_right[:, :, :, pos_r.long()]  # (2, B, H, n_g, P)
+            all_results[2, g_indices] = gathered_r[0].permute(2, 0, 1, 3)
+            all_results[3, g_indices] = gathered_r[1].permute(2, 0, 1, 3)
+
+        # Unpack: bank_idx = tap * 2 + strand
+        # all_results[bank] is (chunk_size, B, H, P) → (B, H, P, chunk_size)
+        endpoint_feats = [[None, None], [None, None]]
+        for tap in (0, 1):
+            for strand in (0, 1):
+                bank_idx = tap * 2 + strand
+                endpoint_feats[tap][strand] = all_results[bank_idx].permute(1, 2, 3, 0)
+
+        # -- L2b span: vectorized gather from prefix sum ----------------
+        o_l_prime = o_l - self._o_l_min
+        o_r_prime = o_r - self._o_l_min
+
+        U_r = U[:, :, :, o_r_prime.long()]
+        U_l = U[:, :, :, o_l_prime.long()]
+        span = U_r - U_l
+
+        span_t = span.permute(0, 2, 3, 1)  # (B, P, chunk_size, N2)
+        interior_span = self.W_span(span_t)
+        L_float = chunk_L.float().to(span.device)
+        mean_t = span_t / L_float[None, None, :, None]
+        interior_mean = self.W_mean(mean_t)
+
+        # -- Assemble pre-activation per (m, L, strand) -----------------
+        pre = torch.zeros(B, P, chunk_size, H, 2, device=h.device, dtype=h.dtype)
+        for strand in (0, 1):
+            f_l = endpoint_feats[0][strand].permute(0, 2, 3, 1)
+            f_r = endpoint_feats[1][strand].permute(0, 2, 3, 1)
+            pre[:, :, :, :, strand] = (
+                f_l + f_r + interior_span + interior_mean
+            )
+
+        # -- L3: nonlinearity + output ----------------------------------
+        hid = self.l3_act(pre)
+        logit_chunk = torch.einsum('bplhs, h -> bpls', hid, self.w_out)
+        lb = self.len_bias[L_start_idx:L_end_idx]
+        logit_chunk = logit_chunk + lb[None, None, :, None]
+
+        return logit_chunk
 
     # -- Dispersion pooling (copied from frozen core) -----------------------
 
