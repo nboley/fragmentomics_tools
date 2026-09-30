@@ -290,23 +290,21 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L2b: interior prefix sum (L-independent, compute once) ----------
         U = self._interior_prefix(x_onehot, 0, P)  # (B, N2, P, n_offsets+1)
 
-        # -- L2a: pre-compute M[g,s] @ h for ALL groups (cached) ------------
-        # Avoids redundant matmuls when the same group spans multiple L-chunks.
-        # _Mh_cache[(bank_idx, g)] = (B, H, model_input_size)
-        _Mh_cache = {}
+        # -- L2a: pre-compute folded M matrices per (bank, group) ------------
+        # Store M matrices (not M@h) — we gather h slices first, then matmul.
+        # This avoids the expensive IndexBackward0 on the large Mh tensor.
+        _M_cache = {}
         all_groups = self._L_groups.unique().tolist()
-        for tap in (0, 1):
-            for strand in (0, 1):
-                bank_idx = tap * 2 + strand
-                for g in all_groups:
-                    M_gs = self._folded_M(bank_idx, g)  # (H, N1)
-                    _Mh_cache[(bank_idx, g)] = M_gs @ h  # (B, H, model_input_size)
+        for bank_idx in range(4):
+            for g in all_groups:
+                _M_cache[(bank_idx, g)] = self._folded_M(bank_idx, g)  # (H, N1)
 
         # -- Chunked forward over L ----------------------------------------
         all_logits = []
 
         L_vals = self._L_vals       # (n_L,)
         L_groups = self._L_groups   # (n_L,)
+        p_range = torch.arange(P, device=h.device)  # (P,) reused across chunks
 
         n_L = self._n_L
         for L_start_idx in range(0, n_L, L_chunk):
@@ -318,41 +316,61 @@ class CutSiteFragmentModel(L.LightningModule):
             # Unique groups in this chunk
             unique_groups = chunk_g.unique()
 
-            # -- L2a: endpoint branch (folded, from cache, vectorized) --------
+            # -- L2a: endpoint branch (einsum fusion + fused tap×strand) ----
+            # Instead of M@h → gather positions (expensive IndexBackward),
+            # we gather h slices first → then apply M (cheap mm backward).
             o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
             o_r = o_l + chunk_L                     # (chunk_size,)
 
+            # Build position indices for both taps: (2, chunk_size, P)
+            # tap 0 = left (o_l), tap 1 = right (o_r)
+            pos_left = o_l[:, None] + p_range[None, :]   # (chunk_size, P)
+            pos_right = o_r[:, None] + p_range[None, :]  # (chunk_size, P)
+
+            # Fuse tap×strand: compute all 4 endpoint features per group
+            # in one pass, avoiding 4 separate IndexBackward ops.
+            # endpoint_feats[tap][strand] = (B, P, chunk_size, H)
             endpoint_feats = [[None, None], [None, None]]
+            for g in unique_groups.tolist():
+                g_mask = (chunk_g == g)
+                if not g_mask.any():
+                    continue
+                g_indices = g_mask.nonzero(as_tuple=True)[0]
+                n_g = g_indices.shape[0]
+
+                # Gather h slices at left and right tap positions for this group
+                # h is (B, N1, model_input_size)
+                pos_l_g = pos_left[g_mask]   # (n_g, P)
+                pos_r_g = pos_right[g_mask]  # (n_g, P)
+
+                # Single gather for both taps: (2, n_g, P) positions
+                # → h_slices: (2, B, N1, n_g, P) via one fancy-index op
+                pos_both = torch.stack([pos_l_g, pos_r_g])  # (2, n_g, P)
+                h_slices = h[:, :, pos_both.reshape(-1).long()].reshape(
+                    B, -1, 2, n_g, P
+                )  # (B, N1, 2, n_g, P)
+
+                # Apply M for all 4 banks: M[bank] @ h_slices → (B, H, 2, n_g, P)
+                for tap in (0, 1):
+                    for strand in (0, 1):
+                        bank_idx = tap * 2 + strand
+                        M_gs = _M_cache[(bank_idx, g)]  # (H, N1)
+                        # h_tap: (B, N1, n_g, P) → einsum with M → (B, H, n_g, P)
+                        h_tap = h_slices[:, :, tap, :, :]  # (B, N1, n_g, P)
+                        feat = torch.einsum('hn, bnlp -> bhlp', M_gs, h_tap)
+                        # Scatter into result
+                        if endpoint_feats[tap][strand] is None:
+                            endpoint_feats[tap][strand] = torch.empty(
+                                B, H, chunk_size, P, device=h.device, dtype=h.dtype
+                            )
+                        endpoint_feats[tap][strand][:, :, g_indices, :] = feat
+
+            # Permute to (B, H, P, chunk_size) to match pre-activation assembly
             for tap in (0, 1):
                 for strand in (0, 1):
-                    bank_idx = tap * 2 + strand
-                    tap_offsets = o_l if tap == 0 else o_r
-
-                    # Build a (chunk_size, B, H, P) tensor by stacking the
-                    # correct group's Mh slice for each L.  Vectorized: build
-                    # index arrays once, gather with one advanced-index op per
-                    # unique group.
-                    result = torch.empty(
-                        chunk_size, B, H, P, device=h.device, dtype=h.dtype
-                    )
-                    for g in unique_groups.tolist():
-                        g_mask = (chunk_g == g)
-                        if not g_mask.any():
-                            continue
-                        Mh_g = _Mh_cache[(bank_idx, g)]  # (B, H, model_input_size)
-                        offsets_g = tap_offsets[g_mask]     # (n_g,)
-                        # Build (n_g, P) position indices
-                        pos_idx = offsets_g[:, None] + torch.arange(
-                            P, device=h.device
-                        )[None, :]  # (n_g, P)
-                        # Gather: Mh_g[:, :, pos_idx] → (B, H, n_g, P)
-                        gathered = Mh_g[:, :, pos_idx.long()]  # (B, H, n_g, P)
-                        # Scatter into result at the right chunk positions
-                        g_indices = g_mask.nonzero(as_tuple=True)[0]
-                        result[g_indices] = gathered.permute(2, 0, 1, 3)
-
-                    # result is (chunk_size, B, H, P) → (B, H, P, chunk_size)
-                    endpoint_feats[tap][strand] = result.permute(1, 2, 3, 0)
+                    endpoint_feats[tap][strand] = endpoint_feats[tap][strand].permute(
+                        0, 1, 3, 2
+                    )  # (B, H, chunk_size, P) → (B, H, P, chunk_size)
 
             # -- L2b span: vectorized gather from prefix sum ----------------
             o_l_prime = o_l - self._o_l_min   # (chunk_size,)
