@@ -157,3 +157,169 @@ where `names` is the `sample_name` column of the **36-row** sheet preserved at
 
 The five names above are the authoritative record — prefer them over re-running
 the draw.
+
+---
+
+## Real vs synthetic hexamer distributions
+
+Enrichment = `observed / background` per hexamer, summed across all 16 FL
+bands before dividing (count-weighted collapse). Normalised within each table
+to mean 1 so that enrichment is a relative quantity. The synthetic comparison
+uses `build_w6(seed, dynamic_range=4.0)` from `scripts/sim_fragments.py` — the
+same function and default the simulator uses. Four independent synthetic draws
+(one per table) are generated to match the four real tables.
+
+**What the band collapse hides:** any fragment-length-dependent variation in
+hexamer preference. A hexamer favoured at short lengths but not long ones gets
+averaged out proportionally to each band's fragment count. The synthetic tables
+have no band structure, so this is the only like-for-like comparison possible.
+Fig 7 shows that the enrichment distribution is stable across representative FL
+bands, so the collapse is not masking a major effect.
+
+Script: `scripts/analyze_hexamer_distributions.py`. Figures:
+`docs/pending/cut_site_hexamer_plots/`.
+
+### 1. Spread
+
+![Spread comparison](cut_site_hexamer_plots/fig1_spread_comparison.png)
+
+| Table | Real p95/p5 | Real min/max DR | Syn p95/p5 | Syn min/max DR | Real log-SD | Syn log-SD |
+|---|---|---|---|---|---|---|
+| start_fwd | 11.35x | 253x | 4.03x | 18.6x | 0.739 | 0.423 |
+| start_rev | 11.17x | 276x | 4.05x | 18.3x | 0.733 | 0.428 |
+| end_fwd | 5.07x | 31.5x | 4.02x | 19.2x | 0.491 | 0.425 |
+| end_rev | 4.96x | 40.8x | 3.99x | 35.9x | 0.489 | 0.427 |
+
+The start tables are **~1.7x wider** in log-space than synthetic (log-SD 0.74
+vs 0.42). The end tables are close to synthetic (log-SD 0.49 vs 0.43). The
+min/max dynamic range of the start tables (253--276x) dwarfs the synthetic
+(18--19x), but min/max is driven by extreme hexamers and is noisy; p95/p5 is
+the stable measure.
+
+**Start/end asymmetry is the dominant structural gap.** Start-site bias
+(5' cut) has ~50% more spread in log-space than end-site bias (3' cut). The
+simulator uses one shared `w6` table for all four, which cannot represent this.
+
+### 2. Shape
+
+![Shape comparison](cut_site_hexamer_plots/fig3_shape_comparison.png)
+
+| Table | Real skew | Real excess kurt | Syn skew | Syn excess kurt |
+|---|---|---|---|---|
+| start_fwd | +0.026 | -0.044 | +0.030 | -0.054 |
+| start_rev | +0.035 | +0.012 | -0.052 | -0.004 |
+| end_fwd | -0.061 | +0.099 | -0.002 | -0.066 |
+| end_rev | -0.072 | +0.188 | -0.007 | -0.002 |
+
+The log-normal assumption holds well: skewness is near zero for all tables
+(|skew| < 0.08), and excess kurtosis is small (< 0.2). The end tables show
+slightly heavier tails (positive excess kurtosis ~0.1--0.2) than the synthetic,
+but the effect is minor. No multi-modality is visible.
+
+![QQ plot](cut_site_hexamer_plots/fig2_qq_lognormal.png)
+
+The QQ plots confirm: real enrichments track their fitted log-normal closely,
+with mild departures only in the extreme tails.
+
+### 3. Correlation structure across the four tables
+
+![Correlation structure](cut_site_hexamer_plots/fig4_correlation_structure.png)
+
+| Category | Pair | Pearson r (mean +/- SD) |
+|---|---|---|
+| Within-end | start_fwd vs start_rev | 0.900 +/- 0.021 |
+| Within-end | end_fwd vs end_rev | 0.812 +/- 0.044 |
+| Across-end (same strand) | start_fwd vs end_fwd | 0.643 +/- 0.043 |
+| Across-end (same strand) | start_rev vs end_rev | 0.640 +/- 0.041 |
+| Across-end (cross strand) | start_fwd vs end_rev | 0.642 +/- 0.039 |
+| Across-end (cross strand) | start_rev vs end_fwd | 0.640 +/- 0.045 |
+
+Within-end correlation (0.81--0.90) is clearly higher than across-end
+(~0.64), and the gap is consistent across all 5 samples. This **supports
+untied tables**: a hexamer's bias at the 5' cut is more similar across strands
+than it is between the 5' and 3' cuts. The across-end correlations are nearly
+identical regardless of strand pairing (same-strand ~0.64, cross-strand ~0.64),
+so the 5'/3' distinction is the real axis of variation, not strand.
+
+The simulator's single shared table (r = 1.0 across all four) overstates
+table coupling and cannot test whether a model recovers the within-end vs
+across-end distinction.
+
+### 4. Sample-to-sample variability
+
+![Sample variability](cut_site_hexamer_plots/fig5_sample_variability.png)
+
+| Table | Pairwise r (mean) | Min | Max |
+|---|---|---|---|
+| start_fwd | 0.892 | 0.867 | 0.918 |
+| start_rev | 0.890 | 0.864 | 0.915 |
+| end_fwd | 0.803 | 0.755 | 0.859 |
+| end_rev | 0.805 | 0.755 | 0.861 |
+
+The hexamer tables are a **stable target** across samples: pairwise
+log-enrichment correlations are 0.80--0.92. Start tables are more stable
+(r~0.89) than end tables (r~0.80), consistent with the start sites carrying a
+stronger, more reproducible signal. The noisier end tables presumably reflect
+lower signal-to-noise at the 3' cut.
+
+![Start vs end asymmetry](cut_site_hexamer_plots/fig6_start_end_asymmetry.png)
+
+The start-vs-end scatter (log-SD ratio ~1.50) confirms the asymmetry is a
+stable feature of the biology, not a sample artifact.
+
+### 5. FL-band stability
+
+![Band stability](cut_site_hexamer_plots/fig7_band_stability.png)
+
+Enrichment distributions are visually similar across representative FL bands
+([25,35), [75,85), [125,135), [175,181)), confirming that the band collapse
+does not mask a major length-dependent shift in hexamer preference.
+
+### Disagreement with coordination-file numbers
+
+The coordination file claimed: start tables span 152--361x enrichment, end
+tables 53--86x, within-end r = 0.85--0.92, across-end r = 0.58--0.71.
+
+Measured from the Parquets:
+- **Start DR**: 253x and 276x (5-sample mean). Single-sample first sample:
+  179x and 228x. The 152--361x range is plausible as a per-sample spread but
+  was not verified against the coordination file's methodology.
+- **End DR**: 31.5x and 40.8x (5-sample mean). Single-sample first sample:
+  75x and 86x. The coordination file's 53--86x matches the per-sample range;
+  the 5-sample mean is lower because averaging shrinks extremes.
+- **Within-end r**: 0.812--0.900. Consistent with the claimed 0.85--0.92 for
+  start (0.900), but the end table (0.812) falls below 0.85.
+- **Across-end r**: 0.640--0.643. Within the claimed 0.58--0.71 range.
+
+No dramatic disagreement. The coordination file's numbers appear broadly
+correct; differences are methodological (mean-of-samples vs per-sample
+extremes).
+
+### Verdict: is the synthetic prior realistic?
+
+**Partially. The end tables are well-approximated; the start tables are not.**
+
+The log-normal shape assumption is sound — real enrichments are approximately
+log-normal in all four tables, with near-zero skew and small excess kurtosis.
+
+The critical mismatch is **spread**: the synthetic `dynamic_range=4.0`
+produces log-SD ~0.42, which matches the end tables (log-SD ~0.49) reasonably
+but underestimates the start tables (log-SD ~0.74) by 1.7x. A sim-derived
+"% bias captured" number therefore **overestimates recovery at start sites**
+(the model faces a narrower distribution than reality) and is approximately
+correct at end sites.
+
+The second gap is **structural**: the simulator uses one table for all four
+positions, while the real data shows clear within-end vs across-end correlation
+structure (r ~0.85 vs ~0.64) and a 1.5x start/end log-SD asymmetry. The sim
+cannot test whether a model recovers these distinctions.
+
+**What transfers from sim to real:**
+- Shape of the distribution (log-normal, low skew/kurtosis)
+- End-table difficulty (spread is similar)
+- General architecture validation (untied tables, strand symmetry)
+
+**What does not transfer:**
+- Start-table recovery percentages (too easy in sim)
+- Any conclusion about start/end differentiation (sim has no asymmetry)
+- Absolute "% bias captured" as a proxy for real-data performance
