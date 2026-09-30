@@ -329,10 +329,24 @@ depth to a real sample's realised count is out of scope.
   equivalence; new seed lineage; spend no effort comparing.
 - **Self-consistency:** the drawn fragments' empirical distribution matches the
   weights they were drawn from.
-- **Realised-parameter recovery:** simulate from surface `S`, re-fit from the
-  *simulated* fragments, recover `S′ ≈ S`. This exercises the whole draw and
-  **catches errors that every normalisation invariant passes**, because
-  `Σ_Ω w = 1` is preserved by any per-element weighting.
+- **Realised-parameter recovery** — the check that **catches errors every
+  normalisation invariant passes**, because `Σ_Ω w = 1` survives any
+  per-element reweighting. The two halves are not symmetric:
+  - **Start tables are exactly identifiable.** The Appendix-A cancellation
+    leaves a clean 5′ marginal `P(c5 | s) = start_s[hex(c5)] / S_s`, so
+    `count_5_s[h] / B_s[h] ∝ start_s[h]` exactly, where `B_s[h]` counts the
+    `c5` positions carrying `h` with `Z_s(c5) > 0`. Recovered up to one
+    multiplicative constant.
+  - **End tables are NOT identifiable from marginal 3′ counts.**
+    `Z_s(c5) = Σ_L end_s[hex(c3(L))] · marginal_fl(L) / predict(...)` couples
+    every end weight, so an observed-over-background ratio cannot factor
+    `end_s[h]` out. Compare the observed 3′ hexamer marginal against the
+    **model-predicted** one computed from `w`, and test with `χ²/dof`.
+  - **Use `χ²/dof`, not a correlation threshold.** Its null value is 1 with a
+    known interval, so it is calibrated in advance; a Pearson-r cutoff is not,
+    and will fail a correct sampler at finite depth purely from the Poisson
+    floor. Always state the noise floor alongside the statistic, or "close to
+    truth" is unfalsifiable.
 - **The manifest round-trips.** Reconstruct `w` from the manifest alone and
   confirm `Σ_Ω w = 1` and the exact-½ strand marginal. **This is the
   load-bearing property of the whole output** — if the manifest is insufficient
