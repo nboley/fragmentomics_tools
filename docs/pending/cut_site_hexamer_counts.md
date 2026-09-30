@@ -275,10 +275,33 @@ no distinction to recover.
 | end_rev | 0.805 | 0.755 | 0.861 |
 
 The hexamer tables are a **stable target** across samples: pairwise
-log-enrichment correlations are 0.80--0.92. Start tables are more stable
-(r~0.89) than end tables (r~0.80), consistent with the start sites carrying a
-stronger, more reproducible signal. The noisier end tables presumably reflect
-lower signal-to-noise at the 3' cut.
+log-enrichment correlations are 0.80--0.92.
+
+**Start tables are NOT more stable than end tables — that reading is a noise
+artifact.** Merging a pair of samples and randomly re-splitting the fragments
+at the same depth ratio (binomial thinning) gives the correlation attributable
+to sampling noise alone:
+
+| table | observed r | thinning-null r | disattenuated r |
+|---|---|---|---|
+| start_fwd | 0.8826 | 0.8977 | 0.983 |
+| start_rev | 0.8831 | 0.8956 | 0.986 |
+| end_fwd | 0.7988 | 0.8166 | 0.978 |
+| end_rev | 0.7905 | 0.8148 | 0.970 |
+
+The **noise ceiling itself** differs between start and end (0.90 vs 0.82),
+because start tables have wider spread (log-SD 0.74 vs 0.49) and the same
+Poisson noise degrades a wider signal less. Once corrected for attenuation
+(`r_obs / r_null`), start and end are equally stable at **0.97--0.99**.
+
+**Observed correlation sits at the noise ceiling, marginally below it.** Two
+real samples are almost exactly as similar as two random halves of one pool, so
+the *underlying* tables are nearly identical across samples and the real
+between-sample variation is small — the ~0.013--0.024 shortfall below the null.
+
+Never read a raw between-sample correlation here without its thinning null: at
+these depths the null is 0.82--0.90, not 1.0, so an uncorrected number mostly
+measures depth and spread rather than biology.
 
 ![Start vs end asymmetry](cut_site_hexamer_plots/fig6_start_end_asymmetry.png)
 
