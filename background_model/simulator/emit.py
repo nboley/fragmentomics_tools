@@ -465,9 +465,18 @@ class ManifestVerificationIncomplete(ValueError):
     the input needed to run it.
 
     This is distinct from ``ManifestMismatch`` (a check ran and disagreed).
-    Here the check COULD NOT run because the caller omitted the input, which
-    makes a skipped check unrepresentable rather than merely visible — the
-    architecture change requested for issue 1.
+    Here the check COULD NOT run because the caller omitted the input.
+
+    This exception enforces the **mandatory** tier of the provenance contract:
+    ``reference`` and ``region_set``.  If the manifest records a hash for
+    either of these and the caller does not supply the corresponding path,
+    ``load_manifest`` raises this exception — a skipped check is genuinely
+    unrepresentable for these inputs.
+
+    The ``simulator_script`` check is **best-effort**: if ``git`` cannot
+    resolve the recorded path, the check does not run and
+    ``"simulator_script:unresolvable"`` is recorded in ``verified`` instead.
+    See ``load_manifest`` for the full contract.
     """
 
 
@@ -487,26 +496,29 @@ def load_manifest(
     and every invariant -- ``Sum_Omega w == 1``, the exact-half strand marginal,
     the domain size -- still passes.  The recorded hashes are the only detector.
 
-    When ``verify=True`` (the default), the loader REQUIRES the inputs for
-    every check the manifest claims it can support.  Specifically:
+    When ``verify=True`` (the default), the provenance contract has two tiers:
 
-    - If the manifest records a ``reference_hash``, ``fasta_path`` must be
-      supplied — otherwise ``ManifestVerificationIncomplete`` is raised.
-    - If the manifest records a ``region_set_hash``, ``region_set_path``
-      must be supplied.
-    - If the manifest records a ``simulator_script`` with a
-      ``simulator_script_sha``, the script must be resolvable via
-      ``git_blob_sha`` — if it is not (returns None), the check is
-      recorded as ``"simulator_script:unresolvable"`` so the gap is
-      visible, but a *resolved* sha that disagrees is a hard error.
+    **Mandatory** (``reference``, ``region_set``):
+        If the manifest records a hash, the caller MUST supply the
+        corresponding path.  Omitting it raises
+        ``ManifestVerificationIncomplete`` — a skipped check is genuinely
+        unrepresentable for these inputs.
 
-    This makes a skipped check unrepresentable rather than merely visible.
+    **Best-effort** (``simulator_script``):
+        If the manifest records a ``simulator_script`` with a
+        ``simulator_script_sha``, the loader calls ``git_blob_sha`` to
+        resolve it.  A resolved sha that disagrees is a hard error
+        (``ManifestMismatch``).  But if ``git_blob_sha`` returns ``None``
+        — because ``git`` is not installed (AWS Batch containers) or the
+        script is not tracked — the check does not run and
+        ``"simulator_script:unresolvable"`` is appended to ``verified``.
+        That entry means *the check did not run*, not that it passed.
 
     :param verify: set False to load without checking. Explicit, so that
         bypassing provenance is a visible decision at the call site.
     :raises ManifestMismatch: if any check that ran disagreed.
-    :raises ManifestVerificationIncomplete: if a check the manifest supports
-        could not run because the caller did not supply the input.
+    :raises ManifestVerificationIncomplete: if a mandatory check could not
+        run because the caller did not supply the input.
     """
     with open(manifest_path) as f:
         raw = json.load(f)

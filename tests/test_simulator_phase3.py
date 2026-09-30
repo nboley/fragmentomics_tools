@@ -1479,6 +1479,78 @@ class TestRepoRelativeResolution:
         assert len(sha) == 40
 
 
+# ── 14b. load_manifest CWD independence (Finding 1, load-level) ────────────
+
+class TestLoadManifestCWDIndependence:
+    """load_manifest must verify simulator_script from ANY working directory.
+
+    The root-cause tests in TestRepoRelativeResolution cover ``_to_repo_relative``
+    and ``git_blob_sha`` individually.  This test exercises the regression at the
+    level where it actually manifested: a ``load_manifest(..., verify=True)`` call
+    from a CWD outside the repo.
+
+    Before the fix (c560972), ``_to_repo_relative`` used ``os.path.abspath`` to
+    resolve relative paths, which prepends CWD.  From ``cd /tmp`` the
+    repo-relative ``scripts/run_simulator.py`` became ``/tmp/scripts/...``,
+    outside the repo, and raised ``ValueError`` — making manifests unloadable
+    under the ``cd /tmp`` + ``PYTHONPATH`` pattern prescribed for Batch.
+
+    All 14 tests that existed before this one passed while the bug was live,
+    because every one ran from the repo root.
+    """
+
+    def test_load_manifest_verifies_script_from_foreign_cwd(
+        self, tmp_path, monkeypatch,
+    ):
+        """Write a manifest with a tracked simulator_script, then load it
+        with verify=True from a CWD outside the repo.  The script check
+        must run — 'simulator_script' must appear in verified."""
+        from background_model.simulator.emit import (
+            _hash_file, _repo_root, write_manifest, load_manifest,
+        )
+
+        # Create real reference and region_set files for the mandatory checks
+        fa = os.path.join(str(tmp_path), "ref.fa")
+        with open(fa, "w") as f:
+            f.write(">c\nACGTACGTAC\n")
+        rs = os.path.join(str(tmp_path), "regions.bed")
+        with open(rs, "w") as f:
+            f.write("chr1\t0\t2560\n")
+
+        rng = np.random.default_rng(0)
+        tables = HexamerTables(
+            *[np.exp(rng.normal(0, 0.3, NHEX)) for _ in range(4)]
+        )
+        fl = np.ones(N_LENGTHS) / N_LENGTHS
+        lut = build_predict_lut(lambda L, gc: 1.0)
+
+        # Use a file known to be tracked in git
+        tracked_script = "background_model/simulator/weights.py"
+
+        mp = os.path.join(str(tmp_path), "m.json")
+        write_manifest(
+            mp,
+            hex_tables=tables, predict_lut=lut, marginal_fl=fl,
+            region_set_name="regions.bed",
+            region_set_hash=_hash_file(rs),
+            reference_name="ref.fa",
+            reference_hash=_hash_file(fa),
+            region_len=2560,
+            simulator_script=tracked_script,
+        )
+
+        # Move CWD to tmp_path — NOT the repo root
+        monkeypatch.chdir(tmp_path)
+
+        # This is the call that raised ValueError before the fix
+        loaded = load_manifest(mp, fasta_path=fa, region_set_path=rs)
+
+        assert "simulator_script" in loaded["verified"], (
+            f"simulator_script check did not run from a foreign CWD. "
+            f"verified={loaded['verified']}"
+        )
+
+
 # ── 15. S_minus guard (Finding 3) ──────────────────────────────────────────
 
 class TestSMinusGuard:

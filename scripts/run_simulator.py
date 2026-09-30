@@ -414,8 +414,8 @@ def main() -> int:
 
     # ── manifest round trip: rebuild w from the manifest ALONE ───────────
     # Paths are passed so the provenance checks actually RUN; load_manifest
-    # skips (does not pass) a check whose input is absent, and reports which
-    # ones ran in ``verified``.
+    # raises ManifestVerificationIncomplete if a mandatory check (reference,
+    # region_set) cannot run because its path is absent.
     loaded = load_manifest(
         manifest_path,
         fasta_path=args.fasta,
@@ -477,6 +477,8 @@ def main() -> int:
     print(
         f"4. worst |w_manifest - w|        = {worst_rt:.3e} over "
         f"{len(kept_w)} regions ({worst_rt_region})\n"
+        # NB: an entry like "simulator_script:unresolvable" means that check
+        # did NOT run (e.g. no git on Batch), not that it passed.
         f"   provenance checks that ran    = {loaded['verified'] or 'NONE'}"
     )
     print(
@@ -526,6 +528,7 @@ def main() -> int:
         "n_readback_overlap": n_readback,
         "n_readback_contained": n_contained,
         "worst_manifest_roundtrip_abs_diff": worst_rt,
+        # An "…:unresolvable" entry means that check did NOT run.
         "provenance_checks_run": loaded["verified"],
         "n_plus": n_plus,
         "n_minus": n_minus,
@@ -568,6 +571,8 @@ def main() -> int:
         failures.append(
             f"manifest round trip differs by {worst_rt:.3e} (> 1e-12)"
         )
+    # Only assert the mandatory checks; "simulator_script:unresolvable"
+    # may appear in verified and means that check did NOT run.
     for check in ("reference", "region_set"):
         if check not in loaded["verified"]:
             failures.append(
