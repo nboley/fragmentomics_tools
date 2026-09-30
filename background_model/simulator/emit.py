@@ -318,13 +318,29 @@ def _repo_root() -> str:
 def _to_repo_relative(path: str, repo_root: Optional[str] = None) -> str:
     """Convert *path* to a repo-relative form.
 
+    Resolution rule (Finding 1 fix):
+
+    - **Absolute** paths are used as-is.
+    - **Relative** paths are resolved against *repo_root*, NOT the current
+      working directory.  This is the key invariant: a manifest stores
+      repo-relative paths (e.g. ``scripts/run_simulator.py``), and at load
+      time ``git_blob_sha`` passes that path back here.  If resolution used
+      ``os.path.abspath`` (which prepends CWD), the path would only resolve
+      when CWD happens to be the repo root — but production Batch jobs run
+      from ``cd /tmp`` with ``PYTHONPATH`` set, so CWD is almost never the
+      repo root.
+
     Raises ``ValueError`` if the result escapes the repo root (starts with
     ``..``), which means the file is outside the repository and cannot be
     addressed by ``git rev-parse HEAD:<relpath>``.
     """
     if repo_root is None:
         repo_root = _repo_root()
-    rel = os.path.relpath(os.path.abspath(path), repo_root)
+    if os.path.isabs(path):
+        abs_path = path
+    else:
+        abs_path = os.path.join(repo_root, path)
+    rel = os.path.relpath(abs_path, repo_root)
     if rel.startswith(".."):
         raise ValueError(
             f"Path {path!r} resolves outside the repo root {repo_root!r} "

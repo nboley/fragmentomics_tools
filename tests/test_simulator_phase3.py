@@ -1407,3 +1407,119 @@ class TestRegionWeightsGuard:
         np.testing.assert_array_equal(s1, s2)
         np.testing.assert_array_equal(e1, e2)
         np.testing.assert_array_equal(st1, st2)
+
+
+# ── 14. _to_repo_relative CWD independence (Finding 1) ────────────────────
+
+class TestRepoRelativeResolution:
+    """_to_repo_relative must resolve relative paths against the repo root,
+    not CWD.
+
+    The manifest stores repo-relative paths (e.g. ``scripts/run_simulator.py``).
+    At load time, ``git_blob_sha`` passes that path back to ``_to_repo_relative``.
+    Before the fix, ``os.path.abspath`` resolved it against CWD, so from
+    ``cd /tmp`` the path became ``/tmp/scripts/run_simulator.py`` — outside the
+    repo — and raised ``ValueError``.
+
+    This test uses ``monkeypatch.chdir(tmp_path)`` so that CWD is NOT the repo
+    root.  Without the fix it raises; with the fix it succeeds.
+    """
+
+    def test_repo_relative_path_resolves_from_foreign_cwd(self, tmp_path, monkeypatch):
+        """A repo-relative path must resolve correctly even when CWD is /tmp."""
+        from background_model.simulator.emit import _to_repo_relative, _repo_root
+
+        monkeypatch.chdir(tmp_path)
+
+        repo_root = _repo_root()
+        # A path that IS inside the repo, expressed as repo-relative
+        rel = _to_repo_relative("background_model/simulator/emit.py", repo_root)
+        assert rel == "background_model/simulator/emit.py"
+        assert not rel.startswith("..")
+
+    def test_absolute_path_inside_repo_still_works(self, tmp_path, monkeypatch):
+        """An absolute path inside the repo must still resolve correctly."""
+        from background_model.simulator.emit import _to_repo_relative, _repo_root
+
+        monkeypatch.chdir(tmp_path)
+
+        repo_root = _repo_root()
+        abs_path = os.path.join(repo_root, "background_model/simulator/emit.py")
+        rel = _to_repo_relative(abs_path, repo_root)
+        assert rel == "background_model/simulator/emit.py"
+
+    def test_absolute_path_outside_repo_raises(self, tmp_path, monkeypatch):
+        """An absolute path outside the repo must still raise ValueError."""
+        from background_model.simulator.emit import _to_repo_relative, _repo_root
+
+        monkeypatch.chdir(tmp_path)
+
+        repo_root = _repo_root()
+        outside = str(tmp_path / "not_in_repo.py")
+        with pytest.raises(ValueError, match="resolves outside the repo root"):
+            _to_repo_relative(outside, repo_root)
+
+    def test_git_blob_sha_from_foreign_cwd(self, tmp_path, monkeypatch):
+        """git_blob_sha on a repo-relative path must work from any CWD.
+
+        This is the end-to-end demonstration: the manifest stores a
+        repo-relative path, and git_blob_sha must resolve it against the
+        repo root — not CWD — to ask git about the right file.
+        """
+        from background_model.simulator.emit import git_blob_sha, _repo_root
+
+        monkeypatch.chdir(tmp_path)
+
+        # Use a file known to be tracked in the repo
+        sha = git_blob_sha("background_model/simulator/emit.py")
+        # It should return a hex sha (40 chars), not None and not raise
+        assert sha is not None, (
+            "git_blob_sha returned None for a tracked file from a foreign CWD"
+        )
+        assert len(sha) == 40
+
+
+# ── 15. S_minus guard (Finding 3) ──────────────────────────────────────────
+
+class TestSMinusGuard:
+    """The region_weights guard must check S_minus as well as S_plus.
+
+    Before the fix, only S_plus was checked.  A caller passing hex_fwd from
+    region A with hex_rc from region B would pass the S_plus check (hex_fwd
+    matches) but draw minus-strand fragments from a chimeric distribution.
+    """
+
+    def test_swapped_hex_rc_detected_by_s_minus_guard(self):
+        """Weights from region A passed with hex_rc from region B must
+        be detected by the S_minus check."""
+        tables = _random_tables(seed=55)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+        region_len = 400
+
+        # Region A: build weights
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=30)
+        rw_a = build_region_weights(
+            hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=region_len, valid=valid_a,
+        )
+
+        # Region B: different hex_rc but SAME hex_fwd as A (so S_plus would pass)
+        _, hex_rc_b, _, _ = _synthetic_region(region_len, seed=40)
+
+        rng = np.random.default_rng(42)
+        with pytest.raises(ValueError, match="different region"):
+            draw_fragments_for_region(
+                hex_fwd=hex_fwd_a,   # same as A — S_plus passes
+                hex_rc=hex_rc_b,     # from B — S_minus must catch this
+                cum_gc=cum_gc_a,
+                valid=valid_a,
+                hex_tables=tables,
+                marginal_fl=fl,
+                predict_lut=lut,
+                region_len=region_len,
+                n_fragments=10,
+                rng=rng,
+                region_weights=rw_a,
+            )

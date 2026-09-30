@@ -119,10 +119,13 @@ def draw_fragments_for_region(
                 f"region_len={region_len} requires ({n_sites}, {N_LENGTHS}). "
                 f"The weights were built for a different region."
             )
-        # S_plus/S_minus depend on hex_fwd, hex_rc, valid, and the hex
-        # tables — all of which are region-specific.  A mismatch here
-        # catches the case where weights from region A are passed with
-        # arrays from region B.
+        # S_plus and S_minus depend on hex_fwd, hex_rc, valid, and the
+        # hex tables — all of which are region-specific.  Both checks are
+        # needed: S_plus validates the plus-strand start weights
+        # (start_fwd[hex_fwd]), S_minus validates the minus-strand start
+        # weights (start_rev[hex_rc]).  A caller passing hex_fwd from
+        # region A with hex_rc from region B would pass one check but
+        # fail the other.
         start_vals_plus_check = np.where(valid, hex_tables.start_fwd[hex_fwd], 0.0)
         Z_plus_check = rw.w_plus.sum(axis=1)
         S_plus_check = float(start_vals_plus_check[Z_plus_check > 0].sum())
@@ -130,6 +133,15 @@ def draw_fragments_for_region(
             raise ValueError(
                 f"region_weights.S_plus={rw.S_plus} but the provided "
                 f"hex_fwd/hex_tables/valid arrays give S_plus={S_plus_check}. "
+                f"The weights were built for a different region."
+            )
+        start_vals_minus_check = np.where(valid, hex_tables.start_rev[hex_rc], 0.0)
+        Z_minus_check = rw.w_minus.sum(axis=1)
+        S_minus_check = float(start_vals_minus_check[Z_minus_check > 0].sum())
+        if abs(S_minus_check - rw.S_minus) > 1e-10:
+            raise ValueError(
+                f"region_weights.S_minus={rw.S_minus} but the provided "
+                f"hex_rc/hex_tables/valid arrays give S_minus={S_minus_check}. "
                 f"The weights were built for a different region."
             )
 
