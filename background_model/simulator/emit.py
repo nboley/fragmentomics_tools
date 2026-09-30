@@ -20,8 +20,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -46,8 +47,15 @@ def _get_vocab() -> np.ndarray:
 
 # ── hexamer tables <-> DataFrames ────────────────────────────────────────
 
+_VALID_TABLE_NAMES = frozenset(HexamerTables._fields)
+
+
 def hex_table_to_dataframe(table: np.ndarray, table_name: str) -> pd.DataFrame:
     """Convert a 4096-element weight array to a DataFrame keyed by hexamer string.
+
+    The ``table_name`` column travels with the data so that a DataFrame loaded
+    into the wrong slot (e.g. ``start_fwd`` loaded as ``end_fwd``) is detected
+    on reconstruction rather than silently misrouting weights.
 
     Parameters
     ----------
@@ -58,16 +66,23 @@ def hex_table_to_dataframe(table: np.ndarray, table_name: str) -> pd.DataFrame:
 
     Returns
     -------
-    DataFrame with columns ``["hexamer", "weight"]``, 4096 rows.
+    DataFrame with columns ``["hexamer", "weight", "table_name"]``, 4096 rows.
     """
+    if table_name not in _VALID_TABLE_NAMES:
+        raise ValueError(
+            f"table_name {table_name!r} not in {sorted(_VALID_TABLE_NAMES)}"
+        )
     vocab = _get_vocab()
     return pd.DataFrame({
         "hexamer": [v.decode() for v in vocab],
         "weight": table,
+        "table_name": table_name,
     })
 
 
-def dataframe_to_hex_table(df: pd.DataFrame) -> np.ndarray:
+def dataframe_to_hex_table(
+    df: pd.DataFrame, expected_name: Optional[str] = None,
+) -> np.ndarray:
     """Reconstruct a 4096-element weight array from a hexamer-keyed DataFrame.
 
     The join is on the hexamer STRING — if the DataFrame was produced under a
@@ -75,8 +90,19 @@ def dataframe_to_hex_table(df: pd.DataFrame) -> np.ndarray:
     which is exactly what the string key exists to make detectable (a bare array
     would silently misalign).
 
+    Parameters
+    ----------
+    df : DataFrame
+        Must have columns ``"hexamer"`` and ``"weight"``, and optionally
+        ``"table_name"`` (added by ``hex_table_to_dataframe``).
+    expected_name : str, optional
+        The slot this table is being loaded into (e.g. ``"start_fwd"``).
+        If the DataFrame carries a ``table_name`` column, every row's value
+        must equal *expected_name*; a mismatch means the table was built for
+        a different slot and is being loaded into the wrong one.
+
     Raises ``ValueError`` if the DataFrame does not contain exactly the 4096
-    expected hexamers (wrong length, duplicates, or unknown strings).
+    expected hexamers, or if the embedded table name disagrees with the slot.
     """
     if len(df) != NHEX:
         raise ValueError(
@@ -92,6 +118,18 @@ def dataframe_to_hex_table(df: pd.DataFrame) -> np.ndarray:
             f"DataFrame has {n_unique} unique hexamer strings but expected "
             f"{NHEX}. Duplicates or missing entries make the table silently wrong."
         )
+
+    # Slot-swap guard: if the DataFrame carries an embedded table_name,
+    # it must match the slot we are loading it into.
+    if expected_name is not None and "table_name" in df.columns:
+        embedded_names = df["table_name"].unique()
+        if len(embedded_names) != 1 or embedded_names[0] != expected_name:
+            raise ValueError(
+                f"Hex table slot mismatch: DataFrame carries "
+                f"table_name={embedded_names.tolist()!r} but is being loaded "
+                f"into slot {expected_name!r}. This means the tables were "
+                f"swapped — the weights would be silently misrouted."
+            )
 
     vocab = _get_vocab()
     vocab_strs = [v.decode() for v in vocab]
@@ -120,9 +158,15 @@ def hex_tables_to_dict(
 
 
 def dict_to_hex_tables(d: Dict[str, pd.DataFrame]) -> HexamerTables:
-    """Reconstruct ``HexamerTables`` from a dict of DataFrames."""
+    """Reconstruct ``HexamerTables`` from a dict of DataFrames.
+
+    Each DataFrame is loaded into the slot whose key matches its dict key,
+    and ``dataframe_to_hex_table`` validates that the embedded ``table_name``
+    (if present) agrees with the slot.  A swapped pair (e.g. ``start_fwd``
+    data loaded into the ``end_fwd`` slot) raises ``ValueError``.
+    """
     return HexamerTables(**{
-        name: dataframe_to_hex_table(d[name])
+        name: dataframe_to_hex_table(d[name], expected_name=name)
         for name in HexamerTables._fields
     })
 
@@ -164,6 +208,17 @@ def sort_bgzip_tabix(
 ) -> str:
     """Sort a BED file, bgzip it, and create a tabix index.
 
+    Preflight: verifies that ``sort``, ``bgzip``, and ``tabix`` are on
+    ``PATH`` before doing any work.  CLAUDE.md warns these binaries are
+    frequently absent in sandboxes and Batch containers; a missing binary
+    raises ``FileNotFoundError`` AFTER the entire sampling run has been
+    paid for.  Checking here fails fast with a clear message.
+
+    The sort uses ``LC_ALL=C`` so that contig collation is byte-order
+    regardless of the ambient locale — ``tabix`` requires a specific
+    lexicographic order, and locale-dependent sort (e.g. ``en_US.UTF-8``)
+    can reorder contigs.
+
     Parameters
     ----------
     bed_path : str
@@ -175,15 +230,32 @@ def sort_bgzip_tabix(
     -------
     str
         Path to the bgzipped file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any of ``sort``, ``bgzip``, ``tabix`` is not found on ``PATH``.
     """
+    missing = [cmd for cmd in ("sort", "bgzip", "tabix")
+               if shutil.which(cmd) is None]
+    if missing:
+        raise FileNotFoundError(
+            f"Required binaries not found on PATH: {missing}. "
+            f"In conda envs they ship in bin/; in Batch containers "
+            f"they may need to be installed or added to PATH."
+        )
+
     if bgzip_path is None:
         bgzip_path = bed_path + ".gz"
 
     sorted_path = bed_path + ".sorted"
-    # sort by contig (lexicographic) then by start (numeric)
+    # sort by contig (lexicographic) then by start (numeric).
+    # LC_ALL=C forces byte-order collation — required by tabix.
+    sort_env = {**os.environ, "LC_ALL": "C"}
     subprocess.run(
         ["sort", "-k1,1", "-k2,2n", bed_path, "-o", sorted_path],
         check=True,
+        env=sort_env,
     )
     # bgzip
     with open(bgzip_path, "wb") as out_f:
@@ -232,8 +304,43 @@ class ManifestMismatch(RuntimeError):
     """
 
 
+def _repo_root() -> str:
+    """Return the repo root inferred from this file's location.
+
+    ``emit.py`` is at ``<repo>/background_model/simulator/emit.py``, so the
+    repo root is three directories up.
+    """
+    return os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)
+    )))
+
+
+def _to_repo_relative(path: str, repo_root: Optional[str] = None) -> str:
+    """Convert *path* to a repo-relative form.
+
+    Raises ``ValueError`` if the result escapes the repo root (starts with
+    ``..``), which means the file is outside the repository and cannot be
+    addressed by ``git rev-parse HEAD:<relpath>``.
+    """
+    if repo_root is None:
+        repo_root = _repo_root()
+    rel = os.path.relpath(os.path.abspath(path), repo_root)
+    if rel.startswith(".."):
+        raise ValueError(
+            f"Path {path!r} resolves outside the repo root {repo_root!r} "
+            f"(relative: {rel!r}). The manifest records repo-relative paths "
+            f"so that provenance checks work from any checkout."
+        )
+    return rel
+
+
 def git_blob_sha(path: str, repo_root: Optional[str] = None) -> Optional[str]:
     """Git blob SHA of ``path`` at HEAD, or ``None`` if untracked/uncommitted.
+
+    *path* may be absolute or repo-relative.  It is resolved to a repo-relative
+    form internally.  If the path is outside the repo, ``ValueError`` is raised
+    rather than silently returning ``None`` — a path that cannot be resolved
+    must not degrade to "unverified and silent".
 
     The BLOB sha, not the repo commit sha, deliberately: a commit sha changes
     on any commit anywhere in the repo, so verifying against it would reject
@@ -248,10 +355,8 @@ def git_blob_sha(path: str, repo_root: Optional[str] = None) -> Optional[str]:
     considered.
     """
     if repo_root is None:
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)
-        )))
-    rel = os.path.relpath(os.path.abspath(path), repo_root)
+        repo_root = _repo_root()
+    rel = _to_repo_relative(path, repo_root)
     try:
         out = subprocess.run(
             ["git", "-C", repo_root, "rev-parse", f"HEAD:{rel}"],
@@ -300,6 +405,13 @@ def write_manifest(
         for name, df in hex_dfs.items()
     }
 
+    # Store the simulator script as a repo-relative path so provenance
+    # checks work from any checkout or worktree, not just the one that
+    # wrote the manifest.
+    script_rel: Optional[str] = None
+    if simulator_script is not None:
+        script_rel = _to_repo_relative(simulator_script)
+
     manifest = {
         "version": 1,
         "hex_tables": hex_json,
@@ -319,7 +431,8 @@ def write_manifest(
         # Which script produced this, and the git blob sha of that exact file.
         # `commit_sha` is repo-wide and moves on unrelated commits; this pair
         # names one file and changes only when that file changes.
-        "simulator_script": simulator_script,
+        # Stored as a REPO-RELATIVE path so the check works from any checkout.
+        "simulator_script": script_rel,
         "simulator_script_sha": (
             simulator_script_sha
             if simulator_script_sha is not None
@@ -329,6 +442,17 @@ def write_manifest(
 
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
+
+
+class ManifestVerificationIncomplete(ValueError):
+    """A manifest records a provenance check but the caller did not supply
+    the input needed to run it.
+
+    This is distinct from ``ManifestMismatch`` (a check ran and disagreed).
+    Here the check COULD NOT run because the caller omitted the input, which
+    makes a skipped check unrepresentable rather than merely visible — the
+    architecture change requested for issue 1.
+    """
 
 
 def load_manifest(
@@ -347,27 +471,33 @@ def load_manifest(
     and every invariant -- ``Sum_Omega w == 1``, the exact-half strand marginal,
     the domain size -- still passes.  The recorded hashes are the only detector.
 
-    Checks, each run only when it CAN be run:
+    When ``verify=True`` (the default), the loader REQUIRES the inputs for
+    every check the manifest claims it can support.  Specifically:
 
-    - ``fasta_path`` given      -> its SHA-256 must equal ``reference_hash``
-    - ``region_set_path`` given -> its SHA-256 must equal ``region_set_hash``
-    - ``simulator_script`` recorded and tracked -> its git blob sha must equal
-      ``simulator_script_sha``
+    - If the manifest records a ``reference_hash``, ``fasta_path`` must be
+      supplied — otherwise ``ManifestVerificationIncomplete`` is raised.
+    - If the manifest records a ``region_set_hash``, ``region_set_path``
+      must be supplied.
+    - If the manifest records a ``simulator_script`` with a
+      ``simulator_script_sha``, the script must be resolvable via
+      ``git_blob_sha`` — if it is not (returns None), the check is
+      recorded as ``"simulator_script:unresolvable"`` so the gap is
+      visible, but a *resolved* sha that disagrees is a hard error.
 
-    A check whose input is absent is SKIPPED, not silently passed.  The returned
-    ``"verified"`` list names exactly which checks actually ran, so a caller
-    cannot mistake "I passed verify=True" for "the reference was checked" --
-    that confusion is the same recorded-vs-enforced trap one level up.
+    This makes a skipped check unrepresentable rather than merely visible.
 
     :param verify: set False to load without checking. Explicit, so that
         bypassing provenance is a visible decision at the call site.
     :raises ManifestMismatch: if any check that ran disagreed.
+    :raises ManifestVerificationIncomplete: if a check the manifest supports
+        could not run because the caller did not supply the input.
     """
     with open(manifest_path) as f:
         raw = json.load(f)
 
-    verified: list = []
+    verified: List[str] = []
     if verify:
+        # ── file-hash checks: reference and region_set ────────────────
         checks = (
             ("reference", fasta_path, raw.get("reference_hash"),
              raw.get("reference_name")),
@@ -375,8 +505,16 @@ def load_manifest(
              raw.get("region_set_name")),
         )
         for label, path, recorded, name in checks:
-            if path is None or recorded is None:
+            if recorded is None:
+                # Manifest does not claim this check — nothing to do.
                 continue
+            if path is None:
+                raise ManifestVerificationIncomplete(
+                    f"Manifest records a {label} hash ({name}: {recorded[:16]}…) "
+                    f"but no {label} path was supplied to load_manifest. "
+                    f"Pass the path to verify, or pass verify=False to skip "
+                    f"all checks."
+                )
             actual = _hash_file(path)
             if actual != recorded:
                 raise ManifestMismatch(
@@ -390,6 +528,7 @@ def load_manifest(
                 )
             verified.append(label)
 
+        # ── simulator script check ────────────────────────────────────
         script = raw.get("simulator_script")
         recorded_sha = raw.get("simulator_script_sha")
         if script and recorded_sha:
@@ -405,6 +544,11 @@ def load_manifest(
                 )
             if actual_sha is not None:
                 verified.append("simulator_script")
+            else:
+                # Script path is recorded but unresolvable (e.g. not in a
+                # git repo, or on a Batch container with no git).  Record
+                # the gap explicitly so it is visible, not silent.
+                verified.append("simulator_script:unresolvable")
 
     # Reconstruct hex tables from string-keyed DataFrames
     hex_dfs = {

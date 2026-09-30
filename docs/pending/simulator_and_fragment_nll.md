@@ -168,6 +168,30 @@ silent-divergence failure `CLAUDE.md` names.
 
 #### The manifest — `w` is reconstructed from factors, not stored dense
 
+> **RECONCILIATION PENDING (2026-09-30) — the provenance-verification behaviour
+> described in this subsection is known-stale and is being changed right now.**
+> `8eb9fe9` made the manifest's recorded hashes *enforced* rather than merely stored.
+> The EM critical review then measured that the `simulator_script` check **silently
+> evaporates outside the worktree that wrote the manifest**: the manifest records an
+> absolute path, `git_blob_sha` relpaths it against a repo root derived from `emit.py`'s
+> own location, and from any other checkout that becomes `../../../scripts/...`, the
+> `git rev-parse` fails, the function returns `None`, and the loader then neither raises
+> *nor* records the check as skipped. Measured: resolves in-worktree, returns `None`
+> via the main checkout. So Phase 5's "3/3 checks ran" is an artifact of running in
+> place — the check is absent exactly where provenance matters most (a Batch container,
+> another checkout, or after this worktree is deleted).
+>
+> The accompanying architecture change: verification is currently **opt-in by
+> omission** — the loader checks only what the caller remembered to pass, and the
+> caller must inspect `verified` afterwards to discover what was actually checked.
+> That assertion is moving into the library, so that **a skipped check becomes
+> unrepresentable rather than merely visible.**
+>
+> The choice between *record the path relative to the repo root* and *fail loudly on an
+> unresolvable path* was deliberately delegated to the implementer rather than fixed
+> here. **Do not write the replacement spec until that choice is reported**, or this
+> section will document a decision nobody made.
+
 `w` **factorises**. `build_region_weights` takes
 `(hex_fwd, hex_rc, cum_gc, valid, hex_tables, marginal_fl, predict_lut, region_len)`,
 and the first four come *entirely* from `precompute_region(contig, gstart, gstop, fasta)`.
@@ -529,9 +553,21 @@ done.
 |---|---|---|---|
 | **1** | 4 | `build_region_weights` + the orientation/geometry helpers | **COMPLETE** — `76e020f`, `409c683`, `5197778`, `09a9b1b` |
 | **2** | 1–3 | cached `(L, gc_bin)` `predict` LUT **first**, then capture-surface fit, `marginal_fl`, per-region precompute | **COMPLETE** — `439d135`, `f7b10a3`, `277dc39` |
-| **3** | 5–6 | sampler; 8-column BED per sample; `build-fragments-h5` → **h5 + manifest**. **No store** (decision 79) | NOT STARTED |
+| **3** | 5–6 | sampler; 8-column BED per sample; `build-fragments-h5` → **h5 + manifest**. **No store** (decision 79) | **COMPLETE** — `3ea7947`, `3bd1775` (all 5 review findings), `f328862` (two-region weight test) |
 | **4** | 7–8 | anchors + model scoring — **MOVED to the model agent** (decision 79b). Specified above only as the contract the simulator's output must support | OUT OF SCOPE HERE |
-| **5** | — | smoke run: a few hundred regions, one sample, all invariants asserted | NOT STARTED |
+| **5** | — | smoke run: a few hundred regions, one sample, all invariants asserted | **COMPLETE** — `8eb9fe9` (provenance enforcement), `b3955b0` (driver). Passed; commits verified against `git log` after the agent returned `status=timeout` |
+
+**Phase 5 result (2026-09-30).** Six assertions measured over 300 regions; worst
+`|w_manifest - w|` was 4.441e-16, i.e. the manifest's factored reconstruction of `w`
+agrees with a direct build to the last bit. Separately confirmed that `8eb9fe9`
+**changed no computed result** — the same 300-region run is byte-identical before and
+after it, so that commit added *enforcement* only. This is the load-bearing check on
+decision 82's intent.
+
+**A fix round follows Phase 5 and is IN FLIGHT as of 2026-09-30** (owner decision 83,
+"fix these"): three EM-critical-review issues plus one architecture change. The
+provenance subsection of Step 6 below is therefore **known-stale and deliberately not
+yet reconciled** — see the note there.
 
 **Decision 79 rescoped this plan after Phase 2.** The simulator's deliverable is the
 fragment h5 plus the reconstruction manifest; store construction, the choice of `D`,
@@ -559,6 +595,19 @@ rewriting every call site plus its tests.
   tests coexisted with provably unforgeable-looking but untested wiring. The fix
   was one test with fully asymmetric tables, mutation-tested against **9**
   plausible misroutings (both strands × start/end × fwd/rc track), **9/9 caught**.
+  **This requirement has now been half-applied three times, which makes it the
+  project's most-repeated defect — treat it as the first thing to check, not a note.**
+  (i) Decision 81 keyed the hexamer tables by the actual hexamer string, which defends
+  against k-mer *ordering* drift but leaves a swapped table *slot* just as undetectable:
+  swapping `start_fwd` ↔ `end_fwd` through the round-trip is accepted silently, and
+  `hex_table_to_dataframe` takes a `table_name` it never uses. The 9/9 mutation test
+  covers orientation wiring, not this mutation. (ii) The `region_weights=` fast path
+  added to `draw_fragments_for_region` documents in its own docstring that weights built
+  from a *different* region "would sample from one region's weights while reporting
+  another's coordinates, and no normalisation invariant would notice" — the hazard is
+  named in prose and left unenforced. Both are in the decision-83 fix round.
+  The pattern to recognise: an invariant that is a property of *one* object (the
+  weights) cannot police how that object is *paired* with another (the region).
 - **A test claimed to catch a bug, but never observed failing, is only an
   assertion about itself.** Demonstrate the failure: mutate → fail → restore →
   pass.

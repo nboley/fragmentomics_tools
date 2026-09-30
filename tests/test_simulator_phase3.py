@@ -63,6 +63,7 @@ from background_model.simulator.emit import (
     load_manifest,
     write_bed,
     ManifestMismatch,
+    ManifestVerificationIncomplete,
 )
 
 
@@ -168,7 +169,7 @@ class TestManifestRoundTrip:
             rng_seed=42,
         )
 
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
         loaded_tables = loaded["hex_tables"]
 
         for name in HexamerTables._fields:
@@ -194,7 +195,7 @@ class TestManifestRoundTrip:
             reference_hash="def",
             region_len=2560,
         )
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
         np.testing.assert_array_almost_equal(
             predict_lut, loaded["predict_lut"], decimal=12,
         )
@@ -214,7 +215,7 @@ class TestManifestRoundTrip:
             reference_hash="def",
             region_len=2560,
         )
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
         np.testing.assert_array_almost_equal(
             marginal_fl, loaded["marginal_fl"], decimal=12,
         )
@@ -239,7 +240,7 @@ class TestManifestRoundTrip:
             reference_hash="h2",
             region_len=region_len,
         )
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
 
         # Build w from the loaded manifest factors + synthetic region
         hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len)
@@ -281,7 +282,7 @@ class TestManifestRoundTrip:
             rng_seed=12345,
             commit_sha="14eb64b",
         )
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
         assert loaded["region_set_name"] == "quiet_v2_pad1200_repeats_removed_tile2560"
         assert loaded["region_set_hash"] == "regionhash123"
         assert loaded["reference_name"] == "hg38.fa"
@@ -781,7 +782,7 @@ class TestManifestCompleteness:
             reference_hash="h2",
             region_len=region_len,
         )
-        loaded = load_manifest(manifest_path)
+        loaded = load_manifest(manifest_path, verify=False)
 
         # Build w from loaded manifest
         rw_loaded = build_region_weights(
@@ -1072,17 +1073,17 @@ class TestManifestProvenanceEnforced:
         with open(fa, "w") as f:
             f.write(">c\nTTTTTTTTTT\n")  # same length, different content
         with pytest.raises(ManifestMismatch, match="reference hash mismatch"):
-            load_manifest(mp, fasta_path=fa)
+            load_manifest(mp, fasta_path=fa, region_set_path=rs)
 
     def test_changed_region_set_raises(self, tmp_path):
         mp, fa, rs = self._write(str(tmp_path))
         with open(rs, "w") as f:
             f.write("chr9\t0\t9999\n")
         with pytest.raises(ManifestMismatch, match="region_set hash mismatch"):
-            load_manifest(mp, region_set_path=rs)
+            load_manifest(mp, fasta_path=fa, region_set_path=rs)
 
     def test_changed_simulator_script_raises(self, tmp_path):
-        mp, _, _ = self._write(
+        mp, fa, rs = self._write(
             str(tmp_path), script="background_model/simulator/weights.py"
         )
         raw = json.loads(open(mp).read())
@@ -1093,20 +1094,26 @@ class TestManifestProvenanceEnforced:
         with open(mp, "w") as f:
             json.dump(raw, f)
         with pytest.raises(ManifestMismatch, match="simulator script changed"):
+            load_manifest(mp, fasta_path=fa, region_set_path=rs)
+
+    def test_absent_inputs_raise_not_silently_skip(self, tmp_path):
+        """A check the manifest claims to support MUST receive its input.
+
+        Previously absent inputs were silently skipped.  Now they raise
+        ``ManifestVerificationIncomplete`` — a skipped check is
+        unrepresentable rather than merely visible.
+        """
+        from background_model.simulator.emit import ManifestVerificationIncomplete
+        mp, _, _ = self._write(str(tmp_path))
+        with pytest.raises(ManifestVerificationIncomplete, match="reference"):
             load_manifest(mp)
 
-    def test_absent_inputs_are_skipped_not_silently_passed(self, tmp_path):
-        """A check that could not run must not look like a check that passed.
-
-        ``verified`` names only the checks that actually compared something, so
-        a caller cannot read ``verify=True`` as "the reference was validated"
-        when no FASTA was supplied.  That confusion would be the same
-        recorded-vs-enforced trap one level up.
-        """
-        mp, _, _ = self._write(str(tmp_path))
-        m = load_manifest(mp)
-        assert "reference" not in m["verified"]
-        assert "region_set" not in m["verified"]
+    def test_absent_region_set_raises(self, tmp_path):
+        """Supplying fasta but omitting region_set raises."""
+        from background_model.simulator.emit import ManifestVerificationIncomplete
+        mp, fa, _ = self._write(str(tmp_path))
+        with pytest.raises(ManifestVerificationIncomplete, match="region_set"):
+            load_manifest(mp, fasta_path=fa)
 
     def test_verify_false_bypasses_everything(self, tmp_path):
         mp, fa, _ = self._write(str(tmp_path))
@@ -1115,9 +1122,288 @@ class TestManifestProvenanceEnforced:
         m = load_manifest(mp, fasta_path=fa, verify=False)
         assert m["verified"] == []
 
-    def test_untracked_script_records_none_rather_than_raising(self, tmp_path):
+    def test_untracked_script_records_none_rather_than_raising(self):
         """A driver under development is not yet committed; that must not block
-        writing a manifest, but the gap must be visible rather than absent."""
+        writing a manifest, but the gap must be visible rather than absent.
+
+        Uses an in-repo path that does not exist on disk.  An out-of-repo
+        path now correctly raises ValueError (issue 1 fix).
+        """
         from background_model.simulator.emit import git_blob_sha
 
-        assert git_blob_sha(str(tmp_path / "nope.py")) is None
+        # Path inside the repo that is not committed/tracked
+        assert git_blob_sha("scripts/nonexistent_driver_12345.py") is None
+
+    def test_script_path_stored_as_repo_relative(self, tmp_path):
+        """The manifest must store the simulator_script as a repo-relative path,
+        not an absolute path.  An absolute path breaks provenance checks when
+        loaded from a different checkout or worktree."""
+        mp, fa, rs = self._write(
+            str(tmp_path), script="background_model/simulator/weights.py"
+        )
+        raw = json.loads(open(mp).read())
+        script_path = raw["simulator_script"]
+        assert not os.path.isabs(script_path), (
+            f"simulator_script is absolute ({script_path!r}). It must be "
+            f"repo-relative so provenance checks work from any checkout."
+        )
+        assert not script_path.startswith(".."), (
+            f"simulator_script escapes repo root ({script_path!r})"
+        )
+
+    def test_path_outside_repo_raises_on_write(self, tmp_path):
+        """A simulator_script path outside the repo must be rejected at
+        write time, not silently recorded as an unresolvable path."""
+        from background_model.simulator.emit import _hash_file
+        rng = np.random.default_rng(0)
+        tables = HexamerTables(
+            *[np.exp(rng.normal(0, 0.3, NHEX)) for _ in range(4)]
+        )
+        fl = np.ones(N_LENGTHS) / N_LENGTHS
+        lut = build_predict_lut(lambda L, gc: 1.0)
+        mp = str(tmp_path / "m.json")
+        outside_script = str(tmp_path / "outside.py")
+        with open(outside_script, "w") as f:
+            f.write("# not in the repo\n")
+        with pytest.raises(ValueError, match="resolves outside the repo root"):
+            write_manifest(
+                mp,
+                hex_tables=tables, predict_lut=lut, marginal_fl=fl,
+                region_set_name="r", region_set_hash="h",
+                reference_name="r", reference_hash="h",
+                region_len=2560,
+                simulator_script=outside_script,
+            )
+
+    def test_unresolvable_script_records_gap_in_verified(self, tmp_path):
+        """A script that cannot be resolved to a git blob (e.g. on a Batch
+        container with no git) must appear as 'simulator_script:unresolvable'
+        in verified, not silently vanish."""
+        mp, fa, rs = self._write(str(tmp_path))
+        # Write a manifest with a script that is in-repo but untracked
+        raw = json.loads(open(mp).read())
+        raw["simulator_script"] = "scripts/nonexistent_driver.py"
+        raw["simulator_script_sha"] = "a" * 40
+        with open(mp, "w") as f:
+            json.dump(raw, f)
+        m = load_manifest(mp, fasta_path=fa, region_set_path=rs)
+        assert "simulator_script:unresolvable" in m["verified"], (
+            f"An unresolvable script check should appear as "
+            f"'simulator_script:unresolvable' in verified, got {m['verified']}"
+        )
+
+
+# ── 11. Hex table slot-swap detection ─────────────────────────────────────
+
+class TestHexTableSlotSwap:
+    """Swapping two hex tables (e.g. start_fwd <-> end_fwd) must be DETECTED.
+
+    Decision 81's string keys protect against k-mer ORDERING drift but do
+    nothing about which of the four tables a DataFrame is loaded into.  The
+    embedded ``table_name`` column makes this detectable.
+
+    What must FAIL: swapping ``start_fwd`` and ``end_fwd`` in the round-trip
+    dict must raise ``ValueError``, not silently produce wrong weights.
+    """
+
+    def test_swapped_slots_detected_on_reconstruction(self):
+        """Swapping start_fwd <-> end_fwd in the dict must raise ValueError."""
+        tables = _random_tables(seed=44)
+        d = hex_tables_to_dict(tables)
+        # Swap start_fwd and end_fwd
+        d["start_fwd"], d["end_fwd"] = d["end_fwd"], d["start_fwd"]
+        with pytest.raises(ValueError, match="slot mismatch"):
+            dict_to_hex_tables(d)
+
+    def test_swapped_slots_detected_on_manifest_round_trip(self, tmp_path):
+        """The swap must also be caught when loading from a manifest."""
+        tables = _random_tables(seed=55)
+        manifest_path = str(tmp_path / "manifest.json")
+        write_manifest(
+            manifest_path,
+            hex_tables=tables,
+            predict_lut=_trivial_lut(),
+            marginal_fl=_flat_marginal_fl(),
+            region_set_name="test", region_set_hash="h1",
+            reference_name="hg38", reference_hash="h2",
+            region_len=2560,
+        )
+        # Tamper: swap start_fwd and end_fwd in the JSON
+        raw = json.loads(open(manifest_path).read())
+        raw["hex_tables"]["start_fwd"], raw["hex_tables"]["end_fwd"] = (
+            raw["hex_tables"]["end_fwd"], raw["hex_tables"]["start_fwd"]
+        )
+        with open(manifest_path, "w") as f:
+            json.dump(raw, f)
+        with pytest.raises(ValueError, match="slot mismatch"):
+            load_manifest(manifest_path, verify=False)
+
+    def test_correct_slots_pass(self):
+        """Correctly-slotted tables must round-trip without error."""
+        tables = _random_tables(seed=66)
+        d = hex_tables_to_dict(tables)
+        recon = dict_to_hex_tables(d)
+        for name in HexamerTables._fields:
+            np.testing.assert_array_equal(
+                getattr(tables, name), getattr(recon, name),
+            )
+
+    def test_table_name_column_present_in_dataframe(self):
+        """hex_table_to_dataframe must include a table_name column."""
+        tables = _random_tables(seed=77)
+        df = hex_table_to_dataframe(tables.start_fwd, "start_fwd")
+        assert "table_name" in df.columns
+        assert (df["table_name"] == "start_fwd").all()
+
+    def test_swapped_start_rev_end_rev_detected(self):
+        """Swapping start_rev <-> end_rev must also be caught."""
+        tables = _random_tables(seed=88)
+        d = hex_tables_to_dict(tables)
+        d["start_rev"], d["end_rev"] = d["end_rev"], d["start_rev"]
+        with pytest.raises(ValueError, match="slot mismatch"):
+            dict_to_hex_tables(d)
+
+
+# ── 12. sort_bgzip_tabix preflight ────────────────────────────────────────
+
+class TestSortBgzipTabixPreflight:
+    """sort_bgzip_tabix must check for required binaries before starting."""
+
+    def test_missing_binary_raises_before_work(self, tmp_path, monkeypatch):
+        """If bgzip is not on PATH, FileNotFoundError is raised immediately."""
+        from background_model.simulator import emit as emit_mod
+
+        original_which = emit_mod.shutil.which
+
+        def fake_which(cmd):
+            if cmd == "bgzip":
+                return None
+            return original_which(cmd)
+
+        monkeypatch.setattr(emit_mod.shutil, "which", fake_which)
+        bed_path = str(tmp_path / "test.bed")
+        with open(bed_path, "w") as f:
+            f.write("chr1\t100\t200\t.\t0\t+\t60\t60\n")
+
+        from background_model.simulator.emit import sort_bgzip_tabix
+        with pytest.raises(FileNotFoundError, match="bgzip"):
+            sort_bgzip_tabix(bed_path)
+
+
+# ── 13. region_weights guard ──────────────────────────────────────────────
+
+class TestRegionWeightsGuard:
+    """Passing ``region_weights`` from a different region must be DETECTED.
+
+    The docstring documents the hazard; the guard enforces it.  Without
+    the guard, weights built from region A could be passed with arrays
+    from region B — the sampler would draw from A's distribution while
+    reporting B's coordinates, and ``Sum_Omega w = 1`` would not notice.
+
+    What must FAIL: weights from region_len=300 passed with arrays for
+    region_len=500 (shape mismatch), and weights from one random region
+    passed with arrays from a different random region of the same size
+    (S_plus mismatch).
+    """
+
+    def test_wrong_region_len_detected(self):
+        """Weights built for region_len=300 must be rejected for region_len=500."""
+        tables = _random_tables(seed=11)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(300, seed=1)
+        rw_a = build_region_weights(
+            hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=300, valid=valid_a,
+        )
+
+        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(500, seed=2)
+        rng = np.random.default_rng(42)
+        with pytest.raises(ValueError, match="different region"):
+            draw_fragments_for_region(
+                hex_fwd=hex_fwd_b, hex_rc=hex_rc_b, cum_gc=cum_gc_b,
+                valid=valid_b, hex_tables=tables, marginal_fl=fl,
+                predict_lut=lut, region_len=500, n_fragments=10,
+                rng=rng, region_weights=rw_a,
+            )
+
+    def test_wrong_region_same_size_detected(self):
+        """Weights from region A passed with arrays from region B (same size)
+        must be detected by the S_plus check."""
+        tables = _random_tables(seed=22)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+        region_len = 400
+
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=10)
+        rw_a = build_region_weights(
+            hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=region_len, valid=valid_a,
+        )
+
+        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(region_len, seed=20)
+        rng = np.random.default_rng(42)
+        with pytest.raises(ValueError, match="different region"):
+            draw_fragments_for_region(
+                hex_fwd=hex_fwd_b, hex_rc=hex_rc_b, cum_gc=cum_gc_b,
+                valid=valid_b, hex_tables=tables, marginal_fl=fl,
+                predict_lut=lut, region_len=region_len, n_fragments=10,
+                rng=rng, region_weights=rw_a,
+            )
+
+    def test_correct_region_weights_accepted(self):
+        """Weights built from the same arrays must be accepted."""
+        tables = _random_tables(seed=33)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+        region_len = 300
+
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=5)
+        rw = build_region_weights(
+            hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=region_len, valid=valid,
+        )
+
+        rng = np.random.default_rng(42)
+        starts, stops, strands = draw_fragments_for_region(
+            hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
+            valid=valid, hex_tables=tables, marginal_fl=fl,
+            predict_lut=lut, region_len=region_len, n_fragments=50,
+            rng=rng, region_weights=rw,
+        )
+        assert len(starts) == 50
+
+    def test_reuse_is_bit_identical(self):
+        """Passing pre-built weights must produce the exact same draw as
+        building internally, given the same RNG seed."""
+        tables = _random_tables(seed=44)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+        region_len = 300
+
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=7)
+        rw = build_region_weights(
+            hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=region_len, valid=valid,
+        )
+
+        kwargs = dict(
+            hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
+            valid=valid, hex_tables=tables, marginal_fl=fl,
+            predict_lut=lut, region_len=region_len, n_fragments=100,
+        )
+
+        rng1 = np.random.default_rng(99)
+        s1, e1, st1 = draw_fragments_for_region(**kwargs, rng=rng1)
+
+        rng2 = np.random.default_rng(99)
+        s2, e2, st2 = draw_fragments_for_region(**kwargs, rng=rng2, region_weights=rw)
+
+        np.testing.assert_array_equal(s1, s2)
+        np.testing.assert_array_equal(e1, e2)
+        np.testing.assert_array_equal(st1, st2)
