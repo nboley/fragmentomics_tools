@@ -51,57 +51,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats as sp_stats
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.count_cut_site_hexamers import TABLE_NAMES, read_output  # noqa: E402
 
 logger = logging.getLogger(__name__)
-
-
-def load_all_samples(parquet_dir: str, sample_names: list[str]):
-    """Load all sample parquets, returning obs and bg aggregated across bands.
-
-    Returns
-    -------
-    obs_by_sample : dict[str, dict[str, ndarray]]
-        obs_by_sample[sample_name][table_name] = (4096,) int64 array
-    bg : dict[str, ndarray]
-        bg[table_name] = (4096,) int64 array (same for all samples)
-    metas : dict[str, dict]
-        Per-sample metadata from the parquet files.
-    """
-    obs_by_sample = {}
-    bg_accum = None
-    metas = {}
-
-    for sample_name in sample_names:
-        path = os.path.join(parquet_dir, f"{sample_name}.cut_site_hexamers.parquet")
-        df, meta = read_output(path)
-        metas[sample_name] = meta
-
-        obs = {}
-        bg = {}
-        for table_name in TABLE_NAMES:
-            tdf = df[df["table"] == table_name]
-            # Aggregate across all bands: group by hexamer, sum obs and bg
-            agg = tdf.groupby("hexamer", sort=False)[["observed", "background"]].sum()
-            obs[table_name] = agg["observed"].values.astype(np.int64)
-            bg[table_name] = agg["background"].values.astype(np.int64)
-
-        obs_by_sample[sample_name] = obs
-
-        if bg_accum is None:
-            bg_accum = bg
-        # bg should be identical across samples (same region set); verify
-        for tn in TABLE_NAMES:
-            if not np.array_equal(bg_accum[tn], bg[tn]):
-                raise ValueError(
-                    f"Background differs between samples for {tn}. "
-                    f"This means they were counted over different region sets."
-                )
-
-    return obs_by_sample, bg_accum, metas
 
 
 def _hexamer_order(df: pd.DataFrame) -> list[str]:
@@ -181,8 +137,12 @@ def estimate_dirichlet_alpha0(
     proportions = np.array(proportions)  # (n_samples, 4096)
     total_counts = np.array(total_counts)
 
-    # Pooled proportion (prior mean direction)
-    p_pool = proportions.mean(axis=0)
+    # Pooled proportion (prior mean direction) — count-weighted, consistent
+    # with the pooled p_pool in build_prior_and_posteriors and with the
+    # Ronning (1989) estimator this code cites.
+    all_counts = np.array([obs_by_sample[sn][table_name].astype(np.float64)
+                           for sn in sample_names if obs_by_sample[sn][table_name].sum() > 0])
+    p_pool = all_counts.sum(axis=0) / all_counts.sum()
 
     # Mean within-sample variance of proportions
     # Var_multinomial(p_h) = p_h(1-p_h)/N for a single sample
@@ -332,6 +292,14 @@ def build_prior_and_posteriors(
             else:
                 shrinkage_ratios.append(float("nan"))
 
+        # Pairwise posterior correlation (M2: provenance for the report)
+        post_weights_all = np.array([posteriors[sn][tn] for sn in sample_names])
+        pairwise_rs = []
+        for ii in range(n_samples):
+            for jj in range(ii + 1, n_samples):
+                r, _ = sp_stats.pearsonr(post_weights_all[ii], post_weights_all[jj])
+                pairwise_rs.append(r)
+
         diagnostics[tn] = {
             "alpha_0": alpha_0,
             "n_samples": n_samples,
@@ -345,6 +313,8 @@ def build_prior_and_posteriors(
             "shrinkage_ratio_median": float(np.nanmedian(shrinkage_ratios)),
             "shrinkage_ratio_min": float(np.nanmin(shrinkage_ratios)) if shrinkage_ratios else float("nan"),
             "shrinkage_ratio_max": float(np.nanmax(shrinkage_ratios)) if shrinkage_ratios else float("nan"),
+            "pairwise_posterior_r_mean": float(np.mean(pairwise_rs)),
+            "pairwise_posterior_r_median": float(np.median(pairwise_rs)),
         }
 
     return prior, posteriors, diagnostics
@@ -447,6 +417,26 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    # Pin provenance at the START of the run, not at write time — so the
+    # recorded commit and script hash are the ones that actually produced
+    # the output, not whatever happens to be checked out when the write
+    # lands.
+    import hashlib
+    import subprocess
+
+    try:
+        commit_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        commit_sha = "unknown"
+
+    script_path = os.path.abspath(__file__)
+    with open(script_path, "rb") as f:
+        script_sha = hashlib.sha256(f.read()).hexdigest()
+
     cohort = pd.read_csv(args.sample_sheet, sep="\t")
     sample_names = cohort["sample_name"].tolist()
     logger.info("Loading %d samples from %s", len(sample_names), args.parquet_dir)
@@ -473,7 +463,8 @@ def main():
             d["shrinkage_ratio_median"],
         )
 
-    # Provenance
+    # Provenance — commit_sha and script_sha were captured at the START
+    # of main(), before any computation.
     first_meta = next(iter(metas.values()))
     provenance = {
         "n_samples": len(sample_names),
@@ -486,6 +477,8 @@ def main():
         "l_min": first_meta.get("l_min"),
         "l_max_inclusive": first_meta.get("l_max_inclusive"),
         "min_mapq": first_meta.get("min_mapq"),
+        "commit_sha": commit_sha,
+        "script_sha256": script_sha,
         "shrinkage_form": (
             "Dirichlet-multinomial conjugate: alpha = alpha_0 * p_pool, "
             "posterior mean theta_i = (obs_i + alpha) / (N_i + alpha_0), "

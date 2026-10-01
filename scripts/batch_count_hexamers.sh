@@ -56,6 +56,10 @@ OUTPUT="${OUTPUT_DIR}/${SAMPLE_NAME}.cut_site_hexamers.parquet"
 
 # ── run from /tmp (treat /home as read-only) ─────────────────────────────
 cd /tmp
+# PYTHONPATH chain: the repo itself provides scripts/ and background_model/.
+# /home/nathanboley/src/biomarker is included because some modules import
+# from the biomarker package — but fragments_h5 is pip-installed in the
+# conda env (not on PYTHONPATH), so it resolves via the env's site-packages.
 export PYTHONPATH="${REPO}:/home/nathanboley/src/biomarker"
 
 echo "Running counting script..."

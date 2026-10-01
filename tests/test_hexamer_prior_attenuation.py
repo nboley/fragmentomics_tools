@@ -271,3 +271,27 @@ class TestAlpha0Estimation:
             f"Low-variance alpha_0 ({a0_low:.1f}) should exceed "
             f"high-variance alpha_0 ({a0_high:.1f})"
         )
+
+    def test_alpha0_golden_value(self):
+        """Regression test: fixed input produces a known alpha_0 value.
+
+        The existing property tests pass for ANY positive alpha_0, so they
+        cannot catch defects in the estimator's formula (e.g. the p_pool
+        weighting bug that was invisible to every property test). This test
+        pins the value to ~4 significant figures on a small, deterministic
+        dataset with known biological variance.
+        """
+        rng = np.random.RandomState(12345)
+        nhex = 64
+        alpha_true = np.ones(nhex) * 10.0
+        obs_by_sample = {}
+        for i in range(10):
+            p_i = rng.dirichlet(alpha_true)
+            obs = rng.multinomial(2000, p_i)
+            obs_by_sample[f"s{i}"] = {"start_fwd": obs.copy()}
+
+        a0 = estimate_dirichlet_alpha0(obs_by_sample, "start_fwd")
+        np.testing.assert_allclose(a0, 608.4, rtol=5e-4, err_msg=(
+            f"alpha_0 golden value changed: got {a0:.4f}, expected ~608.4. "
+            f"If the estimator formula changed intentionally, update this test."
+        ))

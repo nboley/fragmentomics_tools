@@ -99,13 +99,14 @@ def _thinning_reliability(
     n_reps: int = DEFAULT_N_THINNING_REPS,
     rng: np.random.RandomState | None = None,
 ) -> tuple[float, float]:
-    """Estimate the split-half reliability of log-enrichment via binomial thinning.
+    """Estimate the full-depth reliability of log-enrichment via binomial thinning.
 
     Splits the observed counts into two halves using binomial(n=obs_h, p=0.5)
-    for each hexamer h, computes log-enrichment for each half, and returns
-    the mean Pearson correlation across replications.
+    for each hexamer h, computes log-enrichment for each half, correlates them,
+    and applies the Spearman-Brown step-up so the returned reliability refers
+    to the full-depth measurement (not the half-depth split).
 
-    Returns (mean_reliability, se_reliability).
+    Returns (reliability, se_reliability).
     """
     if rng is None:
         rng = np.random.RandomState(42)
@@ -133,7 +134,18 @@ def _thinning_reliability(
     if len(corrs) < 5:
         return np.nan, np.nan
 
-    return float(np.mean(corrs)), float(np.std(corrs) / np.sqrt(len(corrs)))
+    # Each half carries ~half the depth, so the raw split-half correlation
+    # estimates the reliability of a half-depth measurement.  Apply the
+    # Spearman-Brown step-up so the returned value refers to the full-depth
+    # measurement: rho_full = 2 * rho_half / (1 + rho_half).
+    mean_half = float(np.mean(corrs))
+    rho_full = 2.0 * mean_half / (1.0 + mean_half)
+    se_half = float(np.std(corrs) / np.sqrt(len(corrs)))
+    # Propagate SE through the step-up via the derivative:
+    # d(rho_full)/d(rho_half) = 2 / (1 + rho_half)^2
+    deriv = 2.0 / (1.0 + mean_half) ** 2
+    se_full = se_half * deriv
+    return rho_full, se_full
 
 
 def _observed_correlation(
@@ -234,8 +246,11 @@ def measure_sample_disattenuation(
             r_disatt = np.nan
         else:
             r_disatt = r_obs / np.sqrt(rho_s * rho_p)
-            # Clamp to [-1, 1] — disattenuation can slightly exceed 1.0
-            # due to sampling; this is expected, not an error.
+            # Clamp to [-1, 1].  After the Spearman-Brown step-up, the
+            # reliability is estimated at full depth rather than half depth,
+            # so the denominator is larger and values above 1.0 are rare.
+            # They can still occur when sampling noise inflates r_obs more
+            # than it inflates sqrt(rho_s * rho_p).
             r_disatt = float(np.clip(r_disatt, -1.0, 1.0))
 
         rows.append({

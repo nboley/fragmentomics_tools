@@ -22,25 +22,24 @@ pool, less in the individual sample. The method-of-moments estimator matches
 the observed cross-sample variance to the Dirichlet-multinomial prediction,
 automatically calibrating the shrinkage to the data.
 
-**Note on statistical semantics**: this is the PROPOSED form. The
-Dirichlet-multinomial is standard and well-understood, but the owner has final
-say on whether this is the right shrinkage for the simulator's hexamer tables.
+**Decision 107**: This form was approved as the shrinkage estimator for the
+simulator's hexamer tables (Dirichlet-multinomial, prior direction = pooled
+proportion, `alpha_0` by method of moments per Ronning 1989).
 
 ## What 92 samples bought
 
 ### Depth
 
-| Metric | 5-sample pool (est.) | 92-sample pool | Ratio |
-|--------|---------------------|----------------|-------|
-| Per-hexamer median count (start tables) | ~309 | 5,694 | 18.4x |
-| Per-hexamer median count (end tables) | ~403 | 7,424 | 18.4x |
-| Zero-count hexamers (pooled) | 0 | 0 | -- |
-| Zero-count hexamers (per-sample median) | -- | 27.5 (start), 18 (end) | -- |
-| Zero-count hexamers (per-sample max) | -- | 215 (start), 211 (end) | -- |
-| Total observed cuts (pooled, per table) | ~1.9M | ~34.9M | 18.4x |
+| Metric | 92-sample pool |
+|--------|----------------|
+| Per-hexamer median count (start_fwd / start_rev) | 5,694 / 5,712 |
+| Per-hexamer median count (end_fwd / end_rev) | 7,412 / 7,436 |
+| Zero-count hexamers (pooled) | 0 |
+| Zero-count hexamers (per-sample median) | 28 (start_fwd), 26 (start_rev), 18 (end_fwd), 19 (end_rev) |
+| Zero-count hexamers (per-sample max) | 215 (start_fwd), 212 (start_rev), 210 (end_fwd), 211 (end_rev) |
+| Total observed cuts (pooled, fwd / rev) | 34,858,660 / 34,917,233 |
 
-The 5-sample pool was reported to have median ~270 counts per hexamer and 5-6%
-CV at the median hexamer. With 92 samples the depth is 18.4x larger, which:
+At 92 samples (34.9M pooled cuts per table), the depth is such that:
 
 1. **Eliminates pooled zeros entirely.** Even the rarest hexamers have hundreds
    of pooled counts. The zero-count problem is a per-sample issue (median 27
@@ -53,8 +52,9 @@ CV at the median hexamer. With 92 samples the depth is 18.4x larger, which:
 ### Per-sample zeros
 
 Individual samples have ~338k total observed cuts per table, or ~82 counts per
-hexamer at the median. At this depth, 27-28 of 4096 hexamers (0.7%) have zero
-counts in a typical sample, and the worst sample has 215 zeros (5.2%). The
+hexamer at the median. At this depth, 18–28 of 4096 hexamers (0.4–0.7%) have
+zero counts in a typical sample (start tables higher, end tables lower), and
+the worst sample has 210–215 zeros (5.1–5.2%). The
 Dirichlet posterior assigns non-zero weight to all of these — the attenuation
 test suite verifies this property holds on synthetic data, and the real
 artifact confirms: **zero posterior-weight hexamers = 0** across all 92 samples
@@ -78,17 +78,18 @@ pool.
 
 **Yes.** The posteriors do not collapse onto the prior.
 
-| Table | Posterior inter-sample CV (median) | Pairwise r | Shrinkage ratio (median) |
-|-------|-----------------------------------|------------|--------------------------|
-| start_fwd | 14.6% | 0.893 | 0.233 |
-| end_fwd | 12.5% | 0.728 | 0.286 |
-| start_rev | 14.2% | 0.897 | 0.249 |
-| end_rev | 12.5% | 0.725 | 0.284 |
+| Table | Posterior CV (median) | Posterior pairwise r (mean) | Shrinkage ratio (median) |
+|-------|----------------------|---------------------------|--------------------------|
+| start_fwd | 83.8% | 0.954 | 0.233 |
+| end_fwd | 51.9% | 0.909 | 0.286 |
+| start_rev | 83.6% | 0.957 | 0.249 |
+| end_rev | 51.7% | 0.906 | 0.284 |
 
-- **Inter-sample CV**: the posterior weights still vary 12-15% across samples
-  at the median hexamer. This is biological signal that survived shrinkage.
-- **Pairwise correlation**: 0.73-0.90. If posteriors collapsed onto the prior,
-  this would be ~1.0.
+- **Inter-sample CV**: the posterior weights still vary substantially across
+  samples. This is biological signal that survived shrinkage.
+- **Pairwise posterior r**: 0.91–0.96 (mean across all 4186 sample pairs,
+  computed and stored in `diagnostics.pairwise_posterior_r_mean`). If
+  posteriors collapsed onto the prior, this would be ~1.0.
 - **Shrinkage ratio**: each sample moves ~23-29% of the way from its raw
   estimate toward the prior. The range across samples (min 4-6%, max 57-64%)
   confirms the monotone-attenuation property: low-depth samples shrink more.
