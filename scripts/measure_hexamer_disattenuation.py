@@ -78,6 +78,42 @@ logger = logging.getLogger(__name__)
 DEFAULT_N_THINNING_REPS = 50
 
 
+def _extract_artifact_provenance(artifact: dict) -> dict:
+    """Extract the upstream fit-step provenance from the artifact, verbatim.
+
+    Provenance must travel with the artifact.  A consumer copies its input's
+    recorded provenance forward rather than re-deriving it from HEAD, which
+    would be wrong whenever the upstream script has been edited since the
+    artifact was built.
+
+    The artifact may use either the old format (scalar ``script_sha256`` for
+    ``build_hexamer_prior.py`` only) or the new format (``script_shas`` dict).
+    Returns a normalised dict::
+
+        {"commit_sha": "...", "script_shas": {"scripts/build_hexamer_prior.py": "..."}}
+    """
+    prov = artifact.get("provenance", {})
+    commit_sha = prov.get("commit_sha")
+    if commit_sha is None:
+        raise ValueError(
+            "Artifact has no provenance.commit_sha — cannot inherit "
+            "upstream provenance."
+        )
+
+    script_shas = prov.get("script_shas")
+    if script_shas is None:
+        # Old format: scalar script_sha256, always for the build script.
+        sha = prov.get("script_sha256")
+        if sha is None:
+            raise ValueError(
+                "Artifact provenance has neither 'script_shas' nor "
+                "'script_sha256' — cannot inherit upstream provenance."
+            )
+        script_shas = {"scripts/build_hexamer_prior.py": sha}
+
+    return {"commit_sha": commit_sha, "script_shas": script_shas}
+
+
 def _log_enrichment(obs: np.ndarray, bg_prop: np.ndarray) -> np.ndarray:
     """Compute log-enrichment for hexamers where both obs and bg are > 0.
 
@@ -338,15 +374,18 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Verify provenance BEFORE any computation: this script, the fit
-    # script it imports from, and the counting script that produces
-    # the raw data must all match HEAD.
-    build_script = os.path.join(os.path.dirname(__file__), "build_hexamer_prior.py")
+    # Verify provenance for THIS step's scripts only.  The upstream fit
+    # step's provenance is inherited from the artifact, not re-derived
+    # from HEAD — re-reading HEAD for an upstream step is a guess, and
+    # it is wrong precisely when someone has since edited that script.
     counting_script = os.path.join(os.path.dirname(__file__), "count_cut_site_hexamers.py")
-    prov = verify_provenance(__file__, build_script, counting_script)
+    prov = verify_provenance(__file__, counting_script)
 
     logger.info("Loading artifact: %s", args.artifact)
     artifact = load_artifact(args.artifact)
+
+    # Inherit upstream fit-step provenance from the artifact itself.
+    upstream_prov = _extract_artifact_provenance(artifact)
 
     cohort = pd.read_csv(args.sample_sheet, sep="\t")
     sample_names = cohort["sample_name"].tolist()
@@ -363,10 +402,20 @@ def main():
     )
 
     # Write TSV with provenance comment header so the artifact is traceable.
+    # Two sections: upstream fit step (inherited verbatim from the artifact's
+    # own provenance) and this measurement step (verified against HEAD).
     with open(args.output_tsv, "w") as fh:
-        fh.write(f"# commit_sha: {prov['commit_sha']}\n")
+        # Upstream fit step — these shas refer to the code that BUILT the
+        # artifact, not to the current tree.
+        fh.write(f"# fit_step_commit_sha: {upstream_prov['commit_sha']}\n")
+        for rel_path, sha in sorted(upstream_prov["script_shas"].items()):
+            fh.write(f"# fit_step_script_sha256 {rel_path}: {sha}\n")
+        # This measurement step — verified against HEAD.
+        # count_cut_site_hexamers.py is an import dependency (provides
+        # TABLE_NAMES); the counts' own provenance is in the parquet metadata.
+        fh.write(f"# measurement_commit_sha: {prov['commit_sha']}\n")
         for rel_path, sha in sorted(prov["script_shas"].items()):
-            fh.write(f"# script_sha256 {rel_path}: {sha}\n")
+            fh.write(f"# measurement_script_sha256 {rel_path}: {sha}\n")
         fh.write(f"# artifact: {os.path.abspath(args.artifact)}\n")
         fh.write(f"# n_thinning_reps: {args.n_thinning_reps}\n")
         results.to_csv(fh, sep="\t", index=False, float_format="%.6f")

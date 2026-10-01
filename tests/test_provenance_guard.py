@@ -1,11 +1,16 @@
-"""Test the provenance guard that prevents artifact builds from dirty scripts.
+"""Test provenance guards: dirty-script prevention AND inherit-vs-rederive.
 
-The guard lives in ``scripts.build_hexamer_prior.verify_script_provenance``
-and guarantees that every ``commit_sha`` + ``script_sha256`` recorded in an
-artifact can be resolved by checking out that commit.  It scopes to the
-script file itself — unrelated dirty files elsewhere in the worktree are
-tolerated, which is necessary because this worktree is shared with another
-active stream.
+The dirty-script guard lives in
+``scripts.build_hexamer_prior.verify_script_provenance`` and guarantees that
+every ``commit_sha`` + ``script_sha256`` recorded in an artifact can be
+resolved by checking out that commit.  It scopes to the script file itself —
+unrelated dirty files elsewhere in the worktree are tolerated, which is
+necessary because this worktree is shared with another active stream.
+
+The inherit-vs-rederive guard (``TestInheritedProvenance``) verifies that a
+downstream consumer copies its input's recorded provenance forward verbatim
+and adds only its own step's sha.  It must never state a sha for a step it
+did not run and cannot witness.
 """
 import hashlib
 import os
@@ -138,3 +143,87 @@ class TestVerifyScriptProvenanceIsolated:
         # Guard passes because the SCRIPT is clean.
         commit_sha, sha = verify_script_provenance(self.script)
         assert sha == _script_sha256(self.script)
+
+
+# ---------------------------------------------------------------------------
+# Inherit-vs-rederive rule
+# ---------------------------------------------------------------------------
+
+class TestInheritedProvenance:
+    """Verify that _extract_artifact_provenance inherits upstream provenance
+    from the artifact rather than re-deriving it from the current tree.
+
+    The rule: a consumer copies its input's recorded provenance forward
+    verbatim and adds only its own step's sha.  Re-reading HEAD for an
+    upstream step is a guess, and it is wrong precisely when someone has
+    since edited that upstream script.
+    """
+
+    def test_old_format_scalar_sha(self):
+        """Old-format artifacts (scalar ``script_sha256``) are normalised."""
+        from scripts.measure_hexamer_disattenuation import _extract_artifact_provenance
+
+        artifact = {
+            "provenance": {
+                "commit_sha": "abc123def456",
+                "script_sha256": "deadbeef0123",
+            }
+        }
+        prov = _extract_artifact_provenance(artifact)
+        assert prov["commit_sha"] == "abc123def456"
+        assert prov["script_shas"] == {
+            "scripts/build_hexamer_prior.py": "deadbeef0123",
+        }
+
+    def test_new_format_dict_shas(self):
+        """New-format artifacts (dict ``script_shas``) are passed through."""
+        from scripts.measure_hexamer_disattenuation import _extract_artifact_provenance
+
+        artifact = {
+            "provenance": {
+                "commit_sha": "abc123def456",
+                "script_shas": {
+                    "scripts/build_hexamer_prior.py": "sha_build",
+                    "scripts/count_cut_site_hexamers.py": "sha_count",
+                },
+            }
+        }
+        prov = _extract_artifact_provenance(artifact)
+        assert prov["commit_sha"] == "abc123def456"
+        assert prov["script_shas"]["scripts/build_hexamer_prior.py"] == "sha_build"
+        assert prov["script_shas"]["scripts/count_cut_site_hexamers.py"] == "sha_count"
+
+    def test_missing_commit_sha_raises(self):
+        """Artifacts without ``provenance.commit_sha`` raise ValueError."""
+        from scripts.measure_hexamer_disattenuation import _extract_artifact_provenance
+
+        with pytest.raises(ValueError, match="commit_sha"):
+            _extract_artifact_provenance({"provenance": {}})
+
+    def test_missing_script_sha_raises(self):
+        """Artifacts with commit but no script sha raise ValueError."""
+        from scripts.measure_hexamer_disattenuation import _extract_artifact_provenance
+
+        with pytest.raises(ValueError, match="script_sha"):
+            _extract_artifact_provenance({"provenance": {"commit_sha": "abc"}})
+
+    def test_extraction_uses_artifact_values_not_git(self):
+        """Extraction reads the artifact dict — no git calls.
+
+        A fake commit/sha that does not exist in any repo must pass through
+        without error.  If someone refactors to call git (re-derive), this
+        test will fail because the fake values won't resolve.
+        """
+        from scripts.measure_hexamer_disattenuation import _extract_artifact_provenance
+
+        artifact = {
+            "provenance": {
+                "commit_sha": "0000000000000000000000000000000000000000",
+                "script_sha256": "ffffffffffffffffffffffffffffffff",
+            }
+        }
+        prov = _extract_artifact_provenance(artifact)
+        assert prov["commit_sha"] == "0000000000000000000000000000000000000000"
+        assert prov["script_shas"]["scripts/build_hexamer_prior.py"] == (
+            "ffffffffffffffffffffffffffffffff"
+        )
