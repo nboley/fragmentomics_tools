@@ -193,6 +193,19 @@ the model agent's (decision 79).
 - **Out:** `uniform`, `oracle` in per-fragment nats, **recomputed per store and
   never carried across**.
 - Derivation: Appendix C.
+- **Scope (decision 112).** Sharing `build_region_weights` between generator
+  and scorer means a bug inside it is invisible to the oracle — and that is
+  **intended**. The oracle measures NLL under the model that generated the
+  data (the anchor for how much variance is capturable), nothing more.
+  Simulator correctness is realised-parameter recovery's job (decision 88).
+- **Accumulation precision (decisions 115/117).** The oracle averages ~2.47M
+  log-probs of magnitude 13–18 nats. A naive float32 accumulator costs
+  **~1.9 nats** — catastrophic on a ~13-nat quantity. All summary statistics
+  and reported results use **float64 accumulation** (standing rule). Per-tile
+  loss reductions inside the training step stay float32 by explicit scoping.
+  **Lightning disclosure:** Lightning accumulates logged metrics in float32,
+  contributing ~0.008 nats over ~5000 batches (**~1.05 pp of %-captured**).
+  Published figures quoted to 2 dp do not disclose this.
 
 ### Step 8 — Score a model
 
@@ -222,6 +235,41 @@ the model agent's (decision 79).
   bands, so an NLL under one banding is not comparable to one under another.
 - Strand `log 2` is **included** everywhere and cancels in the ratio (simulator
   strand is exactly 50/50); only absolute nats move.
+
+### Measured anchors — cut-site store val split
+
+Measured from `scripts/cut_site_oracle.py` (commit `62bee76`) on the 1536-geometry
+sim store (`sim_tile1536.zarr`), val split. The script calls `build_region_weights`
+from `background_model/simulator/weights.py` — the same function the sampler uses —
+and scores each stored fragment's exact `w(c5, L, s)`, accumulating in float64.
+
+| Quantity | Value |
+|---|---|
+| Oracle NLL (val, 246,134 fragments) | **12.240380** nats |
+| `−mean(log w)` | 12.242086 |
+| `log W_D` | −0.001707 (pooled retention 2,461,808 / 2,466,013 = 0.998295) |
+| Uniform NLL (per-region) | 13.005489 |
+| `log\|D\|` geometric | 13.005492 (deficit 0.000004 — simulated data has essentially no N-masking) |
+| **Gap (uniform − oracle)** | **0.765109** |
+| `\|Ω\|` / `\|D\|` at region_len 1536 | 447,564 / 444,850 |
+| Check 1 — fragments on a `w == 0` cell | **0 of 246,134 — PASS** |
+| Check 2 — per-region entropy 12.244610 vs sample mean 12.242092 | diff 0.002519, SE 0.002565, ratio 0.98 — **PASS** |
+
+**Open reconciliation: the 11.932 figure.** An earlier empirical MLE baseline
+of 11.932 nats has circulated. Scored against this store's anchors it would read
+`(13.005489 − 11.932) / 0.765109 = 140.3%` captured — above 100%, which is
+exactly the symptom Appendix C predicts for a mis-specified anchor. The two
+numbers are **not on the same footing**: the oracle (12.240380) is computed on
+the val split from the simulator's own `build_region_weights` with both
+correctness checks passing decisively; 11.932 is either in-sample, on a
+different domain, or under a different normalisation. Flagged for reconciliation,
+not as a reason to doubt the oracle. Do not use 11.932 as a scoring target until
+its provenance is established.
+
+**Precision disclosure.** Lightning accumulates logged metrics in float32 at
+~0.008 nats, which is **1.05 pp of %-captured** at this gap. Published figures
+quoted to 2 dp (e.g. 65.57%, 71.09%) do not disclose this. The oracle itself
+uses float64 and is not affected.
 
 ---
 
@@ -306,14 +354,35 @@ the failure.
 |---|---|
 | `sample_<i>.h5` | the fragments, via `build-fragments-h5` from an 8-column sorted, tabix-indexed `sample_<i>.bed.gz` |
 | **manifest** | the 4 hexamer tables (DataFrames, string-keyed), the `(L, gc_bin)` predict LUT, `marginal_fl`; plus reference identity+hash, region-set identity+hash, `region_len`, `L` range, `FL_BANDS`, per-region counts, RNG seed, and the `build_region_weights` commit sha |
+| **weight sidecar** | per-fragment `w` as **float32** (decision 114). One value per emitted fragment, self-keyed `(contig, start, stop, strand, w)`. Not a `fragments_h5` schema change — the field has no meaning for real samples. Size: ~9.9 MB at 37 × 66,649 fragments |
 
 The intermediate `sample_<i>.bed.gz` is a means, not a deliverable. **No
 store.**
 
+**Storage dtype (decision 116).** Store `w`, not `log w`. float32's error is
+**relative**, so a relative error on `w` becomes a flat **6.0e-8 absolute
+error** in log space, independent of magnitude. Storing `log w` instead gives
+`|log w| · eps ≈ 1.1e-6` at `|log w| = 18`, growing with magnitude — 13–24×
+worse. No underflow risk: `w_min ≈ e^{-18.1} ≈ 1.4e-8` vs float32 min normal
+`1.2e-38`. Normalisation is **per region** (uniform `log w = −13.01`; it would
+be `−24.12` if global).
+
 The hexamer tables in the manifest are Layer 1's synthetic `build_w6`. Real
 counted tables from `scripts/count_cut_site_hexamers.py` are a separate stream;
 whichever is used, the realised arrays go in the manifest, so the h5 stays
-self-describing either way.
+self-describing either way. **Constraint (decision 91):** the end tables use
+`observed/background`, which is a **biased approximation** — `Z_s(c5)` couples
+every end weight, so this ratio cannot factor `end_s[h]` out. Nothing in this
+document or downstream may claim these tables are the data's end-hexamer
+preference; they are accepted as inputs to `w`, not as measurements of biology.
+
+**Hexamer prior (decisions 107/110/111).** Per-sample posteriors are derived via
+Dirichlet-multinomial shrinkage toward a count-weighted pooled proportion
+`p_pool`, with concentration `α_0` estimated by method of moments (Ronning
+1989). The split-half reliability gets the Spearman-Brown step-up (decision
+110), and `p_pool` uses count-weighted proportions (decision 111, M1). The
+shrinkage form is approved (decision 107); the per-sample posteriors in the
+92-sample artifact `hexamer_prior_92samples.json` stand.
 
 **GC source for scoring.** Simulation uses the true simulator surface; the
 real-data GC source is out of scope for Layer 1.
@@ -363,6 +432,13 @@ depth to a real sample's realised count is out of scope.
   Demonstrate: mutate → fail → restore → pass.
 - **`W_D` per-region:** two regions with different valid-position counts must
   yield different `W_D`. This must be a test, not prose.
+- **Per-sample disattenuation gate (decision 108).** Before running the
+  simulator with respect to a specific sample, measure the disattenuated `r`
+  between that sample's counts and the pooled counts (Spearman-Brown step-up
+  applied, decision 110). This is the operative reading of decision 92's
+  "tested every time" — per-sample, not per-fit. **As built the gate measures
+  but cannot fail:** no threshold, no consequence, and 26 of 92 samples sit
+  below 0.95. A threshold has not been set; do not invent one.
 
 ---
 
@@ -370,10 +446,10 @@ depth to a real sample's realised count is out of scope.
 
 | what | where | supplies |
 |---|---|---|
-| region sets | `quiet_v2_pad1200_repeats_removed_tile2560` (11,505 tiles), `..._tile1536` (66,649) | the regions; `region_len = tile_size + 2·jitter` |
+| region sets | `quiet_v2_pad1200_repeats_removed_tile2560` (11,505 tiles), `..._tile1536` (66,649) — **both include chrX** (decision 94) | the regions; `region_len = tile_size + 2·jitter` |
 | scored crop | `P = tile_size` (2048 for region_len 2560, 1024 for 1536) | the centre axis of `D`; `|D| = 155 · P · 2` |
 | reference | `/efs/analytics/nathanboley/data_resources/genome/hg38.fa` | sequence for hexamers and `cum_gc` |
-| hexamer tables | `build_w6(seed, dynamic_range)` — synthetic, **4096 independent** log-normal draws per table | the four `{start,end}×{fwd,rev}` tables |
+| hexamer tables | Layer 1: `build_w6(seed, dynamic_range)` — synthetic. Layer 2+: counted `observed/background` over `tile2560`, shrunk via Dirichlet-multinomial prior (92 samples; decisions 91/107) — a **biased approximation**, not a measurement of end-hexamer preference | the four `{start,end}×{fwd,rev}` tables |
 | length marginal | `duphist_merged/<sid>__duphist_wg.tsv.gz`, deduped `molecule_keys` | `marginal_fl(L)` |
 | capture surface | same duphist → `load_duphist` → `build_cell_map` → `GCFlDistModel().fit(...)` | `predict(L, gc)` = inverse capture |
 
@@ -410,31 +486,63 @@ is identically zero), so including it in `S_s` would leave
 domain: `{(m, L, strand) : m ∈ [0, P), L in band}`, centre-based — a strict
 subset. Strand is a dimension, so `|D| = 155 · P · 2` and `log|D|` already
 contains the `log 2`. "In-band" is part of this definition, not a filter
-applied after it.
+applied after it. Three silent ways to get it wrong: including out-of-band pairs
+makes `log|D|` count cells no model is charged for; admitting a fragment with
+one endpoint outside the crop puts numerator and denominator on different sets;
+and hardcoding `|D|` — it is **computed**.
 
-`|Ω|` and `|D|` differ on both axes, so neither substitutes for the other. For
-the 2560 geometry, `|Ω| = 2 · Σ_{L=25}^{180}(2561-L) = 767,052`, while
-`|D| = 155 · 2048 · 2 = 634,880`. `|D|` is strictly smaller for two
+`|Ω| = 2 · Σ_{L=25}^{180}(region_len + 1 − L)`. At region_len 2560:
+`|Ω| = 767,052`; at 1536: `|Ω| = 447,564`. `|D|` is strictly smaller for two
 independent reasons: the centre axis spans only `P < region_len` positions per
-length, and **`L = 180` is drawn but is not in band** — the bands are
-`[25,110) ∪ [110,180)`, so 155 of the 156 sampled lengths are scored.
+length (when a centred crop is applied), and **`L = 180` is drawn but is not in
+band** — the bands are `[25,110) ∪ [110,180)`, so 155 of the 156 sampled
+lengths are scored. That second point is why the in-band clause is not vacuous
+even though the sampler is confined to the capture surface's support.
 
 Because scoring is conditional on being in `D`, the true conditional is `w/W_D`
-with `W_D = Σ_{x ∈ D} w(x) < 1`, so the oracle per-fragment NLL is
+with `W_D = Σ_{x ∈ D} w(x) ≤ 1`, so the oracle per-fragment NLL is
 `-log(w/W_D) = -log w + log W_D`. **`-log w` alone is not the oracle:**
 `log W_D < 0`, so it overstates the oracle (makes it too weak) by exactly
 `|log W_D|`, and a model that correctly learns the conditional prints **above
-100% captured**.
+100% captured**, reading as an implementation bug rather than a mis-specified
+anchor.
 
-`W_D` is **per region** — `w` is normalised within a region, so `W_D` differs
-region to region and the oracle averages it over scored fragments. `|D|` is
-purely geometric — identical for every region at a given geometry — so `log|D|`
-is one number. Treating `W_D` as a single scalar reintroduces the same
-mis-normalisation, averaged.
+**Computing `W_D`.** `W_D` is itself a probability under `w` — the probability
+that a draw from `w` lands in `D`. The **retention fraction** `n_scored /
+n_emitted` therefore estimates it directly: no domain rebuild is needed. A
+simulator that draws from `w` and a store that drops out-of-`D` fragments
+computes `W_D` as a side effect.
+
+**Per-region vs pooled scalar.** `W_D` is in principle **per region**: `w` is
+normalised within a region, so `W_D` differs region to region. Treating it as a
+single pooled scalar reintroduces the same mis-normalisation, averaged.
+**However:** when the only domain restriction is dropping `L = 180` (0.17% of
+mass) and no centred crop is applied — as in the 1536-geometry store —
+per-region variation is dominated by binomial noise. Measured: pooled
+`log W_D = −0.001707` vs fragment-weighted per-region `−0.001683`, difference
+**0.000023 nats**; per-region sd = 0.006805, matching the binomial expectation
+at n = 37 (0.006780). **At this domain the pooled scalar is correct and
+per-region estimation adds only noise. If a centred crop is ever applied,
+per-region `W_D` returns** — the crop excludes different mass fractions in
+different regions, and the variation is no longer binomial at fixed `n`.
 
 Both anchors are recomputed per store and never carried across: uniform's
 deficit below `log(tile_size)` tracks the empty-mass fraction, which varies
-across stores by a large factor.
+across stores by a large factor, so a carried baseline silently misstates every
+percentage.
+
+**Verification.** Two checks replace the correlation-grid approach (which
+failed) and constitute the sanctioned oracle validation:
+
+1. **No observed fragment may land on a `w == 0` cell.** A hit proves the
+   coordinate mapping is wrong — hex indices, strand convention, or the
+   `c5`/`c3` assignment.
+2. **Per-region entropy must match the sample mean within MC error.** The exact
+   per-region entropy `H = −Σ_{w>0} w log w` is computable from the weights
+   with no emitted fragments. The sample mean of `−log w(fragment)` over a
+   region's draws must agree with `H` within `SE ≈ sd / √R`. Disagreement
+   proves the coordinate mapping is wrong even when check 1 passes — a
+   consistent off-by-one can avoid zero cells while shifting every weight.
 
 ### Appendix D — Orientation and index conventions
 
