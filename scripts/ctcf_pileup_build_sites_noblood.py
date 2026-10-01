@@ -15,10 +15,10 @@ Site-set cascade (counts reported at every step, like sites_report.json):
   C. REMOVE motifs present in ANY hematopoietic CTCF set:
        - exact (contig,start,stop,strand) matches (reported), AND
        - anything within +-200 bp of a hematopoietic site (superset of exact).
-     The +-200bp overlap is done with the library (RegionDataFrame.drop_overlapping_regions
+     The +-200bp overlap is done with the library (intervals.overlap_indices(how="anti")
      against a +-200bp-widened hematopoietic BED), NOT hand-rolled.
   D. REMOVE motifs overlapping blood DHS (the accessibility filter) via
-     RegionDataFrame.from_bed(...) + drop_overlapping_regions (CLAUDE.md sanctioned).
+     RegionDataFrame.from_bed(...) + intervals.overlap_indices(how="anti") (CLAUDE.md sanctioned).
 Then the SAME remaining filters as the main run:
   1. standard contigs (chr1-22, chrX)
   2. drop sites whose +-AGG_HALF window overlaps the blacklist
@@ -123,7 +123,7 @@ def _write_bed(df, cols=("contig", "start", "stop", "strand")):
 
 def drop_overlapping_bed(sites_df, other_df):
     """Return the rows of sites_df (0..N-1 RangeIndex) NOT overlapping other_df,
-    using the library (RegionDataFrame.from_bed + drop_overlapping_regions)."""
+    using the library (RegionDataFrame.from_bed + intervals.overlap_indices)."""
     sites_df = sites_df.reset_index(drop=True)
     sp = _write_bed(sites_df)
     op = _write_bed(other_df)

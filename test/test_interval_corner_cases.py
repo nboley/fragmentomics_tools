@@ -771,3 +771,58 @@ class TestDeterministicOrder:
         first = overlap_indices(a, b)
         for _ in range(3):
             assert overlap_indices(a, b).equals(first)
+
+
+class TestDuplicateIndexLabels:
+    """Duplicate index labels must not leak between rows.
+
+    `pd.concat` without `ignore_index=True` produces a frame with repeated
+    labels, which is ordinary rather than exotic. `overlaps` previously built
+    its mask with `a.index.isin(pairs.a_index)` -- label membership -- so when
+    two rows shared a label and only one overlapped, BOTH came back True.
+    """
+
+    def _dup(self):
+        # Rows 0 and 1 share the label 7. Only the first overlaps b.
+        a = RegionDataFrame(
+            pd.DataFrame(
+                {
+                    "contig": ["chr1", "chr1"],
+                    "start": [100, 90000],
+                    "stop": [200, 90100],
+                },
+                index=[7, 7],
+            ),
+            ref="hg38",
+        )
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [160]})
+        return a, b
+
+    def test_overlaps_is_per_row_not_per_label(self):
+        a, b = self._dup()
+        m = overlaps(a, b)
+        assert list(m.values) == [True, False]
+
+    def test_overlaps_length_matches_rows(self):
+        """A per-label result would collapse to one entry; a per-row one keeps two."""
+        a, b = self._dup()
+        assert len(overlaps(a, b)) == len(a) == 2
+
+    def test_overlap_indices_reports_the_shared_label_once(self):
+        """Pins the KNOWN LIMITATION rather than asserting it is fine.
+
+        `overlap_indices` returns index LABELS, and a label cannot distinguish
+        which of two identically-labelled rows matched. One pair is reported,
+        carrying label 7. A caller doing `a.loc[pairs.a_index]` therefore gets
+        BOTH rows -- including the one that does not overlap.
+
+        This is inherent to a label-returning API, not a bug in the matching.
+        It is pinned here so the behaviour is visible and so a future change to
+        raise on duplicate labels fails this test loudly rather than silently.
+        """
+        a, b = self._dup()
+        pairs = overlap_indices(a, b)
+        assert len(pairs) == 1
+        assert list(pairs["a_index"]) == [7]
+        # The limitation, made explicit:
+        assert len(a.loc[pairs["a_index"].tolist()]) == 2

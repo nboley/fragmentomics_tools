@@ -20,7 +20,7 @@ Why real data in addition to the synthetic corner-case tests:
 What this captures (the design doc's fixture table):
   - merge_regions             per-dataset
   - join_on_overlap           pairwise (CTCF × blacklist, both directions)
-  - drop_overlapping_regions  pairwise
+  - overlap_indices(how="anti")  pairwise
   - overlaps_rdf              pairwise (with and without max_distance)
   - get_overlapping_base_counts  pairwise (captures the strand-collision bug)
   - from_beds_merged          merging both BEDs together

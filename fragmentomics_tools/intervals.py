@@ -326,8 +326,15 @@ def overlaps(
 ) -> pd.Series:
     """Boolean mask: which rows of *a* overlap at least one row in *b*.
 
-    Equivalent to ``a.index.isin(overlap_indices(a, b, ...).a_index)``
-    but exists because it is the most-used operation in the family.
+    The most-used operation in the family, which is why it has its own name
+    rather than being spelled out at each call site.
+
+    Computed **per row**, not per index label. An earlier version was
+    `a.index.isin(pairs.a_index)`, which is label membership: when two rows
+    share an index label and only one of them overlaps, `isin` marks *both*
+    True. `pd.concat` without `ignore_index=True` produces exactly that frame.
+    Building the mask positionally makes the result independent of whatever
+    index the caller happens to carry.
 
     Parameters
     ----------
@@ -339,16 +346,21 @@ def overlaps(
 
     Returns
     -------
-    pd.Series[bool], index-aligned to *a*.
+    pd.Series[bool], index-aligned to *a*, one entry per ROW of *a*.
     """
-    idx = overlap_indices(a, b, how="inner", wiggle=wiggle, same_strand=same_strand)
-    # `a_index` holds index LABELS. Testing `range(len(a))` against them
-    # compares positions to labels, which silently returns an all-False mask
-    # for any frame whose index is not 0..n-1 -- i.e. any filtered or sliced
-    # frame. `Index.isin` is both label-correct and vectorised.
+    # Normalise first: inside this call `a_index` values are positions, and
+    # `overlap_indices`' duplicate-label guard cannot fire on 0..n-1.
+    a_pos, a_labels = _positional(a)
+    idx = overlap_indices(
+        a_pos, b, how="inner", wiggle=wiggle, same_strand=same_strand
+    )
+    mask = np.zeros(len(a_pos), dtype=bool)
+    matched = idx["a_index"].dropna()
+    if len(matched):
+        mask[matched.values.astype(int)] = True
     return pd.Series(
-        a.index.isin(idx["a_index"].dropna().values),
-        index=a.index,
+        mask,
+        index=a_labels,
         dtype=bool,
     )
 

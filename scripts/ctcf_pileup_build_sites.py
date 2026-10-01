@@ -46,7 +46,7 @@ STD_CONTIGS = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
 def drop_blacklisted_windows(allsites, half):
     """Drop sites whose +-half aggregation window touches the blacklist.
 
-    Uses the library (RegionDataFrame.from_bed + drop_overlapping_regions) per
+    Uses the library (RegionDataFrame.from_bed + intervals.overlap_indices) per
     CLAUDE.md rather than a hand-rolled interval test, so this script and
     ctcf_pileup_build_sites_noblood.py share ONE blacklist implementation.  Two
     implementations of the same filter can drift apart at boundaries (half-open
