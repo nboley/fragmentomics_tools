@@ -210,3 +210,108 @@ class TestMeasureSampleDisattenuation:
                 f"{tn}: high-count pool rho ({rho_hi:.4f}) should exceed "
                 f"low-count pool rho ({rho_lo:.4f})"
             )
+
+
+class TestDisattenuationGoldenValues:
+    """Pin the full measurement chain to exact values so formula errors are caught.
+
+    The property tests above all pass for a wide range of return values and
+    CANNOT detect, e.g., removing the Spearman-Brown step-up, double-applying
+    it, or applying it to the pool but not the sample.  This test pins
+    r_observed, rho_sample, rho_pool_loo, and r_disattenuated for a single
+    deterministic (sample, table) to ~3 significant figures.
+
+    Fixture: 30 samples drawn from a shared multinomial (NHEX=256,
+    depth ~100k each), plus one "deviant" sample whose true p is a 70/30
+    mixture of the pool p and an independent Dirichlet draw (depth 80k).
+    The deviant's r_disattenuated is ~0.911 (unclamped), which means the
+    step-up matters: removing it shifts rho_sample from 0.941 to 0.889
+    and r_disattenuated from 0.911 to 0.938, both far outside tolerance.
+
+    Which formula error each pinned value catches:
+      r_observed    — wrong log-enrichment, wrong mask, wrong Pearson call
+      rho_sample    — step-up removed or double-applied on the SAMPLE side
+      rho_pool_loo  — step-up removed or double-applied on the POOL side,
+                      or LOO subtraction broken
+      r_disattenuated — any of the above, plus wrong denominator formula
+                        (e.g. product vs geometric mean)
+    """
+    NHEX_GOLDEN = 256
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        rng = np.random.RandomState(99)
+        pool_p = rng.dirichlet(np.ones(self.NHEX_GOLDEN) * 10.0)
+
+        bg_flat = np.ones(self.NHEX_GOLDEN, dtype=np.int64) * 5000
+        bg = {tn: bg_flat.copy() for tn in TABLE_NAMES}
+        hex_order = [f"HEX{i:04d}" for i in range(self.NHEX_GOLDEN)]
+
+        obs_by_sample = {}
+        for i in range(30):
+            n_i = 100_000 + rng.randint(-20_000, 20_000)
+            obs_counts = rng.multinomial(n_i, pool_p)
+            obs_by_sample[f"sample_{i:03d}"] = {
+                tn: obs_counts.copy() for tn in TABLE_NAMES
+            }
+
+        # Deviant sample: 70% pool + 30% independent — genuine deviation
+        deviant_p = 0.7 * pool_p + 0.3 * rng.dirichlet(
+            np.ones(self.NHEX_GOLDEN) * 10.0
+        )
+        deviant_p /= deviant_p.sum()
+        deviant_obs = rng.multinomial(80_000, deviant_p)
+        obs_by_sample["sample_deviant"] = {
+            tn: deviant_obs.copy() for tn in TABLE_NAMES
+        }
+
+        prior, posteriors, diagnostics = build_prior_and_posteriors(
+            obs_by_sample, bg, hex_order,
+        )
+
+        self.artifact = {
+            "hex_order": hex_order,
+            "table_names": list(TABLE_NAMES),
+            "prior": prior,
+            "posteriors": {
+                sn: {tn: post.tolist() for tn, post in tables.items()}
+                for sn, tables in posteriors.items()
+            },
+            "background": {tn: arr.tolist() for tn, arr in bg.items()},
+            "diagnostics": diagnostics,
+        }
+        self.obs_by_sample = obs_by_sample
+
+    def test_golden_measurement_chain(self):
+        """Pin r_observed, rho_sample, rho_pool_loo, r_disattenuated."""
+        df = measure_sample_disattenuation(
+            self.artifact,
+            self.obs_by_sample["sample_deviant"],
+            sample_name="sample_deviant",
+            n_reps=50,
+            rng_seed=42,
+        )
+        row = df[df["table"] == "start_fwd"].iloc[0]
+
+        # r_observed: catches log-enrichment or mask bugs
+        np.testing.assert_allclose(
+            row["r_observed"], 0.8835, rtol=5e-3,
+            err_msg="r_observed shifted — check _log_enrichment or _observed_correlation",
+        )
+        # rho_sample: catches Spearman-Brown step-up removal/double-application
+        # on the sample side.  Without step-up this is ~0.889 (shift 0.052).
+        np.testing.assert_allclose(
+            row["rho_sample"], 0.9414, rtol=5e-3,
+            err_msg="rho_sample shifted — check Spearman-Brown step-up in _thinning_reliability",
+        )
+        # rho_pool_loo: catches step-up on pool side, or broken LOO subtraction
+        np.testing.assert_allclose(
+            row["rho_pool_loo"], 0.9990, rtol=2e-3,
+            err_msg="rho_pool_loo shifted — check pool reliability or LOO subtraction",
+        )
+        # r_disattenuated: catches wrong denominator formula (e.g. product instead
+        # of geometric mean, or applying step-up only to one side).
+        np.testing.assert_allclose(
+            row["r_disattenuated"], 0.9111, rtol=5e-3,
+            err_msg="r_disattenuated shifted — check disattenuation formula",
+        )

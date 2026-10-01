@@ -49,8 +49,8 @@ tables; Pearson on raw weights would be dominated by a handful of extreme
 hexamers.
 
 **Implementation**: `scripts/measure_hexamer_disattenuation.py`. Tested by
-`tests/test_hexamer_disattenuation.py` (10 tests on synthetic data with known
-ground truth).
+`tests/test_hexamer_disattenuation.py` (11 tests on synthetic data with known
+ground truth, including pinned golden values for the full measurement chain).
 
 ## Results
 
@@ -164,9 +164,9 @@ biology.
    had been omitted and pushed r_disatt UP), so the two biases partly offset.
    Both are stated here rather than one being waved at as cancelling the other.
 
-### The per-sample gate
+### Per-sample disattenuation measurement
 
-For any new sample being simulated:
+For any new sample being evaluated against the prior:
 ```python
 from scripts.measure_hexamer_disattenuation import (
     measure_sample_disattenuation, load_measurement_results,
@@ -178,7 +178,9 @@ results = load_measurement_results(
     "/efs/analytics/nathanboley/background_model/cut_site_hexamers/disattenuation_92samples.tsv"
 )
 sample_rows = results[results["sample_name"] == "RD-56436-Lib1"]
-# Check: all tables have r_disattenuated > threshold
+# NOTE: No acceptance threshold has been defined yet.  The values above
+# are measurements, not a gate.  A threshold and the consequence of
+# failing it are an open decision.
 
 # Or compute fresh for a new sample not in the cohort:
 art = load_artifact("hexamer_prior_92samples.json")
@@ -201,8 +203,16 @@ Columns: `sample_name`, `table`, `r_observed`, `rho_sample`, `rho_sample_se`,
 
 - Artifact: `hexamer_prior_92samples.json` (92-sample Dirichlet-multinomial fit)
 - Cohort: `cohort92_resolved_paths.tsv`
-- Script: `scripts/measure_hexamer_disattenuation.py`
-- Tests: `tests/test_hexamer_disattenuation.py` (10 tests, synthetic data)
+- Scripts (all verified against HEAD by the provenance guard):
+  - `scripts/measure_hexamer_disattenuation.py` — entry point
+  - `scripts/build_hexamer_prior.py` — prior fitting and provenance utilities
+  - `scripts/count_cut_site_hexamers.py` — raw counting logic (774 lines,
+    transitive dependency via TABLE_NAMES import; changes here affect computed
+    results even though neither fit nor measurement script is modified)
+- Tests: `tests/test_hexamer_disattenuation.py` (11 tests, synthetic data,
+  including pinned golden values for the full measurement chain)
 - 50 thinning replications per (sample, table), deterministic seeds
 - Spearman-Brown step-up applied to split-half reliability
 - Python 3.10, scipy, numpy, pandas
+- The TSV output includes a comment header recording commit sha and
+  per-script sha256 for all three scripts above

@@ -67,6 +67,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.build_hexamer_prior import (
     load_all_samples_ordered,
     load_artifact,
+    verify_provenance,
 )
 from scripts.count_cut_site_hexamers import TABLE_NAMES
 
@@ -251,7 +252,15 @@ def measure_sample_disattenuation(
             # so the denominator is larger and values above 1.0 are rare.
             # They can still occur when sampling noise inflates r_obs more
             # than it inflates sqrt(rho_s * rho_p).
+            r_disatt_raw = r_disatt
             r_disatt = float(np.clip(r_disatt, -1.0, 1.0))
+            if r_disatt_raw != r_disatt:
+                logger.warning(
+                    "%s %s: r_disattenuated %.4f clamped to %.1f "
+                    "(r_obs=%.4f, rho_s=%.4f, rho_p=%.4f)",
+                    sample_name, tn, r_disatt_raw, r_disatt,
+                    r_obs, rho_s, rho_p,
+                )
 
         rows.append({
             "sample_name": sample_name,
@@ -294,8 +303,8 @@ def measure_cohort_disattenuation(
 
 
 def load_measurement_results(path: str) -> pd.DataFrame:
-    """Load previously saved measurement results."""
-    return pd.read_csv(path, sep="\t")
+    """Load previously saved measurement results (skips ``#`` comment header)."""
+    return pd.read_csv(path, sep="\t", comment="#")
 
 
 def main():
@@ -329,6 +338,13 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    # Verify provenance BEFORE any computation: this script, the fit
+    # script it imports from, and the counting script that produces
+    # the raw data must all match HEAD.
+    build_script = os.path.join(os.path.dirname(__file__), "build_hexamer_prior.py")
+    counting_script = os.path.join(os.path.dirname(__file__), "count_cut_site_hexamers.py")
+    prov = verify_provenance(__file__, build_script, counting_script)
+
     logger.info("Loading artifact: %s", args.artifact)
     artifact = load_artifact(args.artifact)
 
@@ -346,7 +362,14 @@ def main():
         n_reps=args.n_thinning_reps,
     )
 
-    results.to_csv(args.output_tsv, sep="\t", index=False, float_format="%.6f")
+    # Write TSV with provenance comment header so the artifact is traceable.
+    with open(args.output_tsv, "w") as fh:
+        fh.write(f"# commit_sha: {prov['commit_sha']}\n")
+        for rel_path, sha in sorted(prov["script_shas"].items()):
+            fh.write(f"# script_sha256 {rel_path}: {sha}\n")
+        fh.write(f"# artifact: {os.path.abspath(args.artifact)}\n")
+        fh.write(f"# n_thinning_reps: {args.n_thinning_reps}\n")
+        results.to_csv(fh, sep="\t", index=False, float_format="%.6f")
     logger.info("Wrote %d rows to %s", len(results), args.output_tsv)
 
     # Summary

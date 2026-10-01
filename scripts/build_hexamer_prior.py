@@ -363,30 +363,39 @@ def write_artifact(
                 os.path.getsize(out_path) / 1e6)
 
 
-def verify_script_provenance(script_path: str) -> tuple[str, str]:
-    """Verify *script_path* matches its committed blob at HEAD.
+def verify_provenance(*script_paths: str) -> dict:
+    """Verify that every path in *script_paths* matches its committed blob at HEAD.
 
-    Returns (commit_sha, script_sha256) on success.
+    Returns a dict::
 
-    Raises RuntimeError if the script differs from HEAD or is untracked.
+        {
+            "commit_sha": "<HEAD>",
+            "script_shas": {
+                "scripts/build_hexamer_prior.py": "<sha256>",
+                "scripts/count_cut_site_hexamers.py": "<sha256>",
+                ...
+            },
+        }
 
-    Design note: the guard scopes to the *script itself*, not the whole
+    Raises RuntimeError if any file is untracked or differs from HEAD.
+
+    Design note: the guard scopes to the listed files, not the whole
     worktree.  A worktree that is permanently dirty due to another active
-    stream (e.g. an in-progress doc rewrite) must not block this script
-    from running.  The property worth guaranteeing is narrower: every
-    provenance sha an artifact records can be resolved by checking out the
-    recorded commit.  If the script matches HEAD, then ``commit_sha`` is a
-    real commit and ``sha256(git show <commit>:<script>)`` equals the
-    recorded ``script_sha256``.
+    stream (e.g. an in-progress doc rewrite) must not block a run.  The
+    property worth guaranteeing is: every sha an artifact records can be
+    resolved by checking out the recorded commit.
     """
     import hashlib
     import subprocess
 
-    script_path = os.path.abspath(script_path)
+    if not script_paths:
+        raise ValueError("verify_provenance requires at least one path")
+
+    first = os.path.abspath(script_paths[0])
+    repo_dir = os.path.dirname(first)
 
     # 1. Resolve HEAD commit.
     try:
-        repo_dir = os.path.dirname(script_path)
         commit_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
             cwd=repo_dir, stderr=subprocess.DEVNULL,
@@ -396,7 +405,7 @@ def verify_script_provenance(script_path: str) -> tuple[str, str]:
             f"Cannot resolve HEAD (git unavailable or not a repo): {exc}"
         ) from exc
 
-    # 2. Repo-relative path for ``git show``.
+    # 2. Repo root for relative paths.
     try:
         repo_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
@@ -405,37 +414,52 @@ def verify_script_provenance(script_path: str) -> tuple[str, str]:
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"Cannot find repo root: {exc}") from exc
 
-    rel_path = os.path.relpath(script_path, repo_root)
+    # 3. Verify each file.
+    script_shas = {}
+    for sp in script_paths:
+        sp_abs = os.path.abspath(sp)
+        rel_path = os.path.relpath(sp_abs, repo_root)
 
-    # 3. Retrieve the committed blob.
-    try:
-        committed_content = subprocess.check_output(
-            ["git", "show", f"HEAD:{rel_path}"],
-            cwd=repo_root, stderr=subprocess.DEVNULL,
-        )
-    except subprocess.CalledProcessError:
-        raise RuntimeError(
-            f"Provenance guard: {rel_path} is not tracked at HEAD "
-            f"({commit_sha[:12]}). Add and commit it before running."
-        )
+        try:
+            committed_content = subprocess.check_output(
+                ["git", "show", f"HEAD:{rel_path}"],
+                cwd=repo_root, stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                f"Provenance guard: {rel_path} is not tracked at HEAD "
+                f"({commit_sha[:12]}). Add and commit it before running."
+            )
 
-    # 4. Compare disk content to committed blob.
-    with open(script_path, "rb") as f:
-        disk_content = f.read()
+        with open(sp_abs, "rb") as f:
+            disk_content = f.read()
 
-    committed_sha = hashlib.sha256(committed_content).hexdigest()
-    disk_sha = hashlib.sha256(disk_content).hexdigest()
+        committed_sha = hashlib.sha256(committed_content).hexdigest()
+        disk_sha = hashlib.sha256(disk_content).hexdigest()
 
-    if committed_sha != disk_sha:
-        raise RuntimeError(
-            f"Provenance guard: {rel_path} on disk "
-            f"(sha256 {disk_sha[:16]}...) differs from HEAD "
-            f"({commit_sha[:12]}, sha256 {committed_sha[:16]}...). "
-            f"Commit the script before running so the recorded provenance "
-            f"resolves to a reproducible state."
-        )
+        if committed_sha != disk_sha:
+            raise RuntimeError(
+                f"Provenance guard: {rel_path} on disk "
+                f"(sha256 {disk_sha[:16]}...) differs from HEAD "
+                f"({commit_sha[:12]}, sha256 {committed_sha[:16]}...). "
+                f"Commit the script before running so the recorded provenance "
+                f"resolves to a reproducible state."
+            )
 
-    return commit_sha, disk_sha
+        script_shas[rel_path] = disk_sha
+
+    return {"commit_sha": commit_sha, "script_shas": script_shas}
+
+
+def verify_script_provenance(script_path: str) -> tuple[str, str]:
+    """Verify *script_path* matches its committed blob at HEAD.
+
+    Returns (commit_sha, script_sha256) on success.
+    Thin wrapper around :func:`verify_provenance` for backward compatibility.
+    """
+    prov = verify_provenance(script_path)
+    sha = next(iter(prov["script_shas"].values()))
+    return prov["commit_sha"], sha
 
 
 def load_artifact(path: str):
@@ -492,9 +516,10 @@ def main():
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Verify provenance BEFORE any computation: the script on disk must
-    # match HEAD so the recorded commit_sha + script_sha256 resolve later.
-    commit_sha, script_sha = verify_script_provenance(__file__)
+    # Verify provenance BEFORE any computation: every script in the
+    # dependency chain must match HEAD so recorded shas resolve later.
+    counting_script = os.path.join(os.path.dirname(__file__), "count_cut_site_hexamers.py")
+    prov = verify_provenance(__file__, counting_script)
 
     cohort = pd.read_csv(args.sample_sheet, sep="\t")
     sample_names = cohort["sample_name"].tolist()
@@ -522,7 +547,7 @@ def main():
             d["shrinkage_ratio_median"],
         )
 
-    # Provenance — verified by verify_script_provenance() at the start.
+    # Provenance — verified by verify_provenance() at the start.
     first_meta = next(iter(metas.values()))
     provenance = {
         "n_samples": len(sample_names),
@@ -535,8 +560,8 @@ def main():
         "l_min": first_meta.get("l_min"),
         "l_max_inclusive": first_meta.get("l_max_inclusive"),
         "min_mapq": first_meta.get("min_mapq"),
-        "commit_sha": commit_sha,
-        "script_sha256": script_sha,
+        "commit_sha": prov["commit_sha"],
+        "script_shas": prov["script_shas"],
         "shrinkage_form": (
             "Dirichlet-multinomial conjugate: alpha = alpha_0 * p_pool, "
             "posterior mean theta_i = (obs_i + alpha) / (N_i + alpha_0), "

@@ -142,7 +142,7 @@ hex_tables, hex_order = artifact_to_hex_tables(art, sample_name=None)
 
 ## Attenuation test
 
-`tests/test_hexamer_prior_attenuation.py` — 7 tests, all passing:
+`tests/test_hexamer_prior_attenuation.py` — 8 tests, all passing:
 
 1. **No zeros in posterior** — every posterior weight is strictly positive
 2. **Shrinkage toward prior** — every sample's posterior is closer to the prior than its raw estimate (L2)
@@ -151,3 +151,4 @@ hex_tables, hex_order = artifact_to_hex_tables(art, sample_name=None)
 5. **Large-N limit** — with 10M observations, posterior ≈ raw estimate (max diff < 1e-4)
 6. **alpha_0 positive** — the concentration parameter is always positive
 7. **alpha_0 monotonicity** — less biological variance → larger alpha_0
+8. **alpha_0 golden value** — pinned regression value on deterministic input (~608.4)
