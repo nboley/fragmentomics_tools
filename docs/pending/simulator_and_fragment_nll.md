@@ -239,9 +239,16 @@ the model agent's (decision 79).
 ### Measured anchors — cut-site store val split
 
 Measured from `scripts/cut_site_oracle.py` (commit `62bee76`) on the 1536-geometry
-sim store (`sim_tile1536.zarr`), val split. The script calls `build_region_weights`
-from `background_model/simulator/weights.py` — the same function the sampler uses —
+sim stores, val split. The script calls `build_region_weights` from
+`background_model/simulator/weights.py` — the same function the sampler uses —
 and scores each stored fragment's exact `w(c5, L, s)`, accumulating in float64.
+
+Both stores were built from the same h5 (`RD-56670.fragments.h5`) and the same
+manifest, so the hexamer tables, `marginal_fl`, and `predict_lut` are identical.
+They differ in `L_max`: v1 (09-30) caps at 179, excluding L=180; v2 (10-01) caps
+at 180, covering the full generative domain.
+
+#### v1 — `sim_tile1536.zarr` (2026-09-30, `L_max`=179)
 
 | Quantity | Value |
 |---|---|
@@ -252,8 +259,35 @@ and scores each stored fragment's exact `w(c5, L, s)`, accumulating in float64.
 | `log\|D\|` geometric | 13.005492 (deficit 0.000004 — simulated data has essentially no N-masking) |
 | **Gap (uniform − oracle)** | **0.765109** |
 | `\|Ω\|` / `\|D\|` at region_len 1536 | 447,564 / 444,850 |
+| Missing fragments | 4,205 of 2,466,013 (0.170%): 3,468 from L=180 exclusion + 737 dedup collisions |
 | Check 1 — fragments on a `w == 0` cell | **0 of 246,134 — PASS** |
 | Check 2 — per-region entropy 12.244610 vs sample mean 12.242092 | diff 0.002519, SE 0.002565, ratio 0.98 — **PASS** |
+
+#### v2 — `sim_tile1536_v2.zarr` (2026-10-01, `L_max`=180)
+
+| Quantity | Value |
+|---|---|
+| Oracle NLL (val, 246,496 fragments) | **12.244812** nats |
+| `−mean(log w)` | 12.245111 |
+| `log W_D` | −0.000299 (pooled retention 2,465,276 / 2,466,013 = 0.999701) |
+| Uniform NLL (per-region) | 13.011571 |
+| `log\|D\|` geometric | 13.011575 (deficit 0.000003) |
+| **Gap (uniform − oracle)** | **0.766759** |
+| `\|Ω\|` / `\|D\|` at region_len 1536 | 447,564 / 447,564 (`D = Ω` — full generative domain scored) |
+| Missing fragments | 737 of 2,466,013 (0.030%): all dedup collisions (732 tiles×1 + 5 tiles×2) |
+| Check 1 — fragments on a `w == 0` cell | **0 of 246,496 — PASS** |
+| Check 2 — per-region entropy 12.244610 vs sample mean 12.245092 | diff 0.000482, SE 0.002568, ratio 0.19 — **PASS** |
+
+**v2 notes.** The oracle rises by 0.004432 nats (v1→v2) because L=180
+fragments sit at the low end of `marginal_fl` and carry lower `w`. The gap
+widens from 0.765109 to 0.766759 (+0.001650), meaning the newly scored domain
+adds slightly more uniform mass than oracle mass. Per-region entropy is
+identical (12.244610) because it is computed over the full `Ω` regardless of
+store `L_max`. The v2 store records provenance attrs (`source_h5`,
+`source_regions`, `source_reference`, `l_target`, `l_seq`, `git_sha`) but
+`git_sha` is the literal string `"unknown"` — it does not resolve to a commit.
+This is the honest failure mode (claims nothing false), but means the store
+cannot be tied to the code that built it.
 
 **Open reconciliation: the 11.932 figure.** An earlier empirical MLE baseline
 of 11.932 nats has circulated. Scored against this store's anchors it would read

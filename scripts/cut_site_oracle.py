@@ -14,18 +14,20 @@ Two mandatory correctness checks:
   2. Mean per-region entropy (-sum w log w) must agree with the sample mean
      of -log w(fragment) within Monte Carlo error at 37 draws/region.
 
-Domain correction: the store excludes L=180, so
+Domain correction: when the store's scoring domain D is a strict subset
+of the generative domain Omega (e.g. v1 excludes L=180), we have:
   oracle NLL = -mean(log w) + log(W_D)
   W_D = n_scored / n_emitted  (pooled scalar)
 
 Usage:
     cd /home/nathanboley/src/fragmentomics_tools/.claude/worktrees/background-model-work
     PYTHONPATH=. /home/nathanboley/miniconda3/envs/biomarker_env/bin/python \
-        scripts/cut_site_oracle.py
+        scripts/cut_site_oracle.py [--manifest PATH] [--store PATH] [--output PATH]
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 
@@ -38,8 +40,39 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+_DEFAULT_MANIFEST = (
+    "/efs/analytics/nathanboley/background_model/"
+    "sim_run_tile1536_20260930/RD-56670.manifest.json"
+)
+_DEFAULT_STORE = (
+    "/efs/analytics/nathanboley/background_model/"
+    "cut_site_stores/sim_tile1536.zarr"
+)
 
-def main():
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="Oracle fragment-level NLL for a cut-site simulation store."
+    )
+    p.add_argument(
+        "--manifest", default=_DEFAULT_MANIFEST,
+        help="Path to the simulation manifest JSON. "
+             "Default: %(default)s",
+    )
+    p.add_argument(
+        "--store", default=_DEFAULT_STORE,
+        help="Path to the zarr store. "
+             "Default: %(default)s",
+    )
+    p.add_argument(
+        "--output", default=None,
+        help="Optional path to write results as JSON.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     t0 = time.time()
 
     # ── Load manifest (verify=False: no FASTA/region_set paths needed) ──
@@ -52,14 +85,8 @@ def main():
         hexamer_indices, HEX_HALF,
     )
 
-    MANIFEST = (
-        "/efs/analytics/nathanboley/background_model/"
-        "sim_run_tile1536_20260930/RD-56670.manifest.json"
-    )
-    STORE = (
-        "/efs/analytics/nathanboley/background_model/"
-        "cut_site_stores/sim_tile1536.zarr"
-    )
+    MANIFEST = args.manifest
+    STORE = args.store
 
     manifest = load_manifest(MANIFEST, verify=False)
     hex_tables = manifest["hex_tables"]
@@ -314,6 +341,37 @@ def main():
     print(f"\n{'='*70}")
     print(f"  Runtime: {time.time()-t0:.1f}s")
     print(f"{'='*70}")
+
+    # ── Optional JSON output ──────────────────────────────────────────────
+    if args.output is not None:
+        import json as json_mod
+        results = {
+            "manifest": MANIFEST,
+            "store": STORE,
+            "store_L_max": int(store_L_max),
+            "n_val_tiles": int(n_val),
+            "n_scored": int(n_scored),
+            "n_total_store": int(n_total_store),
+            "n_total_emitted": int(n_total_emitted),
+            "W_D": float(W_D),
+            "log_W_D": float(log_W_D),
+            "mean_neg_log_w": float(mean_neg_log_w),
+            "oracle_nll": float(oracle_nll),
+            "uniform_nll": float(uniform_nll),
+            "log_D": float(log_D),
+            "D_size": int(D_size),
+            "omega_size": int(omega_size),
+            "gap": float(uniform_nll - oracle_nll),
+            "check1_zero_hits": int(n_zero_hits),
+            "check2_mean_entropy": float(mean_entropy),
+            "check2_mean_sample": float(mean_sample),
+            "check2_diff": float(diff),
+            "check2_se": float(se_diff),
+            "check2_ratio": float(diff / se_diff),
+        }
+        with open(args.output, "w") as f:
+            json_mod.dump(results, f, indent=2)
+        print(f"\n[oracle] results written to {args.output}")
 
     return 0 if n_zero_hits == 0 else 1
 
