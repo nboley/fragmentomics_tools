@@ -87,7 +87,7 @@ had 80% of values clamped at 1.0, masking real deviations that are now visible.
 
 The top 10 most deviant:
 
-| Sample | Mean r_disatt | Min r_disatt (table) | Depth (N) | Mean rho | Assessment |
+| Sample | Mean r_disatt | Min r_disatt (table) | Depth (N, per-strand) | Mean rho | Assessment |
 |--------|--------------|---------------------|-----------|----------|------------|
 | RD-56171-Lib1 | 0.675 | 0.573 (end_rev) | 173k | 0.881 | **Severe** — genuinely different hexamer profile |
 | RD-56818-Lib1 | 0.781 | 0.705 (end_fwd) | 75k | 0.808 | **Severe** — low depth, deviation persists after correction |
@@ -100,7 +100,7 @@ The top 10 most deviant:
 | RD-56429-Lib1 | 0.914 | 0.874 (end_rev) | 182k | 0.854 | **Mild** — end tables only |
 | RD-57081-Lib1 | 0.916 | 0.880 (end_fwd) | 183k | 0.856 | **Mild** — end tables only |
 
-**RD-57090-Lib1** and **RD-56805-Lib1** (mean 0.928, depth 2,282k, rho 0.977)
+**RD-57090-Lib1** and **RD-56805-Lib1** (mean 0.928, depth 2,282k per-strand, rho 0.977)
 are especially informative because they have very high depth and very high
 reliability. Their deviation from the pool is measured with high confidence —
 these are not depth-starved samples where noise might be masquerading as
@@ -113,6 +113,145 @@ biology.
 ![Disattenuated r vs depth](hexamer_disattenuation_plots/fig3_disattenuated_vs_depth.png)
 
 ![Per-sample summary](hexamer_disattenuation_plots/fig4_per_sample_summary.png)
+
+## Depth dependence and structural analysis (2026-10-02)
+
+The measurements above prompted follow-up analysis of the relationship between
+sequencing depth, table structure, and the disattenuation gate. All numbers
+in this section were measured on 2026-10-02 against the same 92-sample cohort
+and artifact.
+
+**Note on depth units.** The outlier table above reports `sample_total_obs`,
+which is a per-table (per-strand) count. Verified for all 92 samples:
+`start_fwd == end_fwd` and `start_rev == end_rev` **exactly** — each fragment
+contributes one start and one end on the same strand. The four tables therefore
+carry only **two** independent counts, and true fragment depth is
+`start_fwd + start_rev`. Per-strand figures are approximately half the true
+fragment depth. The outlier table's "Depth" column has been relabelled
+accordingly; depths in this section use true fragment counts unless marked
+"per-strand".
+
+### Residual depth-disattenuation correlation
+
+`spearman(depth, min r_disattenuated) = 0.638, p < 1e-10` across the 92
+samples.
+
+This should not happen. Disattenuation exists to remove depth-driven
+measurement noise from the correlation, so a residual rank correlation of
+0.638 means the correction is **incomplete**. The practical consequence:
+**a fixed r_disatt threshold acts partly as a depth filter**, systematically
+flagging shallow samples whether or not their underlying hexamer profile
+differs. A threshold of 0.95 was under consideration (see "What this
+licenses") and is now on hold pending further investigation.
+
+Two candidate mechanisms (hypotheses — neither has been tested):
+
+- Shallow samples have more zero-count hexamers, so the joint-nonzero support
+  over which the correlation is computed differs systematically with depth.
+- PCR duplication makes counts overdispersed, breaking the binomial-thinning
+  assumption behind the reliability estimate, with a magnitude that need not
+  be depth-uniform.
+
+### Minimum r_disatt is always an end table
+
+Across all 92 samples the minimum r_disattenuated falls in an end table every
+single time: `end_rev` 50, `end_fwd` 42. Never a start table.
+
+The end tables are computed as `observed / background` — an accepted biased
+approximation; the true end-site hexamer preference (`end_s`) is not recovered
+by this factorization (decision 91). The end/start asymmetry reported here is
+therefore a property of the approximation's behavior, not a direct measurement
+of differential biology at start versus end sites.
+
+### endo_category association is confounded by depth
+
+| endo_category | outliers (min r_disatt < 0.95) | n | rate | median depth (per-strand) |
+|---|---|---|---|---|
+| Mild | 4 | 23 | 17.4% | 418,708 |
+| Moderate | 12 | 23 | 52.2% | 292,305 |
+| Severe | 12 | 23 | 52.2% | 358,454 |
+| Remission | 16 | 23 | 69.6% | 256,558 |
+
+χ² = 13.242 (dof 3), p = 0.0041. Mild vs rest: Fisher exact p = 0.0008,
+OR = 0.153. The cohort is balanced at 23 per category.
+
+However, depth also differs by category (Kruskal-Wallis H = 18.834,
+p = 0.0003): Mild is the deepest and Remission the shallowest, and the
+outlier-rate ordering tracks the depth ordering. Combined with the residual
+depth-disattenuation correlation above, this association **cannot be read as
+biological** — it may be entirely explained by the residual depth dependence.
+
+### The four tables are effectively two
+
+Table × table correlation of pooled weights:
+
+```
+              start_fwd  end_fwd  start_rev  end_rev
+start_fwd        1.0000   0.7495     0.9964   0.7449
+end_fwd          0.7495   1.0000     0.7485   0.9887
+start_rev        0.9964   0.7485     1.0000   0.7482
+end_rev          0.7449   0.9887     0.7482   1.0000
+```
+
+`start_fwd ↔ start_rev` = 0.9964 and `end_fwd ↔ end_rev` = 0.9887, while
+start ↔ end is only ~0.745. The fwd/rev split carries almost no independent
+information; the real structure is start versus end. This is an observation —
+the tables are untied by design, and this is not a proposal to tie them.
+
+Sample × sample correlation, mean off-diagonal, raw versus shrunk posterior —
+this difference is the attenuation the gate measures:
+
+| table | raw | posterior |
+|---|---|---|
+| start_fwd | 0.8714 | 0.9181 |
+| start_rev | 0.8715 | 0.9218 |
+| end_fwd | 0.7541 | 0.8664 |
+| end_rev | 0.7531 | 0.8651 |
+
+Shrinkage moves end tables roughly twice as far as start tables (+0.112 vs
++0.047), i.e. the tables that deviate most are pulled hardest toward the pool.
+
+![Correlation structure — start_fwd](hexamer_disattenuation_plots/fig5_corr_structure_start_fwd.png)
+
+![Correlation structure — end_fwd](hexamer_disattenuation_plots/fig5_corr_structure_end_fwd.png)
+
+![Correlation structure — start_rev](hexamer_disattenuation_plots/fig5_corr_structure_start_rev.png)
+
+![Correlation structure — end_rev](hexamer_disattenuation_plots/fig5_corr_structure_end_rev.png)
+
+![Table × table correlation](hexamer_disattenuation_plots/fig6_table_x_table_corr.png)
+
+### Cohort depth summary
+
+Region set: `quiet_v2_pad1200_repeats_removed_tile2560.bed`, 11,505 tiles ×
+2560 bp = **29.45 Mbp** (decision 94: this set includes chrX — nothing may
+call it autosomal).
+
+| | fragments | per bp |
+|---|---|---|
+| min | 147,737 | 0.0050 |
+| 25% | 434,953 | |
+| median | 676,564 | 0.0230 |
+| 75% | 875,358 | |
+| max | 4,573,250 | 0.1553 |
+
+Cohort total 69,775,893 fragments; pooled per-hexamer mean 8,518 per table;
+dynamic range 31× (deepest RD-56805 at 4,573,250, shallowest RD-56676 at
+147,737).
+
+Gate-blocked samples at true fragment depth:
+
+| Sample | min r_disatt | true depth | per bp |
+|---|---|---|---|
+| RD-56171 | 0.573 | 346,530 | 0.0118 |
+| RD-56818 | 0.705 | 149,721 | 0.0051 |
+| **RD-57090** | **0.724** | **2,270,758** | **0.0771** |
+| RD-56676 | 0.759 | 147,737 | 0.0050 |
+
+RD-57090 and RD-56805 (4,573,250 fragments, 0.1553/bp) are near the top of
+the depth range and still deviate — they are the evidence that the end-table
+deviation is real rather than a pure depth artifact, which matters because the
+other outliers are mostly shallow.
 
 ## What this licenses and what it does not
 
