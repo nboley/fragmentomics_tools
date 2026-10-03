@@ -72,11 +72,10 @@ def _flat_marginal_fl():
     return fl
 
 
-def _synthetic_region(region_len, seed=123, pad=0):
+def _synthetic_region(region_len, seed=123, pad=MAX_FL_HALF):
     """Synthetic hex_fwd, hex_rc, cum_gc, valid arrays for a region.
 
-    With pad=0, returns arrays of size region_len + 1 (backward compatible).
-    With pad > 0, returns expanded arrays of size region_len + 2*pad + 1.
+    Returns expanded arrays of size region_len + 2*pad + 1.
     The core data (positions pad through pad + region_len) is generated from
     ``seed``; padding uses a separate deterministic seed to avoid perturbing
     the core RNG stream.
@@ -86,11 +85,6 @@ def _synthetic_region(region_len, seed=123, pad=0):
     hex_fwd_core = rng.integers(0, NHEX, size=n_core)
     hex_rc_core = rng.integers(0, NHEX, size=n_core)
     bases_gc_core = rng.random(region_len) < 0.4
-
-    if pad == 0:
-        cum_gc = np.concatenate([[0], np.cumsum(bases_gc_core)]).astype(np.float64)
-        valid = np.ones(n_core, dtype=bool)
-        return hex_fwd_core, hex_rc_core, cum_gc, valid
 
     # Expand with deterministic padding from a separate seed
     pad_rng = np.random.default_rng(seed + 1_000_000)
@@ -126,7 +120,7 @@ def _trivial_lut():
 
 
 def _build_weights(region_len, tables=None, marginal_fl=None, predict=None,
-                   predict_lut=None, seed=123, pad=0):
+                   predict_lut=None, seed=123, pad=MAX_FL_HALF):
     """Build weights with default synthetic inputs.
 
     If ``predict_lut`` is provided it is used directly; otherwise one is
@@ -284,10 +278,11 @@ class TestMinusStrandSwap:
         """On a region where hex_fwd == hex_rc and all tables are identical,
         plus and minus weights are equal."""
         region_len = 300
+        pad = MAX_FL_HALF
         rng = np.random.default_rng(77)
-        n_sites = region_len + 1
+        n_sites = region_len + 2 * pad + 1
         hex_idx = rng.integers(0, NHEX, size=n_sites)
-        cum = np.concatenate([[0], np.cumsum(rng.random(region_len) < 0.5)])
+        cum = np.concatenate([[0], np.cumsum(rng.random(region_len + 2 * pad) < 0.5)])
         cum = cum.astype(np.float64)
         table = np.exp(rng.normal(0, 0.3, NHEX))
         table /= table.max()
@@ -299,6 +294,7 @@ class TestMinusStrandSwap:
             hex_tables=HexamerTables(table, table, table, table),
             marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=np.ones(n_sites, dtype=bool),
+            pad=pad,
         )
         # Both strand marginals should be 0.5
         assert abs(rw.w_plus.sum() - 0.5) < 1e-12
@@ -320,18 +316,28 @@ class TestAsymmetricFourTableWiring:
 
     @staticmethod
     def _reference_weight(c5, L, strand, hex_tab, start_tab, end_tab,
-                          cum_gc, valid, fl, predict_lut, region_len):
+                          cum_gc, valid, fl, predict_lut, region_len,
+                          pad=MAX_FL_HALF):
         """Compute w(c5, L, strand) from the Step 4 formula, independently.
 
+        ``c5`` is an array index (not region-local).
         ``hex_tab``, ``start_tab``, ``end_tab`` are the strand-selected arrays.
         ``predict_lut`` is shape ``(N_LENGTHS, N_GC_BINS)``.
         """
+        n_sites = region_len + 2 * pad + 1
         sign = +1 if strand == "+" else -1
         c3 = c5 + sign * L
         li = L - L_MIN
 
+        if c3 < 0 or c3 >= n_sites:
+            return 0.0
         if not (valid[c5] and valid[c3]):
             return 0.0
+        # Midpoint check: p_local + L//2 in [0, region_len)
+        p = min(c5, c3) - pad
+        if p + L // 2 < 0 or p + L // 2 >= region_len:
+            return 0.0
+
         gc_val = float(gc_pct(c5, c3, cum_gc))
         gi = int(gc_bin_index(np.array([gc_val]))[0])
         E_here = end_tab[hex_tab[c3]] * fl[li] / predict_lut[li, gi]
@@ -340,9 +346,12 @@ class TestAsymmetricFourTableWiring:
         Z = 0.0
         for l in range(L_MIN, L_MAX + 1):
             c3_l = c5 + sign * l
-            if c3_l < 0 or c3_l > region_len:
+            if c3_l < 0 or c3_l >= n_sites:
                 continue
             if not (valid[c5] and valid[c3_l]):
+                continue
+            p_l = min(c5, c3_l) - pad
+            if p_l + l // 2 < 0 or p_l + l // 2 >= region_len:
                 continue
             li_l = l - L_MIN
             gc_l = float(gc_pct(c5, c3_l, cum_gc))
@@ -354,13 +363,16 @@ class TestAsymmetricFourTableWiring:
 
         # S_s = sum of start_tab[hex_tab[pos]] over positions with Z_s(pos) > 0
         S = 0.0
-        for pos in range(region_len + 1):
+        for pos in range(n_sites):
             Z_pos = 0.0
             for l in range(L_MIN, L_MAX + 1):
                 c3_l = pos + sign * l
-                if c3_l < 0 or c3_l > region_len:
+                if c3_l < 0 or c3_l >= n_sites:
                     continue
                 if not (valid[pos] and valid[c3_l]):
+                    continue
+                p_l = min(pos, c3_l) - pad
+                if p_l + l // 2 < 0 or p_l + l // 2 >= region_len:
                     continue
                 li_l = l - L_MIN
                 gc_l = float(gc_pct(pos, c3_l, cum_gc))
@@ -380,13 +392,14 @@ class TestAsymmetricFourTableWiring:
         Covers both strands and both parities of L (even and odd).
         """
         region_len = 50
+        pad = MAX_FL_HALF
         rng = np.random.default_rng(314)
-        n_sites = region_len + 1
+        n_sites = region_len + 2 * pad + 1
 
         hex_fwd = rng.integers(0, NHEX, size=n_sites)
         hex_rc = rng.integers(0, NHEX, size=n_sites)
         cum_gc = np.concatenate(
-            [[0], np.cumsum(rng.random(region_len) < 0.4)]
+            [[0], np.cumsum(rng.random(region_len + 2 * pad) < 0.4)]
         ).astype(np.float64)
         valid = np.ones(n_sites, dtype=bool)
 
@@ -405,15 +418,19 @@ class TestAsymmetricFourTableWiring:
             hex_tables=HexamerTables(sf, ef, sr, er),
             marginal_fl=fl, predict_lut=trivial_lut,
             region_len=region_len, valid=valid,
+            pad=pad,
         )
 
-        # (c5, L, strand)
+        # (c5_array_idx, L, strand)
         # Both strands x both parities of L.
+        # c5 positions chosen in the valid midpoint range:
+        #   plus: c5 in [pad - L//2, pad + region_len - 1 - L//2]
+        #   minus: c5 in [pad + ceil(L/2), pad + region_len - 1 + ceil(L/2)]
         cases = [
-            (10, 30, "+"),    # even L, plus
-            (10, 31, "+"),    # odd L, plus
-            (40, 30, "-"),    # even L, minus
-            (41, 31, "-"),    # odd L, minus
+            (pad + 10, 30, "+"),    # even L, plus (midpoint j=10+15=25)
+            (pad + 10, 31, "+"),    # odd L, plus
+            (pad + 40 + 15, 30, "-"),  # even L, minus (c5=pad+55, c3=pad+25)
+            (pad + 41 + 16, 31, "-"),  # odd L, minus
         ]
 
         for c5, L, strand in cases:
@@ -428,7 +445,7 @@ class TestAsymmetricFourTableWiring:
 
             w_ref = self._reference_weight(
                 c5, L, strand, *correct,
-                cum_gc, valid, fl, trivial_lut, region_len,
+                cum_gc, valid, fl, trivial_lut, region_len, pad=pad,
             )
             assert w_ref > 0, f"s={strand} c5={c5} L={L}: zero reference weight"
             assert abs(w_b - w_ref) < 1e-14, (
@@ -436,10 +453,6 @@ class TestAsymmetricFourTableWiring:
             )
 
             # ── wrong wirings (one axis wrong at a time) ──
-            # The last entry is the WITHIN-strand start<->end swap. The
-            # reference-equality assertion above already catches it, but only
-            # probabilistically (random tables); listing it here makes the
-            # distinguishability a proof rather than an overwhelming likelihood.
             if strand == "+":
                 wrongs = [
                     ((hex_rc,  sf, ef), "wrong hex"),
@@ -458,7 +471,7 @@ class TestAsymmetricFourTableWiring:
             for (wh, ws, we), label in wrongs:
                 w_wrong = self._reference_weight(
                     c5, L, strand, wh, ws, we,
-                    cum_gc, valid, fl, trivial_lut, region_len,
+                    cum_gc, valid, fl, trivial_lut, region_len, pad=pad,
                 )
                 assert abs(w_ref - w_wrong) > 1e-14, (
                     f"s={strand} c5={c5} L={L} [{label}]: "
@@ -496,9 +509,8 @@ class TestGenerativeDomainSize:
     def test_domain_matches_nonzero_weight_count(self):
         """The count of non-zero w entries matches the domain size.
 
-        Uses pad=MAX_FL_HALF so the midpoint rule has room; with pad=0
-        the bounds clipping reproduces the old containment rule and the
-        count would be smaller.
+        Uses pad=MAX_FL_HALF so the midpoint rule has room for all
+        fragment endpoints.
         """
         region_len = 500
         rw = _build_weights(region_len, tables=_random_tables(seed=44),
@@ -508,34 +520,6 @@ class TestGenerativeDomainSize:
         assert n_nonzero == expected, (
             f"nonzero weights = {n_nonzero}, domain size = {expected}"
         )
-
-    def test_edge_truncation_plus_pad0(self):
-        """Plus strand with pad=0: reproduces old containment rule.
-
-        With pad=0 the midpoint constraint clips to the array bounds,
-        giving the same result as the old ``c3 in [0, region_len]`` rule.
-        """
-        region_len = 200
-        rw = _build_weights(region_len, pad=0)
-        # c5 = region_len - L_MIN = 175: only L=25 fits (c3=200=region_len)
-        c5 = region_len - L_MIN
-        li_25 = 0  # L=25
-        assert rw.w_plus[c5, li_25] > 0
-        # L=26 would give c3=201 > region_len → should be 0 (clipped)
-        if N_LENGTHS > 1:
-            assert rw.w_plus[c5, 1] == 0.0
-
-    def test_edge_truncation_minus_pad0(self):
-        """Minus strand with pad=0: reproduces old containment rule."""
-        region_len = 200
-        rw = _build_weights(region_len, pad=0)
-        # c5 = L_MIN = 25: only L=25 fits (c3=0)
-        c5 = L_MIN
-        li_25 = 0
-        assert rw.w_minus[c5, li_25] > 0
-        # L=26 would give c3=-1 < 0 → should be 0 (clipped)
-        if N_LENGTHS > 1:
-            assert rw.w_minus[c5, 1] == 0.0
 
     def test_valid_positions_independent_of_L(self):
         """Under the midpoint rule with sufficient pad, every L has exactly
@@ -575,14 +559,14 @@ class TestLengthRange:
 
     def test_weight_shape(self):
         """Shape is (region_len + 2*pad + 1, N_LENGTHS)."""
-        rw = _build_weights(2560, pad=0)
-        assert rw.w_plus.shape == (2561, 156)
-        assert rw.w_minus.shape == (2561, 156)
-        # With midpoint-rule padding
-        rw_padded = _build_weights(1536, pad=MAX_FL_HALF)
-        expected = 1536 + 2 * MAX_FL_HALF + 1
-        assert rw_padded.w_plus.shape == (expected, 156)
-        assert rw_padded.w_minus.shape == (expected, 156)
+        rw = _build_weights(2560)
+        expected_2560 = 2560 + 2 * MAX_FL_HALF + 1
+        assert rw.w_plus.shape == (expected_2560, 156)
+        assert rw.w_minus.shape == (expected_2560, 156)
+        rw_1536 = _build_weights(1536)
+        expected_1536 = 1536 + 2 * MAX_FL_HALF + 1
+        assert rw_1536.w_plus.shape == (expected_1536, 156)
+        assert rw_1536.w_minus.shape == (expected_1536, 156)
 
     def test_all_lengths_populated(self):
         """Every length in [25, 180] has at least one non-zero weight
@@ -609,9 +593,11 @@ class TestWeightProperties:
     def test_invalid_position_zeroed(self):
         """A position with valid=False contributes zero weight."""
         region_len = 300
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=99)
-        # Mark position 100 as invalid
-        valid[100] = False
+        pad = MAX_FL_HALF
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=99, pad=pad)
+        # Mark a position in the interior as invalid (offset by pad)
+        invalid_pos = pad + 100
+        valid[invalid_pos] = False
         tables = _random_tables()
         fl = _flat_marginal_fl()
         rw = build_region_weights(
@@ -619,20 +605,21 @@ class TestWeightProperties:
             hex_tables=tables,
             marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=valid,
+            pad=pad,
         )
-        # Position 100 as c5 should have zero weight for both strands
-        assert rw.w_plus[100, :].sum() == 0.0
-        assert rw.w_minus[100, :].sum() == 0.0
-        # Position 100 as c3 should also zero the fragment:
-        # Plus: c3 = c5 + L = 100 → c5 = 100 - L
-        # Minus: c3 = c5 - L = 100 → c5 = 100 + L
+        # Position invalid_pos as c5 should have zero weight for both strands
+        assert rw.w_plus[invalid_pos, :].sum() == 0.0
+        assert rw.w_minus[invalid_pos, :].sum() == 0.0
+        # Position invalid_pos as c3 should also zero the fragment:
+        # Plus: c3 = c5 + L = invalid_pos → c5 = invalid_pos - L
+        # Minus: c3 = c5 - L = invalid_pos → c5 = invalid_pos + L
         for L in [L_MIN, 50, 75]:
             li = L - L_MIN
-            assert rw.w_plus[100 - L, li] == 0.0, (
-                f"plus c3-mask: L={L}, w_plus[{100-L},{li}] != 0"
+            assert rw.w_plus[invalid_pos - L, li] == 0.0, (
+                f"plus c3-mask: L={L}, w_plus[{invalid_pos-L},{li}] != 0"
             )
-            assert rw.w_minus[100 + L, li] == 0.0, (
-                f"minus c3-mask: L={L}, w_minus[{100+L},{li}] != 0"
+            assert rw.w_minus[invalid_pos + L, li] == 0.0, (
+                f"minus c3-mask: L={L}, w_minus[{invalid_pos+L},{li}] != 0"
             )
         # Normalisation still holds
         total = rw.w_plus.sum() + rw.w_minus.sum()
@@ -641,12 +628,13 @@ class TestWeightProperties:
     def test_heavy_n_masking_normalisation(self):
         """Normalisation holds with ~15% of positions masked (heavy N content)."""
         region_len = 500
+        pad = MAX_FL_HALF
         rng = np.random.default_rng(42)
-        n_sites = region_len + 1
+        n_sites = region_len + 2 * pad + 1
         hex_fwd = rng.integers(0, NHEX, size=n_sites)
         hex_rc = rng.integers(0, NHEX, size=n_sites)
         cum_gc = np.concatenate(
-            [[0], np.cumsum(rng.random(region_len) < 0.4)]
+            [[0], np.cumsum(rng.random(region_len + 2 * pad) < 0.4)]
         ).astype(np.float64)
         valid = rng.random(n_sites) > 0.15  # ~15% masked
         tables = _random_tables(seed=77)
@@ -657,6 +645,7 @@ class TestWeightProperties:
             hex_tables=tables,
             marginal_fl=fl, predict_lut=_trivial_lut(),
             region_len=region_len, valid=valid,
+            pad=pad,
         )
         total = rw.w_plus.sum() + rw.w_minus.sum()
         assert abs(total - 1.0) < 1e-12, f"sum = {total}"

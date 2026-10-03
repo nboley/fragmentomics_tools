@@ -52,7 +52,7 @@ def draw_fragments_for_region(
     n_fragments: int,
     rng: np.random.Generator,
     region_weights: Optional[RegionWeights] = None,
-    pad: int = 0,
+    pad: int = MAX_FL_HALF,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Draw ``n_fragments`` from the generative model for one region.
 

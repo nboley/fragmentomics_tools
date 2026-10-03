@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import numpy as np
 
+from background_model.simulator.weights import MAX_FL_HALF
+
 if TYPE_CHECKING:  # pragma: no cover - import only for the type annotation
     import pysam
 
@@ -116,7 +118,7 @@ def precompute_region(
     gstop: int,
     fasta_path: str,
     fasta: "Optional[pysam.FastaFile]" = None,
-    pad: int = 0,
+    pad: int = MAX_FL_HALF,
 ) -> RegionPrecompute:
     """Compute hexamer indices and cumulative GC for one region.
 
@@ -124,9 +126,7 @@ def precompute_region(
     that hexamer windows and GC context are available for cut sites from
     ``-pad`` through ``region_len + pad`` (in region-local coordinates).
 
-    With ``pad = 0`` (default), this returns the original arrays of size
-    ``region_len + 1``.  With ``pad = MAX_FL_HALF = 90`` (the midpoint
-    rule), it returns expanded arrays of size ``region_len + 2*pad + 1``.
+    Returns expanded arrays of size ``region_len + 2*pad + 1``.
 
     Parameters
     ----------
@@ -146,7 +146,8 @@ def precompute_region(
         changes cost only, never the returned arrays.
     pad : int
         Number of extra positions on each side of the original region.
-        Use ``MAX_FL_HALF`` (90) for the midpoint admission rule.
+        Must be at least ``MAX_FL_HALF`` (90) for the midpoint admission
+        rule to have all fragment endpoints in bounds.
 
     Returns
     -------

@@ -470,7 +470,7 @@ def test_region_hexamers_matches_precompute_region_exactly(tmp_path):
     pysam.faidx(str(fa_path))
 
     gstart, gstop = 20, 180
-    want = precompute_region("chrT", gstart, gstop, str(fa_path))
+    want = precompute_region("chrT", gstart, gstop, str(fa_path), pad=0)
 
     fa = pysam.FastaFile(str(fa_path))
     try:

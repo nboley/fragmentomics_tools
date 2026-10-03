@@ -94,17 +94,12 @@ def _peaked_marginal_fl(seed=77):
     return fl
 
 
-def _synthetic_region(region_len, seed=123, pad=0):
+def _synthetic_region(region_len, seed=123, pad=MAX_FL_HALF):
     rng = np.random.default_rng(seed)
     n_core = region_len + 1
     hex_fwd_core = rng.integers(0, NHEX, size=n_core)
     hex_rc_core = rng.integers(0, NHEX, size=n_core)
     bases_gc_core = rng.random(region_len) < 0.4
-
-    if pad == 0:
-        cum_gc = np.concatenate([[0], np.cumsum(bases_gc_core)]).astype(np.float64)
-        valid = np.ones(n_core, dtype=bool)
-        return hex_fwd_core, hex_rc_core, cum_gc, valid
 
     pad_rng = np.random.default_rng(seed + 1_000_000)
     n_sites = region_len + 2 * pad + 1
@@ -129,7 +124,7 @@ def _trivial_lut():
 
 
 def _draw_fragments(region_len, n_fragments, tables=None, marginal_fl=None,
-                    predict_lut=None, seed=123, rng_seed=42, pad=0):
+                    predict_lut=None, seed=123, rng_seed=42, pad=MAX_FL_HALF):
     """Draw fragments with default synthetic inputs."""
     hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed, pad=pad)
     if tables is None:
@@ -248,6 +243,7 @@ class TestManifestRoundTrip:
         marginal_fl = _peaked_marginal_fl(seed=88)
         predict_lut = build_predict_lut(lambda L, gc: 1.0 + 0.005 * gc)
         region_len = 500
+        pad = MAX_FL_HALF
 
         manifest_path = str(tmp_path / "manifest.json")
         write_manifest(
@@ -264,7 +260,7 @@ class TestManifestRoundTrip:
         loaded = load_manifest(manifest_path, verify=False)
 
         # Build w from the loaded manifest factors + synthetic region
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, pad=pad)
         rw = build_region_weights(
             hex_fwd=hex_fwd,
             hex_rc=hex_rc,
@@ -274,6 +270,7 @@ class TestManifestRoundTrip:
             predict_lut=loaded["predict_lut"],
             region_len=region_len,
             valid=valid,
+            pad=pad,
         )
 
         total = rw.w_plus.sum() + rw.w_minus.sum()
@@ -333,10 +330,11 @@ class TestDrawSelfConsistency:
     def test_empirical_matches_weights(self):
         """Chi-squared goodness-of-fit: binned fragments vs weights."""
         region_len = 300
+        pad = MAX_FL_HALF
         n_fragments = 20_000
         tables = _random_tables(seed=77)
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=55)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=55, pad=pad)
         marginal_fl = _flat_marginal_fl()
         predict_lut = _trivial_lut()
 
@@ -352,6 +350,7 @@ class TestDrawSelfConsistency:
             region_len=region_len,
             n_fragments=n_fragments,
             rng=rng,
+            pad=pad,
         )
 
         # Get the reference weights
@@ -364,6 +363,7 @@ class TestDrawSelfConsistency:
             predict_lut=predict_lut,
             region_len=region_len,
             valid=valid,
+            pad=pad,
         )
 
         # Compare strand marginals: should be ~50/50
@@ -405,10 +405,11 @@ class TestDrawSelfConsistency:
         """The empirical start-position distribution should match the weight
         marginal over start positions."""
         region_len = 200
+        pad = MAX_FL_HALF
         n_fragments = 15_000
         tables = _random_tables(seed=88)
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=44)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=44, pad=pad)
         marginal_fl = _flat_marginal_fl()
         predict_lut = _trivial_lut()
 
@@ -424,6 +425,7 @@ class TestDrawSelfConsistency:
             region_len=region_len,
             n_fragments=n_fragments,
             rng=rng,
+            pad=pad,
         )
 
         rw = build_region_weights(
@@ -435,14 +437,16 @@ class TestDrawSelfConsistency:
             predict_lut=predict_lut,
             region_len=region_len,
             valid=valid,
+            pad=pad,
         )
 
-        # For plus-strand fragments: start = c5, and the marginal over c5
-        # is sum_L w_plus[c5, :].
+        # For plus-strand fragments: the sampler returns c5_local = c5_array - pad.
+        # Convert back to array index for comparison with w_plus.
+        n_sites = region_len + 2 * pad + 1
         plus_mask = strands == "+"
-        plus_starts = starts[plus_mask]
+        plus_c5_array = starts[plus_mask] + pad  # region-local → array index
         empirical_start_hist = np.bincount(
-            plus_starts, minlength=region_len + 1,
+            plus_c5_array, minlength=n_sites,
         ).astype(float)
         empirical_start_hist /= empirical_start_hist.sum()
 
@@ -640,12 +644,15 @@ class TestSamplerBasicProperties:
         assert len(stops) == 100
         assert len(strands) == 100
 
-    def test_all_fragments_in_region(self):
-        """All fragments must be fully contained in the region."""
+    def test_all_fragment_midpoints_in_region(self):
+        """Under the midpoint rule, each fragment's integer midpoint
+        ``start + L // 2`` must fall in ``[0, region_len)``."""
         region_len = 500
         (starts, stops, strands), _ = _draw_fragments(region_len, 1000)
-        assert (starts >= 0).all(), f"min start = {starts.min()}"
-        assert (stops <= region_len).all(), f"max stop = {stops.max()}"
+        Ls = stops - starts
+        midpoints = starts + Ls // 2
+        assert (midpoints >= 0).all(), f"min midpoint = {midpoints.min()}"
+        assert (midpoints < region_len).all(), f"max midpoint = {midpoints.max()}"
 
     def test_all_lengths_in_range(self):
         """All fragment lengths must be in [L_MIN, L_MAX]."""
@@ -714,9 +721,10 @@ class TestDemonstratedFailure:
         distribution instead.
         """
         region_len = 300
+        pad = MAX_FL_HALF
         tables = _random_tables(seed=77)
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=55)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=55, pad=pad)
         marginal_fl = _flat_marginal_fl()
         predict_lut = _trivial_lut()
 
@@ -729,6 +737,7 @@ class TestDemonstratedFailure:
             predict_lut=predict_lut,
             region_len=region_len,
             valid=valid,
+            pad=pad,
         )
 
         # The correct plus-strand start marginal
@@ -777,17 +786,19 @@ class TestManifestCompleteness:
 
     def test_w_from_manifest_matches_original(self, tmp_path):
         region_len = 400
+        pad = MAX_FL_HALF
         tables = _random_tables(seed=66)
         marginal_fl = _peaked_marginal_fl(seed=77)
         predict_lut = build_predict_lut(lambda L, gc: 1.0 + 0.02 * gc)
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=88)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=88, pad=pad)
 
         # Build w from original inputs
         rw_orig = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=tables, marginal_fl=marginal_fl,
             predict_lut=predict_lut, region_len=region_len, valid=valid,
+            pad=pad,
         )
 
         # Write and reload manifest
@@ -812,6 +823,7 @@ class TestManifestCompleteness:
             marginal_fl=loaded["marginal_fl"],
             predict_lut=loaded["predict_lut"],
             region_len=region_len, valid=valid,
+            pad=pad,
         )
 
         np.testing.assert_array_almost_equal(
@@ -966,7 +978,7 @@ class TestPerRegionSequenceDependence:
     computed after it and cannot see it.
     """
 
-    def _weights_for(self, hex_fwd, hex_rc, cum_gc, region_len):
+    def _weights_for(self, hex_fwd, hex_rc, cum_gc, region_len, pad=MAX_FL_HALF):
         rng = np.random.default_rng(11)
         tables = HexamerTables(
             *[np.exp(rng.normal(0, 0.4, NHEX)) for _ in range(4)]
@@ -981,25 +993,27 @@ class TestPerRegionSequenceDependence:
             marginal_fl=fl,
             predict_lut=lut,
             region_len=region_len,
+            pad=pad,
         )
 
     def test_different_sequences_give_different_weights(self):
         """Two regions with different sequence must not yield identical w."""
         region_len = 400
-        n = region_len + 1  # pad=0 arrays
+        pad = MAX_FL_HALF
+        n = region_len + 2 * pad + 1
         r1 = np.random.default_rng(1)
         r2 = np.random.default_rng(2)
 
         hex_a = r1.integers(0, NHEX, n)
         rc_a = r1.integers(0, NHEX, n)
-        gc_a = np.concatenate([[0], np.cumsum(r1.random(region_len) < 0.4)]).astype(float)
+        gc_a = np.concatenate([[0], np.cumsum(r1.random(region_len + 2 * pad) < 0.4)]).astype(float)
 
         hex_b = r2.integers(0, NHEX, n)
         rc_b = r2.integers(0, NHEX, n)
-        gc_b = np.concatenate([[0], np.cumsum(r2.random(region_len) < 0.6)]).astype(float)
+        gc_b = np.concatenate([[0], np.cumsum(r2.random(region_len + 2 * pad) < 0.6)]).astype(float)
 
-        wa = self._weights_for(hex_a, rc_a, gc_a, region_len)
-        wb = self._weights_for(hex_b, rc_b, gc_b, region_len)
+        wa = self._weights_for(hex_a, rc_a, gc_a, region_len, pad=pad)
+        wb = self._weights_for(hex_b, rc_b, gc_b, region_len, pad=pad)
 
         # Both are still valid distributions -- this is exactly why the
         # normalisation invariants have no power here.
@@ -1025,16 +1039,17 @@ class TestPerRegionSequenceDependence:
         be satisfied by nondeterminism rather than by sequence dependence.
         """
         region_len = 400
-        n = region_len + 1  # pad=0 arrays
+        pad = MAX_FL_HALF
+        n = region_len + 2 * pad + 1
         rng = np.random.default_rng(7)
         hex_fwd = rng.integers(0, NHEX, n)
         hex_rc = rng.integers(0, NHEX, n)
         cum_gc = np.concatenate(
-            [[0], np.cumsum(rng.random(region_len) < 0.5)]
+            [[0], np.cumsum(rng.random(region_len + 2 * pad) < 0.5)]
         ).astype(float)
 
-        w1 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len)
-        w2 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len)
+        w1 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len, pad=pad)
+        w2 = self._weights_for(hex_fwd, hex_rc, cum_gc, region_len, pad=pad)
 
         assert np.array_equal(w1.w_plus, w2.w_plus)
         assert np.array_equal(w1.w_minus, w2.w_minus)
@@ -1338,22 +1353,23 @@ class TestRegionWeightsGuard:
         tables = _random_tables(seed=11)
         fl = _flat_marginal_fl()
         lut = _trivial_lut()
+        pad = MAX_FL_HALF
 
-        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(300, seed=1)
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(300, seed=1, pad=pad)
         rw_a = build_region_weights(
             hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
             hex_tables=tables, marginal_fl=fl, predict_lut=lut,
-            region_len=300, valid=valid_a,
+            region_len=300, valid=valid_a, pad=pad,
         )
 
-        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(500, seed=2)
+        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(500, seed=2, pad=pad)
         rng = np.random.default_rng(42)
         with pytest.raises(ValueError, match="different region"):
             draw_fragments_for_region(
                 hex_fwd=hex_fwd_b, hex_rc=hex_rc_b, cum_gc=cum_gc_b,
                 valid=valid_b, hex_tables=tables, marginal_fl=fl,
                 predict_lut=lut, region_len=500, n_fragments=10,
-                rng=rng, region_weights=rw_a,
+                rng=rng, region_weights=rw_a, pad=pad,
             )
 
     def test_wrong_region_same_size_detected(self):
@@ -1363,22 +1379,23 @@ class TestRegionWeightsGuard:
         fl = _flat_marginal_fl()
         lut = _trivial_lut()
         region_len = 400
+        pad = MAX_FL_HALF
 
-        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=10)
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=10, pad=pad)
         rw_a = build_region_weights(
             hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
             hex_tables=tables, marginal_fl=fl, predict_lut=lut,
-            region_len=region_len, valid=valid_a,
+            region_len=region_len, valid=valid_a, pad=pad,
         )
 
-        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(region_len, seed=20)
+        hex_fwd_b, hex_rc_b, cum_gc_b, valid_b = _synthetic_region(region_len, seed=20, pad=pad)
         rng = np.random.default_rng(42)
         with pytest.raises(ValueError, match="different region"):
             draw_fragments_for_region(
                 hex_fwd=hex_fwd_b, hex_rc=hex_rc_b, cum_gc=cum_gc_b,
                 valid=valid_b, hex_tables=tables, marginal_fl=fl,
                 predict_lut=lut, region_len=region_len, n_fragments=10,
-                rng=rng, region_weights=rw_a,
+                rng=rng, region_weights=rw_a, pad=pad,
             )
 
     def test_correct_region_weights_accepted(self):
@@ -1387,12 +1404,13 @@ class TestRegionWeightsGuard:
         fl = _flat_marginal_fl()
         lut = _trivial_lut()
         region_len = 300
+        pad = MAX_FL_HALF
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=5)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=5, pad=pad)
         rw = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=tables, marginal_fl=fl, predict_lut=lut,
-            region_len=region_len, valid=valid,
+            region_len=region_len, valid=valid, pad=pad,
         )
 
         rng = np.random.default_rng(42)
@@ -1400,7 +1418,7 @@ class TestRegionWeightsGuard:
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             valid=valid, hex_tables=tables, marginal_fl=fl,
             predict_lut=lut, region_len=region_len, n_fragments=50,
-            rng=rng, region_weights=rw,
+            rng=rng, region_weights=rw, pad=pad,
         )
         assert len(starts) == 50
 
@@ -1411,18 +1429,20 @@ class TestRegionWeightsGuard:
         fl = _flat_marginal_fl()
         lut = _trivial_lut()
         region_len = 300
+        pad = MAX_FL_HALF
 
-        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=7)
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed=7, pad=pad)
         rw = build_region_weights(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             hex_tables=tables, marginal_fl=fl, predict_lut=lut,
-            region_len=region_len, valid=valid,
+            region_len=region_len, valid=valid, pad=pad,
         )
 
         kwargs = dict(
             hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
             valid=valid, hex_tables=tables, marginal_fl=fl,
             predict_lut=lut, region_len=region_len, n_fragments=100,
+            pad=pad,
         )
 
         rng1 = np.random.default_rng(99)
@@ -1595,17 +1615,18 @@ class TestSMinusGuard:
         fl = _flat_marginal_fl()
         lut = _trivial_lut()
         region_len = 400
+        pad = MAX_FL_HALF
 
         # Region A: build weights
-        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=30)
+        hex_fwd_a, hex_rc_a, cum_gc_a, valid_a = _synthetic_region(region_len, seed=30, pad=pad)
         rw_a = build_region_weights(
             hex_fwd=hex_fwd_a, hex_rc=hex_rc_a, cum_gc=cum_gc_a,
             hex_tables=tables, marginal_fl=fl, predict_lut=lut,
-            region_len=region_len, valid=valid_a,
+            region_len=region_len, valid=valid_a, pad=pad,
         )
 
         # Region B: different hex_rc but SAME hex_fwd as A (so S_plus would pass)
-        _, hex_rc_b, _, _ = _synthetic_region(region_len, seed=40)
+        _, hex_rc_b, _, _ = _synthetic_region(region_len, seed=40, pad=pad)
 
         rng = np.random.default_rng(42)
         with pytest.raises(ValueError, match="different region"):
@@ -1621,4 +1642,5 @@ class TestSMinusGuard:
                 n_fragments=10,
                 rng=rng,
                 region_weights=rw_a,
+                pad=pad,
             )

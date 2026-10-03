@@ -22,6 +22,7 @@ from background_model.simulator.weights import (
     GC_BIN_WIDTH,
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     N_GC_BINS,
     N_LENGTHS,
     NHEX,
@@ -53,12 +54,26 @@ def _flat_marginal_fl():
     return fl
 
 
-def _synthetic_region(region_len, seed=123):
+def _synthetic_region(region_len, seed=123, pad=MAX_FL_HALF):
     rng = np.random.default_rng(seed)
-    n_sites = region_len + 1
-    hex_fwd = rng.integers(0, NHEX, size=n_sites)
-    hex_rc = rng.integers(0, NHEX, size=n_sites)
-    bases_gc = rng.random(region_len) < 0.4
+    n_core = region_len + 1
+    hex_fwd_core = rng.integers(0, NHEX, size=n_core)
+    hex_rc_core = rng.integers(0, NHEX, size=n_core)
+    bases_gc_core = rng.random(region_len) < 0.4
+    pad_rng = np.random.default_rng(seed + 1_000_000)
+    n_sites = region_len + 2 * pad + 1
+    hex_fwd = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad), hex_fwd_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    hex_rc = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad), hex_rc_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    bases_gc = np.concatenate([
+        pad_rng.random(pad) < 0.4, bases_gc_core,
+        pad_rng.random(pad) < 0.4,
+    ])
     cum_gc = np.concatenate([[0], np.cumsum(bases_gc)]).astype(np.float64)
     valid = np.ones(n_sites, dtype=bool)
     return hex_fwd, hex_rc, cum_gc, valid

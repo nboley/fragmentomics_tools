@@ -36,11 +36,6 @@ The midpoint convention matches the per-region count files, which define
 membership as ``midpoint in [start, stop)`` using integer floor division
 for the midpoint.
 
-When ``pad = 0`` (the default for backward compatibility), the midpoint
-rule with array-bounds clipping reproduces the old containment rule
-exactly, so callers passing arrays of size ``region_len + 1`` get the
-original behaviour with no code-path divergence.
-
 Hexamer index conventions:
   - ``hex_fwd[c]``: forward hexamer at cut site ``c`` (6-mer spanning the cut).
   - ``hex_rc[c]``: reverse-complement hexamer at the same position.
@@ -311,7 +306,7 @@ class RegionWeights(NamedTuple):
     w_minus: np.ndarray
     S_plus: float
     S_minus: float
-    pad: int = 0
+    pad: int = MAX_FL_HALF
 
 
 # ── the builder ──────────────────────────────────────────────────────────
@@ -326,7 +321,7 @@ def build_region_weights(
     predict_lut: np.ndarray,
     region_len: int,
     valid: Optional[np.ndarray] = None,
-    pad: int = 0,
+    pad: int = MAX_FL_HALF,
 ) -> RegionWeights:
     """Build the fully normalised weight w over the generative domain Omega.
 
@@ -336,10 +331,6 @@ def build_region_weights(
     parameter controls how far beyond the original ``[0, region_len)``
     interval the input arrays extend; with ``pad = MAX_FL_HALF = 90`` every
     admissible fragment has its endpoints covered.
-
-    When ``pad = 0`` the array-bounds clipping reproduces the old
-    containment rule (``c3 in [0, region_len]``) exactly — no separate
-    code path.
 
     Parameters
     ----------
@@ -361,8 +352,8 @@ def build_region_weights(
         Boolean mask; False where the hexamer window contains non-ACGT.
     pad : int
         Number of extra cut-site positions on each side of the original
-        region.  Use ``MAX_FL_HALF`` (90) for the midpoint rule; 0 for
-        backward-compatible containment-rule behaviour.
+        region.  Must be at least ``MAX_FL_HALF`` (90) so that every
+        admissible fragment has its endpoints in bounds.
 
     Returns
     -------
@@ -403,92 +394,55 @@ def build_region_weights(
 
     Ls = np.arange(L_MIN, L_MAX + 1)  # (N_LENGTHS,)
 
-    if pad >= L_MAX // 2:
-        # ── Vectorised path (midpoint rule with sufficient padding) ──────
-        # With pad >= L_MAX//2, every length L has exactly region_len valid
-        # c5 positions per strand, and all c3 indices are in bounds.
-        # Proof: c5 range count = (pad+region_len-1-L//2) - (pad-L//2) + 1
-        #        = region_len for all L.  c3 max = pad+region_len-1+ceil(L/2)
-        #        < n_sites when pad >= L_MAX//2.  Symmetric for minus strand.
-        #
-        # The genomic span [lo, hi) is identical for both strands at each
-        # (j, li): plus has c5=lo, c3=hi; minus has c5=hi, c3=lo.  So GC,
-        # predict values, and validity are computed once and reused.
-        half_down = Ls // 2               # (N_LENGTHS,)  floor(L/2)
-        half_up = Ls - half_down           # (N_LENGTHS,)  ceil(L/2)
+    # ── Precondition: sufficient padding for the midpoint rule ─────────
+    assert pad >= L_MAX // 2, (
+        f"pad={pad} but the midpoint rule requires pad >= L_MAX // 2 = "
+        f"{L_MAX // 2}. Pass pad=MAX_FL_HALF ({MAX_FL_HALF}) so that "
+        f"every admissible fragment has its endpoints in bounds."
+    )
 
-        j = np.arange(region_len)[:, np.newaxis]    # (region_len, 1)
-        li_idx = np.arange(N_LENGTHS)[np.newaxis, :]  # (1, N_LENGTHS)
+    # ── Vectorised weight computation (midpoint rule) ────────────────
+    # With pad >= L_MAX//2, every length L has exactly region_len valid
+    # c5 positions per strand, and all c3 indices are in bounds.
+    # Proof: c5 range count = (pad+region_len-1-L//2) - (pad-L//2) + 1
+    #        = region_len for all L.  c3 max = pad+region_len-1+ceil(L/2)
+    #        < n_sites when pad >= L_MAX//2.  Symmetric for minus strand.
+    #
+    # The genomic span [lo, hi) is identical for both strands at each
+    # (j, li): plus has c5=lo, c3=hi; minus has c5=hi, c3=lo.  So GC,
+    # predict values, and validity are computed once and reused.
+    half_down = Ls // 2               # (N_LENGTHS,)  floor(L/2)
+    half_up = Ls - half_down           # (N_LENGTHS,)  ceil(L/2)
 
-        # "Low" index = pad - half_down + j  (plus c5, minus c3)
-        # "High" index = pad + half_up + j   (plus c3, minus c5)
-        idx_lo = (pad - half_down)[np.newaxis, :] + j  # (region_len, N_LENGTHS)
-        idx_hi = (pad + half_up)[np.newaxis, :] + j    # (region_len, N_LENGTHS)
+    j = np.arange(region_len)[:, np.newaxis]    # (region_len, 1)
+    li_idx = np.arange(N_LENGTHS)[np.newaxis, :]  # (1, N_LENGTHS)
 
-        # Validity mask (shared: AND is commutative across strands)
-        vmask = valid[idx_lo] & valid[idx_hi]  # (region_len, N_LENGTHS)
+    # "Low" index = pad - half_down + j  (plus c5, minus c3)
+    # "High" index = pad + half_up + j   (plus c3, minus c5)
+    idx_lo = (pad - half_down)[np.newaxis, :] + j  # (region_len, N_LENGTHS)
+    idx_hi = (pad + half_up)[np.newaxis, :] + j    # (region_len, N_LENGTHS)
 
-        # GC (strand-independent over same genomic span)
-        gc_count = cum_gc[idx_hi] - cum_gc[idx_lo]  # (region_len, N_LENGTHS)
-        gc_pct_vals = 100.0 * gc_count / Ls[np.newaxis, :]
-        gc_bins = np.floor(gc_pct_vals / GC_BIN_WIDTH).astype(np.intp)
-        np.clip(gc_bins, 0, N_GC_BINS - 1, out=gc_bins)
+    # Validity mask (shared: AND is commutative across strands)
+    vmask = valid[idx_lo] & valid[idx_hi]  # (region_len, N_LENGTHS)
 
-        predict_vals = predict_lut[li_idx, gc_bins]  # (region_len, N_LENGTHS)
-        mfl = marginal_fl[np.newaxis, :]             # (1, N_LENGTHS)
+    # GC (strand-independent over same genomic span)
+    gc_count = cum_gc[idx_hi] - cum_gc[idx_lo]  # (region_len, N_LENGTHS)
+    gc_pct_vals = 100.0 * gc_count / Ls[np.newaxis, :]
+    gc_bins = np.floor(gc_pct_vals / GC_BIN_WIDTH).astype(np.intp)
+    np.clip(gc_bins, 0, N_GC_BINS - 1, out=gc_bins)
 
-        # Plus strand: c5 = idx_lo, c3 = idx_hi
-        end_plus = end_fwd[hex_fwd[idx_hi]]
-        E_plus = np.where(vmask, end_plus * mfl / predict_vals, 0.0)
-        w_plus[idx_lo, li_idx] = E_plus
+    predict_vals = predict_lut[li_idx, gc_bins]  # (region_len, N_LENGTHS)
+    mfl = marginal_fl[np.newaxis, :]             # (1, N_LENGTHS)
 
-        # Minus strand: c5 = idx_hi, c3 = idx_lo
-        end_minus = end_rev[hex_rc[idx_lo]]
-        E_minus = np.where(vmask, end_minus * mfl / predict_vals, 0.0)
-        w_minus[idx_hi, li_idx] = E_minus
-    else:
-        # ── Original loop (backward compat for pad < L_MAX//2) ───────────
-        for li, L in enumerate(Ls):
-            half_down = L // 2
-            c5_lo = max(0, pad - half_down)
-            c5_hi = min(n_sites - 1, pad + region_len - 1 - half_down)
-            if c5_lo > c5_hi:
-                continue
-            c5s = np.arange(c5_lo, c5_hi + 1)
-            c3s = c5s + L
-            in_bounds = c3s < n_sites
-            c5s = c5s[in_bounds]
-            c3s = c3s[in_bounds]
-            if len(c5s) == 0:
-                continue
-            vmask_l = valid[c5s] & valid[c3s]
-            end_vals = end_fwd[hex_fwd[c3s]]
-            gc_pcts_arr = gc_pct(c5s, c3s, cum_gc)
-            gc_bins_l = gc_bin_index(gc_pcts_arr)
-            predict_vals_l = predict_lut[li, gc_bins_l]
-            E = np.where(vmask_l, end_vals * marginal_fl[li] / predict_vals_l, 0.0)
-            w_plus[c5s, li] = E
+    # Plus strand: c5 = idx_lo, c3 = idx_hi
+    end_plus = end_fwd[hex_fwd[idx_hi]]
+    E_plus = np.where(vmask, end_plus * mfl / predict_vals, 0.0)
+    w_plus[idx_lo, li_idx] = E_plus
 
-        for li, L in enumerate(Ls):
-            half_up = L - L // 2
-            c5_lo = max(0, pad + half_up)
-            c5_hi = min(n_sites - 1, pad + region_len - 1 + half_up)
-            if c5_lo > c5_hi:
-                continue
-            c5s = np.arange(c5_lo, c5_hi + 1)
-            c3s = c5s - L
-            in_bounds = c3s >= 0
-            c5s = c5s[in_bounds]
-            c3s = c3s[in_bounds]
-            if len(c5s) == 0:
-                continue
-            vmask_l = valid[c5s] & valid[c3s]
-            end_vals = end_rev[hex_rc[c3s]]
-            gc_pcts_arr = gc_pct(c5s, c3s, cum_gc)
-            gc_bins_l = gc_bin_index(gc_pcts_arr)
-            predict_vals_l = predict_lut[li, gc_bins_l]
-            E = np.where(vmask_l, end_vals * marginal_fl[li] / predict_vals_l, 0.0)
-            w_minus[c5s, li] = E
+    # Minus strand: c5 = idx_hi, c3 = idx_lo
+    end_minus = end_rev[hex_rc[idx_lo]]
+    E_minus = np.where(vmask, end_minus * mfl / predict_vals, 0.0)
+    w_minus[idx_hi, li_idx] = E_minus
 
     # ── Normalisation ────────────────────────────────────────────────────
     # w(c5,c3,s) = 1/2 * start_s[hex(c5)] / S_s * E_s(c5,L) / Z_s(c5)
