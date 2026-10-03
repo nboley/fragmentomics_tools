@@ -6,9 +6,10 @@ Covers the four required invariants from the Phase 1 spec:
    strand marginal is exactly 0.5.
 2. The minus-strand swap: ``c5 = p+L``, ``c3 = p``; hexamers read RC;
    ``c3(L) = c5 - L``.  Tests both parities of L (odd and even).
-3. The edge rule: ``Z_s(c5)`` sums only L whose ``c3(L)`` stays in
-   ``[0, region_len]``.  The generative domain has 767,052 elements at
-   region_len 2560.
+3. The midpoint rule: a fragment is admitted when its integer midpoint
+   ``p + L // 2`` falls in ``[0, region_len)``.  Every L has exactly
+   ``region_len`` valid positions per strand.  ``|Ω| = 2 × region_len ×
+   N_LENGTHS`` (479,232 at region_len 1536).
 4. L = 25..180, 156 values — exactly the capture surface's support.
 
 All synthetic — no FASTA, no torch, no EFS.
@@ -20,6 +21,7 @@ import pytest
 from background_model.simulator.weights import (
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     N_GC_BINS,
     N_LENGTHS,
     NHEX,
@@ -70,14 +72,44 @@ def _flat_marginal_fl():
     return fl
 
 
-def _synthetic_region(region_len, seed=123):
-    """Synthetic hex_fwd, hex_rc, cum_gc, valid arrays for a region."""
+def _synthetic_region(region_len, seed=123, pad=0):
+    """Synthetic hex_fwd, hex_rc, cum_gc, valid arrays for a region.
+
+    With pad=0, returns arrays of size region_len + 1 (backward compatible).
+    With pad > 0, returns expanded arrays of size region_len + 2*pad + 1.
+    The core data (positions pad through pad + region_len) is generated from
+    ``seed``; padding uses a separate deterministic seed to avoid perturbing
+    the core RNG stream.
+    """
     rng = np.random.default_rng(seed)
-    n_sites = region_len + 1
-    hex_fwd = rng.integers(0, NHEX, size=n_sites)
-    hex_rc = rng.integers(0, NHEX, size=n_sites)
-    # Random GC: about 40% of bases are G/C
-    bases_gc = rng.random(region_len) < 0.4
+    n_core = region_len + 1
+    hex_fwd_core = rng.integers(0, NHEX, size=n_core)
+    hex_rc_core = rng.integers(0, NHEX, size=n_core)
+    bases_gc_core = rng.random(region_len) < 0.4
+
+    if pad == 0:
+        cum_gc = np.concatenate([[0], np.cumsum(bases_gc_core)]).astype(np.float64)
+        valid = np.ones(n_core, dtype=bool)
+        return hex_fwd_core, hex_rc_core, cum_gc, valid
+
+    # Expand with deterministic padding from a separate seed
+    pad_rng = np.random.default_rng(seed + 1_000_000)
+    n_sites = region_len + 2 * pad + 1
+    hex_fwd = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad),
+        hex_fwd_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    hex_rc = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad),
+        hex_rc_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    bases_gc = np.concatenate([
+        pad_rng.random(pad) < 0.4,
+        bases_gc_core,
+        pad_rng.random(pad) < 0.4,
+    ])
     cum_gc = np.concatenate([[0], np.cumsum(bases_gc)]).astype(np.float64)
     valid = np.ones(n_sites, dtype=bool)
     return hex_fwd, hex_rc, cum_gc, valid
@@ -94,13 +126,13 @@ def _trivial_lut():
 
 
 def _build_weights(region_len, tables=None, marginal_fl=None, predict=None,
-                   predict_lut=None, seed=123):
+                   predict_lut=None, seed=123, pad=0):
     """Build weights with default synthetic inputs.
 
     If ``predict_lut`` is provided it is used directly; otherwise one is
     built from ``predict`` (defaulting to the trivial predict).
     """
-    hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed)
+    hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed, pad=pad)
     if tables is None:
         tables = _uniform_tables()
     if marginal_fl is None:
@@ -118,6 +150,7 @@ def _build_weights(region_len, tables=None, marginal_fl=None, predict=None,
         predict_lut=predict_lut,
         region_len=region_len,
         valid=valid,
+        pad=pad,
     )
 
 
@@ -436,54 +469,98 @@ class TestAsymmetricFourTableWiring:
 # ── Invariant 3: generative domain size ───────────────────────────────────
 
 class TestGenerativeDomainSize:
-    """The edge rule: ``Z_s(c5)`` sums only L whose ``c3(L)`` stays in
-    ``[0, region_len]``.  These tests verify the domain size (``|Ω|`` in
-    the design doc) via the closed form."""
+    """The midpoint rule: every L has exactly ``region_len`` valid midpoints
+    per strand.  ``|Ω| = 2 × region_len × N_LENGTHS``.
+
+    Tests updated from the old containment-rule values because the
+    production rule now admits a fragment when its integer midpoint
+    ``p + L // 2`` falls in ``[0, region_len)``.
+    """
 
     def test_domain_2560(self):
-        assert generative_domain_size(2560) == 767_052
+        # Old containment rule: 767,052.
+        # New midpoint rule: 2 × 2560 × 156 = 798,720.
+        assert generative_domain_size(2560) == 2 * 2560 * N_LENGTHS
 
     def test_domain_1536(self):
-        # |Ω| = 2 * sum_{L=25}^{180} (1536 - L + 1) = 447,564
-        assert generative_domain_size(1536) == 447_564
+        # Old containment rule: 447,564.
+        # New midpoint rule: 2 × 1536 × 156 = 479,232.
+        assert generative_domain_size(1536) == 2 * 1536 * N_LENGTHS
 
     def test_domain_minimum_region(self):
-        # region_len = L_MIN = 25: only L=25 fits, 1 position per strand
-        assert generative_domain_size(25) == 2
+        # region_len = L_MIN = 25: under the midpoint rule, every L
+        # still has 25 valid midpoints (0..24), so |Ω| = 2 × 25 × 156.
+        # Old containment rule gave 2 (only L=25 fit).
+        assert generative_domain_size(25) == 2 * 25 * N_LENGTHS
 
     def test_domain_matches_nonzero_weight_count(self):
-        """The count of non-zero w entries matches the domain size."""
-        region_len = 2560
-        rw = _build_weights(region_len, tables=_random_tables(seed=44))
+        """The count of non-zero w entries matches the domain size.
+
+        Uses pad=MAX_FL_HALF so the midpoint rule has room; with pad=0
+        the bounds clipping reproduces the old containment rule and the
+        count would be smaller.
+        """
+        region_len = 500
+        rw = _build_weights(region_len, tables=_random_tables(seed=44),
+                            pad=MAX_FL_HALF)
         n_nonzero = np.count_nonzero(rw.w_plus) + np.count_nonzero(rw.w_minus)
         expected = generative_domain_size(region_len)
         assert n_nonzero == expected, (
             f"nonzero weights = {n_nonzero}, domain size = {expected}"
         )
 
-    def test_edge_truncation_plus(self):
-        """Plus strand: positions near the right edge have fewer valid lengths."""
+    def test_edge_truncation_plus_pad0(self):
+        """Plus strand with pad=0: reproduces old containment rule.
+
+        With pad=0 the midpoint constraint clips to the array bounds,
+        giving the same result as the old ``c3 in [0, region_len]`` rule.
+        """
         region_len = 200
-        rw = _build_weights(region_len)
+        rw = _build_weights(region_len, pad=0)
         # c5 = region_len - L_MIN = 175: only L=25 fits (c3=200=region_len)
         c5 = region_len - L_MIN
         li_25 = 0  # L=25
         assert rw.w_plus[c5, li_25] > 0
-        # L=26 would give c3=201 > region_len → should be 0
+        # L=26 would give c3=201 > region_len → should be 0 (clipped)
         if N_LENGTHS > 1:
             assert rw.w_plus[c5, 1] == 0.0
 
-    def test_edge_truncation_minus(self):
-        """Minus strand: positions near the left edge have fewer valid lengths."""
+    def test_edge_truncation_minus_pad0(self):
+        """Minus strand with pad=0: reproduces old containment rule."""
         region_len = 200
-        rw = _build_weights(region_len)
+        rw = _build_weights(region_len, pad=0)
         # c5 = L_MIN = 25: only L=25 fits (c3=0)
         c5 = L_MIN
         li_25 = 0
         assert rw.w_minus[c5, li_25] > 0
-        # L=26 would give c3=-1 < 0 → should be 0
+        # L=26 would give c3=-1 < 0 → should be 0 (clipped)
         if N_LENGTHS > 1:
             assert rw.w_minus[c5, 1] == 0.0
+
+    def test_valid_positions_independent_of_L(self):
+        """Under the midpoint rule with sufficient pad, every L has exactly
+        region_len valid positions per strand.
+
+        This is the property that eliminates the length-dependent positional
+        penalty: the old containment rule gave ``region_len - L + 1`` positions,
+        which biased the realised fragment-length distribution away from
+        ``marginal_fl``.
+        """
+        region_len = 500
+        rw = _build_weights(region_len, tables=_random_tables(seed=71),
+                            pad=MAX_FL_HALF)
+        for li in range(N_LENGTHS):
+            n_plus = np.count_nonzero(rw.w_plus[:, li])
+            n_minus = np.count_nonzero(rw.w_minus[:, li])
+            L = L_MIN + li
+            assert n_plus == region_len, (
+                f"L={L}: plus-strand has {n_plus} valid positions, "
+                f"expected {region_len}"
+            )
+            assert n_minus == region_len, (
+                f"L={L}: minus-strand has {n_minus} valid positions, "
+                f"expected {region_len}"
+            )
 
 
 # ── Invariant 4: L = 25..180, 156 values ────────────────────────────────
@@ -497,9 +574,15 @@ class TestLengthRange:
         assert N_LENGTHS == 156
 
     def test_weight_shape(self):
-        rw = _build_weights(2560)
+        """Shape is (region_len + 2*pad + 1, N_LENGTHS)."""
+        rw = _build_weights(2560, pad=0)
         assert rw.w_plus.shape == (2561, 156)
         assert rw.w_minus.shape == (2561, 156)
+        # With midpoint-rule padding
+        rw_padded = _build_weights(1536, pad=MAX_FL_HALF)
+        expected = 1536 + 2 * MAX_FL_HALF + 1
+        assert rw_padded.w_plus.shape == (expected, 156)
+        assert rw_padded.w_minus.shape == (expected, 156)
 
     def test_all_lengths_populated(self):
         """Every length in [25, 180] has at least one non-zero weight

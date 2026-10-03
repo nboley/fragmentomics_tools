@@ -81,6 +81,7 @@ from background_model.simulator.sampler import (  # noqa: E402
 from background_model.simulator.weights import (  # noqa: E402
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     NHEX,
     HexamerTables,
     build_region_weights,
@@ -188,12 +189,14 @@ def _process_one_region(task):
 
     rng = np.random.default_rng(child_seed)
 
-    pc = precompute_region(contig, gstart, gstop, "", fasta=ws.fasta)
+    pc = precompute_region(contig, gstart, gstop, "", fasta=ws.fasta,
+                           pad=MAX_FL_HALF)
 
     rw = build_region_weights(
         hex_fwd=pc.hex_fwd, hex_rc=pc.hex_rc, cum_gc=pc.cum_gc,
         hex_tables=ws.hex_tables, marginal_fl=ws.marginal_fl,
         predict_lut=ws.predict_lut, region_len=ws.region_len, valid=pc.valid,
+        pad=MAX_FL_HALF,
     )
 
     # Invariant stats
@@ -205,6 +208,7 @@ def _process_one_region(task):
         valid=pc.valid, hex_tables=ws.hex_tables, marginal_fl=ws.marginal_fl,
         predict_lut=ws.predict_lut, region_len=ws.region_len,
         n_fragments=ws.target, rng=rng, region_weights=rw,
+        pad=MAX_FL_HALF,
     )
 
     result = {
@@ -504,6 +508,7 @@ def main() -> int:
             predict_lut=loaded["predict_lut"],
             region_len=loaded["region_len"],
             valid=pc.valid,
+            pad=MAX_FL_HALF,
         )
         d = max(
             float(np.abs(rw2.w_plus - w_plus).max()),

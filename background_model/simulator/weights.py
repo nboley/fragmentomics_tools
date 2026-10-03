@@ -19,8 +19,27 @@ A fragment is ``(c5, c3, strand)``:
   - ``c3(L) = c5 + strand_sign * L``, where ``strand_sign = +1`` (plus) or
     ``-1`` (minus).
 
-Edge rule: ``Z_s(c5)`` sums only those ``L`` whose ``c3(L)`` stays in
-``[0, region_len]``.  Off the region, ``hex(c3)`` is undefined.
+Midpoint rule (replaces the old containment edge rule)
+------------------------------------------------------
+A fragment is admitted if its **integer midpoint** ``p + L // 2`` (floor
+division) falls in the half-open interval ``[0, region_len)``.  The region
+is expanded by ``pad = L_MAX // 2 = 90`` on each side so that hexamer and
+GC context are available for fragments whose endpoints extend beyond the
+original region boundary.
+
+Under this rule every fragment length L has exactly ``region_len`` valid
+midpoint positions per strand, eliminating the length-dependent positional
+penalty that the old containment rule imposed (where length L had only
+``region_len - L + 1`` valid positions).
+
+The midpoint convention matches the per-region count files, which define
+membership as ``midpoint in [start, stop)`` using integer floor division
+for the midpoint.
+
+When ``pad = 0`` (the default for backward compatibility), the midpoint
+rule with array-bounds clipping reproduces the old containment rule
+exactly, so callers passing arrays of size ``region_len + 1`` get the
+original behaviour with no code-path divergence.
 
 Hexamer index conventions:
   - ``hex_fwd[c]``: forward hexamer at cut site ``c`` (6-mer spanning the cut).
@@ -33,8 +52,8 @@ Hexamer index conventions:
 Invariants (Appendix A):
   - ``w_plus.sum() + w_minus.sum() == 1`` exactly.
   - Each strand marginal is exactly ``0.5``.
-  - The generative domain has ``|Ω| = 2 * Σ_{L=25}^{180} (region_len - L + 1)``
-    elements (767,052 at region_len 2560, 447,564 at 1536).
+  - The generative domain has ``|Ω| = 2 × region_len × N_LENGTHS``
+    elements (479,232 at region_len 1536) under the midpoint rule.
 """
 
 from __future__ import annotations
@@ -52,6 +71,11 @@ L_MAX: int = 180
 """Maximum fragment length (inclusive). Upper bound of the capture surface."""
 
 N_LENGTHS: int = L_MAX - L_MIN + 1  # 156
+
+MAX_FL_HALF: int = L_MAX // 2  # 90
+"""Half of the maximum fragment length — the region expansion needed for the
+midpoint rule.  Under the midpoint rule, a fragment's endpoints can extend
+up to ``MAX_FL_HALF`` beyond the original region boundary."""
 
 NHEX: int = 4096
 """Number of distinct hexamer indices (4^6)."""
@@ -203,28 +227,24 @@ def generative_domain_size(
 ) -> int:
     """Count of all possible fragments the simulator can generate in a region.
 
-    The generative domain (denoted ``Ω`` in the design doc) is the set of
-    all valid ``(c5, c3, strand)`` triples.  Its size is::
+    Under the midpoint rule, the generative domain ``Ω`` is the set of all
+    valid ``(c5, c3, strand)`` triples where the integer midpoint
+    ``p + L // 2`` (floor division) falls in ``[0, region_len)``.
 
-        |Ω| = 2 × Σ_{L=L_min}^{L_max} (region_len − L + 1)
+    Every fragment length has exactly ``region_len`` valid midpoint positions
+    per strand, so::
 
-    For each strand and length ``L``, the number of valid ``c5`` positions
-    is ``region_len - L + 1``:
+        |Ω| = 2 × region_len × (L_max − L_min + 1)
 
-    - Plus strand:  ``c5`` in ``[0, region_len - L]``.
-    - Minus strand: ``c5`` in ``[L, region_len]``.
+    This is the property that eliminates the length-dependent positional
+    penalty of the old containment rule.
 
-    Same count for both strands — hence the factor of 2.
-
-    Verified values: 767,052 at ``region_len = 2560``, 447,564 at 1536.
+    Verified value: 479,232 at ``region_len = 1536``.
     """
-    total = 0
-    for L in range(L_min, L_max + 1):
-        n_positions = region_len - L + 1
-        if n_positions <= 0:
-            break
-        total += n_positions
-    return 2 * total
+    n_lengths = L_max - L_min + 1
+    if n_lengths <= 0 or region_len <= 0:
+        return 0
+    return 2 * region_len * n_lengths
 
 
 # ── hexamer tables ──────────────────────────────────────────────────────
@@ -263,31 +283,35 @@ class RegionWeights(NamedTuple):
 
     The two weight arrays together form a proper probability distribution:
     ``w_plus.sum() + w_minus.sum() == 1`` exactly, and each strand sums
-    to exactly ``0.5``.  An entry is zero where the fragment would extend
-    beyond the region boundary (edge truncation) or where the hexamer
-    window contains a non-ACGT base (N-masking).
+    to exactly ``0.5``.  An entry is zero where the fragment's midpoint
+    falls outside ``[0, region_len)`` or where the hexamer window contains
+    a non-ACGT base (N-masking).
 
     Attributes
     ----------
-    w_plus : ndarray, shape ``(region_len + 1, N_LENGTHS)``
-        Plus-strand weight matrix.  Axis 0 is the 5' cut site ``c5``
-        (positions 0 through ``region_len``).  Axis 1 is the length index
-        ``li = L - L_MIN`` for ``L`` in 25..180.  ``w_plus[c5, li]`` is the
-        probability of drawing the fragment ``(c5, c3=c5+L, strand="+")``.
-    w_minus : ndarray, shape ``(region_len + 1, N_LENGTHS)``
-        Minus-strand weight matrix.  Same axes.  ``w_minus[c5, li]`` is
-        the probability of ``(c5, c3=c5-L, strand="-")``.
+    w_plus : ndarray, shape ``(n_sites, N_LENGTHS)``
+        Plus-strand weight matrix.  ``n_sites = region_len + 2*pad + 1``.
+        Axis 0 is the array index for the 5' cut site; the region-local
+        c5 position is ``array_index - pad``.  Axis 1 is the length index
+        ``li = L - L_MIN`` for ``L`` in 25..180.
+    w_minus : ndarray, shape ``(n_sites, N_LENGTHS)``
+        Minus-strand weight matrix.  Same axes and offset convention.
     S_plus : float
         Sum of start-hexamer weights over plus-strand ``c5`` positions that
         have at least one achievable fragment.  Exposed for the sampler
         (Step 5), which draws ``c5`` from ``start_fwd[hex_fwd[c5]] / S_plus``.
     S_minus : float
         Same, for the minus strand.
+    pad : int
+        Offset from array index to region-local c5 coordinate:
+        ``c5_local = array_index - pad``.  With ``pad = 0`` (default),
+        the arrays are indexed directly by region-local c5 as before.
     """
     w_plus: np.ndarray
     w_minus: np.ndarray
     S_plus: float
     S_minus: float
+    pad: int = 0
 
 
 # ── the builder ──────────────────────────────────────────────────────────
@@ -302,37 +326,43 @@ def build_region_weights(
     predict_lut: np.ndarray,
     region_len: int,
     valid: Optional[np.ndarray] = None,
+    pad: int = 0,
 ) -> RegionWeights:
     """Build the fully normalised weight w over the generative domain Omega.
 
+    Under the **midpoint rule**, a fragment ``(c5, c3, strand)`` is admitted
+    when its integer midpoint ``p + L // 2`` (floor division, matching the
+    per-region count files) falls in ``[0, region_len)``.  The ``pad``
+    parameter controls how far beyond the original ``[0, region_len)``
+    interval the input arrays extend; with ``pad = MAX_FL_HALF = 90`` every
+    admissible fragment has its endpoints covered.
+
+    When ``pad = 0`` the array-bounds clipping reproduces the old
+    containment rule (``c3 in [0, region_len]``) exactly — no separate
+    code path.
+
     Parameters
     ----------
-    hex_fwd : ndarray, shape (region_len + 1,)
-        Forward hexamer index at each cut site position.
-    hex_rc : ndarray, shape (region_len + 1,)
-        Reverse-complement hexamer index at each cut site position.
-    cum_gc : ndarray, shape (region_len + 1,)
-        Cumulative GC count; ``cum_gc[i]`` = #(G or C) in bases [0, i).
+    hex_fwd : ndarray, shape ``(n_sites,)``
+        Forward hexamer index at each cut site.  ``n_sites = region_len + 2*pad + 1``.
+    hex_rc : ndarray, shape ``(n_sites,)``
+        Reverse-complement hexamer index.
+    cum_gc : ndarray, shape ``(n_sites,)``
+        Cumulative GC count over the expanded region.
     hex_tables : HexamerTables
-        Four hexamer weight tables grouped as ``HexamerTables(start_fwd,
-        end_fwd, start_rev, end_rev)``, each shape ``(NHEX,)`` = ``(4096,)``.
-        Plus strand uses ``(start_fwd, end_fwd)``; minus strand uses
-        ``(start_rev, end_rev)``.
-    marginal_fl : ndarray, shape (N_LENGTHS,)
-        ``marginal_fl[li]`` = P(L = L_MIN + li), normalised to sum 1 over
-        L = L_MIN..L_MAX.
-    predict_lut : ndarray, shape (N_LENGTHS, N_GC_BINS)
-        Pre-built capture-surface lookup table.  ``predict_lut[li, gi]`` =
-        ``predict(L_MIN + li, gc_mid_of_bin_gi)``.  Built once via
-        ``build_predict_lut`` and reused across regions and across both the
-        sampler (Step 5) and the oracle (Step 7).  Gathering from a
-        pre-built array replaces the scalar ``predict(L, gc)`` call that
-        previously cost 767,052 Python calls per region at region_len 2560.
+        Four hexamer weight tables.
+    marginal_fl : ndarray, shape ``(N_LENGTHS,)``
+        Marginal fragment-length distribution, summing to 1.
+    predict_lut : ndarray, shape ``(N_LENGTHS, N_GC_BINS)``
+        Pre-built capture-surface lookup table.
     region_len : int
-        Region length in bp.
-    valid : ndarray, shape (region_len + 1,), optional
-        Boolean mask; False where the hexamer window contains a non-ACGT base.
-        If None, all positions are treated as valid.
+        Region length in bp (the original, unexpanded region).
+    valid : ndarray, shape ``(n_sites,)``, optional
+        Boolean mask; False where the hexamer window contains non-ACGT.
+    pad : int
+        Number of extra cut-site positions on each side of the original
+        region.  Use ``MAX_FL_HALF`` (90) for the midpoint rule; 0 for
+        backward-compatible containment-rule behaviour.
 
     Returns
     -------
@@ -340,7 +370,7 @@ def build_region_weights(
         Normalised weights with ``sum(w_plus) + sum(w_minus) = 1`` and
         each strand marginal = 1/2.
     """
-    n_sites = region_len + 1  # cut sites 0..region_len
+    n_sites = region_len + 2 * pad + 1
     assert hex_fwd.shape == (n_sites,), f"hex_fwd shape {hex_fwd.shape} != ({n_sites},)"
     assert hex_rc.shape == (n_sites,), f"hex_rc shape {hex_rc.shape} != ({n_sites},)"
     assert cum_gc.shape == (n_sites,), f"cum_gc shape {cum_gc.shape} != ({n_sites},)"
@@ -373,13 +403,27 @@ def build_region_weights(
 
     Ls = np.arange(L_MIN, L_MAX + 1)  # (N_LENGTHS,)
 
-    # ── Plus strand: c5 in [0, region_len - L], c3 = c5 + L ─────────────
+    # ── Plus strand ──────────────────────────────────────────────────────
+    # Midpoint rule: midpoint = c5_local + L // 2 must be in [0, region_len).
+    # c5_local in [-L//2, region_len - 1 - L//2].
+    # Array index = c5_local + pad.
+    # c3 array index = c5 array index + L.
+    # With pad=0 the bounds clipping reproduces the old containment rule.
     for li, L in enumerate(Ls):
-        max_c5 = region_len - L
-        if max_c5 < 0:
+        half_down = L // 2
+        # Ideal c5 array-index range from the midpoint constraint
+        c5_lo = max(0, pad - half_down)
+        c5_hi = min(n_sites - 1, pad + region_len - 1 - half_down)
+        if c5_lo > c5_hi:
             continue
-        c5s = np.arange(0, max_c5 + 1)
+        c5s = np.arange(c5_lo, c5_hi + 1)
         c3s = c5s + L
+        # Clip: c3 must also be a valid array index
+        in_bounds = c3s < n_sites
+        c5s = c5s[in_bounds]
+        c3s = c3s[in_bounds]
+        if len(c5s) == 0:
+            continue
         vmask = valid[c5s] & valid[c3s]
         end_vals = end_fwd[hex_fwd[c3s]]
         gc_pcts_arr = gc_pct(c5s, c3s, cum_gc)
@@ -388,12 +432,24 @@ def build_region_weights(
         E = np.where(vmask, end_vals * marginal_fl[li] / predict_vals, 0.0)
         w_plus[c5s, li] = E
 
-    # ── Minus strand: c5 in [L, region_len], c3 = c5 - L ────────────────
+    # ── Minus strand ─────────────────────────────────────────────────────
+    # Midpoint = c5_local - (L - L//2) must be in [0, region_len).
+    # c5_local in [L - L//2, region_len - 1 + L - L//2].
+    # c3 array index = c5 array index - L.
     for li, L in enumerate(Ls):
-        if L > region_len:
+        half_up = L - L // 2  # ceil(L/2)
+        c5_lo = max(0, pad + half_up)
+        c5_hi = min(n_sites - 1, pad + region_len - 1 + half_up)
+        if c5_lo > c5_hi:
             continue
-        c5s = np.arange(L, region_len + 1)
+        c5s = np.arange(c5_lo, c5_hi + 1)
         c3s = c5s - L
+        # Clip: c3 must be a valid array index (>= 0)
+        in_bounds = c3s >= 0
+        c5s = c5s[in_bounds]
+        c3s = c3s[in_bounds]
+        if len(c5s) == 0:
+            continue
         vmask = valid[c5s] & valid[c3s]
         end_vals = end_rev[hex_rc[c3s]]
         gc_pcts_arr = gc_pct(c5s, c3s, cum_gc)
@@ -405,11 +461,10 @@ def build_region_weights(
     # ── Normalisation ────────────────────────────────────────────────────
     # w(c5,c3,s) = 1/2 * start_s[hex(c5)] / S_s * E_s(c5,L) / Z_s(c5)
     #
-    # Z_s(c5) = sum over L of E_s(c5,L).  Positions where Z=0 (all c3
-    # out of range OR all c3 hexamers invalid) have no fragments in Omega.
-    # S_s sums start values only over positions with Z > 0, so the
-    # Appendix A cancellation (Z/Z -> 1, sum start/S -> 1) holds exactly
-    # even when N-masking removes entire c5 positions.
+    # Z_s(c5) = sum over L of E_s(c5,L).  Positions where Z=0 (all
+    # midpoints out of range OR all hexamers invalid) have no fragments
+    # in Omega.  S_s sums start values only over positions with Z > 0,
+    # so the Appendix A cancellation holds exactly.
 
     Z_plus = w_plus.sum(axis=1)
     has_frags_plus = Z_plus > 0
@@ -436,4 +491,5 @@ def build_region_weights(
         w_minus=w_minus,
         S_plus=S_plus,
         S_minus=S_minus,
+        pad=pad,
     )

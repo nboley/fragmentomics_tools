@@ -31,6 +31,7 @@ import numpy as np
 from background_model.simulator.weights import (
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     N_LENGTHS,
     HexamerTables,
     RegionWeights,
@@ -51,6 +52,7 @@ def draw_fragments_for_region(
     n_fragments: int,
     rng: np.random.Generator,
     region_weights: Optional[RegionWeights] = None,
+    pad: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Draw ``n_fragments`` from the generative model for one region.
 
@@ -75,28 +77,21 @@ def draw_fragments_for_region(
         RNG instance for reproducibility.
     region_weights : RegionWeights, optional
         An already-built ``RegionWeights`` for THIS region, to sample from
-        instead of rebuilding it.  ``build_region_weights`` is ~63 ms per
-        call at ``region_len`` 2560 and dominates the simulator: a caller
-        that already built ``w`` (to check the ``Sum_Omega w = 1``
-        invariants, say) would otherwise pay for a second, identical build,
-        which measured as 40% of the whole per-region cost.
-
-        Passing it is purely an elision of recomputation -- the object is
-        the same one this function would have constructed -- so the draw is
-        bit-identical, including the RNG stream.  It is the caller's
-        responsibility that the weights were built from the same
-        ``hex_fwd`` / ``hex_rc`` / ``cum_gc`` / ``valid`` / tables as are
-        passed here; a mismatch would sample from one region's weights
-        while reporting another's coordinates, and no normalisation
-        invariant would notice (``Sum_Omega w = 1`` is a property of the
-        weights, not of the draw).
+        instead of rebuilding it.
+    pad : int
+        Region expansion for the midpoint rule.  Must match the pad used
+        to build the precompute arrays and (if provided) the
+        ``region_weights``.
 
     Returns
     -------
     starts : ndarray, shape (n_fragments,), int
-        BED start (0-based, the lower genomic coordinate).
+        BED start (0-based, region-local lower genomic coordinate).
+        Under the midpoint rule, values can be negative (the fragment's
+        left end extends before the region start).
     stops : ndarray, shape (n_fragments,), int
-        BED stop (exclusive, the higher genomic coordinate).
+        BED stop (exclusive, region-local higher genomic coordinate).
+        Under the midpoint rule, values can exceed ``region_len``.
     strands : ndarray, shape (n_fragments,), str
         ``"+"`` or ``"-"`` for each fragment.
     """
@@ -110,29 +105,20 @@ def draw_fragments_for_region(
             predict_lut=predict_lut,
             region_len=region_len,
             valid=valid,
+            pad=pad,
         )
     else:
         rw = region_weights
         # Guard: verify the pre-built weights are consistent with the
-        # arrays passed to this call.  A mismatch means the caller built
-        # weights from one region and is drawing fragments for another —
-        # the draw would sample from one region's distribution while
-        # reporting another region's coordinates, and Sum_Omega w = 1 (a
-        # property of the weights) would not notice.
-        n_sites = region_len + 1
+        # arrays passed to this call.
+        n_sites = region_len + 2 * rw.pad + 1
         if rw.w_plus.shape != (n_sites, N_LENGTHS):
             raise ValueError(
                 f"region_weights.w_plus has shape {rw.w_plus.shape} but "
-                f"region_len={region_len} requires ({n_sites}, {N_LENGTHS}). "
+                f"region_len={region_len}, pad={rw.pad} requires "
+                f"({n_sites}, {N_LENGTHS}). "
                 f"The weights were built for a different region."
             )
-        # S_plus and S_minus depend on hex_fwd, hex_rc, valid, and the
-        # hex tables — all of which are region-specific.  Both checks are
-        # needed: S_plus validates the plus-strand start weights
-        # (start_fwd[hex_fwd]), S_minus validates the minus-strand start
-        # weights (start_rev[hex_rc]).  A caller passing hex_fwd from
-        # region A with hex_rc from region B would pass one check but
-        # fail the other.
         start_vals_plus_check = np.where(valid, hex_tables.start_fwd[hex_fwd], 0.0)
         Z_plus_check = rw.w_plus.sum(axis=1)
         S_plus_check = float(start_vals_plus_check[Z_plus_check > 0].sum())
@@ -152,23 +138,12 @@ def draw_fragments_for_region(
                 f"The weights were built for a different region."
             )
 
-    # Precompute per-strand sampling distributions from the weight factors.
-    # For plus: start_vals_plus[c5] = start_fwd[hex_fwd[c5]] (zeroed where invalid)
-    # For minus: start_vals_minus[c5] = start_rev[hex_rc[c5]] (zeroed where invalid)
-    n_sites = region_len + 1
+    rw_pad = rw.pad
+    n_sites = region_len + 2 * rw_pad + 1
 
     start_vals_plus = np.where(valid, hex_tables.start_fwd[hex_fwd], 0.0)
     start_vals_minus = np.where(valid, hex_tables.start_rev[hex_rc], 0.0)
 
-    # Z_s(c5) = sum over L of w_plus/w_minus unnormalised E values.
-    # But we can get the conditional E_s(c5,L) / Z_s(c5) from the normalised
-    # weights directly: w[c5, :] = 0.5 * start/S * E/Z, and the conditional
-    # over L given c5 is E(c5,L)/Z(c5) = w[c5,:] / w[c5,:].sum() when w[c5,:].sum()>0.
-    #
-    # Similarly c5 ~ start_s[hex(c5)] / S_s.
-
-    # Plus strand start distribution: start_fwd[hex_fwd[c5]] restricted to
-    # positions with Z_plus(c5) > 0.
     Z_plus = rw.w_plus.sum(axis=1)  # (n_sites,)
     has_frags_plus = Z_plus > 0
     start_prob_plus = np.where(has_frags_plus, start_vals_plus, 0.0)
@@ -183,8 +158,6 @@ def draw_fragments_for_region(
     if total_start_minus > 0:
         start_prob_minus /= total_start_minus
 
-    # Per-c5 conditional over L: w[c5, :] / sum(w[c5, :])
-    # Precompute these as 2D arrays. For positions with no fragments, leave as 0.
     cond_L_plus = np.zeros_like(rw.w_plus)
     mask_p = Z_plus > 0
     cond_L_plus[mask_p] = rw.w_plus[mask_p] / Z_plus[mask_p, np.newaxis]
@@ -194,11 +167,6 @@ def draw_fragments_for_region(
     cond_L_minus[mask_m] = rw.w_minus[mask_m] / Z_minus[mask_m, np.newaxis]
 
     Ls = np.arange(L_MIN, L_MAX + 1)  # (N_LENGTHS,)
-
-    # ── Vectorised draw ────────────────────────────────────────────────
-    # All strand choices, then all plus-strand (c5, L), then minus.
-    # Each fragment is drawn independently from the same conditional
-    # distributions as the original per-fragment loop.
 
     starts = np.empty(n_fragments, dtype=np.int64)
     stops = np.empty(n_fragments, dtype=np.int64)
@@ -210,18 +178,19 @@ def draw_fragments_for_region(
     n_minus = n_fragments - n_plus
 
     # 2-3. Plus strand: c5 ~ start_prob_plus, then L ~ cond_L_plus[c5]
+    # c5_plus is an array index; region-local c5 = c5_plus - rw_pad
     if n_plus > 0:
         c5_plus = rng.choice(n_sites, size=n_plus, p=start_prob_plus)
-        # CDF inversion: draw uniform, find first CDF bin that exceeds it.
-        # (cum <= u).sum() matches numpy's searchsorted(side='right').
         u_L = rng.random(n_plus)
         cum = np.cumsum(cond_L_plus[c5_plus], axis=1)
         li_plus = np.minimum(
             (cum <= u_L[:, np.newaxis]).sum(axis=1), N_LENGTHS - 1
         )
         L_plus = Ls[li_plus]
-        starts[is_plus] = c5_plus
-        stops[is_plus] = c5_plus + L_plus
+        # Convert to region-local BED coordinates
+        c5_local = c5_plus - rw_pad
+        starts[is_plus] = c5_local
+        stops[is_plus] = c5_local + L_plus
         strands[is_plus] = "+"
 
     # 2-3. Minus strand: c5 ~ start_prob_minus, then L ~ cond_L_minus[c5]
@@ -233,8 +202,10 @@ def draw_fragments_for_region(
             (cum <= u_L[:, np.newaxis]).sum(axis=1), N_LENGTHS - 1
         )
         L_minus = Ls[li_minus]
-        starts[~is_plus] = c5_minus - L_minus
-        stops[~is_plus] = c5_minus
+        # Convert to region-local BED coordinates
+        c5_local = c5_minus - rw_pad
+        starts[~is_plus] = c5_local - L_minus
+        stops[~is_plus] = c5_local
         strands[~is_plus] = "-"
 
     return starts, stops, strands

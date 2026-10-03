@@ -101,9 +101,15 @@ Derivations: Appendix D.
   least one fragment is achievable. Including `Z_s(c5) = 0` positions breaks
   the Appendix A cancellation: the strand marginal falls below ½ by the
   dead-mass fraction.
-- **Edge rule:** `Z_s(c5)` sums only those `L` whose `c3(L)` stays in
-  `[0, region_len]`; off the region `hex(c3)` is undefined. This per-`c5`
-  truncation is exactly what makes `|Ω| = 2 · Σ_L (region_len − L + 1)` correct.
+- **Midpoint rule** (replaces the old containment edge rule): a fragment is
+  admitted when its integer midpoint `p + L // 2` (floor division) falls in
+  `[0, region_len)`.  The region is expanded by `MAX_FL_HALF = 90` on each
+  side for sequence context.  Under this rule every length L has exactly
+  `region_len` valid midpoints per strand, so
+  `|Ω| = 2 × region_len × N_LENGTHS` (479,232 at region_len 1536).  The
+  midpoint convention matches the per-region count files (`in_region:
+  midpoint in [start,stop)`).  `Z_s(c5)` still sums only those `L` whose
+  midpoint falls in range; the factorisation is unchanged.
 - **`predict` is a cached `(L, gc_bin)` LUT**, gathered from, not called per
   element. Built once and reused across regions and across both the sampler
   (Step 5) and the oracle (Step 7).
@@ -237,6 +243,15 @@ the model agent's (decision 79).
   strand is exactly 50/50); only absolute nats move.
 
 ### Measured anchors — cut-site store val split
+
+> **SUPERSEDED.** The anchors below were measured under the old containment
+> edge rule (`c3 in [0, region_len]`), which imposed a length-dependent
+> positional penalty.  They were invalidated by the switch to the midpoint
+> admission rule (commit that changed `build_region_weights` to use
+> `midpoint = p + L // 2 in [0, region_len)`), which changes `|Ω|` from
+> 447,564 to 479,232 and re-normalises every weight.  **Do not use these
+> numbers for scoring.**  The anchors will be recomputed once the
+> per-region-count alignment change also lands.
 
 Measured from `scripts/cut_site_oracle.py` (commit `62bee76`) on the 1536-geometry
 sim stores, val split. The script calls `build_region_weights` from

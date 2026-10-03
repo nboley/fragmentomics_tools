@@ -37,6 +37,7 @@ import pytest
 from background_model.simulator.weights import (
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     N_GC_BINS,
     N_LENGTHS,
     NHEX,
@@ -93,12 +94,31 @@ def _peaked_marginal_fl(seed=77):
     return fl
 
 
-def _synthetic_region(region_len, seed=123):
+def _synthetic_region(region_len, seed=123, pad=0):
     rng = np.random.default_rng(seed)
-    n_sites = region_len + 1
-    hex_fwd = rng.integers(0, NHEX, size=n_sites)
-    hex_rc = rng.integers(0, NHEX, size=n_sites)
-    bases_gc = rng.random(region_len) < 0.4
+    n_core = region_len + 1
+    hex_fwd_core = rng.integers(0, NHEX, size=n_core)
+    hex_rc_core = rng.integers(0, NHEX, size=n_core)
+    bases_gc_core = rng.random(region_len) < 0.4
+
+    if pad == 0:
+        cum_gc = np.concatenate([[0], np.cumsum(bases_gc_core)]).astype(np.float64)
+        valid = np.ones(n_core, dtype=bool)
+        return hex_fwd_core, hex_rc_core, cum_gc, valid
+
+    pad_rng = np.random.default_rng(seed + 1_000_000)
+    n_sites = region_len + 2 * pad + 1
+    hex_fwd = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad), hex_fwd_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    hex_rc = np.concatenate([
+        pad_rng.integers(0, NHEX, size=pad), hex_rc_core,
+        pad_rng.integers(0, NHEX, size=pad),
+    ])
+    bases_gc = np.concatenate([
+        pad_rng.random(pad) < 0.4, bases_gc_core, pad_rng.random(pad) < 0.4,
+    ])
     cum_gc = np.concatenate([[0], np.cumsum(bases_gc)]).astype(np.float64)
     valid = np.ones(n_sites, dtype=bool)
     return hex_fwd, hex_rc, cum_gc, valid
@@ -109,9 +129,9 @@ def _trivial_lut():
 
 
 def _draw_fragments(region_len, n_fragments, tables=None, marginal_fl=None,
-                    predict_lut=None, seed=123, rng_seed=42):
+                    predict_lut=None, seed=123, rng_seed=42, pad=0):
     """Draw fragments with default synthetic inputs."""
-    hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed)
+    hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, seed, pad=pad)
     if tables is None:
         tables = _random_tables()
     if marginal_fl is None:
@@ -130,6 +150,7 @@ def _draw_fragments(region_len, n_fragments, tables=None, marginal_fl=None,
         region_len=region_len,
         n_fragments=n_fragments,
         rng=rng,
+        pad=pad,
     ), (hex_fwd, hex_rc, cum_gc, valid)
 
 
@@ -965,7 +986,7 @@ class TestPerRegionSequenceDependence:
     def test_different_sequences_give_different_weights(self):
         """Two regions with different sequence must not yield identical w."""
         region_len = 400
-        n = region_len + 1
+        n = region_len + 1  # pad=0 arrays
         r1 = np.random.default_rng(1)
         r2 = np.random.default_rng(2)
 
@@ -1004,7 +1025,7 @@ class TestPerRegionSequenceDependence:
         be satisfied by nondeterminism rather than by sequence dependence.
         """
         region_len = 400
-        n = region_len + 1
+        n = region_len + 1  # pad=0 arrays
         rng = np.random.default_rng(7)
         hex_fwd = rng.integers(0, NHEX, n)
         hex_rc = rng.integers(0, NHEX, n)

@@ -116,12 +116,17 @@ def precompute_region(
     gstop: int,
     fasta_path: str,
     fasta: "Optional[pysam.FastaFile]" = None,
+    pad: int = 0,
 ) -> RegionPrecompute:
     """Compute hexamer indices and cumulative GC for one region.
 
-    Fetches the region plus ``HEX_HALF`` (3 bp) flanking on each side so
-    that hexamer windows for cut sites at positions 0 through ``region_len``
-    are fully resolved.
+    Fetches the region plus ``pad + HEX_HALF`` flanking on each side so
+    that hexamer windows and GC context are available for cut sites from
+    ``-pad`` through ``region_len + pad`` (in region-local coordinates).
+
+    With ``pad = 0`` (default), this returns the original arrays of size
+    ``region_len + 1``.  With ``pad = MAX_FL_HALF = 90`` (the midpoint
+    rule), it returns expanded arrays of size ``region_len + 2*pad + 1``.
 
     Parameters
     ----------
@@ -139,46 +144,52 @@ def precompute_region(
         looping over many regions should open the handle once and pass it
         here.  The sequence fetched is identical either way, so this
         changes cost only, never the returned arrays.
+    pad : int
+        Number of extra positions on each side of the original region.
+        Use ``MAX_FL_HALF`` (90) for the midpoint admission rule.
 
     Returns
     -------
     RegionPrecompute
-        Named tuple with ``hex_fwd``, ``hex_rc``, ``cum_gc``, ``valid``.
+        Named tuple with ``hex_fwd``, ``hex_rc``, ``cum_gc``, ``valid``,
+        each of length ``region_len + 2*pad + 1``.
     """
     import pysam
 
     region_len = gstop - gstart
+    n_expected = region_len + 2 * pad + 1
 
-    if gstart < HEX_HALF:
+    min_left_flank = pad + HEX_HALF
+    if gstart < min_left_flank:
         raise ValueError(
-            f"gstart={gstart} < HEX_HALF={HEX_HALF}: cannot fetch the "
-            f"{HEX_HALF}-bp left flank needed for cut-site hexamers. "
-            f"Regions must start at least {HEX_HALF} bp from the "
-            f"chromosome start."
+            f"gstart={gstart} < pad+HEX_HALF={min_left_flank}: cannot fetch "
+            f"the {min_left_flank}-bp left flank needed for cut-site hexamers "
+            f"with pad={pad}. Regions must start at least {min_left_flank} bp "
+            f"from the chromosome start."
         )
 
-    # Fetch with HEX_HALF flanking on each side for cut-site hexamers
+    # Fetch with (pad + HEX_HALF) flanking on each side
+    fetch_start = gstart - pad - HEX_HALF
+    fetch_end = gstop + pad + HEX_HALF
     if fasta is not None:
-        seq = fasta.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
+        seq = fasta.fetch(contig, fetch_start, fetch_end).upper()
     else:
         with pysam.FastaFile(fasta_path) as fa:
-            seq = fa.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
+            seq = fa.fetch(contig, fetch_start, fetch_end).upper()
     seq_bytes = np.frombuffer(seq.encode("ascii"), dtype=np.uint8)
 
-    # Cut-site hexamers: seq_bytes[c : c+6] for c in 0..region_len
-    # The fetched seq covers [gstart - 3, gstop + 3), so seq_bytes has
-    # length region_len + 2*HEX_HALF.  Sliding window produces
-    # region_len + 2*HEX_HALF - 5 = region_len + 1 entries — exactly
-    # one per cut site.
+    # Cut-site hexamers over the expanded range.  The fetched seq has
+    # length region_len + 2*(pad + HEX_HALF).  Sliding window produces
+    # region_len + 2*(pad + HEX_HALF) - 5 = region_len + 2*pad + 1 entries.
     fwd_cut, rc_cut, valid = hexamer_indices(seq_bytes)
-    assert len(fwd_cut) == region_len + 1, (
-        f"hex length {len(fwd_cut)} != {region_len + 1}"
+    assert len(fwd_cut) == n_expected, (
+        f"hex length {len(fwd_cut)} != {n_expected}"
     )
 
-    # Cumulative GC over the core region bases [gstart, gstop)
-    core = seq_bytes[HEX_HALF : HEX_HALF + region_len]
+    # Cumulative GC over the expanded core bases [gstart - pad, gstop + pad)
+    core = seq_bytes[HEX_HALF : HEX_HALF + region_len + 2 * pad]
     is_gc = (core == ord("G")) | (core == ord("C"))
-    cum_gc = np.empty(region_len + 1, dtype=np.float64)
+    cum_gc = np.empty(n_expected, dtype=np.float64)
     cum_gc[0] = 0
     np.cumsum(is_gc, out=cum_gc[1:])
 

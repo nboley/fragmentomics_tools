@@ -78,12 +78,13 @@ def main(argv=None):
     # ── Load manifest (verify=False: no FASTA/region_set paths needed) ──
     from background_model.simulator.emit import load_manifest
     from background_model.simulator.weights import (
-        build_region_weights, L_MIN, L_MAX, N_LENGTHS,
+        build_region_weights, L_MIN, L_MAX, MAX_FL_HALF, N_LENGTHS,
         generative_domain_size,
     )
     from background_model.simulator.precompute import (
         hexamer_indices, HEX_HALF,
     )
+    PAD = MAX_FL_HALF
 
     MANIFEST = args.manifest
     STORE = args.store
@@ -136,15 +137,21 @@ def main(argv=None):
 
     # ── Sequence offset geometry ────────────────────────────────────────
     # Store seq covers [gstart - rf_budget, gstop + rf_budget), length 1802.
-    # precompute_region needs [gstart - HEX_HALF, gstop + HEX_HALF), length
-    # region_len + 2*HEX_HALF = 1542.
-    # Offset within stored seq: rf_budget - HEX_HALF = 130.
-    seq_offset = rf_budget - HEX_HALF    # 130
-    seq_len_needed = region_len + 2 * HEX_HALF  # 1542
+    # With the midpoint rule we need [gstart - PAD - HEX_HALF,
+    # gstop + PAD + HEX_HALF), length region_len + 2*(PAD + HEX_HALF).
+    # Offset within stored seq: rf_budget - PAD - HEX_HALF.
+    seq_offset = rf_budget - PAD - HEX_HALF    # 133 - 90 - 3 = 40
+    seq_len_needed = region_len + 2 * (PAD + HEX_HALF)  # 1536 + 186 = 1722
+    n_expected = region_len + 2 * PAD + 1  # 1717
 
-    # Verify: hexamer_indices on 1542 bytes -> 1537 = region_len + 1 entries
-    assert seq_len_needed - (6 - 1) == region_len + 1, \
-        f"geometry check: {seq_len_needed - 5} != {region_len + 1}"
+    assert rf_budget >= PAD + HEX_HALF, (
+        f"rf_budget={rf_budget} < PAD+HEX_HALF={PAD + HEX_HALF}: "
+        f"store does not carry enough flanking sequence for the midpoint rule"
+    )
+
+    # Verify: hexamer_indices on seq_len_needed bytes -> n_expected entries
+    assert seq_len_needed - (6 - 1) == n_expected, \
+        f"geometry check: {seq_len_needed - 5} != {n_expected}"
 
     # ── Compute the theoretical domain size |Omega| ─────────────────────
     omega_size = generative_domain_size(region_len, L_MIN, L_MAX)
@@ -184,12 +191,12 @@ def main(argv=None):
 
             # Compute hexamer indices and cumulative GC (mirroring precompute_region)
             hex_fwd, hex_rc, valid = hexamer_indices(seq_sub)
-            assert len(hex_fwd) == region_len + 1
+            assert len(hex_fwd) == n_expected
 
-            # Cumulative GC over core region bases
-            core = seq_sub[HEX_HALF : HEX_HALF + region_len]
+            # Cumulative GC over expanded core bases
+            core = seq_sub[HEX_HALF : HEX_HALF + region_len + 2 * PAD]
             is_gc = (core == ord("G")) | (core == ord("C"))
-            cum_gc = np.empty(region_len + 1, dtype=np.float64)
+            cum_gc = np.empty(n_expected, dtype=np.float64)
             cum_gc[0] = 0
             np.cumsum(is_gc, out=cum_gc[1:])
 
@@ -203,6 +210,7 @@ def main(argv=None):
                 predict_lut=predict_lut,
                 region_len=region_len,
                 valid=valid,
+                pad=PAD,
             )
 
             # ── Check 2 prep: compute per-region entropy ────────────────
@@ -242,10 +250,10 @@ def main(argv=None):
                 li = L - L_MIN
                 s = strands[fi]
 
-                if s == 0:  # plus: c5 = p
-                    w = rw.w_plus[p, li]
-                else:       # minus: c5 = p + L
-                    w = rw.w_minus[p + L, li]
+                if s == 0:  # plus: c5 = p, array index = p + PAD
+                    w = rw.w_plus[p + PAD, li]
+                else:       # minus: c5 = p + L, array index = p + L + PAD
+                    w = rw.w_minus[p + L + PAD, li]
 
                 if w == 0.0:
                     n_zero_hits += 1

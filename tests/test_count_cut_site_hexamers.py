@@ -373,9 +373,13 @@ def test_closed_form_background_equals_brute_force_enumeration(genome_mutator):
 
 
 def test_background_total_matches_the_generative_domain_size():
-    """With no Ns, |Omega| is the closed form from simulator.weights."""
-    from background_model.simulator.weights import generative_domain_size
+    """With no Ns, the total equals the containment-rule domain size.
 
+    ``accumulate_background`` uses the containment rule (c3 stays in
+    [0, region_len]), not the midpoint rule.  ``generative_domain_size``
+    was changed to return the midpoint-rule count, so this test computes
+    the containment-rule count directly.
+    """
     gstart, gstop = 20, 100
     region_len = gstop - gstart
     hex_fwd, hex_rc, valid = tracks(GENOME, gstart, gstop)
@@ -385,11 +389,12 @@ def test_background_total_matches_the_generative_domain_size():
     bg = {k: np.zeros((1, NHEX), dtype=np.float64) for k in TABLE_NAMES}
     csh.accumulate_background(bg, hex_fwd, hex_rc, valid, edges, region_len)
 
-    omega = generative_domain_size(region_len, L_min=5, L_max=12)
+    # Containment-rule domain: 2 * sum_{L=lo}^{hi} (region_len - L + 1)
+    omega_containment = 2 * sum(region_len - L + 1 for L in range(5, 13))
     # each member of Omega contributes one start and one end
-    assert sum(float(v.sum()) for v in bg.values()) == 2 * omega
+    assert sum(float(v.sum()) for v in bg.values()) == 2 * omega_containment
     # ...split evenly between the strands
-    assert bg["start_fwd"].sum() + bg["end_fwd"].sum() == omega
+    assert bg["start_fwd"].sum() + bg["end_fwd"].sum() == omega_containment
 
 
 def test_background_start_end_symmetry_across_strands():
