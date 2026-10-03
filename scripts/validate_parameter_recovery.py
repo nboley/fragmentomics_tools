@@ -83,6 +83,7 @@ from background_model.simulator.sampler import draw_fragments_for_region  # noqa
 from background_model.simulator.weights import (  # noqa: E402
     L_MAX,
     L_MIN,
+    MAX_FL_HALF,
     N_LENGTHS,
     HexamerTables,
     build_region_weights,
@@ -199,6 +200,7 @@ def main() -> int:
     model_3_rev = np.zeros(NHEX, dtype=np.float64)
 
     rng = np.random.default_rng(args.seed)
+    pad = MAX_FL_HALF  # array index = region-local position + pad
 
     # ── Simulation loop ──────────────────────────────────────────────────
     import pysam
@@ -238,14 +240,16 @@ def main() -> int:
         if is_plus.any():
             s_p, e_p = starts[is_plus], stops[is_plus]
             # Plus strand: c5=start, c3=stop; both use hex_fwd
-            obs_5_fwd += np.bincount(pc.hex_fwd[s_p], minlength=NHEX)
-            obs_3_fwd += np.bincount(pc.hex_fwd[e_p], minlength=NHEX)
+            # Region-local coords → array indices by adding pad
+            obs_5_fwd += np.bincount(pc.hex_fwd[s_p + pad], minlength=NHEX)
+            obs_3_fwd += np.bincount(pc.hex_fwd[e_p + pad], minlength=NHEX)
 
         if is_minus.any():
             s_m, e_m = starts[is_minus], stops[is_minus]
             # Minus strand: c5=stop (higher coord), c3=start; both use hex_rc
-            obs_5_rev += np.bincount(pc.hex_rc[e_m], minlength=NHEX)
-            obs_3_rev += np.bincount(pc.hex_rc[s_m], minlength=NHEX)
+            # Region-local coords → array indices by adding pad
+            obs_5_rev += np.bincount(pc.hex_rc[e_m + pad], minlength=NHEX)
+            obs_3_rev += np.bincount(pc.hex_rc[s_m + pad], minlength=NHEX)
 
         # ── Background for start-table recovery ─────────────────────────
         # B_s[h] = #{c5 : hex_s(c5)=h, Z_s(c5)>0}
@@ -273,29 +277,31 @@ def main() -> int:
         )
 
         # ── Model-predicted 3' hex marginal ─────────────────────────────
-        # For each (c5, li), the 3' hexamer is hex_s[c3(c5,L,s)].
-        # Accumulate w at each 3' hexamer index.
+        # Mirror the weight builder's midpoint-rule geometry:
+        #   idx_lo = pad - L//2 + j       (plus c5, minus c3)
+        #   idx_hi = pad + ceil(L/2) + j   (plus c3, minus c5)
+        # where j ∈ [0, region_len) is the midpoint index.
         for li in range(N_LENGTHS):
             L = L_MIN + li
-            # Plus strand: c5 in [0, region_len-L], c3 = c5+L
-            max_c5 = region_len - L
-            if max_c5 >= 0:
-                c5s = np.arange(0, max_c5 + 1)
-                c3s = c5s + L
-                model_3_fwd += np.bincount(
-                    pc.hex_fwd[c3s],
-                    weights=rw.w_plus[c5s, li],
-                    minlength=NHEX,
-                )
-            # Minus strand: c5 in [L, region_len], c3 = c5-L
-            if L <= region_len:
-                c5s = np.arange(L, region_len + 1)
-                c3s = c5s - L
-                model_3_rev += np.bincount(
-                    pc.hex_rc[c3s],
-                    weights=rw.w_minus[c5s, li],
-                    minlength=NHEX,
-                )
+            half_down = L // 2
+            half_up = L - half_down
+
+            j = np.arange(region_len)
+            idx_lo = pad - half_down + j
+            idx_hi = pad + half_up + j
+
+            # Plus strand: 3' hex at idx_hi, weight from w_plus[idx_lo, li]
+            model_3_fwd += np.bincount(
+                pc.hex_fwd[idx_hi],
+                weights=rw.w_plus[idx_lo, li],
+                minlength=NHEX,
+            )
+            # Minus strand: 3' hex at idx_lo, weight from w_minus[idx_hi, li]
+            model_3_rev += np.bincount(
+                pc.hex_rc[idx_lo],
+                weights=rw.w_minus[idx_hi, li],
+                minlength=NHEX,
+            )
 
         if (i + 1) % 200 == 0:
             el = time.perf_counter() - t_loop
