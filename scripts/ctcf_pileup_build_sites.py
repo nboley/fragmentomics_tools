@@ -66,11 +66,11 @@ def drop_blacklisted_windows(allsites, half):
     )
     win_rdf = RegionDataFrame(windows, ref="hg38")
     bl_rdf = RegionDataFrame.from_bed(BLACKLIST_BED, ref="hg38")
-    # `a_index` carries A's index LABELS, which is what the old
-    # `drop_overlapping_regions(...).index` returned, so the filter below is
-    # unchanged in meaning.
-    kept_idx = intervals.overlap_indices(win_rdf, bl_rdf, how="anti")["a_index"]
-    return allsites.loc[allsites.index.isin(kept_idx)].reset_index(drop=True)
+    # `a_pos` carries 0-based row positions into win_rdf, which was built
+    # from allsites with matching row order, so iloc selects correctly
+    # regardless of what index allsites happens to carry.
+    kept_pos = intervals.overlap_indices(win_rdf, bl_rdf, how="anti")["a_pos"]
+    return allsites.iloc[kept_pos.values.astype(int)].reset_index(drop=True)
 
 
 def main():

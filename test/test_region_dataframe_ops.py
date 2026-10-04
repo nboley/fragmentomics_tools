@@ -328,7 +328,7 @@ class TestAntiJoinReplacement:
             ref="hg19",
         )
         idx = overlap_indices(rdf, blacklist, how="anti")
-        kept = rdf.iloc[idx["a_index"].values.astype(int)]
+        kept = rdf.iloc[idx["a_pos"].values.astype(int)]
         assert len(kept) == 1
         assert int(kept.start.iloc[0]) == 500
 

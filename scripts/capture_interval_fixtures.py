@@ -247,7 +247,7 @@ def capture(datasets):
         # rows sharing coordinates collided.
         pairs = intervals.overlap_indices(ctcf, bl)
         record("overlap_bases_sum", "ctcf_x_blacklist",
-               pairs.groupby("a_index")["overlap_bases"].sum())
+               pairs.groupby("a_pos")["overlap_bases"].sum())
 
         record("nearest", "ctcf_x_blacklist", intervals.nearest(ctcf, bl))
 

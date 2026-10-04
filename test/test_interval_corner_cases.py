@@ -199,7 +199,7 @@ class TestOverlapIndicesCornerCases:
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
         result = overlap_indices(a, b, how="anti")
         assert len(result) == 1
-        assert int(result["a_index"].iloc[0]) == 1
+        assert int(result["a_pos"].iloc[0]) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -218,7 +218,7 @@ class TestAntiJoinCornerCases:
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]})
         result = overlap_indices(a, b, how="anti")
         assert len(result) == 1
-        assert int(result["a_index"].iloc[0]) == 1
+        assert int(result["a_pos"].iloc[0]) == 1
 
     def test_nothing_overlaps_keeps_all(self):
         a = _rdf({
@@ -529,14 +529,12 @@ class TestFractionThresholds:
 
 
 class TestNonDefaultIndex:
-    """`bioframe` returns index LABELS, so every internal lookup must align by
-    label. An earlier version indexed `.values` positionally with those labels,
-    which raised IndexError on any frame whose index is not a contiguous
-    0..n-1 range — i.e. on any frame produced by a filter or a slice.
+    """Position-based results must be independent of the input index.
 
-    These use a deliberately non-contiguous index. Against the positional
-    implementation they raise IndexError; the assertions are not the point,
-    reaching them is.
+    ``overlap_indices`` and ``nearest`` return 0-based positions, so any
+    frame — default-indexed, filtered (non-contiguous), or with duplicate
+    labels — produces the same ``a_pos``/``b_pos`` values.  These tests
+    verify that non-contiguous indices do not raise or corrupt results.
     """
 
     def _pair(self, a_idx):
@@ -558,7 +556,8 @@ class TestNonDefaultIndex:
         a, b = self._pair([10, 20])
         result = overlap_indices(a, b, how="inner", min_frac_a=0.5)
         assert len(result) == 2
-        assert sorted(int(i) for i in result["a_index"]) == [10, 20]
+        # Positions are always 0-based, regardless of the input index.
+        assert sorted(int(i) for i in result["a_pos"]) == [0, 1]
 
     def test_wiggle_survives_a_non_default_index(self):
         a = RegionDataFrame(
@@ -575,12 +574,12 @@ class TestNonDefaultIndex:
         )
         result = overlap_indices(a, b, how="inner", wiggle=10)
         assert len(result) == 1
-        assert int(result["a_index"].iloc[0]) == 77
+        assert int(result["a_pos"].iloc[0]) == 0  # position, not label
         # Gap-bridged pairs share no bases.
         assert int(result["overlap_bases"].iloc[0]) == 0
 
-    def test_anti_returns_labels_not_positions(self):
-        """Callers filter with `a.loc[...]`, so labels are load-bearing."""
+    def test_anti_returns_positions(self):
+        """Callers filter with ``a.iloc[...]``, using 0-based positions."""
         a = RegionDataFrame(
             pd.DataFrame(
                 {
@@ -594,7 +593,8 @@ class TestNonDefaultIndex:
         )
         b = _rdf({"contig": ["chr1"], "start": [150], "stop": [300]})
         result = overlap_indices(a, b, how="anti")
-        assert sorted(int(i) for i in result["a_index"]) == [20, 30]
+        # Rows at positions 1 and 2 do not overlap b.
+        assert sorted(int(i) for i in result["a_pos"]) == [1, 2]
 
 
 class TestReciprocalFraction:
@@ -676,7 +676,9 @@ def _values_only(result):
     if isinstance(result, pd.Series):
         return list(result.values)
     if isinstance(result, pd.DataFrame):
-        cols = [c for c in result.columns if c not in ("a_index", "b_index")]
+        cols = [c for c in result.columns if c not in ("a_pos", "b_pos")]
+        # a_pos/b_pos are positions — they should be identical regardless
+        # of input index labels, so we still compare only the data columns.
         return [len(result)] + [list(result[c].values) for c in cols]
     return result
 
@@ -755,14 +757,14 @@ class TestDeterministicOrder:
         a, b = self._many()
         r = overlap_indices(a, b)
         assert len(r) > 1, "fixture must produce several pairs to be meaningful"
-        keys = list(zip(r["a_index"], r["b_index"]))
+        keys = list(zip(r["a_pos"], r["b_pos"]))
         assert keys == sorted(keys)
 
     def test_nearest_is_sorted(self):
         a, b = self._many()
         r = nearest(a, b)
         assert len(r) > 1
-        keys = list(zip(r["a_index"], r["b_index"]))
+        keys = list(zip(r["a_pos"], r["b_pos"]))
         assert keys == sorted(keys)
 
     def test_repeated_calls_agree(self):
@@ -808,21 +810,89 @@ class TestDuplicateIndexLabels:
         a, b = self._dup()
         assert len(overlaps(a, b)) == len(a) == 2
 
-    def test_overlap_indices_reports_the_shared_label_once(self):
-        """Pins the KNOWN LIMITATION rather than asserting it is fine.
+    def test_overlap_indices_identifies_the_matching_row(self):
+        """With positions, duplicate labels no longer cause ambiguity.
 
-        `overlap_indices` returns index LABELS, and a label cannot distinguish
-        which of two identically-labelled rows matched. One pair is reported,
-        carrying label 7. A caller doing `a.loc[pairs.a_index]` therefore gets
-        BOTH rows -- including the one that does not overlap.
+        The old label-based API returned label 7 for the matching row, but
+        ``a.loc[7]`` selected BOTH rows (since both carry label 7) — the
+        caller could not tell which row actually overlapped.
 
-        This is inherent to a label-returning API, not a bug in the matching.
-        It is pinned here so the behaviour is visible and so a future change to
-        raise on duplicate labels fails this test loudly rather than silently.
+        With ``a_pos`` returning 0-based positions, ``a.iloc[0]`` selects
+        exactly the overlapping row. The known limitation is gone.
         """
         a, b = self._dup()
         pairs = overlap_indices(a, b)
         assert len(pairs) == 1
-        assert list(pairs["a_index"]) == [7]
-        # The limitation, made explicit:
-        assert len(a.loc[pairs["a_index"].tolist()]) == 2
+        assert list(pairs["a_pos"]) == [0]  # position 0 = first row
+        # iloc with the position selects exactly the matching row.
+        assert len(a.iloc[pairs["a_pos"].tolist()]) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Windowed frame — the case that motivated the label-to-position change
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestWindowedFrameOverlap:
+    """bin_regions_into_windows produces N windows per region, all sharing
+    the parent region's index label.  The old label-based API could not say
+    WHICH window matched — ``a.iloc[label]`` selected the wrong row.
+
+    ``test_overlap_indices_identifies_correct_window`` is **discriminating**:
+    under the old label-based API, ``a_index`` was the shared label ``0``,
+    so ``windowed.iloc[0]`` pointed to the first window [0,250) rather than
+    the matching second window [250,500).  With ``a_pos=1``,
+    ``windowed.iloc[1]`` correctly identifies the overlapping window.
+    """
+
+    def _windowed(self):
+        """Two 1000bp regions → 8 × 250bp windows, index [0,0,0,0,1,1,1,1]."""
+        rdf = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [0, 10000],
+            "stop": [1000, 11000],
+        })
+        return rdf.bin_regions_into_windows(250, "valid", stride=250)
+
+    def test_overlap_indices_identifies_correct_window(self):
+        windowed = self._windowed()
+        assert len(windowed) == 8
+
+        # Blacklist hits only the 2nd window of region 0 ([250,500)).
+        bl = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
+
+        result = overlap_indices(windowed, bl)
+        assert len(result) == 1
+
+        # Position uniquely identifies which window matched.
+        pos = int(result["a_pos"].iloc[0])
+        row = windowed.iloc[pos]
+        assert int(row["start"]) == 250
+        assert int(row["stop"]) == 500
+
+    def test_overlaps_mask_is_per_window(self):
+        """overlaps() gives a per-window boolean, not per-parent-region."""
+        windowed = self._windowed()
+        bl = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
+        mask = overlaps(windowed, bl)
+
+        # Exactly 1 of 8 windows overlaps.
+        assert mask.sum() == 1
+        assert list(mask.values) == [
+            False, True, False, False,
+            False, False, False, False,
+        ]
+
+    def test_anti_join_drops_only_matching_window(self):
+        """Anti-join on a windowed frame drops the one overlapping window."""
+        windowed = self._windowed()
+        bl = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
+        result = overlap_indices(windowed, bl, how="anti")
+
+        # 7 of 8 windows survive.
+        assert len(result) == 7
+        kept_starts = sorted(
+            int(windowed.iloc[int(p)]["start"]) for p in result["a_pos"]
+        )
+        # The dropped window was [250,500); all others present.
+        assert 250 not in kept_starts
+        assert len(kept_starts) == 7

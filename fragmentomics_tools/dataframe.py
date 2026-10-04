@@ -887,7 +887,7 @@ class RegionDataFrame(DataFrameBase):
         blacklist = RegionDataFrame.from_bed(bed_fname, ref=self.ref)
         idx = overlap_indices(self, blacklist, how="left")
 
-        has_match = idx["b_index"].notna()
+        has_match = idx["b_pos"].notna()
         if not has_match.any():
             result = self.copy()
             result["blacklist_regions"] = ""
@@ -901,14 +901,14 @@ class RegionDataFrame(DataFrameBase):
                 int(blacklist["stop"].iloc[int(bi)]),
                 ref=self.ref,
             )
-            for bi in matched["b_index"]
+            for bi in matched["b_pos"]
         ]
 
         pairs = pd.DataFrame({
-            "a_index": matched["a_index"].values,
+            "a_pos": matched["a_pos"].values,
             "bl_region": bl_regions,
         })
-        grouped = pairs.groupby("a_index")["bl_region"].apply(list)
+        grouped = pairs.groupby("a_pos")["bl_region"].apply(list)
         grouped.index = self.index[grouped.index.astype(int)]
         grouped.name = "blacklist_regions"
 
@@ -1924,6 +1924,6 @@ def intersect_region_dataframes(region_dataframes, sort=False):
     result = region_dataframes[0]
     for rdf in region_dataframes[1:]:
         idx = overlap_indices(result, rdf, how="inner")
-        keep = sorted(set(idx["a_index"].dropna().values.astype(int)))
+        keep = sorted(set(idx["a_pos"].dropna().values.astype(int)))
         result = result.iloc[keep]
     return result

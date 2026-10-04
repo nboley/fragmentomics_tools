@@ -130,16 +130,17 @@ def drop_overlapping_bed(sites_df, other_df):
     try:
         sites_rdf = RegionDataFrame.from_bed(sp, ref="hg38")
         other_rdf = RegionDataFrame.from_bed(op, ref="hg38")
-        # `a_index` carries A's index LABELS, matching what the old
-        # `drop_overlapping_regions(...).index` returned.
-        kept_idx = intervals.overlap_indices(sites_rdf, other_rdf, how="anti")[
-            "a_index"
+        # `a_pos` carries 0-based row positions into sites_rdf.  from_bed
+        # preserves row order, so these positions align with sites_df
+        # (which was reset_index'd above).
+        kept_pos = intervals.overlap_indices(sites_rdf, other_rdf, how="anti")[
+            "a_pos"
         ]
-        keep_idx = sorted(int(i) for i in kept_idx)
+        keep_pos = sorted(int(i) for i in kept_pos)
     finally:
         os.unlink(sp)
         os.unlink(op)
-    return sites_df.loc[keep_idx].reset_index(drop=True)
+    return sites_df.iloc[keep_pos].reset_index(drop=True)
 
 
 def load_ctcf(cell_types):

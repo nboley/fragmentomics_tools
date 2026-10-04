@@ -145,8 +145,8 @@ loader, not as interval algebra.
 ### Position space at the boundary — DECIDED after implementation
 
 `bioframe` reports matches as the **index labels** of whatever the input frames
-carried. `intervals` therefore normalises on entry, does all internal work in
-position space, and maps back to labels exactly once on exit.
+carried. `intervals` therefore normalises on entry and does all internal work in
+position space.
 
 This was not the original design, and it was adopted because the alternative
 failed four times in one 527-line module. Every internal lookup independently
@@ -155,19 +155,29 @@ had to remember not to treat labels as positions. Two instances raised
 in the family — `overlaps` — silently returned an all-**False** mask for any
 frame whose index was not `0..n-1`, which is what any filter or slice produces.
 
-A parametrized label-safety test was added first, and it is kept. But detection
-only covers the entry points someone remembered to parametrize, whereas the
-boundary makes the error *unrepresentable*: inside it there are no labels to
-confuse. Labels now appear in exactly six places.
-
 Worth recording precisely because of how it hid: default-indexed frames are
 safe, `from_bed` produces one, and so unit fixtures, a 47-check review, my own
 verification, and a 964,593-region real-data run all exercised only the safe
 path.
 
+**Positions are now the public contract, not an internal detail mapped back to
+labels on exit.** `overlap_indices` and `nearest` return `a_pos`/`b_pos` —
+0-based row positions — and callers use `a.iloc[result.a_pos]`. The old
+label-returning API assumed that an index label identifies a row, which is false
+in this library: `bin_regions_into_windows` emits N windows per region, all
+sharing the parent region's label. Overlapping a windowed frame against a
+blacklist returned labels that could not say which window matched. Positions
+make the result unambiguous for *every* frame, windowed or not.
+
+This also deletes `_to_labels` (the exit mapping was the only place labels
+entered the module) and simplifies `_positional` to return only the reset
+frames. A parametrized label-safety test is kept but its assertions now verify
+that positions are invariant across index shapes rather than that labels round-
+trip correctly.
+
 ### Pair order is sorted, and that is a correctness requirement
 
-`overlap_indices` and `nearest` sort on `(a_index, b_index)` before returning.
+`overlap_indices` and `nearest` sort on `(a_pos, b_pos)` before returning.
 
 Row order was already part of the contract by design — two implementations can
 agree on the set of pairs and still differ on ordering, which silently breaks
@@ -261,13 +271,13 @@ Layer 2 exposes **five free functions**. Everything the current thirteen
 methods do is either one of these or a pandas expression over one of them.
 
 ```python
-# One primitive. Returns index pairs, never joined columns.
+# One primitive. Returns position pairs, never joined columns.
 overlap_indices(a, b, *, how="inner", wiggle=0,
                 min_frac_a=0.0, min_frac_b=0.0, reciprocal=False,
-                same_strand=False) -> DataFrame[a_index, b_index, overlap_bases]
+                same_strand=False) -> DataFrame[a_pos, b_pos, overlap_bases]
 
 nearest(a, b, *, k=1, ignore_overlaps=False, direction=None,
-        same_strand=False)        -> DataFrame[a_index, b_index, distance]
+        same_strand=False)        -> DataFrame[a_pos, b_pos, distance]
 
 cluster(a, b=None, *, wiggle=0, same_strand=False) -> Series[int]
 merge(a,   *, wiggle=0, same_strand=False)         -> RegionDataFrame
@@ -275,8 +285,14 @@ merge(a,   *, wiggle=0, same_strand=False)         -> RegionDataFrame
 overlaps(a, b, *, wiggle=0, same_strand=False)     -> Series[bool]
 ```
 
-**`overlaps` is deliberately redundant.** It is
-`a.index.isin(overlap_indices(a, b).a_index)` and nothing more. It exists
+``a_pos`` and ``b_pos`` are 0-based row positions into the input frames.
+``a.iloc[result.a_pos]`` is always unambiguous — even when the input carries
+duplicate index labels, as ``bin_regions_into_windows`` produces (N windows per
+region, all sharing the parent region's label).  The old label-based columns
+(``a_index``/``b_index``) could not distinguish which window matched.
+
+**`overlaps` is deliberately redundant.** It is a per-row boolean mask
+built from `overlap_indices(a, b).a_pos` and nothing more. It exists
 because it is the most-used operation in the family — 22 call sites across 11
 notebooks — and that composition is too noisy to write at each of them. This is
 an ergonomics exception to the "one way to do it" rule, recorded as an
@@ -287,7 +303,7 @@ exception rather than dressed up as a principle. No other reduction gets one.
 on the way back — along with `reordered_columns`, suffix collision handling and
 column renaming. All of that machinery exists *only* to carry columns through a
 backend that cannot hold them. A primitive returning
-`(a_index, b_index, overlap_bases)` deletes it: column carrying becomes one
+`(a_pos, b_pos, overlap_bases)` deletes it: column carrying becomes one
 pandas `.join`, performed where we control the semantics. It also collapses the
 differential-test surface to a single function returning integers, which is far
 less brittle to pin than a DataFrame with backend-dependent column order.
@@ -296,12 +312,12 @@ less brittle to pin than a DataFrame with backend-dependent column order.
 
 | Need | Expression |
 |---|---|
-| B's column values for each hit | `b.loc[idx.b_index]`, reindexed onto `idx.a_index` |
+| B's column values for each hit | `b.iloc[idx.b_pos]`, reindexed onto `idx.a_pos` |
 | boolean mask | `overlaps(a, b)` |
 | blacklist / non-overlapping | `overlap_indices(a, b, how="anti")` |
-| overlapping bases per region | `.groupby("a_index").overlap_bases.sum()` |
-| widest single overlap | `.groupby("a_index").overlap_bases.max()` |
-| count of hits per region | `.groupby("a_index").size()` |
+| overlapping bases per region | `.groupby("a_pos").overlap_bases.sum()` |
+| widest single overlap | `.groupby("a_pos").overlap_bases.max()` |
+| count of hits per region | `.groupby("a_pos").size()` |
 
 **Joins preserve provenance; set algebra does not.** This is the boundary that
 decides what may return an index-aligned result:
@@ -380,13 +396,13 @@ Requirement
 | Was | Now |
 |---|---|
 | `a.intersect_with_bed(p)` | `overlap_indices(a, from_bed(p, ref=a.ref))` |
-| `a.get_overlapping_base_counts(p)["counts"]` | `overlap_indices(a, b).groupby("a_index").overlap_bases.sum()` |
-| `a.get_overlapping_base_counts(p)["max_counts"]` | `...groupby("a_index").overlap_bases.max()` |
+| `a.get_overlapping_base_counts(p)["counts"]` | `overlap_indices(a, b).groupby("a_pos").overlap_bases.sum()` |
+| `a.get_overlapping_base_counts(p)["max_counts"]` | `...groupby("a_pos").overlap_bases.max()` |
 | `a.overlaps_with_bed(p)` | `overlaps(a, from_bed(p, ref=a.ref))` |
-| `a.bases_overlap_with_bed(p)` | `overlap_indices(a, b).groupby("a_index").overlap_bases.sum()` |
+| `a.bases_overlap_with_bed(p)` | `overlap_indices(a, b).groupby("a_pos").overlap_bases.sum()` |
 | `a.overlaps_with_beds(ps)` | `[overlaps(a, from_bed(p, ref=a.ref)) for p in ps]` |
 | `a.drop_overlapping_regions(b)` | `overlap_indices(a, b, how="anti")` |
-| `a._get_fragment_coverage_sum(p)` | `overlap_indices(a, from_bed(p, ref=a.ref)).groupby("a_index").size()` |
+| `a._get_fragment_coverage_sum(p)` | `overlap_indices(a, from_bed(p, ref=a.ref)).groupby("a_pos").size()` |
 
 The last row is worth noting: the method whose migration was going to require a
 chunked reader reduces, at the call site, to a `groupby` over the primitive.
@@ -397,7 +413,7 @@ free.** It does not merely test for overlap — it reads B's *coordinate values*
 out of the join result (`contig_{rsuff}`, `start_{rsuff}`, `stop_{rsuff}`) to
 build a `Region` per overlapping blacklist interval. `overlap_indices` returns
 index pairs, not columns, so this is a genuine rewrite: take the pairs, use
-`b_index` to look the coordinates up in `b`, then group. Roughly thirty lines,
+`b_pos` to look the coordinates up in `b`, then group. Roughly thirty lines,
 and it must be called out because an earlier version of this table listed it as
 unchanged.
 
@@ -463,7 +479,7 @@ Two gaps confirmed by reading the source rather than assumed:
 
   **Therefore `overlap_indices` validates `how` itself, before the backend is
   called**, rejecting anything outside `{inner, left, right, outer, anti}` and
-  handling `anti` by composition (outer, then filter to null `b_index`) rather
+  handling `anti` by composition (outer, then filter to null `b_pos`) rather
   than forwarding it. This is a one-line guard and it is not optional: it is
   the only thing standing between a typo and an inverted blacklist filter.
 
@@ -563,10 +579,11 @@ exists): `join_on_overlap` both directions, `get_overlapping_base_counts`,
 **New coverage added:** `cluster` (both datasets), `nearest`,
 `overlap_bases_sum` (the `groupby` that replaces
 `get_overlapping_base_counts`), `overlap_indices` both directions.
+| `overlap_indices`, `nearest`, fixture manifest | `a_index`/`b_index` columns | `a_pos`/`b_pos` columns | Column rename from labels to positions. Serialisation change only — the values are identical (both were positions internally); the column names now reflect the contract. Manifest digests move because the column header is part of the CSV digest. |
 | `merge_book_ended` | 1 merged row | 2 separate rows | `merge(wiggle=0)` does not merge book-ended; this is the decided semantics (wiggle=0 = strict overlap only) |
 | `from_beds_merged_book_ended` | 1 merged row | 2 separate rows | `from_beds_merged` now delegates to `merge(wiggle=0)`; same reason as above |
 | `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
-| `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_index").overlap_bases.sum()` |
+| `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_pos").overlap_bases.sum()` |
 | `_get_fragment_coverage_sum` | test deleted | — | method deleted (0 live callers) |
 | `join_on_overlap` return type | test deleted | — | method deleted; `overlap_indices` returns a plain DataFrame by design |
 | `intersect_with_rdf` raises | test deleted | — | method deleted along with `join_on_overlap` |
