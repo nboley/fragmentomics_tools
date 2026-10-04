@@ -672,6 +672,18 @@ class TestMidpointIndexArraysContract:
 
     These tests are the regression gate for the geometry that
     ``build_region_weights`` and the parameter-recovery validator share.
+
+    **Read this before adding a test here.** ``build_region_weights`` *calls*
+    ``midpoint_index_arrays``, so a test that checks one against the other is
+    checking a function against itself: both sides move together under a
+    geometry change and the test still passes.  An earlier version of this
+    class consisted mostly of such checks while claiming in its docstrings to
+    catch a missing ``pad`` offset.  Mutation testing disproved that — flipping
+    ``half_down``/``half_up`` (in bounds, domain size preserved) passed every
+    structural test here and was caught only by
+    ``test_simulator_phase3.py::test_all_fragment_midpoints_in_region`` and
+    ``TestAsymmetricFourTableWiring``.  Guard the CONVENTION, not the
+    agreement between two callers of one implementation.
     """
 
     @pytest.mark.parametrize("region_len", [50, 200, 500, 1536])
@@ -690,14 +702,56 @@ class TestMidpointIndexArraysContract:
         # idx_lo < idx_hi always (lo is the lower-coordinate cut site)
         assert (idx_lo < idx_hi).all(), "idx_lo >= idx_hi somewhere"
 
+    @pytest.mark.parametrize("region_len", [50, 200, 500, 1536])
+    def test_midpoint_convention_is_pinned(self, region_len):
+        """The defining property of the midpoint rule, asserted directly.
+
+        A fragment occupying array indices ``[idx_lo, idx_hi)`` with length
+        ``L`` has integer midpoint ``idx_lo + L // 2`` (floor division,
+        matching the per-region count files).  Admission requires that
+        midpoint to be region-local position ``j`` — array index ``pad + j``::
+
+            idx_lo[j, li] + L // 2   == pad + j
+            idx_hi[j, li] - idx_lo[j, li] == L
+
+        This is the guard that actually bites, and it is the only test in
+        this class stated against the convention itself rather than against
+        ``build_region_weights``.  Verified by mutation: flipping
+        ``half_down``/``half_up`` fails here and passes every other test in
+        this class.
+        """
+        pad = MAX_FL_HALF
+        idx_lo, idx_hi = midpoint_index_arrays(region_len, pad)
+        Ls = np.arange(L_MIN, L_MAX + 1)[np.newaxis, :]
+        j = np.arange(region_len)[:, np.newaxis]
+
+        midpoints = idx_lo + Ls // 2
+        assert np.array_equal(
+            midpoints, np.broadcast_to(pad + j, midpoints.shape)
+        ), "idx_lo + L//2 != pad + j — the midpoint admission rule is broken"
+        assert np.array_equal(
+            idx_hi - idx_lo, np.broadcast_to(Ls, idx_hi.shape)
+        ), "idx_hi - idx_lo != L — the fragment span is wrong"
+
+    def test_pad_below_minimum_raises(self):
+        """A pad too small for the rule must raise, not return quietly.
+
+        ``idx_lo`` goes negative once ``pad < L_MAX // 2``, and NumPy reads a
+        negative index from the END of the array — so without this guard a
+        wrong pad is a silent wrong answer rather than an error.
+        """
+        for bad_pad in [0, 1, L_MAX // 2 - 1]:
+            with pytest.raises(ValueError, match="midpoint rule requires"):
+                midpoint_index_arrays(200, bad_pad)
+
     @pytest.mark.parametrize("region_len", [200, 500])
     def test_nonzero_support_matches_geometry(self, region_len):
-        """The set of nonzero (c5_idx, li) positions in w_plus / w_minus
-        is exactly the set that midpoint_index_arrays produces.
+        """Consistency check: the weight matrices are populated at the
+        positions this function returns, on the strand-correct one of the two.
 
-        This would FAIL if ``midpoint_index_arrays`` omitted the ``pad``
-        offset or used a different rounding convention — both of which
-        are the defect class the extraction is meant to prevent.
+        **Not** an offset or rounding guard — see the class docstring. What it
+        does catch is a plus/minus mix-up: plus stores at ``idx_lo``, minus at
+        ``idx_hi``, and swapping those fails here.
         """
         pad = MAX_FL_HALF
         tables = _random_tables(seed=71)
@@ -724,39 +778,14 @@ class TestMidpointIndexArraysContract:
                 f"symmetric diff = {actual_positions ^ expected_positions}"
             )
 
-    def test_wrong_pad_breaks_support(self):
-        """If midpoint_index_arrays is called with the wrong pad, its
-        output disagrees with build_region_weights' nonzero support.
+    def test_every_geometry_position_carries_weight(self):
+        """No position the geometry nominates is left unexpectedly at zero.
 
-        This is the test that would pass both with and without the offset
-        if the offset were missing — ensuring the guard is not vacuous.
-        """
-        region_len = 200
-        pad = MAX_FL_HALF
-        tables = _random_tables(seed=71)
-        rw = _build_weights(region_len, tables=tables, pad=pad)
-
-        # Deliberately compute geometry with pad=0 (wrong)
-        idx_lo_wrong, idx_hi_wrong = midpoint_index_arrays(region_len, pad=0)
-
-        # The nonzero support from the WRONG geometry must NOT match
-        # the actual weight matrices (which used pad=MAX_FL_HALF).
-        li = N_LENGTHS // 2  # pick a middle length
-        actual_plus = set(np.nonzero(rw.w_plus[:, li])[0].tolist())
-        wrong_plus = set(idx_lo_wrong[:, li].tolist())
-        assert actual_plus != wrong_plus, (
-            "Wrong-pad geometry matched actual support — the pad offset "
-            "is not being tested"
-        )
-
-    def test_build_region_weights_uses_exported_geometry(self):
-        """build_region_weights populates weights at exactly the positions
-        returned by midpoint_index_arrays with the same pad.
-
-        A direct numerical check: for each (j, li), the plus-strand weight
-        at (idx_lo[j, li], li) should be nonzero, and the corresponding
-        3' cut site is at idx_hi[j, li]. This pins the relationship that
-        the validator relies on.
+        On an all-valid synthetic region every ``(idx_lo[j, li], li)`` must
+        carry positive plus-strand weight and every ``(idx_hi[j, li], li)``
+        positive minus-strand weight.  This is a masking/normalisation check,
+        not a geometry check — it would catch ``valid`` or ``Z``/``S``
+        handling that silently zeroed admissible positions.
         """
         region_len = 300
         pad = MAX_FL_HALF

@@ -218,7 +218,7 @@ def gc_pct(c5, c3, cum_gc):
 
 
 def midpoint_index_arrays(
-    region_len: int, pad: int = MAX_FL_HALF,
+    region_len: int, pad: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Low/high array indices for every (midpoint, length) under the midpoint rule.
 
@@ -243,13 +243,31 @@ def midpoint_index_arrays(
     region_len : int
         Region length in bp (the original, unexpanded region).
     pad : int
-        Number of extra cut-site positions on each side.
+        Number of extra cut-site positions on each side.  **Required, with no
+        default**, and must be at least ``L_MAX // 2``.  There is deliberately
+        no default: supplying one is how a caller ends up re-deriving the pad
+        instead of reading the authoritative ``RegionWeights.pad``, which is
+        the duplication this function exists to remove.
+
+    Raises
+    ------
+    ValueError
+        If ``pad < L_MAX // 2``.  Such a pad makes ``idx_lo`` negative, and
+        NumPy reads a negative index from the END of the array — so without
+        this check a wrong pad is a silent wrong answer rather than an error.
 
     Returns
     -------
     idx_lo : ndarray, shape ``(region_len, N_LENGTHS)``, dtype intp
     idx_hi : ndarray, shape ``(region_len, N_LENGTHS)``, dtype intp
     """
+    if pad < L_MAX // 2:
+        raise ValueError(
+            f"pad={pad} but the midpoint rule requires pad >= L_MAX // 2 = "
+            f"{L_MAX // 2}; a smaller pad yields negative idx_lo, which NumPy "
+            f"would silently read from the end of the array. "
+            f"Pass pad=MAX_FL_HALF ({MAX_FL_HALF}), or RegionWeights.pad."
+        )
     Ls = np.arange(L_MIN, L_MAX + 1)          # (N_LENGTHS,)
     half_down = Ls // 2                        # floor(L/2)
     half_up = Ls - half_down                   # ceil(L/2)
