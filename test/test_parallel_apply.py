@@ -347,37 +347,52 @@ class TestConcurrentCallers:
         assert "exc" not in captured, f"unexpectedly raised: {captured.get('exc')}"
         assert captured["out"] == [0, 10, 20, 30]
 
+    # Both monitor tests identify the monitor by the object tqdm stores on the
+    # class, never by thread name: tqdm names that thread "tqdm_monitor" only
+    # from 4.69.0 on, and the pinned test env has 4.67.1, where it is an
+    # anonymous "Thread-N". A name-based check passes or fails on the tqdm
+    # version rather than on the behaviour under test.
+
     def test_monitor_thread_is_gone_after_the_call(self):
         # The monitor outlives the bar that started it, so without this every
         # later call in the process forks a multi-threaded parent.
-        import threading
-
         from tqdm import tqdm as std_tqdm
 
         list(std_tqdm(range(2), disable=True))
-        assert any(t.name == "tqdm_monitor" for t in threading.enumerate()), (
-            "expected a monitor to exist before the call"
-        )
+        monitor = std_tqdm.__dict__.get("monitor")
+        assert monitor is not None, "expected a monitor to exist before the call"
+        assert monitor.is_alive()
 
         make_rdf(4).parallel_apply(_identity_start, n_workers=2, verbose=False)
 
-        assert not any(t.name == "tqdm_monitor" for t in threading.enumerate())
+        assert not monitor.is_alive(), "the monitor thread survived the call"
+        assert std_tqdm.__dict__.get("monitor") is None
         assert std_tqdm.monitor_interval != 0, "monitor_interval not restored"
 
     def test_monitor_on_a_tqdm_SUBCLASS_is_also_stopped(self):
         # tqdm stores the monitor on the class that built the bar, so
         # tqdm.auto / tqdm.notebook keep their own. Checking only the base
         # class misses the notebook case, which is the common one.
-        import threading
-
         from tqdm import tqdm as std_tqdm
 
         class _SubBar(std_tqdm):
             pass
 
+        # tqdm builds a new monitor only when the one it inherits is absent or
+        # dead. Any earlier bar in this process leaves the base class holding a
+        # live one, and the subclass then shares it -- so without clearing it
+        # first the subclass never gets its own and this test proves nothing.
+        base_monitor = std_tqdm.__dict__.get("monitor")
+        if base_monitor is not None:
+            base_monitor.exit()
+            std_tqdm.monitor = None
+
         try:
             list(_SubBar(range(2), disable=True))
-            assert _SubBar.__dict__.get("monitor") is not None
+            sub_monitor = _SubBar.__dict__.get("monitor")
+            assert sub_monitor is not None, (
+                "precondition: the subclass must hold its own monitor"
+            )
             assert std_tqdm.__dict__.get("monitor") is None, (
                 "precondition: the base class must NOT hold the monitor"
             )
@@ -385,13 +400,14 @@ class TestConcurrentCallers:
             make_rdf(4).parallel_apply(_identity_start, n_workers=2,
                                        verbose=False)
 
-            assert not any(
-                t.name == "tqdm_monitor" for t in threading.enumerate()
-            ), "a subclass's monitor thread survived the call"
+            assert not sub_monitor.is_alive(), (
+                "a subclass's monitor thread survived the call"
+            )
             assert _SubBar.__dict__.get("monitor") is None
         finally:
-            if _SubBar.__dict__.get("monitor") is not None:
-                _SubBar.monitor.exit()
+            leftover = _SubBar.__dict__.get("monitor")
+            if leftover is not None:
+                leftover.exit()
                 _SubBar.monitor = None
 
     def test_nested_calls_work(self):

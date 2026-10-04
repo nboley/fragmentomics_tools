@@ -182,3 +182,58 @@ class TestS9CloseHandles:
         )
         sdf.detach_h5()
         assert not h5._closed
+
+
+class TestLiftOverRefusesAttachedFragmentArrays:
+    """SRDF inherits lift_over from RegionDataFrame, which knows nothing about
+    fragment arrays. Unguarded, lifting an SRDF produced new-assembly
+    coordinates carrying fragments aligned to the OLD assembly -- silently.
+
+    Unlike the resize overrides, there is nothing to recompute: the fragments
+    cannot be transformed across assemblies at all. The guard refuses instead.
+    """
+
+    @staticmethod
+    def _srdf(with_fragment_arrays):
+        cols = {
+            "contig": ["chr1", "chr1"],
+            "start": [1000, 2000],
+            "stop": [2000, 3000],
+            "sample_id": ["s1", "s1"],
+            "frag_h5": ["/data/s1.h5", "/data/s1.h5"],
+        }
+        if with_fragment_arrays:
+            cols["fragment_array"] = [np.zeros(10), np.ones(10)]
+        return SampleAndRegionDataFrame(pd.DataFrame(cols), ref="hg19")
+
+    def test_raises_when_fragment_arrays_attached(self):
+        srdf = self._srdf(with_fragment_arrays=True)
+        assert srdf.has_fragment_array
+        with pytest.raises(ValueError, match="fragments were aligned to the"):
+            srdf.lift_over("hg38")
+
+    def test_error_names_the_remedy(self):
+        """A refusal that does not say what to do instead just moves the wall."""
+        srdf = self._srdf(with_fragment_arrays=True)
+        with pytest.raises(ValueError) as exc:
+            srdf.lift_over("hg38")
+        msg = str(exc.value)
+        assert "drop the fragment arrays" in msg
+        assert "re-attach" in msg
+
+    def test_guard_does_not_fire_without_fragment_arrays(self):
+        """The guard must not break the legitimate path.
+
+        Without fragment arrays the call has to get PAST the guard. It may
+        still fail downstream for want of a liftover chain in the test env --
+        that is fine and distinguishable, because only the guard mentions
+        fragment arrays.
+        """
+        srdf = self._srdf(with_fragment_arrays=False)
+        assert not srdf.has_fragment_array
+        try:
+            srdf.lift_over("hg38")
+        except Exception as e:
+            assert "fragment array" not in str(e), (
+                f"guard fired on a frame with no fragment arrays: {e}"
+            )
