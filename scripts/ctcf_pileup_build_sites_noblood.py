@@ -25,11 +25,11 @@ Then the SAME remaining filters as the main run:
   3. drop sites too near contig edges (full TILE + model margin must fit)
   4. keep strong motifs (top-quartile tf_top_score), cap to N_MAX strongest.
 
-Interval overlap goes through the library (pybedtools -> bedtools binary).  bedtools
-ships in the biomarker_env conda env's bin/; ensure that bin is on PATH before running
-(e.g. `export PATH=.../envs/biomarker_env/bin:$PATH`).  If bedtools is unavailable the
-RegionDataFrame ops will raise -- there is deliberately NO hand-rolled overlap fallback
-for the hematopoietic/DHS filters, so a silent divergence cannot creep in.
+Interval overlap goes through the library (`fragmentomics_tools.intervals`,
+backed by bioframe).  **No external binary is needed** -- this previously
+required the `bedtools` binary on PATH via pybedtools, and that requirement is
+gone.  There is deliberately NO hand-rolled overlap fallback for the
+hematopoietic/DHS filters, so a silent divergence cannot creep in.
 
 Emits sites.npz (same schema as the main builder) + sites_report.json.  CPU-only, cheap.
 """

@@ -54,8 +54,11 @@ def drop_blacklisted_windows(allsites, half):
     same BED -- a disagreement would silently leave masked positions inside
     "blacklist-clear" sites.
 
-    Requires the bedtools binary on PATH (ships in the biomarker_env conda
-    env's bin/).  There is deliberately NO hand-rolled fallback.
+    Needs no external binary -- the overlap runs through
+    `fragmentomics_tools.intervals` on bioframe.  This previously required the
+    `bedtools` binary on PATH via pybedtools, which was a real operational
+    hazard: that bin is frequently absent from PATH in sandboxes and AWS Batch
+    containers.  There is deliberately NO hand-rolled fallback.
     """
     windows = pd.DataFrame(
         {
