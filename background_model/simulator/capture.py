@@ -29,6 +29,7 @@ from background_model.simulator.weights import (
     N_LENGTHS,
     GC_BIN_WIDTH,
     build_predict_lut,
+    gc_bin_index,
 )
 
 # ── paths ─────────────────────────────────────────────────────────────────
@@ -78,9 +79,69 @@ def load_duphist(sample: str, duphist_dir: str = DUPHIST_DIR) -> pd.DataFrame:
     return df[(df.length >= 1) & (df.length <= MAX_SANE_LENGTH)]
 
 
+def prebin_gc_to_midpoints(df: pd.DataFrame) -> pd.DataFrame:
+    """Snap the duphist's ``gc`` to ``SIM_GC_BINS`` midpoints via the FLOOR rule.
+
+    **This exists because of a measured defect.** ``SIM_GC_BINS`` are *inclusive*
+    integer ranges ``[(0,4), (5,9), ..., (95,100)]``, and ``flgc``'s ``_bin_index``
+    matches with ``lo <= value <= hi``, returning ``None`` otherwise — whereupon
+    ``fit()`` does ``continue`` and the cell is **silently dropped**. Inclusive
+    integer bins leave a 1-wide gap every 5 (``(4,5)``, ``(9,10)``, ... ``(94,95)``),
+    and the duphist's ``gc`` is *not* integral: it is ``k * 100/254`` (the uint8 GC
+    encoding showing through), e.g. ``4.331, 4.724, 9.055, 9.449``. Measured on
+    ``RD-56804__duphist_wg.tsv.gz``: **17.99% of molecule mass fell outside every
+    bin** (18.12% within L=25..180) and was dropped from the fit. The loss was not
+    random — it removed the upper fringe of each 5% period, so every retained bin's
+    ``P(seen)`` was fitted on a GC-downshifted subsample.
+
+    A prior comment here asserted "duphist GC values are integers (whole-number
+    percent), so non-integer values don't arise in the fit". That premise was false;
+    it named the exact failure mode and then waived it. Do not reinstate it.
+    Note the hazard was never actually unknown, only inconsistently known:
+    ``weights.gc_bin_index``'s own docstring says the floor rule is "also correct for
+    non-integer GC (which ``_bin_index`` would drop)". Two modules held contradictory
+    beliefs about the same column, and the wrong one governed the fit — which is the
+    argument for having exactly ONE binning rule rather than two that agree on paper.
+
+    Snapping to midpoints (2.5, 7.5, ..., 97.5) is the fix that leaves ``flgc``
+    untouched: each midpoint sits strictly inside exactly one inclusive bin, so
+    ``_bin_index`` can neither gap nor misassign, and it is already the grid
+    ``predict_lut_from_model`` evaluates ``predict`` on. The binning rule itself is
+    single-sourced from ``weights.gc_bin_index`` (floor + clip), the same rule
+    ``build_region_weights`` uses at predict time — so the fit and the gather now
+    agree by construction rather than by coincidence.
+
+    Rejected alternative: passing overlapping bins ``(0,5),(5,10),...``.
+    ``_bin_index`` returns the FIRST match, so an exact 5.0 would land in bin 0 while
+    the floor rule says bin 1. That only "works" because ``k * 100/254`` never hits a
+    multiple of 5 except 0 and 100 — which is the same data-dependent reasoning that
+    produced this bug.
+
+    The returned frame is re-aggregated over ``(length, gc, multiplicity)``: snapping
+    collapses several source rows into one cell, which would otherwise leave
+    **repeated** ``multiplicity`` values inside a cell. A duphist cell must carry one
+    ``molecule_keys`` entry per multiplicity, so the sum is required for correctness,
+    not tidiness.
+    """
+    gc_idx = gc_bin_index(df.gc.to_numpy())
+    gc_mid = gc_idx * GC_BIN_WIDTH + GC_BIN_WIDTH / 2.0
+    return (
+        df.assign(gc=gc_mid)
+        .groupby(["length", "gc", "multiplicity"], as_index=False, sort=False)[
+            "molecule_keys"
+        ]
+        .sum()
+    )
+
+
 def build_cell_map(df: pd.DataFrame) -> dict:
     """Build the ``(length, gc) -> (k_vals, obs, kmax, seen_unique)`` map
-    that ``GCFlDistModel.fit()`` expects."""
+    that ``GCFlDistModel.fit()`` expects.
+
+    GC is snapped to bin midpoints first — see ``prebin_gc_to_midpoints`` for the
+    defect this prevents.
+    """
+    df = prebin_gc_to_midpoints(df)
     cell_map = {}
     for (length, gc), g in df.groupby(["length", "gc"], sort=False):
         k = g.multiplicity.to_numpy()

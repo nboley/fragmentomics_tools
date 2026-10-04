@@ -278,6 +278,99 @@ class TestMarginalFL:
             build_marginal_fl(df)
 
 
+# ── 3b. GC pre-binning: the ~18% silent-drop defect ─────────────────────
+
+class TestPrebinGCToMidpoints:
+    """Guards the fix for a MEASURED defect: ``SIM_GC_BINS`` are inclusive integer
+    ranges with a 1-wide gap every 5, ``flgc._bin_index`` returns None in a gap and
+    ``fit()`` then does ``continue``, and the duphist's ``gc`` is ``k * 100/254`` —
+    so 17.99% of molecule mass was silently dropped from the capture-surface fit.
+    """
+
+    def _fractional_duphist(self):
+        """Duphist whose gc values are the real encoding, k * 100/254, including
+        values that land in the inclusive-bin gaps (4.33, 4.72, 9.06, ...)."""
+        import pandas as pd
+        gc = np.array([4.330700, 4.724400, 9.055100, 9.448800, 14.173200])
+        return pd.DataFrame({
+            "length": [100] * len(gc),
+            "gc": gc,
+            "multiplicity": [1] * len(gc),
+            "molecule_keys": [1000] * len(gc),
+        })
+
+    def test_gap_values_are_not_dropped(self):
+        """Every input row must survive into a cell.
+
+        MUST FAIL if the pre-binning is removed: without it these five gc values
+        match no ``SIM_GC_BINS`` entry and the fit discards them. Asserted on the
+        ACTUAL bins, so it breaks if the bin definition regresses to inclusive.
+        """
+        from background_model.simulator.capture import (
+            prebin_gc_to_midpoints, SIM_GC_BINS,
+        )
+        out = prebin_gc_to_midpoints(self._fractional_duphist())
+        assert out.molecule_keys.sum() == 5000, "molecule mass was lost"
+        for gc in out.gc:
+            hits = [i for i, (lo, hi) in enumerate(SIM_GC_BINS) if lo <= gc <= hi]
+            assert len(hits) == 1, (
+                f"gc={gc} matches {len(hits)} of SIM_GC_BINS, need exactly 1 — "
+                f"flgc._bin_index drops a non-match and takes the first of a tie"
+            )
+
+    def test_snapped_values_use_the_floor_rule(self):
+        """Snapping must agree with ``weights.gc_bin_index``, not with any
+        independently reimplemented rounding.
+
+        MUST FAIL on a rounding-convention change. For the five fixture values the
+        two rules give disjoint answers::
+
+            floor: 4.33, 4.72 -> 2.5 | 9.06, 9.45 -> 7.5 | 14.17 -> 12.5
+            round: 4.33, 4.72 -> 7.5 | 9.06, 9.45 -> 12.5 | 14.17 -> 17.5
+
+        so a round-based implementation yields {7.5, 12.5, 17.5} and fails here
+        while still passing the no-drop test above.
+        """
+        from background_model.simulator.capture import prebin_gc_to_midpoints
+        out = prebin_gc_to_midpoints(self._fractional_duphist())
+        got = sorted(out.gc.unique().tolist())
+        assert got == [2.5, 7.5, 12.5], f"expected floor midpoints, got {got}"
+
+    def test_collapsed_cells_aggregate_multiplicity(self):
+        """Rows that collapse into one cell must SUM per multiplicity.
+
+        MUST FAIL if the groupby-sum is dropped: a duphist cell carries one
+        ``molecule_keys`` entry per multiplicity, so leaving repeated multiplicity
+        rows inside a cell silently corrupts the histogram ``fit()`` reads. A
+        no-drop check cannot catch this because no mass is lost.
+        """
+        import pandas as pd
+        from background_model.simulator.capture import prebin_gc_to_midpoints
+        # three gc values in the SAME bin (0-5), all multiplicity 1
+        df = pd.DataFrame({
+            "length": [100, 100, 100],
+            "gc": [0.787400, 1.181100, 1.574800],
+            "multiplicity": [1, 1, 1],
+            "molecule_keys": [7, 11, 13],
+        })
+        out = prebin_gc_to_midpoints(df)
+        assert len(out) == 1, (
+            f"expected 1 aggregated row, got {len(out)} — repeated multiplicity "
+            f"values inside one cell corrupt the duphist histogram"
+        )
+        assert out.molecule_keys.iloc[0] == 31
+        assert out.multiplicity.iloc[0] == 1
+
+    def test_gc_100_lands_in_the_last_bin(self):
+        """gc = 100.0 occurs in real data and must clamp to bin 19, not 20."""
+        import pandas as pd
+        from background_model.simulator.capture import prebin_gc_to_midpoints
+        df = pd.DataFrame({"length": [100], "gc": [100.0],
+                           "multiplicity": [1], "molecule_keys": [5]})
+        out = prebin_gc_to_midpoints(df)
+        assert out.gc.iloc[0] == 97.5, f"gc=100 snapped to {out.gc.iloc[0]}"
+
+
 # ── 4. hex_fwd / hex_rc RC contract ─────────────────────────────────────
 
 class TestHexamerRCContract:
