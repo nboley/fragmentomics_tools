@@ -962,6 +962,93 @@ per-hexamer count overdispersion is the transfer risk) was falsified by a
 pre-flight measurement: the effect is ~4% excess variance at our counts, and the
 conditional loss cannot see it regardless.
 
+## 10. Cut-Site Fragment Model — Real-Data Comparison (2026-10-01)
+
+A new model family trained on per-fragment data rather than aggregate 12-track
+position profiles. Three cut-site model ablations and two old CNN runs on the
+same tile1536 region set, evaluated on a common **fragment-level multinomial
+NLL** metric via `eval_fragment_nll.py` / `eval_cutsite_fragment_nll.py`.
+
+### 10.1 Stores
+
+| Store | Path | Tiles | Data |
+|---|---|---|---|
+| Real cut-site | `cut_site_stores/quiet_tile1536.zarr` | 66,649 | per-fragment (start, length, strand) |
+| Real 12-track | `stores/12track_tile1536/bg_store_b8d7ba35.zarr` | 66,649 | aggregate 12-track endpoint counts |
+| Sim cut-site | `cut_site_stores/sim_tile1536.zarr` | 66,649 | simulated fragments |
+| Sim 12-track | `stores/sim_12track_tile1536/bg_store_21d9a69a.zarr` | 66,649 | simulated 12-track counts |
+
+### 10.2 Training Results (real data)
+
+**Cut-site model ablations** (tile_size=1024, 20 epochs, A10G, ~4.5h each):
+
+| Run | Mult wt | NB wt | val_mult_nll | val_nb_loss | Notes |
+|---|---|---|---|---|---|
+| NB-only | 0.0 | 1.0 (fixed) | 12.669 | **5.432** | Count-only, val_nb barely learns |
+| Mult-only | 1.0 | 0.0 | **12.011** | 5.571 | Shape-only, best mult NLL |
+| Combined (run6) | 1.0 | 1.0→0.0 | 12.718 | 5.456 | NB warmup→mult, tile2560 |
+
+**Old CNN models** (lr=1e-4, fp32, 30 min cap → 7 epochs):
+
+| Run | Loss | val_mult_nll (12-track) |
+|---|---|---|
+| Multinomial | multinomial | 6.738 |
+| NB-frozen-disp | nb_offset (frozen r) | 6.737 |
+
+### 10.3 Fragment-Level NLL (common metric, same val set)
+
+All models evaluated with the same per-fragment multinomial NLL — the metric
+the cut-site model directly optimises. For old CNN models, fragment
+probabilities are derived from the 12-track position predictions via
+`eval_fragment_nll.py` (product of endpoint probabilities × marginal p(L),
+normalized).
+
+| Model | Fragment NLL | Method |
+|---|---|---|
+| **Stage 1 hex baseline** | **12.024** | Analytical (zero training) |
+| **Cut-site Mult-only** | **12.012** | `eval_cutsite_fragment_nll.py` |
+| Old CNN Multinomial | 12.325 | `eval_fragment_nll.py` |
+| Old CNN NB-frozen | 12.325 | `eval_fragment_nll.py` |
+| Cut-site NB-only | 12.669 | `eval_cutsite_fragment_nll.py` |
+
+**Key findings:**
+- The analytical hex baseline (12.024) already beats the old CNN (12.325) with
+  **zero training** — the factored model p_start × p_stop × p(L) captures
+  more than the CNN's 12-track aggregation loses.
+- Cut-site Mult-only (12.012) is the best trained model, improving only 0.012
+  nats over the analytical baseline — most of the signal is in the hex tables.
+- Both old CNN models give identical fragment NLL (12.325), confirming the
+  frozen-dispersion NB correctly approximates multinomial for shape learning.
+
+### 10.4 Stage 1 — Conv Approximation of Hex Tables
+
+Can the model's L1 architecture (Conv1d(4, 128, k=6) + LeakyReLU) learn the
+analytical hex table values? Trained on per-position multinomial loss predicting
+cut-site density from one-hot sequence.
+
+| Data | Train tiles | Epochs | Final loss | Pearson r (start_fwd / stop_fwd / start_rev / stop_rev) |
+|---|---|---|---|---|
+| Real | 10,000 | 30 | 6.668 | 0.950 / 0.904 / 0.953 / 0.902 |
+| Sim | 20,000 | 30 | 6.915 | 0.350 / 0.511 / 0.543 / 0.463 |
+
+The conv achieves r ≈ 0.90–0.95 on real data — it can approximate hex tables
+well but not perfectly (the LeakyReLU nonlinearity means it is not a direct
+lookup table). On sim data the correlations are much lower (r ≈ 0.35–0.54)
+because the signal-to-noise is worse (uniform fragment density, lower counts).
+
+### 10.5 Sim-Data Training (1 epoch, 30 min timeout)
+
+| Model | val_mult_nll | val_nb_loss | Status |
+|---|---|---|---|
+| CS Combined | **12.093** | 4.722 | Stable |
+| CS Mult-only | **12.095** | 4.734 | Stable |
+| CS NB-only | 12.678 | **4.721** | Stable |
+| Old CNN NB-frozen | 6.991 → 385 | — | Diverged ep 1 |
+| Old CNN Multinomial | 42.4 → 52K | — | Diverged immediately |
+
+Both old CNN models diverge on the low-count sim data (~6 counts/track).
+Cut-site models are stable with 1 epoch.
+
 ## Appendix: Run Inventory
 
 All runs at `/efs/analytics/nathanboley/background_model/simulation_v2/runs/`:
@@ -1008,5 +1095,134 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 | `lrsweep_cnn_lr2e-3` | cnn 128k/1L | 2e-3 | 7.552690 | 39 | 67.0% | not converged (ep 39/40) |
 | `lrsweep_cnn_lr7e-3` | cnn 128k/1L | 7e-3 | 7.579552 | 31 | 37.0% | diverged ep31 (pre-div min) |
 | `lrsweep_ken_lr2e-2` | ken 512k/2L | 2e-2 | 7.612706 | 0 | — | **collapsed ep0 — equals uniform, not a result** |
+
+---
+
+## 10. Cut-Site Fragment Model — Ablation & Baseline Comparison (2026-10-01)
+
+A new model family that predicts **per-fragment** probabilities p(m, L, s)
+directly, rather than aggregate per-position profiles. Trained on the same
+regions (66,649 tiles, tile1536) with a single real sample (RD-56670).
+
+### 10.1 Fragment-Level NLL — Unified Comparison
+
+All models evaluated on the same val set (6,652 regions, 67,477 fragments)
+using the same per-fragment multinomial NLL metric. Old CNN models evaluated
+via `eval_fragment_nll.py` which bridges 12-track position predictions to
+fragment probabilities via p_start × p_stop × p(L) / Z.
+
+| Model | Fragment NLL | Training | Notes |
+|-------|-------------|----------|-------|
+| **Cut-site Mult-only** | **12.012** | 20 epochs, lr=1e-3 | Best trained model |
+| **Stage 1 hex baseline** | **12.024** | Zero training (analytical MLE) | Factored: p_start × p_stop × p(L) |
+| Stage 2 correction (ep 1) | 12.048 | 2 epochs, hex baseline + neural correction | Still improving |
+| Old CNN Multinomial | 12.325 | 7 epochs, lr=1e-4, fp32 | Position-profile → fragment bridge |
+| Old CNN NB-frozen-disp | 12.325 | 7 epochs, lr=1e-4, fp32 | Frozen high-r ≈ multinomial |
+| Cut-site NB-only | 12.669 | 20 epochs, lr=1e-3 | Not optimizing multinomial loss |
+
+**Key findings:**
+
+1. The analytical hex-table baseline (12.024) — computed from empirical
+   hexamer cut frequencies with zero gradient descent — nearly matches the
+   best trained cut-site model (12.012). The 0.012-nat gap is the value of
+   everything the neural network learns beyond hexamer lookup + length marginal.
+
+2. The cut-site Mult-only model beats the old 12-track CNN by 0.31 nats on
+   the fragment metric (12.012 vs 12.325), but most of that gap is already
+   closed by the analytical baseline (12.024 vs 12.325 = 0.30 nats).
+
+3. The old CNN's fragment NLL (12.325) is substantially worse than the
+   factored baseline (12.024), meaning the 12-track aggregation loses
+   information that the factored start × stop model preserves.
+
+### 10.2 Cut-Site Ablation — Training Dynamics
+
+Three loss-weighting variants of the same architecture (Conv1d(4,128,k=6) +
+SSM banks + shape/dispersion heads), all on real data, tile_size=1024:
+
+| Variant | Mult weight | NB weight | val_mult_nll (ep 19) | val_nb_loss (ep 19) |
+|---------|------------|-----------|---------------------|-------------------|
+| **Mult-only** | 1.0 | 0.0 | **12.011** | 5.571 |
+| NB-only | 0.0 | 1.0 (fixed) | 12.669 | **5.432** |
+| Combined (run6, tile2560) | 1.0 | 1.0→0.0 (annealed) | 12.718 | 5.456 |
+
+- NB-only barely learns (val_nb drops 0.012 over 20 epochs — near-instant
+  convergence).
+- Mult-only shows steady improvement (12.047 → 12.008 over 20 epochs).
+- The two losses pull in different directions: optimizing one hurts the other.
+
+### 10.3 Stage 1 — Analytical Hex-Table Baseline
+
+Computed empirical cut-site probabilities by counting hexamer occurrences
+at fragment endpoints across all training tiles. Four tables (start_fwd,
+stop_fwd, start_rev, stop_rev), 4096 entries each. Combined with empirical
+marginal p(L) to form the factored baseline:
+
+    log p₀(m, L, s) = log p_start(hex) + log p_stop(hex) + log p(L) - log Z
+
+| Data | Baseline NLL | Fragments | Regions |
+|------|-------------|-----------|---------|
+| Real | 12.024 | 67,477 | 6,652 |
+| Sim | 11.932 | 154,917 | 6,664 |
+
+Sim baseline is better because the simulator generates from hexamer tables,
+so the factored model is the true data-generating process.
+
+**Conv approximation test:** Conv1d(4, 128, k=6) + LeakyReLU + Conv1d(128, 4, 1)
+trained to predict the analytical hex-table values from one-hot sequence:
+
+| Table | Pearson r (real, 30 ep) | Pearson r (sim, 30 ep) |
+|-------|------------------------|------------------------|
+| start_fwd | 0.950 | 0.350 |
+| stop_fwd | 0.904 | 0.511 |
+| start_rev | 0.953 | 0.543 |
+| stop_rev | 0.902 | 0.463 |
+
+The conv architecture recovers ~90-95% correlation on real data but only
+~35-55% on sim data (lower signal-to-noise with fewer fragments per hexamer).
+
+### 10.4 Stage 2 — Neural Correction Model
+
+Model outputs additive log-corrections to the hex baseline:
+
+    log p(m, L, s) = log_softmax(log_p0 + f_θ(seq))
+
+Hex tables are trainable parameters initialized from Stage 1 MLE. Only
+2 epochs completed (30 min timeout):
+
+| Data | Epoch 0 | Epoch 1 | Stage 1 baseline |
+|------|---------|---------|-----------------|
+| Real | 12.072 | **12.048** | 12.024 |
+| Sim | 12.063 | **12.017** | 11.932 |
+
+The correction network is learning — epoch 0→1 shows clear improvement.
+Longer runs needed to assess convergence.
+
+### 10.5 Sim Data — Model Stability
+
+All models trained on simulated data (66,649 tiles, 37 frags/region, 30 min
+cap). Cut-site models are stable; old CNN models diverge on low-count data.
+
+| Model | val_mult_nll (ep 0) | Status |
+|-------|-------------------|--------|
+| CS Mult-only | 12.095 | Stable |
+| CS Combined | 12.093 | Stable |
+| CS NB-only | 12.678 | Stable (not optimizing mult) |
+| Old CNN Multinomial | 42.371 → 52K | **Diverged** (lr=1e-4 too high) |
+| Old CNN NB-frozen | 6.464 → 385 | **Diverged** by epoch 1 |
+
+### 10.6 Next Steps — Two-Stage Training Design
+
+See `docs/pending/two_stage_training.md` for the full design. Key decisions:
+
+1. Hex tables are **trainable** parameters (initialized from empirical MLE)
+2. k=6 (4096 hexamers), optimize on real data later
+3. NB count loss stays **separate** from the Stage 2 correction
+4. Baseline pooled across all regions (global MLE), not per-region
+
+The sim-data sanity check: on simulated data generated from hexamer tables,
+the Stage 2 corrections should converge to zero — the baseline IS the ground
+truth. Any improvement beyond baseline indicates learned correlations; any
+degradation indicates overfitting.
 
 <!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/training_analysis.md", "title": "[WIP] Background Model v2 — Simulation Study Training Analysis", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T22:07:11.520404+00:00", "page_id": "4963532846", "published_version": 3} -->

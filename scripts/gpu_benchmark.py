@@ -11,7 +11,7 @@ from background_model.cut_site_model import CutSiteFragmentModel
 
 P = 2048
 model = CutSiteFragmentModel(
-    L_min=25, L_max=179, tile_size=P,
+    L_min=25, L_max=180, tile_size=P,
     N1=128, K=128, N2=32, H=32, L_chunk=32,
 ).cuda()
 l_in = model.calc_input_region_size(P)

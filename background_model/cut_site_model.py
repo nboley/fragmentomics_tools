@@ -5,6 +5,13 @@ The model emits one logit per (centre m, length L, strand s) triple and trains
 on the fragment multinomial.  It joins the bake-off alongside the 12-track
 model class but does NOT subclass any existing model or mixin.
 
+Two-stage training (docs/pending/two_stage_training.md):
+  Stage 1: Analytical hex-table baseline — log p₀(m, L, s) from empirical
+           hexamer cut-site frequencies + marginal p(L).  Zero training.
+  Stage 2: Neural correction — model outputs additive log-corrections f_θ,
+           so log p(m,L,s) = log p₀(m,L,s) + f_θ(seq, m, L, s), re-normalized.
+           Hex tables are trainable parameters initialized from Stage 1.
+
 Consumes primitives from the frozen background_model_core.py (losses, masking,
 dispersion pooling) without modifying them.
 """
@@ -13,6 +20,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
+import numpy as np
 import lightning as L
 import torch
 import torch.nn as nn
@@ -75,7 +83,7 @@ LENGTH_GROUP_WIDTH = 15
 # ---------------------------------------------------------------------------
 
 DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)               # 25
-DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1           # 179 (half-open)
+DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS)               # 180 (inclusive)
 
 
 def _compute_geometry(L_min: int, L_max: int):
@@ -91,6 +99,126 @@ def length_to_group(L: torch.Tensor, L_min: int) -> torch.Tensor:
     """Map fragment length to group index: g = min((L - L_min) // 15, 9)."""
     return torch.clamp((L - L_min) // LENGTH_GROUP_WIDTH,
                         max=N_LENGTH_GROUPS - 1)
+
+
+# ---------------------------------------------------------------------------
+# Hex-table baseline (Stage 1)
+# ---------------------------------------------------------------------------
+
+HEX_K = 6
+N_HEX = 4 ** HEX_K   # 4096
+
+
+def _onehot_to_hex_indices(x_onehot: torch.Tensor, k: int = HEX_K) -> torch.Tensor:
+    """Convert (B, 4, L) one-hot sequence to (B, L-k+1) hexamer indices.
+
+    Each index is in [0, 4^k).  Positions with ambiguous bases (no channel
+    active, i.e. N) get index 0 (safe — just maps to a single hex entry).
+    """
+    # argmax over channel dim: (B, L) base indices 0-3
+    bases = x_onehot.argmax(dim=1)  # (B, L)
+    powers = (4 ** torch.arange(k, device=x_onehot.device)).long()  # (k,)
+    # Sliding window: sum base[p+i] * 4^i for i in 0..k-1
+    # Use unfold for efficiency
+    bases_unf = bases.unfold(1, k, 1)  # (B, L-k+1, k)
+    indices = (bases_unf * powers[None, None, :]).sum(dim=-1)  # (B, L-k+1)
+    return indices
+
+
+def compute_log_p0(
+    x_onehot: torch.Tensor,
+    hex_log_start_fwd: torch.Tensor,
+    hex_log_stop_fwd: torch.Tensor,
+    hex_log_start_rev: torch.Tensor,
+    hex_log_stop_rev: torch.Tensor,
+    log_pL: torch.Tensor,
+    tile_size: int,
+    L_min: int,
+    L_max: int,
+) -> torch.Tensor:
+    """Compute factored baseline log p₀(m, L, s) from hex tables.
+
+    Args:
+        x_onehot: (B, 4, l_in) one-hot sequence (includes conv padding)
+        hex_log_*: (4096,) log-probability tables (trainable parameters)
+        log_pL: (n_L,) log marginal length distribution
+        tile_size: P (number of scored positions)
+        L_min, L_max: fragment length range
+
+    Returns:
+        log_p0: (B, P, n_L, 2) unnormalized log-scores for each (m, L, s).
+                NOT log-softmax-ed — the caller normalises after adding f_θ.
+    """
+    B = x_onehot.shape[0]
+    n_L = L_max - L_min + 1
+
+    # Hex indices over the full sequence (including margins for endpoint lookup)
+    hex_idx = _onehot_to_hex_indices(x_onehot)  # (B, l_in - k + 1)
+
+    # The one-hot sequence has WINDOW_HALF positions of margin on each side
+    # of the tile_size scored positions.  After Conv1d(k=6), h starts at
+    # position 0 of x_onehot, and the scored positions start at WINDOW_HALF
+    # in h-space.  For hex lookups, position p in the tile corresponds to
+    # hex_idx position (WINDOW_HALF + p) in x_onehot-space (since conv
+    # trims k-1=5, but hex_idx also trims k-1, so they align).
+
+    # Per-position log cut probabilities from hex tables
+    # hex_idx covers positions [0, l_in - k + 1) in x_onehot space
+    # Scored positions [0, P) in tile space correspond to hex_idx
+    # positions [WINDOW_HALF, WINDOW_HALF + P) — BUT we also need
+    # endpoint positions at offsets from the scored centre m.
+    #
+    # For fragment (m, L, s):
+    #   +strand: start = m - L//2,           stop = m - L//2 + L - 1
+    #   -strand: start = m - L//2 + L - 1,   stop = m - L//2
+    #
+    # These positions need to be valid hex_idx indices.  The WINDOW_HALF
+    # margin (128) ensures positions up to L_max//2 = 89 outside the tile
+    # are available.
+
+    # Look up per-position log-probs for all 4 tables
+    log_sf = hex_log_start_fwd[hex_idx]   # (B, n_hex_pos)
+    log_ef = hex_log_stop_fwd[hex_idx]    # (B, n_hex_pos)
+    log_sr = hex_log_start_rev[hex_idx]   # (B, n_hex_pos)
+    log_er = hex_log_stop_rev[hex_idx]    # (B, n_hex_pos)
+
+    # Build log_p0 (B, P, n_L, 2) by gathering endpoint log-probs
+    # For each centre m in [0, P), length L in [L_min, L_max]:
+    #   start_pos = WINDOW_HALF + m - L//2           (in hex_idx coords)
+    #   stop_pos  = WINDOW_HALF + m - L//2 + L - 1
+    L_vals = torch.arange(L_min, L_max + 1, device=x_onehot.device)  # (n_L,)
+    m_vals = torch.arange(tile_size, device=x_onehot.device)          # (P,)
+
+    # start_pos[m, L] = WINDOW_HALF + m - L//2
+    # stop_pos[m, L]  = start_pos + L - 1
+    start_pos = (WINDOW_HALF + m_vals[:, None] - L_vals[None, :] // 2).long()  # (P, n_L)
+    stop_pos = (start_pos + L_vals[None, :] - 1).long()                        # (P, n_L)
+
+    # Clamp to valid range (positions outside hex_idx get clamped; they're
+    # in the WINDOW_HALF margin so should be valid, but clamp for safety)
+    max_idx = hex_idx.shape[1] - 1
+    start_pos_c = start_pos.clamp(0, max_idx)
+    stop_pos_c = stop_pos.clamp(0, max_idx)
+
+    # Flatten for gather: (P * n_L,)
+    flat_start = start_pos_c.reshape(-1)   # (P * n_L,)
+    flat_stop = stop_pos_c.reshape(-1)
+
+    # Gather: (B, P * n_L) -> reshape to (B, P, n_L)
+    log_sf_g = log_sf[:, flat_start].reshape(B, tile_size, n_L)
+    log_ef_g = log_ef[:, flat_stop].reshape(B, tile_size, n_L)
+    log_sr_g = log_sr[:, flat_stop].reshape(B, tile_size, n_L)
+    log_er_g = log_er[:, flat_start].reshape(B, tile_size, n_L)
+
+    # log p₀(m, L, s=0) = log_start_fwd[start] + log_stop_fwd[stop] + log_pL[L]
+    # log p₀(m, L, s=1) = log_start_rev[stop] + log_stop_rev[start] + log_pL[L]
+    log_pL_broad = log_pL[None, None, :]   # (1, 1, n_L)
+
+    log_p0_fwd = log_sf_g + log_ef_g + log_pL_broad  # (B, P, n_L)
+    log_p0_rev = log_sr_g + log_er_g + log_pL_broad   # (B, P, n_L)
+
+    log_p0 = torch.stack([log_p0_fwd, log_p0_rev], dim=-1)  # (B, P, n_L, 2)
+    return log_p0
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +263,12 @@ class CutSiteFragmentModel(L.LightningModule):
         nb_w0: float = 1.0,
         nb_T_anneal: int = 5,
         mult_weight: float = 1.0,
+        # Stage 2: hex-table baseline (path to .npz from stage1_hex_baseline.py)
+        hex_tables_path: Optional[str] = None,
+        freeze_hex: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["hex_tables_path", "freeze_hex"])
 
         # -- Geometry derived from L_min / L_max ----------------------------
         n_L, o_l_min, o_r_max, n_offsets = _compute_geometry(L_min, L_max)
@@ -196,6 +327,36 @@ class CutSiteFragmentModel(L.LightningModule):
             max_dispersion_ratio=max_dispersion_ratio,
             clamp_margin=clamp_margin,
         )
+
+        # -- Stage 2: hex-table baseline (trainable or frozen) -----------------
+        n_L = L_max - L_min + 1
+        self._use_hex_baseline = hex_tables_path is not None
+        self._freeze_hex = freeze_hex
+        if hex_tables_path is not None:
+            data = np.load(hex_tables_path)
+            hex_tensors = {
+                "hex_log_start_fwd": torch.from_numpy(np.log(np.maximum(data["start_fwd"], 1e-30))).float(),
+                "hex_log_stop_fwd": torch.from_numpy(np.log(np.maximum(data["stop_fwd"], 1e-30))).float(),
+                "hex_log_start_rev": torch.from_numpy(np.log(np.maximum(data["start_rev"], 1e-30))).float(),
+                "hex_log_stop_rev": torch.from_numpy(np.log(np.maximum(data["stop_rev"], 1e-30))).float(),
+            }
+            if freeze_hex:
+                for name, tensor in hex_tensors.items():
+                    self.register_buffer(name, tensor)
+            else:
+                for name, tensor in hex_tensors.items():
+                    setattr(self, name, nn.Parameter(tensor))
+            self.register_buffer(
+                "_log_pL",
+                torch.from_numpy(np.log(np.maximum(data["p_L"], 1e-30))).float(),
+            )
+        else:
+            # Dummy parameters (not used when hex baseline is off)
+            self.hex_log_start_fwd = None
+            self.hex_log_stop_fwd = None
+            self.hex_log_start_rev = None
+            self.hex_log_stop_rev = None
+            self.register_buffer("_log_pL", torch.zeros(n_L))
 
         # Pre-compute length tensors as buffers
         self.register_buffer(
@@ -500,6 +661,16 @@ class CutSiteFragmentModel(L.LightningModule):
         mask = batch["mask"]              # (B, tile_size)
 
         logits, endpoint_shape, disp_bp = self(x)
+
+        # -- Stage 2: add hex-table baseline log p₀ to logits --------------
+        if self._use_hex_baseline:
+            log_p0 = compute_log_p0(
+                x, self.hex_log_start_fwd, self.hex_log_stop_fwd,
+                self.hex_log_start_rev, self.hex_log_stop_rev,
+                self._log_pL, self.hparams.tile_size,
+                self.hparams.L_min, self.hparams.L_max,
+            )
+            logits = logits + log_p0
 
         # -- Fragment multinomial NLL ---------------------------------------
         # log_softmax over the full domain D

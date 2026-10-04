@@ -22,6 +22,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -230,11 +231,28 @@ def build_store(args):
         open_kwargs["zarr_format"] = 2
     root = zarr.open_group(args.output, **open_kwargs)
 
+    # Git SHA (best-effort)
+    try:
+        _git = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
+        )
+        git_sha = _git.stdout.strip() if _git.returncode == 0 else "unknown"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        git_sha = "unknown"
+
     root.attrs.update({
         "config_json": cfg.to_json(),
         "config_hash": cfg.config_hash(),
         "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "split_version": 0,
+        # Explicit geometry (derivable from config, but callers shouldn't have to)
+        "l_target": cfg.l_target,
+        "l_seq": cfg.l_seq,
+        # Input provenance
+        "source_h5": os.path.abspath(args.sample),
+        "source_regions": os.path.abspath(args.regions),
+        "source_reference": os.path.abspath(args.reference),
+        "git_sha": git_sha,
     })
 
     tiles = root.create_group("tiles")
@@ -284,7 +302,7 @@ def main():
     p.add_argument("--jitter", type=int, default=256)
     p.add_argument("--rf-budget", type=int, default=133)
     p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=179)
+    p.add_argument("--L-max", type=int, default=180)
     p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
     p.add_argument("--no-dedup", action="store_true", help="Skip (start,stop) deduplication")
     p.add_argument("--split-seed", type=int, default=42)

@@ -36,7 +36,7 @@ from background_model.tracks import FL_BANDS
 
 # Default length bounds (from FL_BANDS, overridable)
 _DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)    # 25
-_DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1  # 179
+_DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS)      # 180
 
 
 # ---------------------------------------------------------------------------

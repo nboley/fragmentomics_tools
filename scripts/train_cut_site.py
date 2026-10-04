@@ -16,7 +16,7 @@ def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--tile-size", type=int, default=2048)
     p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=179)
+    p.add_argument("--L-max", type=int, default=180)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -28,6 +28,12 @@ def main():
                    choices=["32", "bf16-mixed", "16-mixed"])
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--min-N", type=int, default=10)
+    p.add_argument("--hex-tables", default=None,
+                   help="Path to Stage 1 hex tables (.npz) for two-stage training")
+    p.add_argument("--freeze-hex", action="store_true",
+                   help="Freeze hex lookup tables (don't update during training)")
+    p.add_argument("--limit-batches", type=float, default=1.0,
+                   help="Fraction of train batches per epoch (0.1 = 10%%)")
     args = p.parse_args()
 
     os.makedirs(args.run_dir, exist_ok=True)
@@ -39,6 +45,8 @@ def main():
         learning_rate=args.lr, nb_w0=args.nb_w0, nb_T_anneal=args.nb_T_anneal,
         mult_weight=args.mult_weight,
         lr_patience=4, max_lr_reductions=3, lr_factor=0.5,
+        hex_tables_path=args.hex_tables,
+        freeze_hex=args.freeze_hex,
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {n_params:,}")
@@ -75,6 +83,7 @@ def main():
         enable_checkpointing=True,
         default_root_dir=args.run_dir,
         log_every_n_steps=10,
+        limit_train_batches=args.limit_batches,
     )
     trainer.fit(model, train_dl, val_dl)
 
