@@ -217,6 +217,48 @@ def gc_pct(c5, c3, cum_gc):
     return 100.0 * (cum_gc[hi] - cum_gc[lo]) / L
 
 
+def midpoint_index_arrays(
+    region_len: int, pad: int = MAX_FL_HALF,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Low/high array indices for every (midpoint, length) under the midpoint rule.
+
+    For midpoint position ``j`` in ``[0, region_len)`` and length ``L = L_MIN + li``:
+
+    - ``idx_lo[j, li] = pad - L // 2 + j`` — the lower-coordinate cut site
+      (plus-strand c5, minus-strand c3).
+    - ``idx_hi[j, li] = pad + ceil(L / 2) + j`` — the higher-coordinate cut site
+      (plus-strand c3, minus-strand c5).
+
+    Both arrays are integer indices into the expanded region array of length
+    ``region_len + 2 * pad + 1``.
+
+    This is the *single* source of truth for the midpoint-rule index geometry.
+    ``build_region_weights`` uses it internally, and any downstream code that
+    needs to map between weight-matrix positions and cut-site array positions
+    (e.g. the parameter-recovery validator) must call this rather than
+    re-deriving the arithmetic.
+
+    Parameters
+    ----------
+    region_len : int
+        Region length in bp (the original, unexpanded region).
+    pad : int
+        Number of extra cut-site positions on each side.
+
+    Returns
+    -------
+    idx_lo : ndarray, shape ``(region_len, N_LENGTHS)``, dtype intp
+    idx_hi : ndarray, shape ``(region_len, N_LENGTHS)``, dtype intp
+    """
+    Ls = np.arange(L_MIN, L_MAX + 1)          # (N_LENGTHS,)
+    half_down = Ls // 2                        # floor(L/2)
+    half_up = Ls - half_down                   # ceil(L/2)
+    j = np.arange(region_len)[:, np.newaxis]   # (region_len, 1)
+    idx_lo = (pad - half_down)[np.newaxis, :] + j  # (region_len, N_LENGTHS)
+    idx_hi = (pad + half_up)[np.newaxis, :] + j    # (region_len, N_LENGTHS)
+    return idx_lo, idx_hi
+
+
 def generative_domain_size(
     region_len: int, L_min: int = L_MIN, L_max: int = L_MAX,
 ) -> int:
@@ -411,16 +453,9 @@ def build_region_weights(
     # The genomic span [lo, hi) is identical for both strands at each
     # (j, li): plus has c5=lo, c3=hi; minus has c5=hi, c3=lo.  So GC,
     # predict values, and validity are computed once and reused.
-    half_down = Ls // 2               # (N_LENGTHS,)  floor(L/2)
-    half_up = Ls - half_down           # (N_LENGTHS,)  ceil(L/2)
+    idx_lo, idx_hi = midpoint_index_arrays(region_len, pad)
 
-    j = np.arange(region_len)[:, np.newaxis]    # (region_len, 1)
     li_idx = np.arange(N_LENGTHS)[np.newaxis, :]  # (1, N_LENGTHS)
-
-    # "Low" index = pad - half_down + j  (plus c5, minus c3)
-    # "High" index = pad + half_up + j   (plus c3, minus c5)
-    idx_lo = (pad - half_down)[np.newaxis, :] + j  # (region_len, N_LENGTHS)
-    idx_hi = (pad + half_up)[np.newaxis, :] + j    # (region_len, N_LENGTHS)
 
     # Validity mask (shared: AND is commutative across strands)
     vmask = valid[idx_lo] & valid[idx_hi]  # (region_len, N_LENGTHS)

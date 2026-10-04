@@ -13,6 +13,7 @@ from background_model.simulator.weights import (
     build_region_weights,
     gc_bin_index,
     generative_domain_size,
+    midpoint_index_arrays,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "build_region_weights",
     "gc_bin_index",
     "generative_domain_size",
+    "midpoint_index_arrays",
 ]
 
 # Step 1-2 (capture surface + marginal FL) and Step 3 (precompute) are

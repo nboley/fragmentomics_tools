@@ -36,6 +36,7 @@ from background_model.simulator.weights import (
     gc_bin_index,
     gc_pct,
     generative_domain_size,
+    midpoint_index_arrays,
 )
 
 
@@ -661,3 +662,123 @@ class TestWeightProperties:
         # But both normalise to 1
         assert abs(rw1.w_plus.sum() + rw1.w_minus.sum() - 1.0) < 1e-12
         assert abs(rw2.w_plus.sum() + rw2.w_minus.sum() - 1.0) < 1e-12
+
+
+# ── midpoint_index_arrays contract tests ──────────────────────────────
+
+class TestMidpointIndexArraysContract:
+    """Guards the exported midpoint-rule geometry so a future pad/edge-rule
+    change fails loudly instead of silently.
+
+    These tests are the regression gate for the geometry that
+    ``build_region_weights`` and the parameter-recovery validator share.
+    """
+
+    @pytest.mark.parametrize("region_len", [50, 200, 500, 1536])
+    def test_all_indices_in_bounds(self, region_len):
+        """Every index produced by midpoint_index_arrays is a valid offset
+        into the expanded region array of size region_len + 2*pad + 1."""
+        pad = MAX_FL_HALF
+        n_sites = region_len + 2 * pad + 1
+        idx_lo, idx_hi = midpoint_index_arrays(region_len, pad)
+        assert idx_lo.shape == (region_len, N_LENGTHS)
+        assert idx_hi.shape == (region_len, N_LENGTHS)
+        assert idx_lo.min() >= 0, f"idx_lo min {idx_lo.min()} < 0"
+        assert idx_hi.max() < n_sites, (
+            f"idx_hi max {idx_hi.max()} >= n_sites {n_sites}"
+        )
+        # idx_lo < idx_hi always (lo is the lower-coordinate cut site)
+        assert (idx_lo < idx_hi).all(), "idx_lo >= idx_hi somewhere"
+
+    @pytest.mark.parametrize("region_len", [200, 500])
+    def test_nonzero_support_matches_geometry(self, region_len):
+        """The set of nonzero (c5_idx, li) positions in w_plus / w_minus
+        is exactly the set that midpoint_index_arrays produces.
+
+        This would FAIL if ``midpoint_index_arrays`` omitted the ``pad``
+        offset or used a different rounding convention — both of which
+        are the defect class the extraction is meant to prevent.
+        """
+        pad = MAX_FL_HALF
+        tables = _random_tables(seed=71)
+        rw = _build_weights(region_len, tables=tables, pad=pad)
+        idx_lo, idx_hi = midpoint_index_arrays(region_len, pad)
+
+        # Plus strand: c5 is at idx_lo, weight stored at w_plus[idx_lo, li]
+        for li in range(N_LENGTHS):
+            expected_positions = set(idx_lo[:, li].tolist())
+            actual_positions = set(np.nonzero(rw.w_plus[:, li])[0].tolist())
+            assert actual_positions == expected_positions, (
+                f"Plus L={L_MIN+li}: expected {len(expected_positions)} "
+                f"positions, got {len(actual_positions)}; "
+                f"symmetric diff = {actual_positions ^ expected_positions}"
+            )
+
+        # Minus strand: c5 is at idx_hi, weight stored at w_minus[idx_hi, li]
+        for li in range(N_LENGTHS):
+            expected_positions = set(idx_hi[:, li].tolist())
+            actual_positions = set(np.nonzero(rw.w_minus[:, li])[0].tolist())
+            assert actual_positions == expected_positions, (
+                f"Minus L={L_MIN+li}: expected {len(expected_positions)} "
+                f"positions, got {len(actual_positions)}; "
+                f"symmetric diff = {actual_positions ^ expected_positions}"
+            )
+
+    def test_wrong_pad_breaks_support(self):
+        """If midpoint_index_arrays is called with the wrong pad, its
+        output disagrees with build_region_weights' nonzero support.
+
+        This is the test that would pass both with and without the offset
+        if the offset were missing — ensuring the guard is not vacuous.
+        """
+        region_len = 200
+        pad = MAX_FL_HALF
+        tables = _random_tables(seed=71)
+        rw = _build_weights(region_len, tables=tables, pad=pad)
+
+        # Deliberately compute geometry with pad=0 (wrong)
+        idx_lo_wrong, idx_hi_wrong = midpoint_index_arrays(region_len, pad=0)
+
+        # The nonzero support from the WRONG geometry must NOT match
+        # the actual weight matrices (which used pad=MAX_FL_HALF).
+        li = N_LENGTHS // 2  # pick a middle length
+        actual_plus = set(np.nonzero(rw.w_plus[:, li])[0].tolist())
+        wrong_plus = set(idx_lo_wrong[:, li].tolist())
+        assert actual_plus != wrong_plus, (
+            "Wrong-pad geometry matched actual support — the pad offset "
+            "is not being tested"
+        )
+
+    def test_build_region_weights_uses_exported_geometry(self):
+        """build_region_weights populates weights at exactly the positions
+        returned by midpoint_index_arrays with the same pad.
+
+        A direct numerical check: for each (j, li), the plus-strand weight
+        at (idx_lo[j, li], li) should be nonzero, and the corresponding
+        3' cut site is at idx_hi[j, li]. This pins the relationship that
+        the validator relies on.
+        """
+        region_len = 300
+        pad = MAX_FL_HALF
+        hex_fwd, hex_rc, cum_gc, valid = _synthetic_region(region_len, pad=pad)
+        tables = _random_tables(seed=55)
+        fl = _flat_marginal_fl()
+        lut = _trivial_lut()
+        rw = build_region_weights(
+            hex_fwd=hex_fwd, hex_rc=hex_rc, cum_gc=cum_gc,
+            hex_tables=tables, marginal_fl=fl, predict_lut=lut,
+            region_len=region_len, valid=valid, pad=pad,
+        )
+        idx_lo, idx_hi = midpoint_index_arrays(region_len, pad)
+
+        # For every (j, li), the plus-strand weight at the geometry's
+        # predicted position should equal the weight we actually find.
+        for li in [0, N_LENGTHS // 4, N_LENGTHS // 2, N_LENGTHS - 1]:
+            gathered_plus = rw.w_plus[idx_lo[:, li], li]
+            gathered_minus = rw.w_minus[idx_hi[:, li], li]
+            assert (gathered_plus > 0).all(), (
+                f"Plus li={li}: some geometry positions have zero weight"
+            )
+            assert (gathered_minus > 0).all(), (
+                f"Minus li={li}: some geometry positions have zero weight"
+            )
