@@ -434,6 +434,8 @@ def cluster(
     -------
     pd.Series[int], index-aligned to *a*.
     """
+    _check_min_dist(min_dist)
+
     if b is not None:
         _assert_same_ref(a, b)
 
@@ -448,6 +450,23 @@ def cluster(
     return pd.Series(labels[:n_a], index=a.index, name="cluster")
 
 
+def _check_min_dist(min_dist):
+    """Reject a negative ``min_dist`` with OUR message, not bioframe's.
+
+    bioframe already rejects it, so this is not a behaviour fix — it is an
+    error-surface fix. Without it the caller sees
+    ``min_dist>=0 currently required``, which is bioframe's wording: it leaks
+    the backend through our API, contradicts the rule that backend arguments
+    never appear in our signatures, reads inconsistently beside ``pad``'s
+    message, and would change under us if bioframe reworded it.
+    """
+    if min_dist is not None and min_dist < 0:
+        raise ValueError(
+            f"min_dist must be >= 0 or None, got {min_dist}. "
+            f"Use min_dist=None for strictly-overlapping-only."
+        )
+
+
 def _cluster_df(df, min_dist, same_strand):
     """Assign connected-component labels to rows of *df*.
 
@@ -455,6 +474,18 @@ def _cluster_df(df, min_dist, same_strand):
     ``min_dist=None`` gives strictly-overlapping-only (book-ended stay
     separate); ``min_dist=0`` joins book-ended (the ``bedtools merge -d 0``
     convention).
+
+    **The per-strand split is deliberate and must not be replaced by
+    bioframe's ``on=['strand']``.** That parameter is an equality join, so it
+    treats ``"."`` as equal to ``"."`` and clusters strandless rows together;
+    ``bedtools -s`` treats ``"."`` as *no strand* and never calls two
+    strandless features same-stranded. Measured across all nine
+    ``(A strand, B strand)`` combinations, those two agree on eight and
+    diverge on exactly this one — and strandless is the DEFAULT path in this
+    codebase, since ``Region(strand=".")`` normalises to ``None``. Delegating
+    here would invert the result on the common case with no error, which is
+    why the loop below iterates only ``+`` and ``-`` and leaves every
+    unstranded row in a cluster of its own.
     """
     import bioframe
 
@@ -511,6 +542,8 @@ def merge(
     A new ``RegionDataFrame`` with merged intervals, sorted by contig/start.
     """
     from fragmentomics_tools.dataframe import RegionDataFrame
+
+    _check_min_dist(min_dist)
 
     labels = _cluster_df(
         a[list(_COLS) + (["strand"] if "strand" in a.columns else [])],

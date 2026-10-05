@@ -1102,3 +1102,44 @@ class TestAttachBlacklistOnWindowedFrame:
         assert len(hit) == 1
         assert int(hit[0].start) == 300
         assert int(hit[0].stop) == 400
+
+
+class TestMinDistValidation:
+    """A negative ``min_dist`` must raise OUR error, not bioframe's.
+
+    bioframe rejects it already, so this is not about behaviour — it is about
+    whose error the caller sees. Before this, the message was
+    ``min_dist>=0 currently required``, bioframe's wording, which leaks the
+    backend through our API, contradicts the rule that backend arguments never
+    appear in our signatures, reads inconsistently beside ``pad``'s message,
+    and would change under us if bioframe reworded it.
+    """
+
+    def _two(self):
+        return _rdf(
+            {"contig": ["chr1", "chr1"], "start": [100, 300], "stop": [200, 400]}
+        )
+
+    @pytest.mark.parametrize("bad", [-1, -5, -1000])
+    def test_merge_rejects_negative(self, bad):
+        with pytest.raises(ValueError, match=r"min_dist must be >= 0 or None"):
+            merge(self._two(), min_dist=bad)
+
+    @pytest.mark.parametrize("bad", [-1, -5, -1000])
+    def test_cluster_rejects_negative(self, bad):
+        with pytest.raises(ValueError, match=r"min_dist must be >= 0 or None"):
+            cluster(self._two(), min_dist=bad)
+
+    def test_message_names_the_None_escape_hatch(self):
+        """The error should tell the caller what to use instead."""
+        try:
+            merge(self._two(), min_dist=-1)
+        except ValueError as e:
+            assert "min_dist=None" in str(e)
+        else:
+            raise AssertionError("expected ValueError")
+
+    @pytest.mark.parametrize("ok", [None, 0, 1, 100])
+    def test_valid_values_still_accepted(self, ok):
+        merge(self._two(), min_dist=ok)
+        cluster(self._two(), min_dist=ok)
