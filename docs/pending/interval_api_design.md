@@ -363,7 +363,15 @@ gives the transitive grouping across two frames.
 
 **`nearest` is not `overlap_indices(pad=n)`.** ``pad`` answers *whether*
 something is within range; `nearest` answers *which* and *how far*, with a
-signed strand-aware distance. Neither substitutes for the other.
+strand-aware distance. Neither substitutes for the other.
+
+**`nearest` distance follows the `bedtools closest -d` convention.**
+``distance == 0`` means overlapping; non-overlapping pairs (including
+book-ended) get ``gap + 1``.  This makes ``distance == 0`` unambiguous.
+The previous convention returned 0 for both overlapping and book-ended
+pairs, conflating two distinct relationships.  ``bioframe.closest``
+returns the raw gap; our layer adds 1 for non-overlapping pairs.
+This is a deliberate divergence from bioframe — do not simplify it back.
 
 ### Net change
 
@@ -438,7 +446,7 @@ Verified against bioframe 0.8.0 by introspection, not from documentation.
 | Ours | `bioframe` | We supply |
 |---|---|---|
 | `overlap_indices` | `overlap(..., return_index=True)`, `how ∈ {left,right,outer,inner}` | `contig`→`chrom` mapping; **column renaming — see below**; `how="anti"` as outer + null filter; fraction thresholds; `same_strand` |
-| `nearest` | `closest(k=, ignore_overlaps=, ignore_upstream=, ignore_downstream=, return_distance=)` | signed-distance and direction convention |
+| `nearest` | `closest(k=, ignore_overlaps=, ignore_upstream=, ignore_downstream=, return_distance=)` | bedtools distance convention (gap+1 for non-overlapping, 0 for overlapping) and direction |
 | `cluster`, `merge` | `cluster(min_dist=, return_cluster_ids=)`, `merge(min_dist=)` | two-frame `cluster` — see below — and label alignment |
 
 **The returned column names are ours to produce, not `bioframe`'s.** Verified
@@ -605,8 +613,14 @@ bedtools `merge -d 0` behaviour, which was the correct default all along.
 | `overlaps_w10` → `overlaps_p10` | 964,593 | 964,593 | `310a0f2220058dca` | `310a0f2220058dca` | **identical digest** — renamed only; no CTCF/blacklist pair at exactly gap=10 |
 
 Everything else — overlap_indices (both directions), overlap_indices_anti,
-overlaps (both), overlap_bases_sum, nearest, merge blacklist, cluster
+overlaps (both), overlap_bases_sum, merge blacklist, cluster
 blacklist, all inputs — is **byte-identical**.
+
+**Moved: `nearest` distance convention adopted from bedtools.**
+
+| operation | old digest | new digest | why |
+|---|---|---|---|
+| `nearest` | (previous) | (new) | distance for non-overlapping pairs changed from gap (0-based) to gap+1 (bedtools convention). Semantic change: the previous `distance == 0` was ambiguous (overlapping OR book-ended); now `distance == 0` means overlapping only, and book-ended pairs get `distance == 1`. Row count and pair identity unchanged — only the distance column values move. |
 | `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
 | `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_pos").overlap_bases.sum()` |
 | `_get_fragment_coverage_sum` | test deleted | — | method deleted (0 live callers) |

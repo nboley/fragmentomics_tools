@@ -19,5 +19,5 @@ overlaps	ctcf_x_blacklist	964593	fd3767dba05a17f3
 overlaps_p10	ctcf_x_blacklist	964593	310a0f2220058dca	pad=10
 overlaps	blacklist_x_ctcf	636	b75af5509fea3f8e	
 overlap_bases_sum	ctcf_x_blacklist	8804	836cc5a1fe6fecd8	
-nearest	ctcf_x_blacklist	964593	4dd2d4634790f721	
+nearest	ctcf_x_blacklist	964593	ca80d0fe0542f246	
 from_beds_merged	all	942977	2881f8420eba3880	

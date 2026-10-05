@@ -492,27 +492,31 @@ class TestClusterSynthetic:
 
 @pytest.mark.requires_bedtools
 class TestClosestSynthetic:
-    """bedtools closest -d distance convention vs nearest().
+    """bedtools closest -d == nearest(), column-for-column.
 
-    bedtools uses 1-based distance for non-overlapping (distance = gap + 1).
-    Our API uses the gap (0-based).  Both report 0 for overlapping.
-    The test verifies the SAME PAIR is found and the KNOWN relationship
-    between the distances holds.
+    Distance follows the bedtools convention: 0 for overlapping,
+    gap + 1 for non-overlapping (including book-ended).  This test
+    asserts EXACT AGREEMENT, not a known offset.
+
+    This test is designed to FAIL against commit 76a2c6f, which used
+    the bioframe gap convention (0 for book-ended).  That is the proof
+    that the previous behaviour was wrong.
     """
 
     @pytest.mark.parametrize(
-        "gap,expect_bt_dist,expect_our_dist",
+        "gap,expected_dist",
         [
-            (-50, 0, 0),      # overlapping
-            (0, 1, 0),        # book-ended
-            (1, 2, 1),        # gap=1
-            (10, 11, 10),     # gap=10
-            (100, 101, 100),  # gap=100
+            (-50, 0),    # overlapping
+            (0, 1),      # book-ended (gap=0) — the critical boundary
+            (1, 2),      # gap=1
+            (10, 11),    # gap=10
+            (100, 101),  # gap=100
         ],
     )
-    def test_closest_distance_convention(
-        self, request, tmp_path, gap, expect_bt_dist, expect_our_dist
+    def test_closest_distance_exact_agreement(
+        self, request, tmp_path, gap, expected_dist
     ):
+        """Our distance matches bedtools column-for-column."""
         _require_bedtools(request)
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b_start = 200 + gap
@@ -531,17 +535,15 @@ class TestClosestSynthetic:
         near = nearest(a, b)
         our_dist = int(near.distance.iloc[0])
 
-        assert bt_dist == expect_bt_dist, (
-            f"gap={gap}: bedtools distance={bt_dist}, expected={expect_bt_dist}"
+        assert bt_dist == expected_dist, (
+            f"gap={gap}: bedtools distance={bt_dist}, expected={expected_dist}"
         )
-        assert our_dist == expect_our_dist, (
-            f"gap={gap}: our distance={our_dist}, expected={expect_our_dist}"
+        assert our_dist == expected_dist, (
+            f"gap={gap}: our distance={our_dist}, expected={expected_dist}"
         )
-        # The known relationship:
-        if bt_dist > 0:
-            assert bt_dist == our_dist + 1
-        else:
-            assert bt_dist == our_dist == 0
+        assert bt_dist == our_dist, (
+            f"gap={gap}: distances disagree: bedtools={bt_dist}, ours={our_dist}"
+        )
 
     def test_closest_finds_same_target(self, request, tmp_path):
         """Both find the same nearest B interval, even when there are several."""
@@ -560,13 +562,86 @@ class TestClosestSynthetic:
              "-b", str(tmp_path / "b.bed"), "-d"]
         )
         bt_b_start = int(bt[0].split("\t")[4])
+        bt_dist = int(bt[0].split("\t")[-1])
 
         near = nearest(a, b)
         our_b = b.iloc[int(near.b_pos.iloc[0])]
+        our_dist = int(near.distance.iloc[0])
 
         assert bt_b_start == int(our_b.start), (
             f"bedtools found b_start={bt_b_start}, ours found {int(our_b.start)}"
         )
+        assert bt_dist == our_dist, (
+            f"distances disagree: bedtools={bt_dist}, ours={our_dist}"
+        )
+
+    def test_closest_gap_table_differential(self, request, tmp_path):
+        """Full gap table comparison including overlapping and gap=0.
+
+        This is the DIFFERENTIAL TEST required by the task: it compares our
+        distance against the real CLI column-for-column across a gap table.
+        This test FAILS against commit 76a2c6f (which used bioframe's gap
+        convention) at the gap=0 (book-ended) case: bedtools reports 1,
+        the old code reported 0.
+        """
+        _require_bedtools(request)
+        # Build A: one interval per gap value.  B: one target interval.
+        gaps = [-50, 0, 1, 5, 10, 50, 100]
+        a_starts = []
+        a_stops = []
+        b_target_start = 10000
+        b_target_stop = 10100
+        for g in gaps:
+            if g < 0:
+                # Overlapping: A extends into B.
+                a_s = b_target_start + g
+                a_e = b_target_start + 100
+            else:
+                # Non-overlapping: A ends at b_start - gap.
+                a_e = b_target_start - g
+                a_s = a_e - 100
+            a_starts.append(a_s)
+            a_stops.append(a_e)
+
+        a = _rdf({
+            "contig": ["chr1"] * len(gaps),
+            "start": a_starts,
+            "stop": a_stops,
+        })
+        b = _rdf({
+            "contig": ["chr1"],
+            "start": [b_target_start],
+            "stop": [b_target_stop],
+        })
+        a_bed = tmp_path / "a.bed"
+        b_bed = tmp_path / "b.bed"
+        a_sorted = tmp_path / "a_sorted.bed"
+        _write_bed3(a, a_bed)
+        _write_bed3(b, b_bed)
+        _sort_bed(a_bed, a_sorted)
+
+        bt_lines = _run_bedtools(
+            ["closest", "-a", str(a_sorted), "-b", str(b_bed), "-d"]
+        )
+        bt_dists = {}
+        for line in bt_lines:
+            parts = line.split("\t")
+            a_key = (parts[0], int(parts[1]), int(parts[2]))
+            bt_dists[a_key] = int(parts[-1])
+
+        near = nearest(a, b)
+        our_dists = {}
+        for _, row in near.iterrows():
+            ar = a.iloc[int(row.a_pos)]
+            a_key = (ar.contig, int(ar.start), int(ar.stop))
+            our_dists[a_key] = int(row.distance)
+
+        for key in bt_dists:
+            assert key in our_dists, f"Missing from our result: {key}"
+            assert bt_dists[key] == our_dists[key], (
+                f"Distance mismatch at {key}: "
+                f"bedtools={bt_dists[key]}, ours={our_dists[key]}"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════

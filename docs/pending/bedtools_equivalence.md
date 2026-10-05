@@ -146,30 +146,28 @@ bedtools closest -a A.bed -b B.bed -d
 near = intervals.nearest(a, b)           # DataFrame[a_pos, b_pos, distance]
 ```
 
-**Known difference: distance convention.**  For non-overlapping intervals,
-bedtools reports distance = gap + 1 (the number of bases between the last base
-of A and the first base of B, 1-based), while our API reports the gap (the
-0-based half-open coordinate difference `b_start - a_end`).  For overlapping
-intervals, both report 0.
+Distance follows the ``bedtools closest -d`` convention exactly:
 
 | Geometry | bedtools `-d` | our `distance` |
 |---|---|---|
 | overlapping | 0 | 0 |
-| book-ended (gap=0) | 1 | 0 |
-| gap=1 | 2 | 1 |
-| gap=G | G+1 | G |
+| book-ended (gap=0) | **1** | **1** |
+| gap=1 | 2 | 2 |
+| gap=G | G+1 | G+1 |
 
-This means `bedtools_distance = our_distance + 1` for all non-overlapping pairs,
-and `bedtools_distance = our_distance = 0` for overlapping pairs.  The
-conversion is: `our_distance = max(bedtools_distance - 1, 0)`.
+For overlapping pairs, distance is 0.  For non-overlapping pairs (including
+book-ended), distance is gap + 1.  This makes ``distance == 0`` unambiguously
+mean "overlapping" — the previous convention reported 0 for both overlapping
+and book-ended pairs, which made those two relationships indistinguishable.
 
-The API uses the 0-based gap convention because it is consistent with the
-half-open coordinate system the rest of the library uses, and because it makes
-`distance == 0` mean "book-ended or overlapping" rather than "overlapping only".
+This deliberately diverges from ``bioframe.closest``, which returns the raw gap
+(0 for both overlapping and book-ended).  Do not "simplify" the distance back
+to the raw gap — that reintroduces the ambiguity this change exists to remove.
 
 Note: bedtools `closest` requires sorted input; our `nearest` does not.
 
-Verified on both synthetic fixtures and real data with sorted input.
+Verified column-for-column against bedtools 2.31.1 on synthetic fixtures
+covering overlapping, book-ended, and gap=1/10/100 cases.
 
 ### `bedtools cluster` — connected component labels
 

@@ -632,11 +632,50 @@ class TestClusterCornerCases:
 
 class TestNearestCornerCases:
     def test_basic_nearest(self):
+        """Gap of 100bp → distance = 101 (bedtools convention: gap + 1)."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
         result = nearest(a, b)
         assert len(result) == 1
-        assert int(result["distance"].iloc[0]) == 100
+        assert int(result["distance"].iloc[0]) == 101
+
+    def test_overlapping_distance_zero(self):
+        """Overlapping intervals → distance = 0."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [300]})
+        result = nearest(a, b)
+        assert len(result) == 1
+        assert int(result["distance"].iloc[0]) == 0
+
+    def test_book_ended_distance_one(self):
+        """Book-ended [100,200) and [200,300) → distance = 1 (not 0).
+
+        This is the critical case: the previous convention returned 0 for
+        book-ended pairs, making them indistinguishable from overlapping.
+        The bedtools convention returns 1 (gap + 1 = 0 + 1).
+        """
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
+        result = nearest(a, b)
+        assert len(result) == 1
+        assert int(result["distance"].iloc[0]) == 1
+
+    def test_gap_1_distance_2(self):
+        """Gap of 1bp → distance = 2."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [201], "stop": [300]})
+        result = nearest(a, b)
+        assert len(result) == 1
+        assert int(result["distance"].iloc[0]) == 2
+
+    def test_no_match_distance_null(self):
+        """When B has no row on the same contig, b_pos and distance are null."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr2"], "start": [100], "stop": [200]})
+        result = nearest(a, b)
+        assert len(result) == 1
+        assert pd.isna(result["b_pos"].iloc[0])
+        assert pd.isna(result["distance"].iloc[0])
 
     def test_ref_mismatch_raises(self):
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]}, ref="hg38")

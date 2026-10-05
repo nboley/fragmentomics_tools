@@ -355,6 +355,13 @@ def nearest(
     -------
     DataFrame with columns ``a_pos``, ``b_pos``, ``distance``.
     ``a_pos`` and ``b_pos`` are 0-based row positions.
+
+    Distance follows the ``bedtools closest -d`` convention:
+    0 for overlapping pairs, gap + 1 for non-overlapping (including
+    book-ended, which get distance 1).  This makes ``distance == 0``
+    unambiguously mean "overlapping".  Deliberately diverges from
+    ``bioframe``, which returns the raw gap (0 for both overlapping
+    and book-ended).
     """
     import bioframe
 
@@ -390,6 +397,32 @@ def nearest(
         "b_pos": result["index_"],
         "distance": result["distance"],
     })
+
+    # ── bedtools distance convention ──────────────────────────────────
+    # bioframe returns the gap (0-based half-open coordinate difference)
+    # for non-overlapping pairs, and 0 for both overlapping AND book-ended
+    # pairs.  bedtools reports distance = gap + 1 for non-overlapping and
+    # 0 for overlapping.  The +1 is not cosmetic: it makes distance == 0
+    # unambiguously mean "overlapping", whereas the gap convention conflates
+    # overlapping with book-ended.
+    #
+    # Determine true overlap from coordinates: half-open intervals overlap
+    # iff a_start < b_stop AND b_start < a_stop.  Add 1 to every pair that
+    # does NOT overlap.  Null b_pos (no neighbour) stays null.
+    has_match = idx["b_pos"].notna()
+    if has_match.any():
+        a_pos_vals = idx.loc[has_match, "a_pos"].values.astype(int)
+        b_pos_vals = idx.loc[has_match, "b_pos"].values.astype(int)
+        a_starts = a["start"].values[a_pos_vals]
+        a_stops = a["stop"].values[a_pos_vals]
+        b_starts = b["start"].values[b_pos_vals]
+        b_stops = b["stop"].values[b_pos_vals]
+        truly_overlaps = (a_starts < b_stops) & (b_starts < a_stops)
+        # Non-overlapping pairs: distance = gap + 1
+        adjustment = np.where(truly_overlaps, 0, 1)
+        idx.loc[has_match, "distance"] = (
+            idx.loc[has_match, "distance"].values + adjustment
+        )
 
     if same_strand:
         has_match = idx["b_pos"].notna()
