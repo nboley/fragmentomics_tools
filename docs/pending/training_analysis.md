@@ -1224,10 +1224,32 @@ This previously read "RD-56670", which is a different library belonging to
 > **2. Three different scorers in one column.** The claim "all models evaluated
 > … using the same per-fragment multinomial NLL metric" is false. `12.325` comes
 > from `eval_fragment_nll.py`; the cut-site figures come from the model's own val
-> path; the hex baseline came from `stage1_hex_baseline`. They disagree on the
-> fragment filter, `min_N`, the normalizer, the estimator, and the length domain
-> (`L_MAX` 179 vs 180). The population counts give it away: this table says
-> 6,652 regions, the model's val path reports **6,204**.
+> path; the hex baseline came from `stage1_hex_baseline`, which hand-rolled the
+> crop, the fragment filter, the normalizer and the estimator and has since been
+> deleted for that reason.
+>
+> Measured, so the scope of this is exact rather than asserted:
+>
+> | | population | normalizer | estimator |
+> |---|---|---|---|
+> | `eval_fragment_nll` | **6,204** regions | endpoints-in-tile, own `Z` | region-weighted |
+> | model val path | **6,204** regions | `log_softmax` over `P×n_L×2` | region-weighted |
+> | `stage1_hex_baseline` (deleted) | no `min_N` floor | endpoints-in-tile | fragment-weighted |
+>
+> So `eval_fragment_nll` and the model **agree** on population and on `min_N`
+> semantics (both apply it to the raw indptr count), and agree on the estimator.
+> They differ in the **normalizer** and the **length domain** — the script
+> derives `L_MAX = max(band hi) − 1 = 179` because the 12-track bridge has no
+> band to score L=180 in, while the model's domain is `[25, 180]` by design,
+> `L_min`/`L_max` having been deliberately decoupled from `FL_BANDS` in 569bdd7.
+> Cross-model scoring therefore restricts to the intersection `[25, 179]` in the
+> scorer, where the band constraint actually lives.
+>
+> An earlier version of this box cited "6,652 vs 6,204" as evidence of a
+> population divergence between those two. **That was wrong** — 6,652 comes from
+> an older store revision, not from a live disagreement. Corrected here rather
+> than silently dropped, since mis-attributing a real defect to the wrong cause
+> is how the original error in this section survived review.
 >
 > **Status:** the old checkpoints and `bg_store_b8d7ba35` are both unusable for
 > this comparison. A split-aligned 12-track store is being built (splits copied
