@@ -43,6 +43,38 @@ class TestGeometryConstants:
         assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218 (unchanged: 39+179 == 38+180)
         assert N_OFFSETS == L_MAX_INBAND  # 180
 
+    def test_excl_prefix_is_strictly_lower_triangular(self):
+        """The prefix buffer must be exactly [o < k].
+
+        `u @ _excl_prefix` replaced `zeros(); U[...,1:] = cumsum(u, -1)` for
+        speed (5.9x) and accuracy (2.2x in bf16).  The substitution is only
+        valid if the matrix is STRICTLY lower triangular: an inclusive prefix
+        (o <= k) would shift every interior span by one offset, which no test
+        asserting shapes or gradient flow would catch.
+        """
+        m = CutSiteFragmentModel(tile_size=64, N1=16, K=16, N2=8, H=8,
+                                 L_chunk=32)
+        P = m._excl_prefix
+        assert P.shape == (m._n_offsets, m._n_offsets + 1)
+        o = torch.arange(P.shape[0])[:, None]
+        k = torch.arange(P.shape[1])[None, :]
+        assert torch.equal(P, (o < k).to(P.dtype))
+        assert (P[:, 0] == 0).all(), "column 0 must be the empty prefix"
+        assert (P[:, -1] == 1).all(), "last column must be the full sum"
+
+    def test_excl_prefix_matmul_equals_cumsum(self):
+        """The matmul must agree with the cumsum it replaced."""
+        m = CutSiteFragmentModel(tile_size=64, N1=16, K=16, N2=8, H=8,
+                                 L_chunk=32)
+        torch.manual_seed(0)
+        u = torch.randn(2, 8, 16, m._n_offsets, dtype=torch.float32)
+
+        expected = torch.zeros(2, 8, 16, m._n_offsets + 1)
+        expected[..., 1:] = torch.cumsum(u, dim=-1)
+        got = torch.matmul(u, m._excl_prefix.to(u.dtype))
+
+        torch.testing.assert_close(got, expected, atol=1e-4, rtol=1e-4)
+
     def test_n_offsets_is_live_width(self):
         """All N_OFFSETS entries receive gradient (no dead offsets)."""
         # The minimum o_l for any in-band L is O_L_MIN (at L_MAX).

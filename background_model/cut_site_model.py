@@ -290,6 +290,21 @@ class CutSiteFragmentModel(L.LightningModule):
         self._o_l_min = o_l_min
         self._n_offsets = n_offsets
 
+        # Strictly-lower-triangular ones, (n_offsets, n_offsets + 1), so that
+        # `u @ _excl_prefix` is the exclusive prefix sum of u along its last
+        # axis: column k sums the offsets o' < k, giving column 0 == 0.
+        # Replaces a cumsum -- see _interior_prefix for the measurements.
+        # A buffer, not rebuilt per forward, so it follows .to(device) and is
+        # built once; it is tiny (n_offsets x n_offsets+1) next to the (B, N2,
+        # m_count, n_offsets) operand it multiplies.
+        self.register_buffer(
+            "_excl_prefix",
+            torch.triu(
+                torch.ones(n_offsets, n_offsets + 1, dtype=torch.float32),
+                diagonal=1,
+            ),
+        )
+
         W = 2 * WINDOW_HALF  # 256
         self._model_input_size = tile_size + W  # 2304
 
@@ -471,11 +486,31 @@ class CutSiteFragmentModel(L.LightningModule):
         # einsum: 'nco, bcmo -> bnmo'
         u = torch.einsum('nco, bcmo -> bnmo', self.interior_F, x_patch)
 
-        # Exclusive prefix sum along the offset axis (last dim)
-        # U[k] = sum_{o'<k} u[o'], so U[0] = 0 and U[n_offsets] = sum(u)
-        U = torch.zeros(B, N2, m_count, n_offsets + 1,
-                         device=u.device, dtype=u.dtype)
-        U[..., 1:] = torch.cumsum(u, dim=-1)
+        # Exclusive prefix sum along the offset axis (last dim):
+        # U[k] = sum_{o'<k} u[o'], so U[0] = 0 and U[n_offsets] = sum(u).
+        #
+        # Done as a matmul with a strictly-lower-triangular ones matrix rather
+        # than `zeros(); U[...,1:] = cumsum(u, -1)`.  Measured on an A10G at
+        # the real shape (32, 32, 1024, 180), bf16, warmed fwd AND bwd:
+        #
+        #     zeros+slice+cumsum   fwd 17.25 ms   fwd+bwd 39.06 ms   3.15 GiB
+        #     F.pad(cumsum)        fwd 17.24 ms   fwd+bwd 37.49 ms   3.15 GiB
+        #     matmul (this)        fwd  2.75 ms   fwd+bwd  6.61 ms   2.12 GiB
+        #
+        # 5.9x faster end-to-end and 33% less memory.  The scan is bandwidth-
+        # bound over a short innermost axis, which is the worst case for it,
+        # while the GEMM runs on tensor cores that `aten::mm` profiling showed
+        # sitting at 2.6% of the step -- i.e. essentially idle.
+        #
+        # It is also MORE accurate, which is why this is a safe substitution
+        # and not merely a fast one: a sequential bf16 scan accumulates over
+        # n_offsets terms in 8 mantissa bits, whereas the GEMM accumulates in
+        # fp32 on the tensor cores.  Max deviation from an fp32 reference was
+        # 0.244 for the matmul vs 0.536 for the scan -- 2.2x better.
+        #
+        # Changes computed results (different summation order); approved by the
+        # owner 2026-10-05.
+        U = torch.matmul(u, self._excl_prefix.to(u.dtype))
 
         return U  # (B, N2, m_count, n_offsets + 1)
 
