@@ -1195,6 +1195,49 @@ This previously read "RD-56670", which is a different library belonging to
 
 ### 10.1 Fragment-Level NLL — Unified Comparison
 
+> ## ⚠ RETRACTED 2026-10-05 — this table is not a valid comparison
+>
+> Two independent defects, either of which alone would void it.
+>
+> **1. Train-on-test leakage in the old CNN numbers.** The old 12-track models
+> were trained on `stores/12track_tile1536/bg_store_b8d7ba35.zarr`. Joining that
+> store to the cut-site store on `(contig, start)` — the only key that matches,
+> since the two use different `region_id` conventions:
+>
+> | | |
+> |---|---|
+> | regions in common | 66,649 (identical region set) |
+> | same split assignment | 39,991 = **60.00%** |
+> | **cut-site VAL regions that are 12-track TRAIN** | **6,664 = 100.00%** |
+>
+> **Every region in the cut-site model's val set was in the old models'
+> training set.** So `12.325` is a *training*-set score placed beside
+> validation-set scores. 60% agreement is near the 66% expected of two
+> *independent* draws at `region_fracs=[0.8,0.1,0.1]`, so the two split
+> assignments are effectively unrelated.
+>
+> **Direction of the bias matters here.** Leakage *flatters* the old CNN, and it
+> still lost. So "the cut-site model beats the old 12-track CNN" survives
+> directionally — but the margin is **understated**, which is the opposite bias
+> from the other retractions in this document.
+>
+> **2. Three different scorers in one column.** The claim "all models evaluated
+> … using the same per-fragment multinomial NLL metric" is false. `12.325` comes
+> from `eval_fragment_nll.py`; the cut-site figures come from the model's own val
+> path; the hex baseline came from `stage1_hex_baseline`. They disagree on the
+> fragment filter, `min_N`, the normalizer, the estimator, and the length domain
+> (`L_MAX` 179 vs 180). The population counts give it away: this table says
+> 6,652 regions, the model's val path reports **6,204**.
+>
+> **Status:** the old checkpoints and `bg_store_b8d7ba35` are both unusable for
+> this comparison. A split-aligned 12-track store is being built (splits copied
+> by `(contig, start)`, not redrawn), CNN-multinomial and KEN will be retrained
+> on it, and all models will then be scored through one unified scorer on the
+> length intersection `[25, 179]`. Until then **no number in this table should
+> be cited.**
+>
+> Nothing below this line has been re-derived.
+
 All models evaluated on the same val set (6,652 regions, 67,477 fragments)
 using the same per-fragment multinomial NLL metric. Old CNN models evaluated
 via `eval_fragment_nll.py` which bridges 12-track position predictions to
