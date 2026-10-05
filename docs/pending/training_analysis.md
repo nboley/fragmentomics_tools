@@ -1015,8 +1015,13 @@ normalized).
 - The analytical hex baseline (12.024) already beats the old CNN (12.325) with
   **zero training** — the factored model p_start × p_stop × p(L) captures
   more than the CNN's 12-track aggregation loses.
-- Cut-site Mult-only (12.012) is the best trained model, improving only 0.012
-  nats over the analytical baseline — most of the signal is in the hex tables.
+- ~~Cut-site Mult-only (12.012) is the best trained model, improving only 0.012
+  nats over the analytical baseline — most of the signal is in the hex tables.~~
+  **RETRACTED 2026-10-05** — see the retraction box at the head of §10. The
+  12.024 baseline was computed on a different fragment population with a
+  different estimator and normalizer. Measured on the model's own terms the
+  baseline is 12.8475 and the correction is worth −0.6118 nats, so the hex
+  tables do NOT hold most of the signal.
 - Both old CNN models give identical fragment NLL (12.325), confirming the
   frozen-dispersion NB correctly approximates multinomial for shape learning.
 
@@ -1100,9 +1105,74 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 
 ## 10. Cut-Site Fragment Model — Ablation & Baseline Comparison (2026-10-01)
 
+> ## ⚠ RETRACTION (2026-10-05) — read before using any number in §10
+>
+> **Every Stage-2-vs-baseline comparison in §10 is invalid.** The two sides were
+> never measuring the same thing, so the recorded conclusion is backwards.
+>
+> The baseline figure (12.024) came from
+> `stage1_hex_baseline.evaluate_baseline_nll`, a *second* implementation of the
+> fragment rule. It had drifted from `CutSiteFragmentDataset` — the thing the
+> model actually trains and validates on — on **four independent axes**:
+>
+> | | baseline | model |
+> |---|---|---|
+> | fragment filter | centre **and** endpoints in-tile | centre only |
+> | region filter | none | drops regions with < `min_N`=10 fragments |
+> | normalizer | endpoints-in-tile domain | `log_softmax` over all `P×n_L×2` |
+> | estimator | fragment-weighted `total/total` | **region-weighted** `(nll_sum/N).mean()` |
+>
+> Compounded, these made the published baseline roughly **0.8 nats too easy**.
+>
+> Measured correctly — through the model's own validation path, with the
+> correction zeroed, so population, estimator and normalizer match by
+> construction (`train_cut_site.py --validate-only --zero-correction`):
+>
+> | | val_mult_nll |
+> |---|---|
+> | hex baseline | **12.8475** |
+> | Stage 2, 20 ep @ 10% data | **12.2357** |
+> | **correction is worth** | **−0.6118 nats** |
+>
+> ![Stage-2 loss path against the correctly-measured baseline](training_analysis_plots/offset3_loss_path_vs_true_baseline.png)
+>
+> **Specifically retracted:**
+> - "improving only 0.012 nats over the analytical baseline — most of the
+>   signal is in the hex tables" (§10.3 / §10.1). The correction is worth
+>   ~50× more than stated, and the hex tables do **not** hold most of the signal.
+> - "All learning rates produce val NLL worse than the Stage 1 analytical
+>   baseline" (§10.6). They were all *better* than the real baseline.
+> - The 10-fold figure 12.0255 ± 0.0059 (§10.7). The cross-validation itself
+>   was sound, but it validated the wrong estimator on the wrong population, so
+>   the number is not a target for anything.
+>
+> 12.8475 has reproduced bit-identically five times (fp32, bf16-mixed, and
+> three separate flag paths), and the model at init scores 12.847876 — very
+> slightly *worse*, as it must, since random noise added to a correctly
+> normalised log-prob can only hurt once renormalised.
+>
+> A separate, real bug was found in the same investigation: the hex tables were
+> **keyed at offset 2 and read at offset 0**, so the model was handed a
+> corrupted prior. Fixed (`de6c224`); registration is now junction-centred at
+> offset 3 and guarded by `tests/test_hex_registration.py`. An offset sweep over
+> 0–5 gives a symmetric U-curve minimised at the two central registrations
+> (2 and 3, tied to 0.00013); offset 0 — the textbook "end motif" convention —
+> is the worst of the six.
+>
+> **Caveat that applies to the corrected numbers too:** all of this is a
+> **single library** (`RD-56413-Lib1`). There is no between-sample variation
+> anywhere in the store, so −0.6118 says the correction captures real structure
+> *in one sample* and says nothing about transfer. Conclusion 9 of this document
+> identifies sample heterogeneity as the axis that matters; this store has none
+> of it. The −0.6118 is also a **floor**: that run had plateaued but not
+> converged, on 10% of train batches per epoch.
+
 A new model family that predicts **per-fragment** probabilities p(m, L, s)
 directly, rather than aggregate per-position profiles. Trained on the same
-regions (66,649 tiles, tile1536) with a single real sample (RD-56670).
+regions (66,649 tiles, tile1536) with a single real sample (`RD-56413-Lib1`,
+patient NC-14158, IBD cohort — read from the store's `source_h5` attribute).
+This previously read "RD-56670", which is a different library belonging to
+`absolute_capture_probability.md`; corrected 2026-10-05.
 
 ### 10.1 Fragment-Level NLL — Unified Comparison
 
@@ -1225,7 +1295,10 @@ hex tables initialized from Stage 1 MLE and trainable, 13 epochs:
 
 ![LR sweep comparison](../../../lr_sweep_comparison.png)
 
-**All learning rates produce val NLL worse than the Stage 1 analytical baseline.**
+~~**All learning rates produce val NLL worse than the Stage 1 analytical baseline.**~~
+**RETRACTED 2026-10-05** — see the retraction box at the head of §10. Every LR
+in this sweep was in fact *better* than the real baseline (12.8475); the
+comparison was against a figure ~0.8 nats too easy.
 The neural correction network is adding noise that overwhelms the residual
 signal beyond the hexamer tables. lr=1e-3 is closest (12.062) but still 0.038
 nats above the baseline.
@@ -1234,6 +1307,14 @@ A follow-up run with **frozen hex tables** (`--freeze-hex`, lr=1e-3, 20 epochs)
 timed out at epoch 16 with val_mult_nll = 12.092 — also worse than baseline.
 
 ### 10.7 K-Fold Cross-Validation of the Hex Baseline (2026-10-04)
+
+> **RETRACTED 2026-10-05 as an anchor** — see the retraction box at the head of
+> §10. The cross-validation is methodologically sound and its variance estimate
+> (σ = 0.0059) is still the best evidence that the hex baseline is stable across
+> folds. But it measures the *superseded* estimator on the *superseded*
+> population, so **12.0255 is not a target for any model number** and must not
+> be compared against a `val_mult_nll`. It also predates the registration fix,
+> so it describes offset-2 tables. The usable baseline is 12.8475.
 
 To assess whether the baseline-vs-model gap is real or within noise, the
 hex-table baseline NLL was evaluated under 10-fold cross-validation over
