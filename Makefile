@@ -8,7 +8,7 @@ IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
 IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 
-.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test
+.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test test-realdata
 
 # Wall-clock bound on a test run. This is a hang detector, not a perf budget:
 # the library suite finishes in well under a minute. Override for slow hosts
@@ -42,6 +42,7 @@ help:
 	@echo "  docker-push   Push Docker image to ECR"
 	@echo "  docker        Build and push Docker image"
 	@echo "  tag           Create and push git tag v$$VERSION"
+	@echo "  test-realdata Run the real-data regression checks; FAILS if EFS inputs are absent"
 	@echo "  all           Build/upload conda, tag repo, build/push docker"
 	@echo "  test          Run the test suite under a $(TEST_TIMEOUT)s timeout"
 	@echo "  clean         Remove build artifacts"
@@ -211,3 +212,24 @@ clean:
 	find . -name "*.pyc" -delete
 	find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 	@echo "✓ Clean complete"
+
+# Real-data regression checks. The ordinary `make test` SKIPS these when the
+# EFS inputs are absent, so that an off-EFS checkout still has a usable suite.
+# This target passes --realdata, which turns absent inputs into a failure.
+#
+# That distinction is the whole point. The committed interval manifest went
+# unread by any test for the entire Phase 0 -> Phase 1 window, and two real
+# regressions lived in the repo as a result: a 592-interval `merge` movement
+# that was recorded as "deliberate", and cross-process non-determinism that no
+# in-process test could observe. A regression net that can silently skip is
+# how both survived.
+test-realdata:
+	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
+		test/test_interval_real_data.py -v --realdata; \
+	rc=$$?; \
+	if [ $$rc -eq 137 ]; then \
+		echo ""; \
+		echo "❌ KILLED after $(TEST_TIMEOUT)s. It HUNG -- it did not fail."; \
+		exit 137; \
+	fi; \
+	exit $$rc
