@@ -121,11 +121,19 @@ class TestForwardPass:
         assert torch.isfinite(logits).all()
 
     def test_strand_axis_differs(self, small_model):
-        """The two strands should generally produce different logits."""
+        """The two strands should generally produce different logits.
+
+        w_out is zero-initialised, which makes every logit exactly 0 and so
+        makes the strands trivially equal. That is the init contract, not a
+        property of the forward pass, so perturb w_out off zero first --
+        otherwise this test would pass vacuously and stop guarding strand
+        asymmetry at all.
+        """
+        with torch.no_grad():
+            small_model.w_out.normal_(0.0, 0.5)
         l_in = small_model.calc_input_region_size(256)
         x = torch.randn(1, 4, l_in)
         logits, _, _ = small_model(x)
-        # With random init, strand 0 and 1 should differ
         assert not torch.allclose(logits[..., 0], logits[..., 1], atol=1e-6)
 
     def test_batch_independence(self, small_model):
@@ -150,7 +158,17 @@ class TestForwardPass:
 
 class TestGradientFlow:
     def test_all_trainable_params_receive_gradients(self):
+        """Every trainable parameter is wired to the loss.
+
+        This guards the computation GRAPH, not the init. w_out is
+        zero-initialised, and since d(logit)/d(hid) = w_out, that alone zeroes
+        the stem's gradient and would make this test fail for a reason that has
+        nothing to do with wiring. Perturb w_out off zero so a failure here
+        means a parameter is genuinely disconnected.
+        """
         m = CutSiteFragmentModel(tile_size=64, N1=16, K=16, N2=8, H=8, L_chunk=32)
+        with torch.no_grad():
+            m.w_out.normal_(0.0, 0.5)
         l_in = m.calc_input_region_size(64)
         x = torch.randn(2, 4, l_in)
         logits, ep_shape, _ = m(x)
@@ -162,6 +180,43 @@ class TestGradientFlow:
             if p.requires_grad:
                 assert p.grad is not None, f"{name} has no gradient"
                 assert not (p.grad == 0).all(), f"{name} has all-zero gradient"
+
+    def test_zero_init_contract(self):
+        """Pin both halves of the zero-init bargain.
+
+        (a) at init the correction is exactly 0, so Stage 2 starts AT its prior;
+        (b) the resulting dead gradient is transient -- w_out leaves zero on the
+            first step, and the stem receives gradient immediately afterwards.
+
+        (b) is the half worth guarding. Zero-init looks fatal if you only check
+            step 0, and that reading is what got it reverted once already.
+        """
+        m = CutSiteFragmentModel(tile_size=64, N1=16, K=16, N2=8, H=8, L_chunk=32)
+        l_in = m.calc_input_region_size(64)
+        x = torch.randn(2, 4, l_in)
+
+        # (a) correction identically zero at init
+        assert torch.equal(m.w_out, torch.zeros_like(m.w_out))
+        logits, _, _ = m(x)
+        assert torch.equal(logits, torch.zeros_like(logits)), \
+            "zero-init must make f_theta exactly 0, so logits == log_p0"
+
+        # one optimiser step: only w_out and len_bias can move
+        opt = torch.optim.SGD(m.parameters(), lr=0.1)
+        logits, ep_shape, _ = m(x)
+        (logits.sum() + ep_shape.sum()).backward()
+        assert not torch.equal(m.w_out.grad, torch.zeros_like(m.w_out.grad)), \
+            "w_out must receive gradient at init or it can never leave zero"
+        opt.step()
+        assert not torch.equal(m.w_out, torch.zeros_like(m.w_out))
+
+        # (b) stem now receives gradient
+        m.zero_grad()
+        logits, ep_shape, _ = m(x)
+        (logits.sum() + ep_shape.sum()).backward()
+        stem = m.W_span.weight
+        assert stem.grad is not None and not (stem.grad == 0).all(), \
+            "stem must receive gradient once w_out is off zero"
 
     def test_frozen_dispersion_no_grad(self):
         m = CutSiteFragmentModel(tile_size=64, N1=16, K=16, N2=8, H=8, L_chunk=32)

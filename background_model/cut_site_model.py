@@ -323,7 +323,19 @@ class CutSiteFragmentModel(L.LightningModule):
 
         # -- L3: output head -----------------------------------------------
         self.l3_act = nn.LeakyReLU()
-        self.w_out = nn.Parameter(torch.randn(H) * (H ** -0.5))
+        # w_out is ZERO-initialised, so the correction f_theta is exactly 0 at
+        # init and the logits are exactly log_p0. Stage 2 therefore starts AT
+        # its hex-table prior and can only improve on it, rather than starting
+        # at prior+noise and having to undo the noise first.
+        #
+        # Known and accepted consequence: logit = (hid * w_out).sum(-1), so
+        # d(logit)/d(hid) = w_out = 0 and NO upstream parameter receives
+        # gradient on step 0. This is transient, not fatal -- d(L)/d(w_out) =
+        # sum((dL/dlogit) * hid) is nonzero, so w_out leaves zero on the first
+        # step and the stem trains from step 1. Confirmed empirically: a
+        # zero-init run trained normally (12.214 -> 12.099 over 16 epochs).
+        # test_zero_init_contract pins both halves of this.
+        self.w_out = nn.Parameter(torch.zeros(H))
         self.len_bias = nn.Parameter(torch.zeros(n_L))
 
         # -- Endpoint heads for NB loss (shape + frozen dispersion) ---------
