@@ -317,13 +317,6 @@ class TestWindowBoundary:
     G-1 does not) which holds for G >= 1 but not for G=0.
     """
 
-    # (gap_between_intervals, window_param, should_match)
-    _CASES = [
-        (0, 0, True),    # gap=0 (book-ended), w=0: strict overlap (these DO overlap at the boundary)
-        # Actually: book-ended [100,200) and [200,300) do NOT share bases.
-        # window -w 0 is equivalent to intersect, which requires shared bases.
-    ]
-
     @pytest.mark.parametrize(
         "gap,w,expect_match",
         [

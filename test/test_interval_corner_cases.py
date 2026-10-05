@@ -864,14 +864,20 @@ _ENTRY_POINTS = {
 
 
 def _values_only(result):
-    """Compare by values, ignoring the index labels themselves."""
+    """Compare by values, ignoring the index labels themselves.
+
+    ALL columns are compared, including ``a_pos`` and ``b_pos``.  Those are
+    positions — they MUST be identical regardless of input index labels, and
+    that identity is the whole point of this test.  An earlier version excluded
+    them, which defeated the guard: simulating a regression where
+    ``overlap_indices`` returned labels instead of positions made the default
+    run produce ``a_pos=[0,1]`` and the labelled run ``a_pos=[10,20]``, but
+    nothing else differed, so the comparison passed.
+    """
     if isinstance(result, pd.Series):
         return list(result.values)
     if isinstance(result, pd.DataFrame):
-        cols = [c for c in result.columns if c not in ("a_pos", "b_pos")]
-        # a_pos/b_pos are positions — they should be identical regardless
-        # of input index labels, so we still compare only the data columns.
-        return [len(result)] + [list(result[c].values) for c in cols]
+        return [len(result)] + [list(result[c].values) for c in result.columns]
     return result
 
 
@@ -1182,3 +1188,384 @@ class TestMinDistValidation:
     def test_valid_values_still_accepted(self, ok):
         merge(self._two(), min_dist=ok)
         cluster(self._two(), min_dist=ok)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Audit fix 2: ref mismatch — every two-frame function must reject it
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestRefMismatchRaises:
+    """Every two-frame function asserts ``ref`` equality.
+
+    This is the guard that stops an hg19 frame being joined against hg38,
+    a silent scientific error.  Previously only ``nearest`` had a test;
+    audit finding M1.
+    """
+
+    def _pair(self, ref_a="hg38", ref_b="hg19"):
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]}, ref=ref_a)
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [250]}, ref=ref_b)
+        return a, b
+
+    def test_overlap_indices_rejects_ref_mismatch(self):
+        a, b = self._pair()
+        with pytest.raises(ValueError, match="same reference"):
+            overlap_indices(a, b)
+
+    def test_overlaps_rejects_ref_mismatch(self):
+        a, b = self._pair()
+        with pytest.raises(ValueError, match="same reference"):
+            overlaps(a, b)
+
+    def test_cluster_two_frame_rejects_ref_mismatch(self):
+        a, b = self._pair()
+        with pytest.raises(ValueError, match="same reference"):
+            cluster(a, b)
+
+    def test_nearest_rejects_ref_mismatch(self):
+        """Already existed as a standalone; duplicated here for completeness."""
+        a, b = self._pair()
+        with pytest.raises(ValueError, match="same reference"):
+            nearest(a, b)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Audit fix 3: join types beyond inner/anti — left, right, outer
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestJoinTypes:
+    """Behavioural tests for ``how="left"``, ``"right"``, ``"outer"``.
+
+    Audit findings M2-M4.  The design validates ``how`` against an explicit
+    set precisely because ``bioframe.overlap`` does not validate at all and
+    silently returns an inner join for unrecognised values.  Untested join
+    types are how that returns.
+    """
+
+    def _frames(self):
+        """A has two rows, B has one.  Only A[0] overlaps B[0]."""
+        a = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [100, 5000],
+            "stop": [200, 5100],
+        })
+        b = _rdf({
+            "contig": ["chr1"],
+            "start": [150],
+            "stop": [250],
+        })
+        return a, b
+
+    def test_inner_only_matched(self):
+        """Baseline: inner returns only matched pairs."""
+        a, b = self._frames()
+        r = overlap_indices(a, b, how="inner")
+        assert len(r) == 1
+        assert int(r["a_pos"].iloc[0]) == 0
+        assert int(r["b_pos"].iloc[0]) == 0
+
+    def test_left_keeps_unmatched_a(self):
+        """Left join: every A row appears; unmatched get null b_pos."""
+        a, b = self._frames()
+        r = overlap_indices(a, b, how="left")
+        assert len(r) == 2
+        matched = r[r["b_pos"].notna()]
+        unmatched = r[r["b_pos"].isna()]
+        assert len(matched) == 1
+        assert int(matched["a_pos"].iloc[0]) == 0
+        assert len(unmatched) == 1
+        assert int(unmatched["a_pos"].iloc[0]) == 1
+        assert int(unmatched["overlap_bases"].iloc[0]) == 0
+
+    def test_right_keeps_unmatched_b(self):
+        """Right join: every B row appears; unmatched get null a_pos."""
+        a, b = self._frames()
+        r = overlap_indices(a, b, how="right")
+        # B has 1 row, it overlaps A[0] → 1 matched row only (right join
+        # keeps unmatched B rows, but here all B rows match).
+        assert len(r) == 1
+        assert int(r["b_pos"].iloc[0]) == 0
+
+    def test_right_with_unmatched_b(self):
+        """Right join with a B row that has no match in A."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({
+            "contig": ["chr1", "chr2"],
+            "start": [150, 1000],
+            "stop": [250, 2000],
+        })
+        r = overlap_indices(a, b, how="right")
+        assert len(r) == 2
+        matched = r[r["a_pos"].notna()]
+        unmatched = r[r["a_pos"].isna()]
+        assert len(matched) == 1
+        assert len(unmatched) == 1
+        assert int(unmatched["b_pos"].iloc[0]) == 1
+
+    def test_outer_keeps_all(self):
+        """Outer join: all A and all B appear, even unmatched."""
+        a = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [100, 5000],
+            "stop": [200, 5100],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr2"],
+            "start": [150, 9000],
+            "stop": [250, 9100],
+        })
+        r = overlap_indices(a, b, how="outer")
+        # A[0] matches B[0]; A[1] unmatched; B[1] unmatched → 3 rows.
+        assert len(r) == 3
+        matched = r[r["a_pos"].notna() & r["b_pos"].notna()]
+        assert len(matched) == 1
+        a_only = r[r["a_pos"].notna() & r["b_pos"].isna()]
+        b_only = r[r["a_pos"].isna() & r["b_pos"].notna()]
+        assert len(a_only) == 1
+        assert len(b_only) == 1
+
+    def test_anti_returns_unmatched_a_only(self):
+        """Anti join: only A rows with no B match."""
+        a, b = self._frames()
+        r = overlap_indices(a, b, how="anti")
+        assert len(r) == 1
+        assert int(r["a_pos"].iloc[0]) == 1
+        assert r["b_pos"].isna().all()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Audit fix 4: nearest secondary parameters — k>1, ignore_overlaps,
+#              direction (including strandless/dot-strand case)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestNearestParameters:
+    """Tests for ``k>1``, ``ignore_overlaps``, and ``direction``.
+
+    Audit findings M5-M7.  All three were shipped with zero coverage.
+    """
+
+    def test_k_2_returns_two_nearest(self):
+        """k=2: two nearest B intervals returned per A row."""
+        a = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
+        b = _rdf({
+            "contig": ["chr1", "chr1", "chr1"],
+            "start": [0, 400, 800],
+            "stop": [100, 500, 900],
+        })
+        # Gaps: B[0] gap=100 → dist=101; B[1] gap=100 → dist=101; B[2] gap=500 → dist=501
+        r = nearest(a, b, k=2)
+        assert len(r) == 2
+        dists = sorted(int(d) for d in r["distance"])
+        assert dists == [101, 101]
+
+    def test_k_greater_than_available(self):
+        """k=5 but only 2 B intervals: returns 2, not 5."""
+        a = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [0, 500],
+            "stop": [100, 600],
+        })
+        r = nearest(a, b, k=5)
+        assert len(r) == 2
+
+    def test_ignore_overlaps(self):
+        """ignore_overlaps=True skips overlapping B intervals."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [150, 500],
+            "stop": [250, 600],
+        })
+        # Without ignore_overlaps: B[0] overlaps → distance=0.
+        r_default = nearest(a, b)
+        assert int(r_default["distance"].iloc[0]) == 0
+
+        # With ignore_overlaps: B[0] skipped, B[1] returned.
+        r_skip = nearest(a, b, ignore_overlaps=True)
+        assert len(r_skip) == 1
+        assert int(r_skip["b_pos"].iloc[0]) == 1
+        assert int(r_skip["distance"].iloc[0]) == 301  # gap=300, dist=301
+
+    def test_direction_upstream(self):
+        """direction='upstream': only B intervals upstream of A."""
+        a = _rdf({
+            "contig": ["chr1"],
+            "start": [500],
+            "stop": [600],
+            "strand": ["+"],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [100, 800],
+            "stop": [200, 900],
+            "strand": ["+", "+"],
+        })
+        r = nearest(a, b, direction="upstream")
+        assert len(r) == 1
+        # For + strand, upstream = lower coordinates → B[0].
+        assert int(r["b_pos"].iloc[0]) == 0
+
+    def test_direction_downstream(self):
+        """direction='downstream': only B intervals downstream of A."""
+        a = _rdf({
+            "contig": ["chr1"],
+            "start": [500],
+            "stop": [600],
+            "strand": ["+"],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [100, 800],
+            "stop": [200, 900],
+            "strand": ["+", "+"],
+        })
+        r = nearest(a, b, direction="downstream")
+        assert len(r) == 1
+        # For + strand, downstream = higher coordinates → B[1].
+        assert int(r["b_pos"].iloc[0]) == 1
+
+    def test_direction_with_strandless(self):
+        """direction with strand='.' (normalises to None).
+
+        Region(strand='.') normalises .strand to None. The strandless path
+        is the default in this codebase, and strand-aware direction is the
+        area it gets wrong most often.
+        """
+        a = _rdf({
+            "contig": ["chr1"],
+            "start": [500],
+            "stop": [600],
+            "strand": ["."],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [100, 800],
+            "stop": [200, 900],
+            "strand": [".", "."],
+        })
+        # With strandless data, direction should still work — bioframe
+        # treats strandless as +.
+        r_up = nearest(a, b, direction="upstream")
+        r_down = nearest(a, b, direction="downstream")
+        assert len(r_up) == 1
+        assert len(r_down) == 1
+        # They should find different B intervals.
+        assert int(r_up["b_pos"].iloc[0]) != int(r_down["b_pos"].iloc[0])
+
+    def test_direction_invalid_raises(self):
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]})
+        with pytest.raises(ValueError, match="direction="):
+            nearest(a, b, direction="sideways")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Audit fix 5: Requirement 6 — replacement expressions for deleted methods
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestReplacementExpressions:
+    """Verify that the replacement expressions from the design's net-change
+    table actually produce correct results.
+
+    Audit findings M11-M12.  Requirement 6 says every deleted method must
+    survive as an expression over what replaces it.  These are the tests
+    that keep that requirement true rather than merely claimed.
+    """
+
+    def _frames(self):
+        """A: three regions.  B: two regions that overlap A[0] and A[1]."""
+        a = _rdf({
+            "contig": ["chr1", "chr1", "chr1"],
+            "start": [100, 300, 700],
+            "stop": [200, 500, 800],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [150, 350],
+            "stop": [250, 450],
+        })
+        return a, b
+
+    def test_get_overlapping_base_counts_sum(self):
+        """``a.get_overlapping_base_counts(p)["counts"]``
+        → ``overlap_indices(a, b).groupby("a_pos").overlap_bases.sum()``
+        """
+        a, b = self._frames()
+        idx = overlap_indices(a, b)
+        counts = idx.groupby("a_pos")["overlap_bases"].sum()
+        # A[0]=[100,200) overlaps B[0]=[150,250): overlap=50
+        # A[1]=[300,500) overlaps B[1]=[350,450): overlap=100
+        # A[2] no overlap → not in groupby
+        assert int(counts.loc[0]) == 50
+        assert int(counts.loc[1]) == 100
+        assert 2 not in counts.index
+
+    def test_get_overlapping_base_counts_max(self):
+        """``a.get_overlapping_base_counts(p)["max_counts"]``
+        → ``overlap_indices(a, b).groupby("a_pos").overlap_bases.max()``
+        """
+        a = _rdf({
+            "contig": ["chr1"],
+            "start": [100],
+            "stop": [400],
+        })
+        b = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [120, 250],
+            "stop": [180, 350],
+        })
+        idx = overlap_indices(a, b)
+        max_overlap = idx.groupby("a_pos")["overlap_bases"].max()
+        # A[0] overlaps B[0] by 60bp and B[1] by 100bp → max=100
+        assert int(max_overlap.loc[0]) == 100
+
+    def test_overlaps_with_bed_replacement(self):
+        """``a.overlaps_with_bed(path)`` → ``overlaps(a, b)``"""
+        a, b = self._frames()
+        mask = overlaps(a, b)
+        assert list(mask.values) == [True, True, False]
+
+    def test_bases_overlap_with_bed_replacement(self):
+        """``a.bases_overlap_with_bed(path)``
+        → ``overlap_indices(a, b).groupby("a_pos").overlap_bases.sum()``
+        """
+        a, b = self._frames()
+        idx = overlap_indices(a, b)
+        sums = idx.groupby("a_pos")["overlap_bases"].sum()
+        # Same computation as get_overlapping_base_counts — verify the full
+        # Series is reindexable to produce a per-A-row result.
+        result = sums.reindex(range(len(a)), fill_value=0)
+        assert list(result) == [50, 100, 0]
+
+    def test_drop_overlapping_regions_replacement(self):
+        """``a.drop_overlapping_regions(b)`` → ``overlap_indices(a, b, how="anti")``"""
+        a, b = self._frames()
+        anti = overlap_indices(a, b, how="anti")
+        surviving = a.iloc[anti["a_pos"].values.astype(int)]
+        assert len(surviving) == 1
+        assert int(surviving["start"].iloc[0]) == 700
+
+    def test_overlaps_rdf_replacement(self):
+        """``a.overlaps_rdf(b)`` → ``overlaps(a, b)``
+
+        overlaps_rdf returned a boolean Series aligned to a's index.
+        overlaps() returns the same.
+        """
+        a, b = self._frames()
+        mask = overlaps(a, b)
+        assert len(mask) == len(a)
+        assert mask.index.equals(a.index)
+        assert list(mask.values) == [True, True, False]
+
+    def test_fragment_coverage_sum_replacement(self):
+        """``a._get_fragment_coverage_sum(p)``
+        → ``overlap_indices(a, b).groupby("a_pos").size()``
+        """
+        a, b = self._frames()
+        idx = overlap_indices(a, b)
+        hit_counts = idx.groupby("a_pos").size()
+        # A[0] has 1 hit, A[1] has 1 hit, A[2] has 0 hits.
+        assert int(hit_counts.loc[0]) == 1
+        assert int(hit_counts.loc[1]) == 1
+        assert 2 not in hit_counts.index
