@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Train the cut-site fragment model."""
-import argparse, os, sys
+import argparse, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lightning as L
@@ -9,6 +9,72 @@ from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
 from background_model.cut_site_model import CutSiteFragmentModel
 from background_model.cut_site_dataset import CutSiteFragmentDataset, cut_site_collate_fn
+
+
+def _nvidia_smi_sample():
+    """(utilisation %, VRAM used GiB) for GPU 0, or (None, None) if unavailable.
+
+    Returns None rather than raising: this is telemetry, and a missing or
+    broken nvidia-smi must never take down a 4-hour training run.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip().splitlines()[0]
+        util, mib = (float(v) for v in out.split(","))
+        return util, mib / 1024.0
+    except Exception:
+        return None, None
+
+
+class GPUStatsCallback(L.Callback):
+    """Per-epoch peak VRAM and mean SM utilisation.
+
+    Deliberately NOT lightning's DeviceStatsMonitor, for two reasons: it reports
+    torch.cuda memory only and so has no SM utilisation, which is half of what
+    we need; and it logs per batch, which on a full-data run here would be ~31k
+    rows. pynvml is absent from both envs, so utilisation comes from nvidia-smi.
+
+    Utilisation is SAMPLED during the epoch and averaged, not read once at the
+    epoch boundary. A single end-of-epoch reading lands at a point where the
+    loader is draining and the GPU is quiet, which would understate it. Peak
+    memory needs no sampling -- torch.cuda tracks the true high-water mark.
+    """
+
+    def __init__(self, sample_every: int = 50):
+        super().__init__()
+        self.sample_every = sample_every
+        self._utils: list[float] = []
+        self._mem: list[float] = []
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        self._utils.clear()
+        self._mem.clear()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if batch_idx % self.sample_every:
+            return
+        util, used = _nvidia_smi_sample()
+        if util is not None:
+            self._utils.append(util)
+            self._mem.append(used)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not torch.cuda.is_available():
+            return
+        stats = {
+            "gpu_peak_alloc_gb": torch.cuda.max_memory_allocated() / 2 ** 30,
+            "gpu_peak_reserved_gb": torch.cuda.max_memory_reserved() / 2 ** 30,
+        }
+        if self._utils:
+            stats["gpu_util_pct_mean"] = sum(self._utils) / len(self._utils)
+            stats["gpu_util_pct_min"] = min(self._utils)
+            stats["gpu_mem_used_gb_max"] = max(self._mem)
+        pl_module.log_dict(stats, sync_dist=True)
 
 
 def main():
@@ -110,6 +176,7 @@ def main():
         default_root_dir=args.run_dir,
         log_every_n_steps=10,
         limit_train_batches=args.limit_batches,
+        callbacks=[GPUStatsCallback()],
     )
     if args.validate_only:
         trainer.validate(model, val_dl)
