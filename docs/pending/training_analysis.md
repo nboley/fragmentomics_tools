@@ -1020,7 +1020,7 @@ normalized).
   **RETRACTED 2026-10-05** — see the retraction box at the head of §10. The
   12.024 baseline was computed on a different fragment population with a
   different estimator and normalizer. Measured on the model's own terms the
-  baseline is 12.8475 and the correction is worth −0.6118 nats, so the hex
+  baseline is 12.847500 and the correction is worth −0.663966 nats, so the hex
   tables do NOT hold most of the signal.
 - Both old CNN models give identical fragment NLL (12.325), confirming the
   frozen-dispersion NB correctly approximates multinomial for shape learning.
@@ -1130,9 +1130,26 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 >
 > | | val_mult_nll |
 > |---|---|
-> | hex baseline | **12.8475** |
-> | Stage 2, 20 ep @ 10% data | **12.2357** |
-> | **correction is worth** | **−0.6118 nats** |
+> | hex baseline | **12.847500** |
+> | Stage 2, 20 ep @ 10% data | 12.235727 |
+> | **Stage 2, 20 ep @ FULL data (converged)** | **12.183534** |
+> | **correction is worth** | **−0.663966 nats** |
+>
+> **The converged figure is 12.183534 / −0.663966** (batch `c5bfa8c9`, run dir
+> `fulldata_zeroinit_offset3`, best at epoch 18). It is plateaued, not truncated:
+> epochs 17–19 give 12.185205 / 12.183534 / 12.188797, oscillating in the third
+> decimal, and the LR scheduler never fired. Full data is worth +0.052 over the
+> 10% run. The 10%-data figures above are retained only to show the trajectory —
+> **cite 12.183534, not 12.2357 or 12.248.**
+>
+> Two limits on how far this result generalises:
+> - **Multinomial-only.** `nb_weight` was 0.0 at every logged step (verified in
+>   the run's own metrics), so the NB endpoint head received no gradient. This
+>   says nothing about endpoint or dispersion modelling.
+> - **One library.** The store is `n_train_samples=1` (RD-56413-Lib1). There is
+>   no between-sample variation in this data at all, so nothing here tests
+>   whether the correction transfers — which is the axis §9 identifies as the
+>   one that matters.
 >
 > ![Stage-2 loss path against the correctly-measured baseline](training_analysis_plots/offset3_loss_path_vs_true_baseline.png)
 >
@@ -1161,11 +1178,13 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 >
 > **Caveat that applies to the corrected numbers too:** all of this is a
 > **single library** (`RD-56413-Lib1`). There is no between-sample variation
-> anywhere in the store, so −0.6118 says the correction captures real structure
+> anywhere in the store, so −0.663966 says the correction captures real structure
 > *in one sample* and says nothing about transfer. Conclusion 9 of this document
 > identifies sample heterogeneity as the axis that matters; this store has none
-> of it. The −0.6118 is also a **floor**: that run had plateaued but not
-> converged, on 10% of train batches per epoch.
+> of it. Unlike the earlier 10%-data figure, −0.663966 is **not** a floor — the
+> full-data run converged (plateaued across epochs 17–19, LR scheduler never
+> fired), so more training on *this* data is not the missing ingredient. A
+> second library is.
 
 A new model family that predicts **per-fragment** probabilities p(m, L, s)
 directly, rather than aggregate per-position profiles. Trained on the same
