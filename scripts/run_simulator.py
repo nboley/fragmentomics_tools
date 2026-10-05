@@ -434,6 +434,11 @@ def main() -> int:
         reference_name=os.path.basename(args.fasta),
         reference_hash=reference_hash,
         region_len=region_len,
+        # Recorded so the round trip reconstructs w from the MANIFEST rather
+        # than from this module's MAX_FL_HALF. Previously pad was supplied from
+        # the constant on BOTH sides of the round trip, so that check agreed by
+        # construction instead of by verification.
+        pad=MAX_FL_HALF,
         per_region_counts=per_region_counts,
         rng_seed=args.seed,
         commit_sha=git_commit_sha(repo_dir),
@@ -508,7 +513,11 @@ def main() -> int:
             predict_lut=loaded["predict_lut"],
             region_len=loaded["region_len"],
             valid=pc.valid,
-            pad=MAX_FL_HALF,
+            # From the MANIFEST, not MAX_FL_HALF. Taking it from the constant
+            # made this round trip agree by construction: both sides used the
+            # same in-process value, so a manifest that recorded the wrong
+            # geometry -- or none at all -- would still round-trip perfectly.
+            pad=loaded["pad"],
         )
         d = max(
             float(np.abs(rw2.w_plus - w_plus).max()),

@@ -65,6 +65,7 @@ from background_model.simulator.emit import (
     write_bed,
     ManifestMismatch,
     ManifestVerificationIncomplete,
+    MANIFEST_VERSION,
 )
 
 
@@ -182,6 +183,7 @@ class TestManifestRoundTrip:
             reference_name="hg38",
             reference_hash="def456",
             region_len=2560,
+            pad=MAX_FL_HALF,
             rng_seed=42,
         )
 
@@ -210,6 +212,7 @@ class TestManifestRoundTrip:
             reference_name="hg38",
             reference_hash="def",
             region_len=2560,
+            pad=MAX_FL_HALF,
         )
         loaded = load_manifest(manifest_path, verify=False)
         np.testing.assert_array_almost_equal(
@@ -230,6 +233,7 @@ class TestManifestRoundTrip:
             reference_name="hg38",
             reference_hash="def",
             region_len=2560,
+            pad=MAX_FL_HALF,
         )
         loaded = load_manifest(manifest_path, verify=False)
         np.testing.assert_array_almost_equal(
@@ -256,6 +260,7 @@ class TestManifestRoundTrip:
             reference_name="hg38",
             reference_hash="h2",
             region_len=region_len,
+            pad=MAX_FL_HALF,
         )
         loaded = load_manifest(manifest_path, verify=False)
 
@@ -295,6 +300,7 @@ class TestManifestRoundTrip:
             reference_name="hg38.fa",
             reference_hash="referencehash456",
             region_len=2560,
+            pad=MAX_FL_HALF,
             fl_bands=((25, 110), (110, 180)),
             per_region_counts={"chr1:1000-3560": 54},
             rng_seed=12345,
@@ -813,6 +819,7 @@ class TestManifestCompleteness:
             reference_name="hg38",
             reference_hash="h2",
             region_len=region_len,
+            pad=MAX_FL_HALF,
         )
         loaded = load_manifest(manifest_path, verify=False)
 
@@ -1094,6 +1101,7 @@ class TestManifestProvenanceEnforced:
             reference_name="ref.fa",
             reference_hash=_hash_file(fa),
             region_len=2560,
+            pad=MAX_FL_HALF,
             simulator_script=script,
         )
         return mp, fa, rs
@@ -1214,6 +1222,7 @@ class TestManifestProvenanceEnforced:
                 region_set_name="r", region_set_hash="h",
                 reference_name="r", reference_hash="h",
                 region_len=2560,
+                pad=MAX_FL_HALF,
                 simulator_script=outside_script,
             )
 
@@ -1269,6 +1278,7 @@ class TestHexTableSlotSwap:
             region_set_name="test", region_set_hash="h1",
             reference_name="hg38", reference_hash="h2",
             region_len=2560,
+            pad=MAX_FL_HALF,
         )
         # Tamper: swap start_fwd and end_fwd in the JSON
         raw = json.loads(open(manifest_path).read())
@@ -1583,6 +1593,7 @@ class TestLoadManifestCWDIndependence:
             reference_name="ref.fa",
             reference_hash=_hash_file(fa),
             region_len=2560,
+            pad=MAX_FL_HALF,
             simulator_script=tracked_script,
         )
 
@@ -1644,3 +1655,101 @@ class TestSMinusGuard:
                 region_weights=rw_a,
                 pad=pad,
             )
+
+
+# ── manifest version guard + recorded pad (v1 -> v2) ─────────────────────
+
+class TestManifestVersionAndPad:
+    """The v2 manifest records `pad` and `load_manifest` rejects versions it
+    cannot interpret.
+
+    Both of these closed gaps where the manifest OVERCLAIMED. v1 wrote
+    ``"version": 1`` and nothing ever read it, and it did not record ``pad`` at
+    all -- so reconstructing ``w`` adopted whatever ``MAX_FL_HALF`` the loading
+    code happened to hold. Every normalisation invariant still held, so the
+    error would have been silent.
+    """
+
+    def _write(self, path, *, pad=MAX_FL_HALF):
+        write_manifest(
+            path,
+            hex_tables=_random_tables(),
+            predict_lut=_trivial_lut(),
+            marginal_fl=_flat_marginal_fl(),
+            region_set_name="synthetic",
+            region_set_hash="abc",
+            reference_name="hg38",
+            reference_hash="def",
+            region_len=2560,
+            pad=pad,
+        )
+
+    def test_pad_is_recorded_in_the_manifest(self, tmp_path):
+        """What must FAIL: a manifest that does not record the geometry."""
+        p = str(tmp_path / "m.json")
+        self._write(p)
+        raw = json.loads(open(p).read())
+        assert "pad" in raw, "manifest does not record pad"
+        assert raw["pad"] == MAX_FL_HALF
+        assert raw["version"] == MANIFEST_VERSION
+
+    def test_loader_returns_the_manifests_pad_not_the_module_constant(
+        self, tmp_path,
+    ):
+        """The decisive test for the gap that was closed.
+
+        Writing a pad that DIFFERS from ``MAX_FL_HALF`` and reading it back
+        proves the value travels through the artifact. Were the loader to
+        re-derive it -- from the constant, or as ``l_max // 2`` -- this returns
+        90 and fails. A test written with the default pad could not tell the
+        two apart, which is why it is deliberately off-default here.
+        """
+        odd_pad = MAX_FL_HALF + 7
+        assert odd_pad != MAX_FL_HALF
+        p = str(tmp_path / "m.json")
+        self._write(p, pad=odd_pad)
+        loaded = load_manifest(p, verify=False)
+        assert loaded["pad"] == odd_pad, (
+            f"loader returned pad={loaded['pad']} but the manifest recorded "
+            f"{odd_pad}; the geometry is coming from code, not the artifact"
+        )
+
+    def test_unsupported_version_raises(self, tmp_path):
+        """A v1 manifest must be rejected, not silently reinterpreted."""
+        p = str(tmp_path / "m.json")
+        self._write(p)
+        raw = json.loads(open(p).read())
+        raw["version"] = 1
+        del raw["pad"]          # exactly what a real v1 manifest looks like
+        with open(p, "w") as f:
+            json.dump(raw, f)
+        with pytest.raises(ManifestMismatch, match="[Uu]nsupported manifest version"):
+            load_manifest(p, verify=False)
+
+    def test_version_guard_is_not_bypassed_by_verify_false(self, tmp_path):
+        """`verify=False` governs provenance HASHES, not interpretability.
+
+        What must FAIL: a loader where `verify=False` reopens the gap. The
+        version question is prior to the hash question -- a v1 manifest cannot
+        be interpreted at all, so there is deliberately no bypass.
+        """
+        p = str(tmp_path / "m.json")
+        self._write(p)
+        raw = json.loads(open(p).read())
+        raw["version"] = 99
+        with open(p, "w") as f:
+            json.dump(raw, f)
+        for verify in (True, False):
+            with pytest.raises(ManifestMismatch):
+                load_manifest(p, verify=verify)
+
+    def test_missing_version_key_raises(self, tmp_path):
+        """A manifest with no version at all is also uninterpretable."""
+        p = str(tmp_path / "m.json")
+        self._write(p)
+        raw = json.loads(open(p).read())
+        del raw["version"]
+        with open(p, "w") as f:
+            json.dump(raw, f)
+        with pytest.raises(ManifestMismatch):
+            load_manifest(p, verify=False)

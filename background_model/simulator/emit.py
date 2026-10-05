@@ -131,20 +131,25 @@ def dataframe_to_hex_table(
                 f"swapped — the weights would be silently misrouted."
             )
 
-    vocab = _get_vocab()
-    vocab_strs = [v.decode() for v in vocab]
-    idx_map = {s: i for i, s in enumerate(vocab_strs)}
+    # Reindex onto the vocabulary ORDER, rather than sorting the frame.
+    # Sorting by the hexamer string happens to give the same result today
+    # because `hexamer_indices` is a base-4 ACGT encoder, so its index order
+    # coincides with lexicographic order -- but nothing enforces that, and
+    # `hexamer_vocabulary` exists specifically so no caller has to depend on
+    # it.  Binding to the vocabulary keeps the encoding owned in one place.
+    vocab_strs = [v.decode() for v in _get_vocab()]
+    weights = df.set_index("hexamer")["weight"].reindex(vocab_strs)
 
-    table = np.zeros(NHEX, dtype=np.float64)
-    for _, row in df.iterrows():
-        hexamer = row["hexamer"]
-        if hexamer not in idx_map:
-            raise ValueError(
-                f"Unknown hexamer {hexamer!r} in DataFrame — not in the "
-                f"vocabulary derived from hexamer_indices"
-            )
-        table[idx_map[hexamer]] = row["weight"]
-    return table
+    missing = weights.isna()
+    if missing.any():
+        names = missing.index[missing].tolist()
+        raise ValueError(
+            f"{int(missing.sum())} vocabulary hexamer(s) absent from the "
+            f"DataFrame, e.g. {names[:5]} — not in the vocabulary derived "
+            f"from hexamer_indices. NaN here is deliberate: a zero-filled "
+            f"array would leave these at 0.0, which normalisation hides."
+        )
+    return weights.to_numpy(dtype=np.float64)
 
 
 def hex_tables_to_dict(
@@ -385,6 +390,15 @@ def git_blob_sha(path: str, repo_root: Optional[str] = None) -> Optional[str]:
     return out.stdout.strip() or None
 
 
+#: Manifest format version.  BUMP THIS when a field that ``w`` reconstruction
+#: depends on is added or changes meaning, and teach ``load_manifest`` to reject
+#: the versions it can no longer interpret.  v1 -> v2 added ``pad``: a v1
+#: manifest does not record the geometry, so reconstructing from it would
+#: silently fall back to whatever ``MAX_FL_HALF`` happens to be in the code
+#: doing the loading.
+MANIFEST_VERSION = 2
+
+
 def write_manifest(
     manifest_path: str,
     *,
@@ -396,6 +410,7 @@ def write_manifest(
     reference_name: str,
     reference_hash: str,
     region_len: int,
+    pad: int,
     l_min: int = L_MIN,
     l_max: int = L_MAX,
     fl_bands: Sequence[Tuple[int, int]] = ((25, 110), (110, 180)),
@@ -429,7 +444,7 @@ def write_manifest(
         script_rel = _to_repo_relative(simulator_script)
 
     manifest = {
-        "version": 1,
+        "version": MANIFEST_VERSION,
         "hex_tables": hex_json,
         "predict_lut": predict_lut.tolist(),
         "marginal_fl": marginal_fl.tolist(),
@@ -438,6 +453,12 @@ def write_manifest(
         "reference_name": reference_name,
         "reference_hash": reference_hash,
         "region_len": region_len,
+        # Recorded EXPLICITLY rather than derived as l_max // 2.  The identity
+        # happens to hold for the default pad, but `midpoint_index_arrays`
+        # deliberately refuses a pad default precisely because re-deriving the
+        # geometry is the failure mode; a manifest that stores the value
+        # actually used does not care whether the identity still holds.
+        "pad": pad,
         "l_min": l_min,
         "l_max": l_max,
         "fl_bands": [list(b) for b in fl_bands],
@@ -523,6 +544,27 @@ def load_manifest(
     with open(manifest_path) as f:
         raw = json.load(f)
 
+    # ── format version: checked ALWAYS, independent of `verify` ───────────
+    # `verify` governs provenance HASHES — whether the recorded inputs are the
+    # inputs on disk.  The version governs whether this file can be interpreted
+    # at all, which is a prior question.  A v1 manifest records no `pad`, so
+    # reconstructing `w` from it would silently adopt whatever MAX_FL_HALF the
+    # loading code happens to hold; that is the gap the field was added to
+    # close, so `verify=False` must not reopen it.
+    version = raw.get("version")
+    if version != MANIFEST_VERSION:
+        raise ManifestMismatch(
+            f"Unsupported manifest version in {manifest_path}.\n"
+            f"  recorded : {version!r}\n"
+            f"  supported: {MANIFEST_VERSION}\n"
+            f"v1 manifests predate the `pad` field and therefore do not record "
+            f"the midpoint geometry. Reconstructing w from one would use the "
+            f"loader's own MAX_FL_HALF rather than the value the sampler drew "
+            f"with, and every normalisation invariant would still hold — so the "
+            f"error would be silent. Re-run the simulation to obtain a v"
+            f"{MANIFEST_VERSION} manifest; there is deliberately no bypass."
+        )
+
     verified: List[str] = []
     if verify:
         # ── file-hash checks: reference and region_set ────────────────
@@ -597,6 +639,10 @@ def load_manifest(
         "reference_name": raw["reference_name"],
         "reference_hash": raw["reference_hash"],
         "region_len": raw["region_len"],
+        # Required, not .get() -- the version guard above has already rejected
+        # any manifest that predates this field, so a KeyError here would mean
+        # a v2 manifest was written without it.
+        "pad": raw["pad"],
         "l_min": raw["l_min"],
         "l_max": raw["l_max"],
         "fl_bands": [tuple(b) for b in raw["fl_bands"]],
