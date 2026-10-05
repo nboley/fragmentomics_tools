@@ -35,13 +35,17 @@ def main():
                    help="Freeze hex lookup tables (don't update during training)")
     p.add_argument("--limit-batches", type=float, default=1.0,
                    help="Fraction of train batches per epoch (0.1 = 10%%)")
-    p.add_argument("--baseline-only", action="store_true",
-                   help="Zero the neural correction and run validation only, so "
-                        "val_mult_nll IS the hex-table baseline measured on the "
-                        "model's own fragment population, estimator and "
-                        "normalizer. Use this instead of a standalone baseline "
-                        "evaluator -- a second implementation of the fragment "
-                        "filter silently drifted from the dataset on four axes.")
+    p.add_argument("--validate-only", action="store_true",
+                   help="Run validation only, no training. On a freshly built "
+                        "model this measures the model AT INIT.")
+    p.add_argument("--zero-correction", action="store_true",
+                   help="Zero w_out and len_bias so the correction f_theta is "
+                        "exactly 0 and the logits are exactly log_p0. With "
+                        "--validate-only, val_mult_nll IS the hex baseline, "
+                        "measured on the model's own fragment population, "
+                        "estimator and normalizer. Use this rather than a "
+                        "standalone evaluator -- a second implementation of the "
+                        "fragment rule silently drifted on four axes.")
     args = p.parse_args()
 
     os.makedirs(args.run_dir, exist_ok=True)
@@ -59,9 +63,10 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model params: {n_params:,}")
 
-    if args.baseline_only:
+    if args.zero_correction:
         if args.hex_tables is None:
-            p.error("--baseline-only requires --hex-tables")
+            p.error("--zero-correction requires --hex-tables: with no baseline "
+                    "the logits would be identically zero and the NLL uniform")
         # logit = (hid * w_out).sum(-1) + len_bias, with no other additive term,
         # so zeroing both makes the correction identically zero regardless of
         # what the stem computes. The logits are then exactly log_p0.
@@ -70,7 +75,7 @@ def main():
             model.len_bias.zero_()
         assert model.w_out.abs().max().item() == 0.0
         assert model.len_bias.abs().max().item() == 0.0
-        print("baseline-only: correction zeroed (w_out=0, len_bias=0)")
+        print("zero-correction: f_theta == 0 (w_out=0, len_bias=0)")
 
     train_ds = CutSiteFragmentDataset(
         store_path=args.store, model_input_size=model.model_input_size,
@@ -106,7 +111,7 @@ def main():
         log_every_n_steps=10,
         limit_train_batches=args.limit_batches,
     )
-    if args.baseline_only:
+    if args.validate_only:
         trainer.validate(model, val_dl)
     else:
         trainer.fit(model, train_dl, val_dl)
