@@ -235,132 +235,6 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
     return hex_tables, p_L, stats
 
 
-def evaluate_baseline_nll(root, config, hex_tables, p_L, split="val",
-                          L_min=25, L_max=180, k=6, max_regions=None):
-    """Evaluate the factored baseline fragment NLL on the given split.
-
-    log p₀(m, L, s) = log p_start(start_hex) + log p_stop(stop_hex) + log p(L) - log Z
-    """
-    tile_size = config.tile_size
-    l_target = config.l_target
-    n_L = L_max - L_min + 1
-
-    split_arr = root["tiles/split"][:]
-    seq_all = root["tiles/seq"][:]
-    mask_all = root["tiles/mask"][:]
-    frag_indptr = root["fragments/indptr"][:]
-    frag_start_arr = root["fragments/start"][:]
-    frag_length_arr = root["fragments/length"][:]
-    frag_strand_arr = root["fragments/strand"][:]
-
-    split_code = _SPLIT_CODES[split]
-    tile_ok = np.nonzero(split_arr == split_code)[0]
-    if max_regions is not None:
-        tile_ok = tile_ok[:max_regions]
-
-    crop_start, _ = calculate_start_and_stop_from_jitter(l_target, tile_size, 0)
-    n_tiles = seq_all.shape[0]
-    n_samples = (len(frag_indptr) - 1) // n_tiles
-
-    # Precompute log tables
-    log_start_fwd = np.log(np.maximum(hex_tables["start_fwd"], 1e-30))
-    log_stop_fwd = np.log(np.maximum(hex_tables["stop_fwd"], 1e-30))
-    log_start_rev = np.log(np.maximum(hex_tables["start_rev"], 1e-30))
-    log_stop_rev = np.log(np.maximum(hex_tables["stop_rev"], 1e-30))
-    log_pL = np.log(np.maximum(p_L, 1e-30))
-
-    total_nll = 0.0
-    total_frags = 0
-    n_regions = 0
-
-    for t_idx, t in enumerate(tile_ok):
-        seq_full = seq_all[t]
-        mask_full = mask_all[t]
-
-        mask_crop = jitter_matrix(mask_full, 0, tile_size)
-        valid_hex = hex_window_for_tile(seq_full, tile_size, k)
-
-        for s in range(n_samples):
-            u = s * n_tiles + t
-            flo = int(frag_indptr[u])
-            fhi = int(frag_indptr[u + 1])
-            if flo == fhi:
-                continue
-
-            starts = frag_start_arr[flo:fhi].astype(np.int64)
-            lengths = frag_length_arr[flo:fhi].astype(np.int64)
-            strands = frag_strand_arr[flo:fhi].astype(np.int64)
-            starts_crop = starts - crop_start
-
-            # Build per-position log-probabilities from hex tables
-            log_p_start_fwd = log_start_fwd[valid_hex]  # (P,)
-            log_p_stop_fwd = log_stop_fwd[valid_hex]
-            log_p_start_rev = log_start_rev[valid_hex]
-            log_p_stop_rev = log_stop_rev[valid_hex]
-
-            # Compute log Z (normalizer over all valid fragments)
-            log_scores = []
-            for L in range(L_min, L_max + 1):
-                max_start = tile_size - L
-                if max_start < 0:
-                    continue
-                L_idx = L - L_min
-                lp = log_pL[L_idx]
-                if lp < -60:  # skip negligible lengths
-                    continue
-
-                # + strand: start at p, stop at p+L-1
-                fwd_scores = log_p_start_fwd[:max_start + 1] + log_p_stop_fwd[L - 1:L + max_start] + lp
-                # - strand: start at p+L-1, stop at p
-                rev_scores = log_p_start_rev[L - 1:L + max_start] + log_p_stop_rev[:max_start + 1] + lp
-                log_scores.extend(fwd_scores.tolist())
-                log_scores.extend(rev_scores.tolist())
-
-            if not log_scores:
-                continue
-
-            log_scores_arr = np.array(log_scores)
-            log_Z = np.logaddexp.reduce(log_scores_arr)
-
-            # Score each observed fragment
-            region_nll = 0.0
-            region_n = 0
-            for fi in range(len(starts)):
-                st = starts_crop[fi]
-                L = lengths[fi]
-                s_val = strands[fi]
-                end = st + L - 1
-
-                centre = st + L // 2
-                if centre < 0 or centre >= tile_size:
-                    continue
-                if L < L_min or L > L_max:
-                    continue
-                if st < 0 or end >= tile_size:
-                    continue
-
-                L_idx = L - L_min
-                if s_val == 0:
-                    log_p = log_p_start_fwd[st] + log_p_stop_fwd[end] + log_pL[L_idx] - log_Z
-                else:
-                    log_p = log_p_start_rev[end] + log_p_stop_rev[st] + log_pL[L_idx] - log_Z
-
-                region_nll -= log_p
-                region_n += 1
-
-            if region_n > 0:
-                total_nll += region_nll
-                total_frags += region_n
-                n_regions += 1
-
-        if (t_idx + 1) % 1000 == 0:
-            running = total_nll / max(total_frags, 1)
-            print(f"  [{t_idx + 1}/{len(tile_ok)}] nll={running:.4f} ({total_frags} frags, {n_regions} regions)")
-
-    mean_nll = total_nll / max(total_frags, 1)
-    return mean_nll, total_frags, n_regions
-
-
 def train_conv_baseline(root, config, hex_tables, split="train",
                         L_min=25, L_max=180, k=6, N1=128,
                         epochs=5, lr=1e-3, batch_size=256, max_tiles=5000):
@@ -548,8 +422,6 @@ def main():
     p.add_argument("--k", type=int, default=6, help="hexamer size (default: 6)")
     p.add_argument("--L-min", type=int, default=25)
     p.add_argument("--L-max", type=int, default=180)
-    p.add_argument("--max-eval-regions", type=int, default=None,
-                   help="limit eval to N regions (for speed)")
     p.add_argument("--train-conv", action="store_true",
                    help="train a linear Conv1d and compare to analytical solution")
     p.add_argument("--conv-epochs", type=int, default=5)
@@ -583,21 +455,18 @@ def main():
         ratio = table.max() / table.min()
         print(f"  {table_name}: max/min ratio = {ratio:.1f}")
 
-    # Evaluate baseline NLL
+    # This script deliberately does NOT report a baseline NLL. It used to, via
+    # evaluate_baseline_nll, which was a second implementation of the fragment
+    # rule and had silently drifted from CutSiteFragmentDataset on four axes
+    # (filter, min_N, normalizer, estimator). The number it printed was ~0.8
+    # nats easier than the figure the model is actually scored against, which
+    # made a working Stage 2 look like it could not beat its own prior.
     print(f"\n{'=' * 60}")
-    print("Evaluating factored baseline NLL on val split")
-    print("=" * 60)
-
-    nll, n_frags, n_regions = evaluate_baseline_nll(
-        root, config, hex_tables, p_L,
-        split="val", L_min=args.L_min, L_max=args.L_max, k=args.k,
-        max_regions=args.max_eval_regions,
-    )
-
-    print(f"\n{'=' * 60}")
-    print(f"BASELINE FRAGMENT NLL = {nll:.6f}")
-    print(f"  Fragments: {n_frags:,}")
-    print(f"  Regions: {n_regions:,}")
+    print("Hex tables written. To measure the baseline NLL, run:")
+    print("  train_cut_site.py --baseline-only --hex-tables <this .npz>")
+    print("which zeroes the correction and reports the figure through the")
+    print("model's own validation path, so the fragment population, estimator")
+    print("and normalizer match the model by construction.")
     print("=" * 60)
 
     # Optional: train conv and compare
