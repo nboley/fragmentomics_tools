@@ -1731,18 +1731,44 @@ class RegionDataFrame(DataFrameBase):
         fasta_path,
         seq_type,
         reverse_complement_sequence_if_minus_strand,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
+        """Fetch one sequence per region.
+
+        ``fasta_path`` is REQUIRED. It used to default to
+        ``self.get_fasta_path()``, which for ``ref='hg38'`` returns a
+        hardcoded ``/scratch`` path to a DIFFERENT assembly patch
+        (GRCh38.p12) -- so the default either failed on a machine without
+        ``/scratch`` or silently answered from another reference.
+        """
         if fasta_path is None:
-            fasta_path = self.get_fasta_path()
+            raise ValueError(
+                "fasta_path is required. There is no safe default: "
+                "get_fasta_path() returns a hardcoded /scratch path to "
+                "GRCh38.p12, a different assembly patch from the hg38 FASTA "
+                "callers normally use."
+            )
 
         assert seq_type in ["one_hot_encoded", "bytearray"]
         if seq_type == "one_hot_encoded":
-            method = "get_one_hot_encoded_sequence"
             name = "one_hot_encoded_sequence"
         elif seq_type == "bytearray":
-            method = "get_sequence"
             name = "sequence"
+            # Region.get_sequence returns raw bytes and has no strand
+            # handling, and this package has no reverse-complement helper to
+            # give it one. Forwarding this flag is what made
+            # get_sequence/attach_sequence raise TypeError from the callee --
+            # they had never worked. Refuse explicitly rather than ignore.
+            if reverse_complement_sequence_if_minus_strand:
+                raise NotImplementedError(
+                    "reverse_complement_sequence_if_minus_strand is not "
+                    "supported for raw sequence; it is implemented only for "
+                    "the one-hot path, which can flip the encoded array. Use "
+                    "get_one_hot_encoded_sequence, or reverse-complement the "
+                    "bytes yourself."
+                )
         else:
             assert False, "UNREACHABLE"
 
@@ -1751,24 +1777,45 @@ class RegionDataFrame(DataFrameBase):
             for region in tqdm(
                 self.iter_regions(), total=len(self), disable=(not verbose), desc="get sequences"
             ):
-                seqs.append(
-                    getattr(region, method)(
-                        fasta,
-                        reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                if seq_type == "one_hot_encoded":
+                    seqs.append(
+                        region.get_one_hot_encoded_sequence(
+                            fasta,
+                            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                            left_pad=left_pad,
+                            right_pad=right_pad,
+                        )
                     )
-                )
+                else:
+                    seqs.append(region.get_sequence(fasta, left_pad, right_pad))
         return pd.Series(seqs, index=self.index, name=name)
 
     def get_sequence(
         self,
-        fasta_path=None,
+        fasta_path,
         reverse_complement_sequence_if_minus_strand=False,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
+        """One bytes sequence per region, optionally with flanking context.
+
+        :param left_pad: extra bases before each region's ``start``
+        :param right_pad: extra bases after each region's ``stop``
+
+        Padding is applied at the fetch, so regions are NOT resized and
+        positions stay expressible relative to the original ``start``. The
+        alternative -- ``expand_regions`` then fetch -- moves the bounds that
+        a caller doing its own coordinate arithmetic then has to undo, and
+        ``SampleAndRegionDataFrame.expand_regions`` additionally refuses once
+        fragment arrays are attached.
+        """
         return self._get_seq(
             fasta_path,
             "bytearray",
             reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            left_pad=left_pad,
+            right_pad=right_pad,
             verbose=verbose,
         )
 
@@ -1779,14 +1826,18 @@ class RegionDataFrame(DataFrameBase):
 
     def get_one_hot_encoded_sequence(
         self,
-        fasta_path=None,
+        fasta_path,
         reverse_complement_sequence_if_minus_strand=False,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
         return self._get_seq(
             fasta_path,
             "one_hot_encoded",
             reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            left_pad=left_pad,
+            right_pad=right_pad,
             verbose=verbose,
         )
 
