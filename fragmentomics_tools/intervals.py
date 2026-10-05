@@ -102,24 +102,6 @@ def _deterministic_order(idx):
     ).reset_index(drop=True)
 
 
-def _wiggle_to_min_dist(wiggle: int) -> int:
-    """Map our wiggle semantics to bioframe's min_dist.
-
-    Our wiggle: gap <= wiggle counts as adjacent.  wiggle=0 means plain
-    overlap only (book-ended do NOT match).
-
-    bioframe's min_dist: gap <= min_dist counts as adjacent.  min_dist=0
-    merges book-ended intervals.  min_dist >= 0 required.
-
-    For wiggle >= 1 the mapping is direct (min_dist = wiggle).
-    For wiggle == 0, bioframe cannot express "strictly overlapping only",
-    so callers must handle that case separately.
-    """
-    if wiggle < 0:
-        raise ValueError(f"wiggle must be >= 0, got {wiggle}")
-    return wiggle
-
-
 # ── overlap_indices ──────────────────────────────────────────────────
 
 def overlap_indices(
@@ -127,7 +109,7 @@ def overlap_indices(
     b: "RegionDataFrame",
     *,
     how: str = "inner",
-    wiggle: int = 0,
+    pad: int = 0,
     min_frac_a: float = 0.0,
     min_frac_b: float = 0.0,
     reciprocal: bool = False,
@@ -141,9 +123,12 @@ def overlap_indices(
         The two region sets.  Must share the same ``ref``.
     how : {"inner", "left", "right", "outer", "anti"}
         Join type.  ``"anti"`` returns A rows with **no** match in B.
-    wiggle : int
-        Maximum edge-to-edge gap that still counts as overlap.
-        ``wiggle=0`` is plain overlap; book-ended intervals do **not** match.
+    pad : int
+        Slack for overlap testing.  A pair matches when the edge-to-edge
+        gap is **strictly less than** ``pad``.  ``pad=0`` is strict overlap
+        (book-ended intervals do **not** match).  Equivalent to
+        ``bedtools window -w pad``: gap 0 first matches at ``pad=1``,
+        gap G first matches at ``pad=G+1``.
     min_frac_a, min_frac_b : float
         Minimum fraction of A (or B) that must be covered.
     reciprocal : bool
@@ -174,6 +159,9 @@ def overlap_indices(
     # Validated at entry, not inside the fraction block -- that block is
     # guarded by `min_frac_a > 0 or min_frac_b > 0`, so a check placed there
     # never fires for the one case it exists to catch.
+    if pad < 0:
+        raise ValueError(f"pad must be >= 0, got {pad}")
+
     if reciprocal and min_frac_a <= 0:
         raise ValueError(
             "reciprocal=True requires min_frac_a > 0; it applies min_frac_a "
@@ -182,21 +170,21 @@ def overlap_indices(
 
     _assert_same_ref(a, b)
 
-    # Wiggle: expand B intervals so a gap <= wiggle still produces an overlap.
-    # We keep the original B lengths for overlap_bases computation.
-    # Expansion must be (wiggle + 1) because half-open overlap requires
-    # strict inequality (start < end), so expanding by exactly `wiggle`
-    # leaves a gap of `wiggle` as book-ended (no overlap).
+    # Pad: expand B intervals so a gap < pad still produces an overlap.
+    # Half-open overlap: [a_start, a_stop) and [b_start, b_stop) overlap iff
+    # b_start < a_stop AND a_start < b_stop.  Expanding B by `pad` on each
+    # side makes a gap of G overlap iff G < pad — the `bedtools window -w`
+    # convention.
     # Enter position space. Everything below indexes positionally, which is
     # correct BECAUSE of this line -- see _positional.
     a, b = _positional(a, b)
 
     b_orig_start = b["start"].values.copy()
     b_orig_stop = b["stop"].values.copy()
-    if wiggle > 0:
+    if pad > 0:
         b = b.copy()
-        b["start"] = b["start"] - (wiggle + 1)
-        b["stop"] = b["stop"] + (wiggle + 1)
+        b["start"] = b["start"] - pad
+        b["stop"] = b["stop"] + pad
 
     bf_how = how
     if how == "anti":
@@ -223,7 +211,7 @@ def overlap_indices(
     has_overlap = idx["b_pos"].notna()
     overlap_bases = pd.array([0] * len(result), dtype="Int64")
     if has_overlap.any():
-        if wiggle > 0:
+        if pad > 0:
             # Compute actual overlap against original (un-expanded) B intervals.
             a_pos = idx.loc[has_overlap, "a_pos"].values.astype(int)
             b_pos = idx.loc[has_overlap, "b_pos"].values.astype(int)
@@ -301,7 +289,7 @@ def overlaps(
     a: "RegionDataFrame",
     b: "RegionDataFrame",
     *,
-    wiggle: int = 0,
+    pad: int = 0,
     same_strand: bool = False,
 ) -> pd.Series:
     """Boolean mask: which rows of *a* overlap at least one row in *b*.
@@ -319,8 +307,10 @@ def overlaps(
     Parameters
     ----------
     a, b : RegionDataFrame
-    wiggle : int
-        Maximum edge-to-edge gap that still counts as overlap.
+    pad : int
+        Slack for overlap testing.  A pair matches when the gap is
+        strictly less than ``pad``.  ``pad=0`` is strict overlap.
+        See ``overlap_indices`` for the full convention.
     same_strand : bool
         If True, only match when both strands are in {"+", "-"} and equal.
 
@@ -328,12 +318,7 @@ def overlaps(
     -------
     pd.Series[bool], index-aligned to *a*, one entry per ROW of *a*.
     """
-    # `overlap_indices` normalises its own inputs and returns POSITIONS, so
-    # there is nothing to normalise here -- an earlier version called
-    # `_positional` first and reset an already-0..n-1 index a second time.
-    # Positions index straight into a boolean array, and the caller's index is
-    # reattached only on the way out.
-    idx = overlap_indices(a, b, how="inner", wiggle=wiggle, same_strand=same_strand)
+    idx = overlap_indices(a, b, how="inner", pad=pad, same_strand=same_strand)
     mask = np.zeros(len(a), dtype=bool)
     matched = idx["a_pos"].dropna()
     if len(matched):
@@ -422,7 +407,7 @@ def cluster(
     a: "RegionDataFrame",
     b: "RegionDataFrame | None" = None,
     *,
-    wiggle: int = 0,
+    min_dist: int | None = 0,
     same_strand: bool = False,
 ) -> pd.Series:
     """Label connected components among overlapping intervals.
@@ -436,8 +421,12 @@ def cluster(
         The returned Series is aligned to *a* (labels for *b* are
         not returned; use the two-frame form when you need to know which
         A-intervals are transitively connected *through* B).
-    wiggle : int
-        Maximum edge-to-edge gap that still counts as connection.
+    min_dist : int or None
+        Join distance.  ``min_dist=0`` joins book-ended intervals
+        (``bedtools merge -d 0``).  ``min_dist=N`` joins when the gap is
+        ``<= N``.  ``min_dist=None`` joins only genuinely overlapping
+        intervals (book-ended stay separate).  Passed straight through to
+        ``bioframe.cluster``.
     same_strand : bool
         If True, only connect same-strand intervals.
 
@@ -445,8 +434,6 @@ def cluster(
     -------
     pd.Series[int], index-aligned to *a*.
     """
-    import bioframe
-
     if b is not None:
         _assert_same_ref(a, b)
 
@@ -455,18 +442,19 @@ def cluster(
         b[list(_COLS) + (["strand"] if "strand" in b.columns else [])].reset_index(drop=True),
     ], ignore_index=True)
 
-    labels = _cluster_df(df, wiggle, same_strand)
+    labels = _cluster_df(df, min_dist, same_strand)
 
     n_a = len(a)
     return pd.Series(labels[:n_a], index=a.index, name="cluster")
 
 
-def _cluster_df(df, wiggle, same_strand):
+def _cluster_df(df, min_dist, same_strand):
     """Assign connected-component labels to rows of *df*.
 
-    For wiggle >= 1 delegates to bioframe (min_dist = wiggle).
-    For wiggle == 0, bioframe's min_dist=0 incorrectly clusters book-ended
-    intervals, so we implement the sweep ourselves.
+    Delegates entirely to ``bioframe.cluster(min_dist=...)``.
+    ``min_dist=None`` gives strictly-overlapping-only (book-ended stay
+    separate); ``min_dist=0`` joins book-ended (the ``bedtools merge -d 0``
+    convention).
     """
     import bioframe
 
@@ -478,7 +466,10 @@ def _cluster_df(df, wiggle, same_strand):
             if not mask.any():
                 continue
             sub = df[mask].copy()
-            sub_labels = _cluster_one_group(sub, wiggle)
+            result = bioframe.cluster(
+                sub.reset_index(drop=True), min_dist=min_dist, cols=_COLS,
+            )
+            sub_labels = result["cluster"].values
             labels[mask] = sub_labels + offset
             offset += sub_labels.max() + 1 if len(sub_labels) > 0 else 0
         # Unstranded rows each get their own cluster.
@@ -487,59 +478,10 @@ def _cluster_df(df, wiggle, same_strand):
             labels[unstranded] = np.arange(offset, offset + unstranded.sum())
         return labels
     else:
-        return _cluster_one_group(df, wiggle)
-
-
-def _cluster_one_group(df, wiggle):
-    """Cluster a single strand-group (or all-strand) df.
-
-    Uses bioframe for wiggle >= 1 (where min_dist = wiggle gives the right
-    semantics: gap <= wiggle clusters together).  For wiggle == 0 bioframe's
-    min_dist=0 incorrectly clusters book-ended intervals, so we sweep.
-    """
-    import bioframe
-
-    if wiggle >= 1:
-        result = bioframe.cluster(df.reset_index(drop=True), min_dist=wiggle, cols=_COLS)
+        result = bioframe.cluster(
+            df.reset_index(drop=True), min_dist=min_dist, cols=_COLS,
+        )
         return result["cluster"].values
-    else:
-        # wiggle=0: only truly overlapping intervals cluster (book-ended do not).
-        # Sort by contig, start, stop and sweep.
-        # Reset index so positional and label indexing agree.
-        df = df.reset_index(drop=True)
-        sort_order = df.sort_values(list(_COLS)).index.values
-        contigs = df["contig"].values
-        starts = df["start"].values
-        stops = df["stop"].values
-
-        labels = np.empty(len(df), dtype=int)
-        cluster_id = 0
-
-        if len(sort_order) == 0:
-            return labels
-
-        # Sweep: maintain current cluster's extent.
-        cur_contig = contigs[sort_order[0]]
-        cur_stop = stops[sort_order[0]]
-        labels[sort_order[0]] = cluster_id
-
-        for i in range(1, len(sort_order)):
-            ix = sort_order[i]
-            c = contigs[ix]
-            s = starts[ix]
-            e = stops[ix]
-            if c == cur_contig and s < cur_stop:
-                # Overlaps current cluster (strict <, so book-ended excluded).
-                labels[ix] = cluster_id
-                if e > cur_stop:
-                    cur_stop = e
-            else:
-                cluster_id += 1
-                labels[ix] = cluster_id
-                cur_contig = c
-                cur_stop = e
-
-        return labels
 
 
 # ── merge ────────────────────────────────────────────────────────────
@@ -547,18 +489,20 @@ def _cluster_one_group(df, wiggle):
 def merge(
     a: "RegionDataFrame",
     *,
-    wiggle: int = 0,
+    min_dist: int | None = 0,
     same_strand: bool = False,
 ) -> "RegionDataFrame":
-    """Merge overlapping (or within-wiggle) intervals.
+    """Merge overlapping (or within-distance) intervals.
 
     Parameters
     ----------
     a : RegionDataFrame
-    wiggle : int
-        Maximum edge-to-edge gap that counts as adjacent.
-        ``wiggle=0`` means only truly overlapping intervals merge
-        (book-ended do **not** merge).
+    min_dist : int or None
+        Join distance.  ``min_dist=0`` merges book-ended intervals
+        (``bedtools merge -d 0``).  ``min_dist=N`` merges when the gap is
+        ``<= N``.  ``min_dist=None`` merges only genuinely overlapping
+        intervals (book-ended do **not** merge).  Passed straight through
+        to ``bioframe.cluster``.
     same_strand : bool
         If True, only merge intervals on the same strand.
 
@@ -570,7 +514,7 @@ def merge(
 
     labels = _cluster_df(
         a[list(_COLS) + (["strand"] if "strand" in a.columns else [])],
-        wiggle,
+        min_dist,
         same_strand,
     )
 

@@ -19,7 +19,7 @@ that drifts from them is wrong even if it is internally coherent.
 2. **Correctness before restructuring.** A new test that fails against
    production code is a finding to report, not something to patch away.
 3. **The useful interactions are two.** Joining region sets on overlap — with
-   wiggle, join types, and transitive grouping — and statistics over those
+   distance slack, join types, and transitive grouping — and statistics over those
    overlaps.
 4. **Statistics are `groupby` at the call site, not API surface.** The API's job
    is to return something a `groupby` can reduce, not to enumerate reductions.
@@ -272,17 +272,17 @@ methods do is either one of these or a pandas expression over one of them.
 
 ```python
 # One primitive. Returns position pairs, never joined columns.
-overlap_indices(a, b, *, how="inner", wiggle=0,
+overlap_indices(a, b, *, how="inner", pad=0,
                 min_frac_a=0.0, min_frac_b=0.0, reciprocal=False,
                 same_strand=False) -> DataFrame[a_pos, b_pos, overlap_bases]
 
 nearest(a, b, *, k=1, ignore_overlaps=False, direction=None,
         same_strand=False)        -> DataFrame[a_pos, b_pos, distance]
 
-cluster(a, b=None, *, wiggle=0, same_strand=False) -> Series[int]
-merge(a,   *, wiggle=0, same_strand=False)         -> RegionDataFrame
+cluster(a, b=None, *, min_dist=0, same_strand=False) -> Series[int]
+merge(a,   *, min_dist=0, same_strand=False)          -> RegionDataFrame
 
-overlaps(a, b, *, wiggle=0, same_strand=False)     -> Series[bool]
+overlaps(a, b, *, pad=0, same_strand=False)           -> Series[bool]
 ```
 
 ``a_pos`` and ``b_pos`` are 0-based row positions into the input frames.
@@ -350,10 +350,18 @@ gives the transitive grouping across two frames.
   `suffixes`, `return_input`, `keep_order`, `ensure_int` are implementation
   detail. Our schema is an invariant, not a parameter. This also removes the
   `**kwargs` passthrough that makes `s=True` reachable today.
-- **One word per concept.** `wiggle` means the same thing in `overlap_indices`,
-  `overlaps`, `cluster` and `merge`.
+- **Two conventions, for two questions.** Overlap functions
+  (``overlap_indices``, ``overlaps``) take ``pad``: gap < pad (the
+  ``bedtools window -w`` convention — "is there anything within range?").
+  Merge/cluster functions take ``min_dist``: gap <= min_dist (the
+  ``bedtools merge -d`` convention — "should these be joined?"). The two
+  conventions differ because bedtools itself uses different conventions for
+  its overlap-testing and merge operations: ``-w P`` matches when the gap is
+  strictly less than P, while ``-d D`` merges when the gap is at most D. A
+  single parameter forced one convention on both questions, which matched
+  neither tool.
 
-**`nearest` is not `overlap_indices(wiggle=n)`.** Wiggle answers *whether*
+**`nearest` is not `overlap_indices(pad=n)`.** ``pad`` answers *whether*
 something is within range; `nearest` answers *which* and *how far*, with a
 signed strand-aware distance. Neither substitutes for the other.
 
@@ -552,13 +560,13 @@ edge cases.
 
 | operation | old | new | why |
 |---|---|---|---|
-| `merge`, ctcf | 950,936 | **951,528** (+592) | `wiggle=0` does not merge book-ended intervals; bedtools `merge` did. Decided semantics. |
-| `from_beds_merged` | 942,977 | **943,554** (+577) | same cause — it now delegates to `merge(wiggle=0)` |
+| `merge`, ctcf | 950,936 | **951,528** (+592) | old `wiggle=0` did not merge book-ended; bedtools `merge` did. Now `min_dist=0` (default) merges book-ended, matching bedtools. |
+| `from_beds_merged` | 942,977 | **943,554** (+577) | same cause — delegates to `merge()`, now `min_dist=0` by default |
 | `drop_overlapping_regions` -> `overlap_indices_anti` | 955,789 | 955,789 | **same row count**, digest differs only because the return shape changed from rows to index pairs. The matching count is an independent check that the anti-join replacement is correct. |
 
 **A prediction of mine that was wrong, corrected here rather than left
 standing.** This table previously asserted that `overlaps_rdf_d10` would move,
-because `wiggle` fixes an off-by-one that made `max_distance=N` reach only
+because the migration fixed an off-by-one that made `max_distance=N` reach only
 `N-1`. The fix is real and is pinned by a discriminating unit test — but the
 real-data digest is **identical**, because no CTCF/blacklist pair in this
 dataset has an edge-to-edge gap of exactly 10 bp. The lesson is that a
@@ -580,8 +588,25 @@ exists): `join_on_overlap` both directions, `get_overlapping_base_counts`,
 `overlap_bases_sum` (the `groupby` that replaces
 `get_overlapping_base_counts`), `overlap_indices` both directions.
 | `overlap_indices`, `nearest`, fixture manifest | `a_index`/`b_index` columns | `a_pos`/`b_pos` columns | Column rename from labels to positions. Serialisation change only — the values are identical (both were positions internally); the column names now reflect the contract. Manifest digests move because the column header is part of the CSV digest. |
-| `merge_book_ended` | 1 merged row | 2 separate rows | `merge(wiggle=0)` does not merge book-ended; this is the decided semantics (wiggle=0 = strict overlap only) |
-| `from_beds_merged_book_ended` | 1 merged row | 2 separate rows | `from_beds_merged` now delegates to `merge(wiggle=0)`; same reason as above |
+| `merge_book_ended` | 1 merged row | **1 merged row (restored)** | `merge()` with default `min_dist=0` now merges book-ended, matching bedtools. The previous wiggle=0 behaviour is available via `min_dist=None`. |
+| `from_beds_merged_book_ended` | 1 merged row | **1 merged row (restored)** | `from_beds_merged` delegates to `merge()` with default `min_dist=0`; same reason |
+
+**Moved again: `wiggle` → `pad`/`min_dist` rename (API alignment with bedtools/bioframe conventions).**
+
+The `min_dist=0` default now merges book-ended intervals, reversing the
++592/+577 movements from the bedtools→bioframe migration. This is the
+bedtools `merge -d 0` behaviour, which was the correct default all along.
+
+| operation | old n | new n | old digest | new digest | why |
+|---|---|---|---|---|---|
+| `merge`, ctcf | 951,528 | **950,936** (−592) | `a48500b095969201` | `ea10500ba93aa568` | `min_dist=0` (default) merges book-ended — reverses the +592 |
+| `cluster`, ctcf | 964,593 | 964,593 | `08251b5ca62a1c6b` | `a6fa06033cae2d5c` | same count, labels changed (book-ended now cluster together) |
+| `from_beds_merged` | 943,554 | **942,977** (−577) | `090a66334e779ceb` | `2881f8420eba3880` | same cause |
+| `overlaps_w10` → `overlaps_p10` | 964,593 | 964,593 | `310a0f2220058dca` | `310a0f2220058dca` | **identical digest** — renamed only; no CTCF/blacklist pair at exactly gap=10 |
+
+Everything else — overlap_indices (both directions), overlap_indices_anti,
+overlaps (both), overlap_bases_sum, nearest, merge blacklist, cluster
+blacklist, all inputs — is **byte-identical**.
 | `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
 | `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_pos").overlap_bases.sum()` |
 | `_get_fragment_coverage_sum` | test deleted | — | method deleted (0 live callers) |
@@ -667,36 +692,59 @@ The bump also closes a pre-existing hazard unrelated to this work: `main` is
 198 commits ahead of `v1.4.0` while `pyproject.toml` still declares `1.4.0`, so
 anything installed from `main` in that window reports a version it is not.
 
-## `wiggle` semantics — DECIDED, and it corrects an off-by-one
+## Distance parameter semantics — DECIDED
 
-**`wiggle` is defined as: a pair matches when the edge-to-edge gap between them
-is `<= wiggle`.** `wiggle=0` is plain overlap, where book-ended intervals do
-*not* match.
+**Two conventions, matching two different tools, because the two operations ask
+different questions.**
 
-This **fixes** a defect in the method it replaces rather than carrying it
-forward. `overlaps_rdf(max_distance=N)` reaches only `N-1`: it expands the
-query by `N` on each side and then tests with half-open `IntervalTree`
-semantics, so an interval expanded to start exactly where the query ends is
-book-ended and does not count. Measured on a 10 bp gap — `max_distance=10`
-returns `False`, `11` returns `True`. The docstring meanwhile promises
-"maximum distance (edge to edge)", so the code and its stated contract
-disagree. It is the half-open-plus-padding interaction, the same family as the
-`[lo, hi)` fl-band trap in CLAUDE.md.
+Measured against bedtools 2.31.1 and bioframe 0.8.0:
 
-Fixing it is free, which is why it is being fixed now rather than preserved:
-**0 of the 22 `overlaps_rdf` call sites pass `max_distance`** — all 22 are the
-same copy-pasted line across 11 notebooks using the default — and at the
-default of 0 there is no expansion and the behaviour is already correct. So no
-result that exists today moves. The rename to `wiggle` in a major version is
-also the one moment where a semantics change cannot be silently inherited:
-the parameter name and the major version both change at once.
+| gap | `bt window -w` | `bt merge -d` | old `wiggle` |
+|---|---|---|---|
+| 0 (book-ended) | 1 | **0** | 1 |
+| 1 | 2 | 1 | 1 |
+| 2 | 3 | 2 | 2 |
 
-**Required test, at the boundary.** A gap of exactly `G` must match at
-`wiggle == G` and must not at `wiggle == G-1`. Boundary-adjacent behaviour is
-what a reimplementation gets wrong, and asserting only the interior would pass
-against both the old and the new semantics. The Phase 0 digest for
-`overlaps_rdf_d10` pins the *old* answer and is therefore expected to move —
-that movement is this decision landing, not a regression.
+bedtools is deliberately not self-consistent: `window -w 0` reports no hit on
+book-ended intervals (they share zero bases), while `merge -d 0` joins them
+(the gap is 0).  Both are right for their own question.
+
+The old single `wiggle` parameter was a third convention matching neither tool.
+It has been replaced by two parameters, each following the standard convention
+for its operation:
+
+**Overlap functions (`overlap_indices`, `overlaps`) → `pad`.**
+``pad=0`` is strict overlap (book-ended do not match).  A pair matches when
+the edge-to-edge gap is **strictly less than** ``pad``.  This is the
+``bedtools window -w`` convention: gap G first matches at ``pad = G+1``.
+Equivalent to ``bioframe.expand(b, pad=pad)`` then overlap.
+
+**Merge/cluster functions (`merge`, `cluster`) → `min_dist`.**
+``min_dist=0`` joins book-ended (the ``bedtools merge -d 0`` default).
+``min_dist=N`` joins when the gap is ``<= N``.  ``min_dist=None`` joins
+only genuinely overlapping intervals.  Passed straight through to
+``bioframe.cluster``/``bioframe.merge``.
+
+This also deletes the hand-rolled sweep in ``_cluster_one_group`` (~55 lines)
+and the ``wiggle == 0`` special-casing, which existed because ``_wiggle_to_min_dist``
+claimed "bioframe cannot express strictly overlapping only".  That claim was
+false: ``bioframe.cluster(min_dist=None)`` and ``bioframe.merge(min_dist=None)``
+give exactly that behaviour.
+
+**Required tests, at the boundary.**
+
+For `pad`: gap G first matches at ``pad == G+1`` and does not at ``pad == G``,
+including G=0.  ``pad=0`` never matches a non-overlapping pair; genuinely
+overlapping pairs match at ``pad=0``.
+
+For `min_dist`: gap G first joins at ``min_dist == G`` and does not at
+``min_dist == G-1``, **including G=0**.  ``min_dist=None`` joins only genuinely
+overlapping pairs.
+
+The `overlaps_rdf(max_distance=N)` off-by-one that this design originally
+corrected (reaching only N-1 due to half-open expansion) is now moot: `pad`
+follows the bedtools convention, and the old `max_distance` parameter no
+longer exists.
 
 ## Still open
 

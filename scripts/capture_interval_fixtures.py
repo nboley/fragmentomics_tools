@@ -236,9 +236,9 @@ def capture(datasets):
                intervals.overlap_indices(ctcf, bl, how="anti"))
 
         record("overlaps", "ctcf_x_blacklist", intervals.overlaps(ctcf, bl))
-        record("overlaps_w10", "ctcf_x_blacklist",
-               intervals.overlaps(ctcf, bl, wiggle=10),
-               note="wiggle=10")
+        record("overlaps_p10", "ctcf_x_blacklist",
+               intervals.overlaps(ctcf, bl, pad=10),
+               note="pad=10")
         record("overlaps", "blacklist_x_ctcf", intervals.overlaps(bl, ctcf))
 
         # What get_overlapping_base_counts used to return, now a groupby over

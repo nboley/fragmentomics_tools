@@ -6,6 +6,12 @@ the bioframe-backed replacements.
 
 Fixture movements from the Phase 0 baseline are recorded in the design doc
 (docs/pending/interval_api_design.md, §Fixture movements).
+
+**Parameter conventions.**  Overlap functions (``overlap_indices``,
+``overlaps``) take ``pad``: gap < pad (``bedtools window -w`` convention).
+Merge/cluster functions take ``min_dist``: gap <= min_dist (``bedtools
+merge -d`` convention).  The two conventions differ because the two
+operations ask different questions — see the design doc for the rationale.
 """
 
 import os
@@ -37,31 +43,50 @@ def _rdf(rows, ref="hg38"):
 class TestMergeCornerCases:
     """Pin merge on the eight differential-test cases.
 
-    FIXTURE MOVEMENT: merge(wiggle=0) does NOT merge book-ended intervals.
-    This differs from the old merge_regions() which delegated to bedtools
-    merge, which considers book-ended as adjacent.  wiggle=1 restores the
-    old book-ended merging behavior.
+    min_dist=0 (the default) merges book-ended intervals, matching
+    ``bedtools merge -d 0`` and ``bioframe.merge(min_dist=0)``.
+    min_dist=None gives strictly-overlapping-only (book-ended stay separate).
     """
 
-    def test_book_ended_not_merged_at_wiggle_0(self):
-        """[0,10) + [10,20) share a boundary — NOT merged at wiggle=0."""
+    def test_book_ended_merged_at_min_dist_0(self):
+        """[0,10) + [10,20) share a boundary — merged at min_dist=0 (default)."""
         rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
-        merged = merge(rdf, wiggle=0)
-        assert len(merged) == 2
-
-    def test_book_ended_merged_at_wiggle_1(self):
-        """[0,10) + [10,20) — merged at wiggle=1 (gap=0 <= 1)."""
-        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
-        merged = merge(rdf, wiggle=1)
+        merged = merge(rdf, min_dist=0)
         assert len(merged) == 1
         assert int(merged.start.iloc[0]) == 0
         assert int(merged.stop.iloc[0]) == 20
 
-    def test_one_bp_gap_stays_separate(self):
-        """[0,10) + [11,20) — 1bp gap at position 10, no merge."""
-        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 11], "stop": [10, 20]})
-        merged = merge(rdf)
+    def test_book_ended_not_merged_at_min_dist_none(self):
+        """[0,10) + [10,20) — NOT merged at min_dist=None (strict overlap only)."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
+        merged = merge(rdf, min_dist=None)
         assert len(merged) == 2
+
+    def test_default_merges_book_ended(self):
+        """Default min_dist=0 merges book-ended — matches bedtools merge -d 0."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
+        merged = merge(rdf)
+        assert len(merged) == 1
+
+    def test_book_ended_merged_at_min_dist_1(self):
+        """[0,10) + [10,20) — merged at min_dist=1 (gap=0 <= 1)."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 10], "stop": [10, 20]})
+        merged = merge(rdf, min_dist=1)
+        assert len(merged) == 1
+        assert int(merged.start.iloc[0]) == 0
+        assert int(merged.stop.iloc[0]) == 20
+
+    def test_one_bp_gap_stays_separate_at_min_dist_0(self):
+        """[0,10) + [11,20) — 1bp gap at position 10, NOT merged at min_dist=0."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 11], "stop": [10, 20]})
+        merged = merge(rdf, min_dist=0)
+        assert len(merged) == 2
+
+    def test_one_bp_gap_merged_at_min_dist_1(self):
+        """[0,10) + [11,20) — 1bp gap, merged at min_dist=1 (gap <= 1)."""
+        rdf = _rdf({"contig": ["chr1", "chr1"], "start": [0, 11], "stop": [10, 20]})
+        merged = merge(rdf, min_dist=1)
+        assert len(merged) == 1
 
     def test_one_bp_shared_merges(self):
         """[0,10) + [9,20) share position 9."""
@@ -117,6 +142,57 @@ class TestMergeCornerCases:
         merged = merge(rdf)
         starts = list(zip(merged.contig, merged.start))
         assert starts == sorted(starts)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# merge / cluster boundary tests — parametrized over gap × min_dist
+# ═══════════════════════════════════════════════════════════════════════
+
+# For merge/cluster: gap G first joins at min_dist == G (gap <= min_dist).
+# min_dist=None joins only genuinely overlapping.
+_MERGE_BOUNDARY_CASES = [
+    # (gap, min_dist, should_merge)
+    (0, None, False),   # book-ended, strict overlap only
+    (0, 0, True),       # book-ended, min_dist=0 joins them
+    (1, 0, False),      # gap=1, min_dist=0 does not reach
+    (1, 1, True),       # gap=1, min_dist=1 joins
+    (1, None, False),   # gap=1, strict overlap
+    (5, 4, False),      # gap=5, min_dist=4 does not reach
+    (5, 5, True),       # gap=5, min_dist=5 joins
+    (10, 9, False),     # gap=10, min_dist=9 does not reach
+    (10, 10, True),     # gap=10, min_dist=10 joins
+]
+
+
+@pytest.mark.parametrize("gap,min_dist,should_merge", _MERGE_BOUNDARY_CASES)
+def test_merge_boundary(gap, min_dist, should_merge):
+    """Gap G first joins at min_dist == G, including G=0."""
+    rdf = _rdf({
+        "contig": ["chr1", "chr1"],
+        "start": [100, 200 + gap],
+        "stop": [200, 300 + gap],
+    })
+    merged = merge(rdf, min_dist=min_dist)
+    if should_merge:
+        assert len(merged) == 1, f"gap={gap}, min_dist={min_dist}: expected merged"
+    else:
+        assert len(merged) == 2, f"gap={gap}, min_dist={min_dist}: expected separate"
+
+
+@pytest.mark.parametrize("gap,min_dist,should_cluster", _MERGE_BOUNDARY_CASES)
+def test_cluster_boundary(gap, min_dist, should_cluster):
+    """Cluster uses the same gap <= min_dist convention as merge."""
+    rdf = _rdf({
+        "contig": ["chr1", "chr1"],
+        "start": [100, 200 + gap],
+        "stop": [200, 300 + gap],
+    })
+    labels = cluster(rdf, min_dist=min_dist)
+    same_cluster = labels.iloc[0] == labels.iloc[1]
+    if should_cluster:
+        assert same_cluster, f"gap={gap}, min_dist={min_dist}: expected same cluster"
+    else:
+        assert not same_cluster, f"gap={gap}, min_dist={min_dist}: expected different clusters"
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -278,22 +354,36 @@ class TestOverlapsCornerCases:
         result = overlaps(a, b)
         assert list(result) == [True]
 
-    def test_wiggle_bridges_book_ended(self):
-        """wiggle=1 bridges a book-ended gap (gap=0 <= 1)."""
+    def test_pad_bridges_book_ended(self):
+        """pad=1 bridges a book-ended gap (gap=0 < 1)."""
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
-        result = overlaps(a, b, wiggle=1)
+        result = overlaps(a, b, pad=1)
         assert list(result) == [True]
 
-    def test_wiggle_boundary(self):
-        """A gap of exactly G matches at wiggle=G and not at G-1.
+    def test_pad_does_not_bridge_book_ended_at_0(self):
+        """pad=0 does NOT bridge a book-ended gap."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [200], "stop": [300]})
+        result = overlaps(a, b, pad=0)
+        assert list(result) == [False]
 
-        This is the required boundary test from the design doc.
+    def test_pad_boundary(self):
+        """A gap of exactly G matches at pad=G+1 and not at pad=G.
+
+        This is the required boundary test. pad uses strict less-than:
+        gap < pad (the ``bedtools window -w`` convention).
         """
         a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
         b = _rdf({"contig": ["chr1"], "start": [210], "stop": [300]})  # gap = 10
-        assert list(overlaps(a, b, wiggle=9)) == [False]
-        assert list(overlaps(a, b, wiggle=10)) == [True]
+        assert list(overlaps(a, b, pad=10)) == [False]   # gap < 10 → 10 doesn't match
+        assert list(overlaps(a, b, pad=11)) == [True]    # gap < 11 → 10 matches
+
+    def test_genuinely_overlapping_at_pad_0(self):
+        """Genuinely overlapping pairs match at pad=0."""
+        a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+        b = _rdf({"contig": ["chr1"], "start": [150], "stop": [300]})
+        assert list(overlaps(a, b, pad=0)) == [True]
 
     def test_two_contigs(self):
         a = _rdf({
@@ -325,11 +415,58 @@ class TestOverlapsCornerCases:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# overlap boundary tests — parametrized over gap × pad
+# ═══════════════════════════════════════════════════════════════════════
+
+# For overlap functions: gap G first matches at pad == G+1 (gap < pad).
+# pad=0 never matches a non-overlapping pair.
+_OVERLAP_BOUNDARY_CASES = [
+    # (gap, pad, should_match)
+    (0, 0, False),    # book-ended, pad=0 → strict overlap only
+    (0, 1, True),     # book-ended, pad=1 → gap < 1 → matches
+    (1, 1, False),    # gap=1, pad=1 → gap < 1 → 1 doesn't match
+    (1, 2, True),     # gap=1, pad=2 → gap < 2 → matches
+    (5, 5, False),    # gap=5, pad=5 → gap < 5 → doesn't match
+    (5, 6, True),     # gap=5, pad=6 → gap < 6 → matches
+    (10, 10, False),  # gap=10, pad=10 → doesn't match
+    (10, 11, True),   # gap=10, pad=11 → matches
+]
+
+
+@pytest.mark.parametrize("gap,pad,should_match", _OVERLAP_BOUNDARY_CASES)
+def test_overlaps_boundary(gap, pad, should_match):
+    """Gap G first matches at pad == G+1."""
+    a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+    b = _rdf({"contig": ["chr1"], "start": [200 + gap], "stop": [300 + gap]})
+    result = list(overlaps(a, b, pad=pad))
+    if should_match:
+        assert result == [True], f"gap={gap}, pad={pad}: expected match"
+    else:
+        assert result == [False], f"gap={gap}, pad={pad}: expected no match"
+
+
+@pytest.mark.parametrize("gap,pad,should_match", _OVERLAP_BOUNDARY_CASES)
+def test_overlap_indices_boundary(gap, pad, should_match):
+    """overlap_indices agrees with overlaps on boundary cases."""
+    a = _rdf({"contig": ["chr1"], "start": [100], "stop": [200]})
+    b = _rdf({"contig": ["chr1"], "start": [200 + gap], "stop": [300 + gap]})
+    result = overlap_indices(a, b, pad=pad)
+    if should_match:
+        assert len(result) == 1, f"gap={gap}, pad={pad}: expected 1 pair"
+    else:
+        assert len(result) == 0, f"gap={gap}, pad={pad}: expected 0 pairs"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # from_beds_merged — concat + merge
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestFromBedsMergedCornerCases:
-    """Pin from_beds_merged behaviour."""
+    """Pin from_beds_merged behaviour.
+
+    from_beds_merged delegates to merge() with default min_dist=0,
+    which merges book-ended intervals (the bedtools merge -d 0 convention).
+    """
 
     def test_single_bed(self):
         """Single-file path delegates to from_bed."""
@@ -367,10 +504,9 @@ class TestFromBedsMergedCornerCases:
             result = RegionDataFrame.from_beds_merged([p1, p2], ref="hg38")
             assert len(result) == 2
 
-    def test_book_ended_beds_not_merged(self):
-        """FIXTURE MOVEMENT: book-ended intervals from two BEDs do NOT
-        merge at wiggle=0 (the new default).  The old merge_regions()
-        delegated to bedtools merge which merged book-ended by default."""
+    def test_book_ended_beds_merged(self):
+        """Book-ended intervals from two BEDs ARE merged at default min_dist=0,
+        matching bedtools merge -d 0."""
         with tempfile.TemporaryDirectory() as d:
             p1 = os.path.join(d, "a.bed")
             p2 = os.path.join(d, "b.bed")
@@ -379,7 +515,7 @@ class TestFromBedsMergedCornerCases:
             with open(p2, "w") as fh:
                 fh.write("chr1\t100\t200\n")
             result = RegionDataFrame.from_beds_merged([p1, p2], ref="hg38")
-            assert len(result) == 2
+            assert len(result) == 1
 
     def test_chroms_filter(self):
         """chroms parameter filters to selected chromosomes."""
@@ -477,9 +613,16 @@ class TestClusterCornerCases:
         labels = cluster(a, b)
         assert labels.iloc[0] == labels.iloc[1]
 
-    def test_book_ended_not_clustered(self):
+    def test_book_ended_clustered_at_min_dist_0(self):
+        """Default min_dist=0 clusters book-ended (bedtools merge -d 0 convention)."""
         rdf = _rdf({"contig": ["chr1","chr1"], "start": [0,10], "stop": [10,20]})
         labels = cluster(rdf)
+        assert labels.iloc[0] == labels.iloc[1]
+
+    def test_book_ended_not_clustered_at_min_dist_none(self):
+        """min_dist=None: only genuinely overlapping intervals cluster."""
+        rdf = _rdf({"contig": ["chr1","chr1"], "start": [0,10], "stop": [10,20]})
+        labels = cluster(rdf, min_dist=None)
         assert labels.iloc[0] != labels.iloc[1]
 
 
@@ -500,6 +643,15 @@ class TestNearestCornerCases:
         b = _rdf({"contig": ["chr1"], "start": [300], "stop": [400]}, ref="hg19")
         with pytest.raises(ValueError, match="same reference"):
             nearest(a, b)
+
+    def test_no_slack_parameter(self):
+        """nearest has no slack parameter — it returns distances."""
+        import inspect
+        sig = inspect.signature(nearest)
+        params = set(sig.parameters.keys())
+        assert "pad" not in params
+        assert "min_dist" not in params
+        assert "wiggle" not in params
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -559,7 +711,7 @@ class TestNonDefaultIndex:
         # Positions are always 0-based, regardless of the input index.
         assert sorted(int(i) for i in result["a_pos"]) == [0, 1]
 
-    def test_wiggle_survives_a_non_default_index(self):
+    def test_pad_survives_a_non_default_index(self):
         a = RegionDataFrame(
             pd.DataFrame(
                 {"contig": ["chr1"], "start": [100], "stop": [200]}, index=[77]
@@ -572,7 +724,8 @@ class TestNonDefaultIndex:
             ),
             ref="hg38",
         )
-        result = overlap_indices(a, b, how="inner", wiggle=10)
+        # Gap = 10. pad=11 → gap < 11 → matches.
+        result = overlap_indices(a, b, how="inner", pad=11)
         assert len(result) == 1
         assert int(result["a_pos"].iloc[0]) == 0  # position, not label
         # Gap-bridged pairs share no bases.
@@ -652,17 +805,17 @@ _B_ROWS = {
 }
 
 # Every public entry point, including the parameter paths that have their own
-# internal lookups (wiggle, same_strand and the fraction filter each index
+# internal lookups (pad, same_strand and the fraction filter each index
 # back into the input frames separately).
 _ENTRY_POINTS = {
     "overlap_indices_inner": lambda a, b: overlap_indices(a, b),
     "overlap_indices_anti": lambda a, b: overlap_indices(a, b, how="anti"),
     "overlap_indices_left": lambda a, b: overlap_indices(a, b, how="left"),
-    "overlap_indices_wiggle": lambda a, b: overlap_indices(a, b, wiggle=50),
+    "overlap_indices_pad": lambda a, b: overlap_indices(a, b, pad=50),
     "overlap_indices_same_strand": lambda a, b: overlap_indices(a, b, same_strand=True),
     "overlap_indices_min_frac": lambda a, b: overlap_indices(a, b, min_frac_a=0.3),
     "overlaps": lambda a, b: overlaps(a, b),
-    "overlaps_wiggle": lambda a, b: overlaps(a, b, wiggle=50),
+    "overlaps_pad": lambda a, b: overlaps(a, b, pad=50),
     "overlaps_same_strand": lambda a, b: overlaps(a, b, same_strand=True),
     "nearest": lambda a, b: nearest(a, b),
     "cluster_one_frame": lambda a, b: cluster(a),
@@ -690,7 +843,7 @@ def test_entry_point_is_indifferent_to_index_labels(name):
     `bioframe` returns index LABELS in its `index`/`index_` columns. Any
     internal lookup that treats those as POSITIONS breaks on frames produced
     by a filter or a slice — which is most real frames. This has been found
-    four separate times in this module: the wiggle path, the fraction filter,
+    four separate times in this module: the pad path, the fraction filter,
     `overlaps`, and `_strand_mask`.
 
     Two of those four raised IndexError, which is survivable. The other two

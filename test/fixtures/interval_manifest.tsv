@@ -9,15 +9,15 @@ merge	blacklist	636	73aa4ede82c22f38
 unique_regions	blacklist	636	de7cc0fc3346ea27	
 cluster	blacklist	636	d0431ca84f60cca8	
 sort	ctcf	964593	566f1c274d74515a	
-merge	ctcf	951528	a48500b095969201	
+merge	ctcf	950936	ea10500ba93aa568	
 unique_regions	ctcf	964593	566f1c274d74515a	
-cluster	ctcf	964593	08251b5ca62a1c6b	
+cluster	ctcf	964593	a6fa06033cae2d5c	
 overlap_indices	ctcf_x_blacklist	8804	372c1e00328443c8	
 overlap_indices	blacklist_x_ctcf	8804	dd5285f82737b63e	
 overlap_indices_anti	ctcf_x_blacklist	955789	81e808d3fa87a0a0	
 overlaps	ctcf_x_blacklist	964593	fd3767dba05a17f3	
-overlaps_w10	ctcf_x_blacklist	964593	310a0f2220058dca	wiggle=10
+overlaps_p10	ctcf_x_blacklist	964593	310a0f2220058dca	pad=10
 overlaps	blacklist_x_ctcf	636	b75af5509fea3f8e	
 overlap_bases_sum	ctcf_x_blacklist	8804	836cc5a1fe6fecd8	
 nearest	ctcf_x_blacklist	964593	4dd2d4634790f721	
-from_beds_merged	all	943554	090a66334e779ceb	
+from_beds_merged	all	942977	2881f8420eba3880	
