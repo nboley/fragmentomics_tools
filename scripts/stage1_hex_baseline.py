@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 import zarr
 
+from background_model.cut_site_model import CUT_OFFSET_IN_KMER
 from background_model.cut_site_store import CutSiteStoreConfig, validate_length_range
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
@@ -63,6 +64,29 @@ def _seq_to_hexamer_indices(seq_uint8, k=6):
         indices += b.astype(np.int64) * powers[i]
     indices[has_n] = -1
     return indices
+
+
+def hex_window_for_tile(seq_full, tile_size, k=6):
+    """k-mer index per tile position, registered on the cut junction.
+
+    Returns ``(tile_size,)`` where entry ``p`` is the k-mer STARTING
+    ``CUT_OFFSET_IN_KMER`` bases before tile position ``p``.
+
+    The registration is done by explicit slicing rather than by choosing a crop
+    width and letting ``jitter_matrix`` centre it.  That indirection is what
+    broke before: ``jitter_matrix`` crops from the full stored sequence (1802bp,
+    not ``l_target``) and CEILS on odd differences, so the realised offset did
+    not match what ``calculate_start_and_stop_from_jitter`` predicted and nobody
+    noticed the k-mer had moved.
+    """
+    tile_start = (len(seq_full) - tile_size) // 2
+    lo = tile_start - CUT_OFFSET_IN_KMER
+    if lo < 0 or lo + tile_size + k - 1 > len(seq_full):
+        raise ValueError(
+            f"sequence of length {len(seq_full)} cannot supply k-mers for a "
+            f"{tile_size}bp tile at offset {CUT_OFFSET_IN_KMER} with k={k}"
+        )
+    return _seq_to_hexamer_indices(seq_full[lo:lo + tile_size + k - 1], k)
 
 
 def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
@@ -118,17 +142,10 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
         seq_full = seq_all[t]
         mask_full = mask_all[t]
 
-        # Centre crop (j=0)
-        seq_crop = jitter_matrix(seq_full, 0, tile_size + k - 1)  # need k-1 extra for hexamers
         mask_crop = jitter_matrix(mask_full, 0, tile_size)
 
-        # Convert to hexamer indices over the crop region
-        # seq_crop covers positions [crop_start, crop_start + tile_size + k - 1)
-        # so hexamer at position p covers seq_crop[p:p+k]
-        hex_idx = _seq_to_hexamer_indices(seq_crop, k)  # (tile_size,)
-
-        # Count hexamer occurrences (only at masked positions with valid hexamers)
-        valid_hex = hex_idx[:tile_size]  # one hex per position in tile
+        # valid_hex[p] = k-mer starting CUT_OFFSET_IN_KMER before tile pos p
+        valid_hex = hex_window_for_tile(seq_full, tile_size, k)
         for p in range(tile_size):
             if mask_crop[p] and valid_hex[p] >= 0:
                 hex_occurrences[valid_hex[p]] += 1
@@ -260,10 +277,8 @@ def evaluate_baseline_nll(root, config, hex_tables, p_L, split="val",
         seq_full = seq_all[t]
         mask_full = mask_all[t]
 
-        seq_crop = jitter_matrix(seq_full, 0, tile_size + k - 1)
         mask_crop = jitter_matrix(mask_full, 0, tile_size)
-        hex_idx = _seq_to_hexamer_indices(seq_crop, k)
-        valid_hex = hex_idx[:tile_size]
+        valid_hex = hex_window_for_tile(seq_full, tile_size, k)
 
         for s in range(n_samples):
             u = s * n_tiles + t
@@ -500,8 +515,7 @@ def train_conv_baseline(root, config, hex_tables, split="train",
         analytical_table = hex_tables[tname]
         all_corrs = []
         for i in range(n_eval):
-            seq_crop = jitter_matrix(seq_all[tile_ok[i]], 0, tile_size + k - 1)
-            hex_idx = _seq_to_hexamer_indices(seq_crop, k)[:tile_size]
+            hex_idx = hex_window_for_tile(seq_all[tile_ok[i]], tile_size, k)
             valid = hex_idx >= 0
             if valid.sum() < 10:
                 continue

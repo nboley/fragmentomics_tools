@@ -1211,9 +1211,106 @@ cap). Cut-site models are stable; old CNN models diverge on low-count data.
 | Old CNN Multinomial | 42.371 → 52K | **Diverged** (lr=1e-4 too high) |
 | Old CNN NB-frozen | 6.464 → 385 | **Diverged** by epoch 1 |
 
-### 10.6 Next Steps — Two-Stage Training Design
+### 10.6 LR Sweep — Stage 2 Neural Correction (2026-10-02)
 
-See `docs/pending/two_stage_training.md` for the full design. Key decisions:
+Four learning rates tested on Stage 2, all with 10% train data (`--limit-batches 0.1`),
+hex tables initialized from Stage 1 MLE and trainable, 13 epochs:
+
+| LR | Best val_mult_nll | vs Stage 1 baseline (12.024) | Epochs |
+|---|---|---|---|
+| 5e-3 | 12.075 | +0.051 (worse) | 13 |
+| 1e-3 | 12.062 | +0.038 (worse) | 15 |
+| 5e-4 | 12.085 | +0.061 (worse) | 13 |
+| 1e-4 | 12.170 | +0.146 (worse, still learning) | 13 |
+
+![LR sweep comparison](../../../lr_sweep_comparison.png)
+
+**All learning rates produce val NLL worse than the Stage 1 analytical baseline.**
+The neural correction network is adding noise that overwhelms the residual
+signal beyond the hexamer tables. lr=1e-3 is closest (12.062) but still 0.038
+nats above the baseline.
+
+A follow-up run with **frozen hex tables** (`--freeze-hex`, lr=1e-3, 20 epochs)
+timed out at epoch 16 with val_mult_nll = 12.092 — also worse than baseline.
+
+### 10.7 K-Fold Cross-Validation of the Hex Baseline (2026-10-04)
+
+To assess whether the baseline-vs-model gap is real or within noise, the
+hex-table baseline NLL was evaluated under 10-fold cross-validation over
+all 66,649 tiles. Each fold fits hex tables on 90% of tiles and evaluates
+on the held-out 10%.
+
+| Fold | Val Tiles | Val Frags | NLL |
+|------|-----------|-----------|-----|
+| 0 | 6,664 | 67,819 | 12.0276 |
+| 1 | 6,664 | 67,418 | 12.0270 |
+| 2 | 6,664 | 67,465 | 12.0286 |
+| 3 | 6,664 | 67,584 | 12.0243 |
+| 4 | 6,664 | 66,987 | 12.0267 |
+| 5 | 6,664 | 67,913 | 12.0300 |
+| 6 | 6,664 | 66,978 | 12.0268 |
+| 7 | 6,664 | 67,866 | 12.0204 |
+| 8 | 6,664 | 67,740 | 12.0104 |
+| 9 | 6,673 | 67,541 | 12.0330 |
+
+**Weighted mean: 12.0255 ± 0.0059 (std), range 0.023 nats.**
+
+The original single-split baseline (12.024) is within 1σ of the cross-validated
+mean (12.025). The hex baseline is very stable: σ = 0.006 nats.
+
+**Comparison to trained models:**
+
+| Model | Best val NLL | vs baseline mean | Significance |
+|---|---|---|---|
+| Hex baseline (10-fold mean) | **12.025 ± 0.006** | — | — |
+| Stage 2 lr=1e-3 (best neural) | 12.062 | +0.037 | 6.3σ worse |
+| Stage 2 real (2 ep) | 12.048 | +0.023 | 3.9σ worse |
+| Stage 2 sim (2 ep) | 12.017 | −0.008 | 1.4σ better |
+| Cut-site Mult-only (20 ep) | 12.012 | −0.013 | 2.2σ better |
+
+**Findings:**
+
+1. The Stage 2 neural correction **reliably makes things worse** on real data:
+   the best lr sweep result (12.062) is 6σ above the analytical baseline.
+   The conv backbone adds noise that overwhelms the residual signal.
+
+2. Only the full-data Mult-only model (12.012, 20 epochs) and the sim Stage 2
+   (12.017, 2 epochs) dip below the baseline, and neither is strongly
+   significant (2.2σ and 1.4σ respectively).
+
+3. The hex tables capture essentially all learnable structure at this data
+   scale — the gap between the analytical MLE and the best trained model
+   is only 0.013 nats (2.2σ), meaning the neural network learns almost
+   nothing beyond what counting hexamer frequencies already provides.
+
+4. The tight cross-validation variance (σ = 0.006) confirms that the
+   baseline NLL is a stable, well-determined quantity — not an artifact of
+   a particular train/val split.
+
+### 10.8 Next Steps — Two-Stage Training Design
+
+See `docs/pending/two_stage_training.md` for the full design.
+
+**Open question:** Why does the neural correction make things worse? Hypotheses:
+
+1. **Insufficient data per parameter.** 675K fragments across 60K train tiles
+   may be too sparse for the conv backbone to learn corrections beyond hex noise.
+2. **Architecture mismatch.** The additive log-correction + log_softmax may
+   fight the hex baseline's already-correct normalization.
+3. **The hex tables ARE the signal.** On real data with one sample, there may
+   be no learnable structure beyond hexamer cut-site frequencies + marginal p(L).
+   The 0.013-nat gap (Mult-only vs baseline) could be entirely overfitting.
+
+Next experiments to discriminate:
+
+- **Multi-sample training.** The current store has 1 sample. Adding more samples
+  would provide cross-sample signal that hex tables cannot capture.
+- **Evaluate Mult-only on held-out test split** (not val) to check whether the
+  0.013-nat improvement is real or overfit.
+- **Direct hex-table correction** without the conv backbone — train only the
+  hex table parameters and p(L) with gradient descent, keeping the factored form.
+
+Key decisions:
 
 1. Hex tables are **trainable** parameters (initialized from empirical MLE)
 2. k=6 (4096 hexamers), optimize on real data later

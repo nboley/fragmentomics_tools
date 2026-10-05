@@ -33,14 +33,15 @@ class TestGeometryConstants:
     """Verify the FL_BANDS-derived constants match the design doc."""
 
     def test_inband_range(self):
+        # L_max is INCLUSIVE (180), not the half-open 179 it was before f9fa653.
         assert L_MIN_INBAND == 25
-        assert L_MAX_INBAND == 179
-        assert N_L == 155  # 179 - 25 + 1
+        assert L_MAX_INBAND == 180
+        assert N_L == 156  # 180 - 25 + 1
 
     def test_offset_range(self):
-        assert O_L_MIN == 128 - 179 // 2  # 39
-        assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218
-        assert N_OFFSETS == L_MAX_INBAND  # 179
+        assert O_L_MIN == 128 - 180 // 2  # 38
+        assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218 (unchanged: 39+179 == 38+180)
+        assert N_OFFSETS == L_MAX_INBAND  # 180
 
     def test_n_offsets_is_live_width(self):
         """All N_OFFSETS entries receive gradient (no dead offsets)."""

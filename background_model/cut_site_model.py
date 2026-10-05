@@ -108,6 +108,16 @@ def length_to_group(L: torch.Tensor, L_min: int) -> torch.Tensor:
 HEX_K = 6
 N_HEX = 4 ** HEX_K   # 4096
 
+# Position of the cut BASE within the k-mer, junction-centred: for a cut at
+# base s the k-mer spans s-3 .. s+2, so the cut junction (between s-1 and s)
+# sits exactly mid-k-mer.  Owner-specified 2026-10-05.
+#
+# This MUST be the single definition.  It previously lived implicitly in crop
+# widths in two files and they silently disagreed -- the builder registered at
+# cut-2 while the model read at cut+0, so the tables were keyed on one k-mer and
+# looked up with another.  Guarded by tests/test_hex_registration.py.
+CUT_OFFSET_IN_KMER = 3
+
 
 def _onehot_to_hex_indices(x_onehot: torch.Tensor, k: int = HEX_K) -> torch.Tensor:
     """Convert (B, 4, L) one-hot sequence to (B, L-k+1) hexamer indices.
@@ -191,7 +201,11 @@ def compute_log_p0(
 
     # start_pos[m, L] = WINDOW_HALF + m - L//2
     # stop_pos[m, L]  = start_pos + L - 1
-    start_pos = (WINDOW_HALF + m_vals[:, None] - L_vals[None, :] // 2).long()  # (P, n_L)
+    # Subtract CUT_OFFSET_IN_KMER so the gathered k-mer STARTS that many bases
+    # before the cut, putting the cut junction mid-k-mer.  stop_pos is derived
+    # from start_pos so it inherits the same registration for the 3' cut.
+    start_pos = (WINDOW_HALF + m_vals[:, None] - L_vals[None, :] // 2
+                 - CUT_OFFSET_IN_KMER).long()                                  # (P, n_L)
     stop_pos = (start_pos + L_vals[None, :] - 1).long()                        # (P, n_L)
 
     # Clamp to valid range (positions outside hex_idx get clamped; they're
