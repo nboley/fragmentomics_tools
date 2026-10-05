@@ -33,15 +33,18 @@ class TestGeometryConstants:
     """Verify the FL_BANDS-derived constants match the design doc."""
 
     def test_inband_range(self):
-        # L_max is INCLUSIVE (180), not the half-open 179 it was before f9fa653.
+        # FL_BANDS are half-open, so band (110, 180) covers 110-179 and L=180
+        # sits in no band at all.  f9fa653 briefly set L_max to max(hi) = 180
+        # describing it as a fix; that was a semantics change, and the 12-track
+        # bridge cannot score L=180 because it has no band for it.  Reverted.
         assert L_MIN_INBAND == 25
-        assert L_MAX_INBAND == 180
-        assert N_L == 156  # 180 - 25 + 1
+        assert L_MAX_INBAND == 179
+        assert N_L == 155  # 179 - 25 + 1
 
     def test_offset_range(self):
-        assert O_L_MIN == 128 - 180 // 2  # 38
-        assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218 (unchanged: 39+179 == 38+180)
-        assert N_OFFSETS == L_MAX_INBAND  # 180
+        assert O_L_MIN == 128 - 179 // 2  # 39
+        assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218 (same as at 180: 38+180)
+        assert N_OFFSETS == L_MAX_INBAND  # 179
 
     def test_n_offsets_is_live_width(self):
         """All N_OFFSETS entries receive gradient (no dead offsets)."""

@@ -83,7 +83,16 @@ LENGTH_GROUP_WIDTH = 15
 # ---------------------------------------------------------------------------
 
 DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)               # 25
-DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS)               # 180 (inclusive)
+# FL_BANDS are half-open [lo, hi), so band (110, 180) covers lengths 110-179
+# and L=180 is covered by NO band.  f9fa653 set this to max(hi) = 180 under the
+# heading of a fix; that was a semantics change rather than a fix, and it put a
+# length into the model's domain that the band structure excludes.  The 12-track
+# bridge cannot score L=180 at all -- there is no band to look its endpoint
+# tracks up in -- so any cross-model comparison has to drop it regardless.
+# Reverted to the half-open reading.  Only the DEFAULT moves: this model takes
+# L_min/L_max as explicit parameters (the FL_BANDS *dependency* was removed in
+# 569bdd7), so a caller that wants 180 can still pass it.
+DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS) - 1           # 179 (inclusive)
 
 
 def _compute_geometry(L_min: int, L_max: int):

@@ -83,7 +83,7 @@ def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--tile-size", type=int, default=2048)
     p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=180)
+    p.add_argument("--L-max", type=int, default=179)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
