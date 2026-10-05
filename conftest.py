@@ -48,6 +48,17 @@ def pytest_addoption(parser):
             "check cannot silently pass."
         ),
     )
+    parser.addoption(
+        "--bedtools",
+        action="store_true",
+        default=False,
+        help=(
+            "require bedtools equivalence tests to RUN rather than skip. "
+            "Without this, tests marked requires_bedtools skip when the "
+            "bedtools binary is absent; with it, absent bedtools is a "
+            "failure. Used by `make test-equivalence`."
+        ),
+    )
 
 
 def pytest_configure(config):
@@ -58,6 +69,11 @@ def pytest_configure(config):
         "markers",
         "requires_real_data: needs the real BED inputs on /efs; skips when "
         "they are absent unless --realdata is given",
+    )
+    config.addinivalue_line(
+        "markers",
+        "requires_bedtools: needs the bedtools binary; skips when absent "
+        "unless --bedtools is given",
     )
 
 

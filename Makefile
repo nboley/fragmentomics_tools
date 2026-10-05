@@ -8,7 +8,7 @@ IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
 IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 
-.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test test-realdata
+.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test test-realdata test-equivalence
 
 # Wall-clock bound on a test run. This is a hang detector, not a perf budget:
 # the library suite finishes in well under a minute. Override for slow hosts
@@ -43,6 +43,7 @@ help:
 	@echo "  docker        Build and push Docker image"
 	@echo "  tag           Create and push git tag v$$VERSION"
 	@echo "  test-realdata Run the real-data regression checks; FAILS if EFS inputs are absent"
+	@echo "  test-equivalence Run bedtools equivalence checks; FAILS if bedtools is absent"
 	@echo "  all           Build/upload conda, tag repo, build/push docker"
 	@echo "  test          Run the test suite under a $(TEST_TIMEOUT)s timeout"
 	@echo "  clean         Remove build artifacts"
@@ -226,6 +227,20 @@ clean:
 test-realdata:
 	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
 		test/test_interval_real_data.py -v --realdata; \
+	rc=$$?; \
+	if [ $$rc -eq 137 ]; then \
+		echo ""; \
+		echo "❌ KILLED after $(TEST_TIMEOUT)s. It HUNG -- it did not fail."; \
+		exit 137; \
+	fi; \
+	exit $$rc
+
+# Bedtools equivalence checks. Runs the real bedtools binary and compares
+# against our intervals module. --bedtools makes absent bedtools/data a failure
+# rather than a skip — the same pattern as test-realdata/--realdata.
+test-equivalence:
+	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
+		test/test_bedtools_equivalence.py -v --bedtools; \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \
