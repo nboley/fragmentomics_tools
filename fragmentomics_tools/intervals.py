@@ -328,22 +328,17 @@ def overlaps(
     -------
     pd.Series[bool], index-aligned to *a*, one entry per ROW of *a*.
     """
-    # Save the original index for the return value, then normalise to
-    # position space so overlap_indices operates on a clean 0..n-1 frame.
-    original_index = a.index
-    (a_pos,) = _positional(a)
-    idx = overlap_indices(
-        a_pos, b, how="inner", wiggle=wiggle, same_strand=same_strand
-    )
-    mask = np.zeros(len(a_pos), dtype=bool)
+    # `overlap_indices` normalises its own inputs and returns POSITIONS, so
+    # there is nothing to normalise here -- an earlier version called
+    # `_positional` first and reset an already-0..n-1 index a second time.
+    # Positions index straight into a boolean array, and the caller's index is
+    # reattached only on the way out.
+    idx = overlap_indices(a, b, how="inner", wiggle=wiggle, same_strand=same_strand)
+    mask = np.zeros(len(a), dtype=bool)
     matched = idx["a_pos"].dropna()
     if len(matched):
         mask[matched.values.astype(int)] = True
-    return pd.Series(
-        mask,
-        index=original_index,
-        dtype=bool,
-    )
+    return pd.Series(mask, index=a.index, dtype=bool)
 
 
 # ── nearest ──────────────────────────────────────────────────────────

@@ -896,3 +896,56 @@ class TestWindowedFrameOverlap:
         # The dropped window was [250,500); all others present.
         assert 250 not in kept_starts
         assert len(kept_starts) == 7
+
+
+class TestAttachBlacklistOnWindowedFrame:
+    """attach_blacklist_regions must annotate per ROW, not per index label.
+
+    `bin_regions_into_windows` emits N windows per region, all carrying the
+    parent region's label. The previous implementation mapped positions back
+    to labels and `join`ed on them, which smeared the annotation across every
+    window sharing a parent: 8 windows with one real overlap produced FOUR
+    annotated rows, three of which do not touch the blacklist at all.
+
+    Wrong in the permissive direction -- it marks clean regions as
+    blacklisted -- which is the worst way for a blacklist to be wrong.
+    """
+
+    def _windowed_and_bed(self, tmp_path):
+        rdf = _rdf({
+            "contig": ["chr1", "chr1"],
+            "start": [0, 10000],
+            "stop": [1000, 11000],
+        })
+        windowed = rdf.bin_regions_into_windows(250, "valid", stride=250)
+        bed = tmp_path / "bl.bed"
+        bed.write_text("chr1\t300\t400\n")
+        return windowed, str(bed)
+
+    def test_only_the_overlapping_window_is_annotated(self, tmp_path):
+        windowed, bed = self._windowed_and_bed(tmp_path)
+        assert list(windowed.index) == [0, 0, 0, 0, 1, 1, 1, 1], (
+            "fixture must have duplicate labels or this proves nothing"
+        )
+
+        out = windowed.attach_blacklist_regions(bed)
+
+        annotated = [bool(v) and v != "" for v in out["blacklist_regions"]]
+        assert annotated == [
+            False, True, False, False,
+            False, False, False, False,
+        ]
+
+    def test_row_count_is_preserved(self, tmp_path):
+        """A label join on duplicate labels can also change the row count."""
+        windowed, bed = self._windowed_and_bed(tmp_path)
+        out = windowed.attach_blacklist_regions(bed)
+        assert len(out) == len(windowed) == 8
+
+    def test_the_annotation_names_the_right_interval(self, tmp_path):
+        windowed, bed = self._windowed_and_bed(tmp_path)
+        out = windowed.attach_blacklist_regions(bed)
+        hit = out.iloc[1]["blacklist_regions"]
+        assert len(hit) == 1
+        assert int(hit[0].start) == 300
+        assert int(hit[0].stop) == 400

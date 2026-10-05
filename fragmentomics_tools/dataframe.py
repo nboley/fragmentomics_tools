@@ -908,12 +908,20 @@ class RegionDataFrame(DataFrameBase):
             "a_pos": matched["a_pos"].values,
             "bl_region": bl_regions,
         })
-        grouped = pairs.groupby("a_pos")["bl_region"].apply(list)
-        grouped.index = self.index[grouped.index.astype(int)]
-        grouped.name = "blacklist_regions"
+        # Assign POSITIONALLY. The previous version mapped `a_pos` back to
+        # `self.index` labels and `join`ed on them, which smears the annotation
+        # across every row sharing a label. Measured on a frame from
+        # `bin_regions_into_windows` -- 8 windows, index [0,0,0,0,1,1,1,1],
+        # exactly one window overlapping -- four rows came back annotated, and
+        # three of those do not touch the blacklist at all. A blacklist
+        # annotation that errs toward "blacklisted" is the worst direction to
+        # be wrong in, so this never goes through labels.
+        column = [""] * len(self)
+        for pos, regions in pairs.groupby("a_pos")["bl_region"]:
+            column[int(pos)] = list(regions)
 
         result = self.copy()
-        result = result.join(grouped).fillna("")
+        result["blacklist_regions"] = column
         return result
 
     @property
