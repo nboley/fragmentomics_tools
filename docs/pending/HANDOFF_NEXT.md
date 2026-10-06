@@ -35,6 +35,103 @@ composition rather than a method per source.
 `COORDINATION.version_2.md` holds process state. It is gitignored and dies with
 the worktree, so nothing durable belongs only there.
 
+## Where to work, and the trap that will bite first
+
+```
+worktree   /home/nathanboley/src/fragmentomics_tools/.claude/worktrees/f10-test-fix
+branch     version_2
+python     /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
+```
+
+The directory is still named `f10-test-fix`; the branch was renamed and the
+directory was not.
+
+**Every ad-hoc script needs `PYTHONPATH=<worktree>`.** Without it the editable
+install resolves `fragmentomics_tools` to the *main repo root*, which is a
+different checkout:
+
+```
+$ cd /tmp && python -c "import fragmentomics_tools as f; print(f.__file__)"
+/home/nathanboley/src/fragmentomics_tools/fragmentomics_tools/__init__.py
+   branch            background-model-v2
+   behind main       59 commits
+   has intervals.py  False
+```
+
+So a throwaway script silently imports a tree with **no `intervals` module at
+all** and happily reports numbers from it. This has already produced a wrong
+measurement in this project. Print `fragmentomics_tools.intervals.__file__`
+and check it before trusting any result.
+
+`make test` is unaffected — pytest puts the working directory first — which is
+precisely why the hazard is easy to miss.
+
+**Repo-wide greps must exclude `.claude/worktrees/`.** Several checked-out
+copies of this repo live there and inflate match counts roughly threefold.
+That produced five wrong findings during the interval work.
+
+## The interval API
+
+Five free functions in `fragmentomics_tools/intervals.py`. Frames in,
+index-aligned results out, no backend argument in any signature.
+
+```python
+overlap_indices(a, b, *, how="inner", pad=0, min_frac_a=0.0, min_frac_b=0.0,
+                reciprocal=False, same_strand=False)
+    -> DataFrame[a_pos, b_pos, overlap_bases]      # how: inner|left|right|outer|anti
+
+overlaps(a, b, *, pad=0, same_strand=False)                 -> Series[bool]
+nearest(a, b, *, k=1, ignore_overlaps=False, direction=None, same_strand=False)
+                                                   -> DataFrame[a_pos, b_pos, distance]
+cluster(a, b=None, *, min_dist=0, same_strand=False)        -> Series[int]
+merge(a, *, min_dist=0, same_strand=False)                  -> RegionDataFrame
+```
+
+**Results are positions, not index labels.** Use `a.iloc[result.a_pos]`. The
+index is not a row identity in this library — `bin_regions_into_windows` emits
+N windows per region, all carrying the parent region's label. A label-based
+API returned the wrong window, silently. This single distinction caused four
+of the seven bugs found in the interval work; it is the thing most worth
+knowing before writing a call site.
+
+Two distance conventions, deliberately different because bedtools' are:
+
+| | semantics | matches |
+|---|---|---|
+| `pad` on overlap | gap **<** pad; `pad=0` is strict overlap | `bedtools window -w` |
+| `min_dist` on merge/cluster | gap **<=** min_dist; `None` is strictly-overlapping-only | `bedtools merge -d` |
+
+`bedtools intersect -u` and `window -w 0` report no hit on book-ended
+intervals; `merge -d 0` joins them. Both are right for their own question.
+Do not "fix" the inconsistency.
+
+## What broke for callers
+
+A clean break by decision — no shim, no deprecation. `RegionDataFrame` went
+from 61 methods to 44. Four of those removals are renames that moved the
+function to `intervals`; thirteen are deletions, plus two on `Region`. The
+full table, with a replacement expression for every deletion, is in
+[`interval_api_design.md`](interval_api_design.md) under "Net change".
+
+The renames are what downstream will hit:
+
+| was | now |
+|---|---|
+| `join_on_overlap` | `intervals.overlap_indices` |
+| `overlaps_rdf` | `intervals.overlaps` |
+| `merge_regions` | `intervals.merge` |
+| `drop_overlapping_regions` | `overlap_indices(a, b, how="anti")` |
+
+`overlaps_rdf` → `overlaps` alone breaks **22 call sites across 11 notebooks**
+in `biomarker-projects`. Those were deliberately not updated, so they break
+loudly rather than silently changing behaviour.
+
+`label_balanced` was deleted too. It was **not** dead — the owner accepted the
+break.
+
+`bias_correction/train.py` still calls deleted methods. That package is v1 and
+superseded, so it was left alone; see CLAUDE.md.
+
 ## Branch and release state
 
 | | |
@@ -47,6 +144,14 @@ the worktree, so nothing durable belongs only there.
 **No merge to `main` and no tag until the whole refactor completes** — owner
 decision, 2026-10-05. The flow is inverted meanwhile: `main` merges *into*
 `version_2` at phase boundaries.
+
+Other worktrees are live and other sessions are working in them —
+`background-model-work`, `cut-site-model`, `fragmentomics-tools-improvements`,
+`recovery-threshold`. `main` moving is visible to all of them, so prefer
+merging `main` *in* over moving `main`.
+
+The repo root is checked out on `background-model-v2` and holds another
+session's uncommitted changes. Do not check anything out there.
 
 ## What is done
 
