@@ -86,6 +86,20 @@ A length is valid when both cut-site hexamers are ACGT-only. The denominator is
 therefore **per start** — two starts in the same region normalise over different
 length sets, so `w.sum()` is not a region constant.
 
+**ACGT-only is not the whole condition.** `w[l]` is a product of three
+factors, and any one of them zeroes a length:
+
+| factor | zero when |
+|---|---|
+| `valid` | the end hexamer contains a non-ACGT base |
+| `r_end` | `C(h) = 0` — the hexamer was never observed as a cut site **in this sample** |
+| `f(l)` | the length is absent from the length distribution and densified to zero |
+
+Only the first is a property of the reference. The second is a property of the
+sample and its depth, so **the same region normalises over different length
+sets for different samples.** The code cannot distinguish the three causes: it
+tests `w.sum() > 0`. See the Open section.
+
 ## 5. Propensity
 
 A hexamer's weight is observed over expected-under-uniform:
@@ -151,3 +165,27 @@ arrays, so the length draw is one `(n, n_lengths)` block.
   `n` fragments. `P(start)` does not condition on a valid fragment existing.
   Not observed on the 1536 tiles — 38,637 drawn for 38,637 requested — but it
   is a silent shortfall where it does occur.
+
+  **DEFERRED by owner, 2026-10-06: documented only. No counter, no test.**
+  Recorded so the next reader does not re-open it as an oversight.
+
+  The region frame is **not** the cause, which is the first thing everyone
+  asks. `right_pad = L_MAX + HEX_HALF = 183` is exactly sufficient: the
+  furthest end hexamer a drawn start needs sits at region-local
+  `region_len - 1 + L_MAX` and reads through `region_len + 182`, which the
+  flank provides. There is no truncation and no out-of-range read. The start
+  side is independently safe — starts are gated on `valid`, so a start whose
+  own hexamer is invalid has weight 0 and is never drawn.
+
+  A drop therefore needs **all 156 lengths zeroed at once**, from the three
+  factors in §4. On repeats-removed quiet tiles that needs a ≥183 bp N-run
+  immediately downstream, or 156 consecutive hexamers all unobserved in the
+  sample. Hence the clean 38,637.
+
+  **The partial case is the larger exposure, and it is not a defect.** A start
+  that loses *most* of its lengths does not drop; it reshapes `P(l | i)`, which
+  §4 licenses. Nothing reports it. A shallow sample with many `C(h) = 0` cells
+  therefore samples lengths from a quietly narrowed support, and the only
+  symptom is that the length marginal drifts from `f(L)`. If a future
+  length-marginal check fails without an obvious cause, measure the reachable
+  fraction of `f(L)` per start before looking anywhere else.
