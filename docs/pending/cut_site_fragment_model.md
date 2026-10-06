@@ -1,6 +1,6 @@
 # Cut-site fragment model — integration design
 
-Status: DESIGN COMPLETE, implemented on worktree-cut-site-model.
+Status: implemented at HEAD 7ea790e on worktree-cut-site-model. Start admission is in force. No store or hex table has been rebuilt under it. No result under start admission has been measured. Centre-admission anchors are retired; see §Store compatibility.
 
 This is the integration and plumbing spec for a model whose native output is the
 fragment weight itself — one logit per `(m, L, strand)` — trained on the
@@ -32,26 +32,89 @@ parameterisation.
 
 ## Geometry
 
-**Start admission.** A fragment is admitted iff `min(fragment_start,
-fragment_end)` lies in `[0, tile_size)`. `m` is the fragment START position,
+**Start admission.** A fragment is admitted iff its START lies in `[0, P)`
+in crop coordinates (`P = tile_size`). `m` is the fragment START position,
 not the centre. This gives `|D_L| = P` for every in-band `L` (length-
 independent — start in `[0, P)` gives `P` positions for every `L`).
 
-`WINDOW_HALF = 181`.  Derivation: the model's reachable cut range in hex-idx
-space is `[WINDOW_HALF, WINDOW_HALF + P + L_max - 2]`.  The widest margin
-needed is `L_max - 1 = 179`, so `WINDOW_HALF >= 179`.  181 is chosen so
-`rf_budget = WINDOW_HALF + 5 = 186` keeps its existing definition.  Symmetric
-by design — the unused left margin is the price of reviewability after the
-off-by-3 incident.
+Admission reads `start` directly. No `min(start, end)` remains in the store
+builder or the dataset. The store is verified, not assumed, to hold fragments
+left-to-right. `scripts/build_cut_site_store.py` raises `ValueError` on any
+fetched fragment with `stop < start`, before dedup (commit 7ea790e). The check
+covers every fragment `fetch_array` returns. That set is an overlap superset,
+so the check also sees fragments whose start lies outside the region.
+
+- **Admission results are unchanged by that check.** For every build that
+  completes, the keep set equals the one the former `min()` filter produced.
+  A build that contains a reversed fragment now fails instead of dropping it
+  silently. [Verified: 0 of 30,754,614 fragments reversed, chr1/2/20/X, per the
+  coordination log, 2026-10-06 section "EM FINDING".]
+- **`np.abs` was rejected.** It would admit reversed fragments that are dropped
+  today. That changes which fragments enter the model, so it needs owner
+  sign-off.
+
+`WINDOW_HALF = 181` (`cut_site_model.py:79`). The constructor enforces
+`WINDOW_HALF >= L_max - 1 = 179` (`cut_site_model.py:288`). Derivation: the
+deepest hex gather is at `WINDOW_HALF + P + L_max - 2`, the 3' cut at `m = P-1`
+with `L = L_max`. The k-mer for that cut ends 2 bases past it. §Margin
+arithmetic gives the tight bound, which is one base lower. 181 is the owner's
+choice (Q1, 2026-10-06). Symmetric by design — the unused left margin is the
+price of reviewability after the off-by-3 incident.
+
+`rf_budget = WINDOW_HALF + 5 = 186` (`cut_site_store.py:56`). It is pinned by
+`tests/test_hex_registration.py::test_rf_budget_equals_window_half_plus_5`,
+not imported. Importing `WINDOW_HALF` would pull torch and lightning into
+`cut_site_store.py`, a numpy/zarr module that the AWS Batch builder depends on.
 
 Window `W` = 2 × WINDOW_HALF = 362 bases.
 
-```
-left tap   o_l = WINDOW_HALF           (independent of L)
-right tap  o_r = WINDOW_HALF + L       (L apart = cut site spacing)
-```
+Index conventions. Hex index `j` is the k-mer that starts at one-hot position
+`j`. The tile begins at one-hot position `pad = WINDOW_HALF + 3`, and
+`CUT_OFFSET_IN_KMER = 3`. A cut at tile base `c` therefore reads hex index
+`WINDOW_HALF + c`. The taps in use:
 
-The taps are exactly `L` apart, indexing **CUT SITES** (`m` and `m+L`).
+| Tap | Tile base | Hex index | Used by |
+|---|---|---|---|
+| 5' endpoint | `m` | `WINDOW_HALF + m` | hex prior `start_pos` (`cut_site_model.py:193`); L2a left tap (`:650`) |
+| 3' endpoint, last base | `m + L - 1` | `WINDOW_HALF + m + L - 1` | hex prior `stop_pos` (`:196`); store `last[p+L-1]`; `tests/test_hex_registration.py:109` |
+| 3' endpoint, L2a right tap | `m + L` | `WINDOW_HALF + m + L` | L2a forward (`:636`, `:651`) |
+
+**The 3' endpoint is one base apart in the two branches.** The hex prior, the
+store and the registration test use the last fragment base `m+L-1`. The L2a
+forward pass uses `m+L`. See §Open discrepancies, item 1.
+
+**Registration is enforced, not emergent.** The construction-time assertion
+`(l_in - tile_size)//2 - WINDOW_HALF == CUT_OFFSET_IN_KMER` runs in
+`CutSiteFragmentModel.__init__` (`cut_site_model.py:299-306`). The reason is
+not obvious. `raw = P + 2*WINDOW_HALF + 5` is odd only because `P` is even.
+Rounding up to even gives `pad = WINDOW_HALF + 3`. An ODD `tile_size` gives an
+even `raw`, so `pad` falls to `WINDOW_HALF + 2`. The k-mer then slides to
+offset 2, and registration breaks with no error. [Verified: the comment at
+`cut_site_model.py:295-298`. The arithmetic follows from `:437-438`.] The
+assertion turns that case into a construction error. The test is
+`tests/test_hex_registration.py:391`.
+
+**Hot-path width check.** `compute_log_p0` checks `hex_idx.shape[1] >=
+WINDOW_HALF + tile_size + L_max - 1` (`cut_site_model.py:199-207`). The check
+uses Python ints, so it adds no device-to-host sync per forward. It replaces the
+tensor `assert` on `start_pos.min()` and `stop_pos.max()`, which forced a sync.
+It runs on every call, not at construction. [Verified: 7ea790e diff.]
+
+### Margin arithmetic
+
+Only even `P` is valid, which the constructor enforces. For even `P`,
+`l_in = P + 2*WINDOW_HALF + 6`, because the `+5` conv margin is rounded up to
+even (`cut_site_model.py:437-438`). So `pad = WINDOW_HALF + 3` and the right
+margin past the tile is `WINDOW_HALF + 3`. [Inferred from the formula above.]
+
+- The deepest 3' cut is at tile base `P + L_max - 2`. Its k-mer ends 2 bases
+  later, at tile base `P + L_max`.
+- That base must lie inside the input: `L_max <= WINDOW_HALF + 2`.
+
+So the tight bound at even `P` is `WINDOW_HALF >= L_max - 2 = 178`. The
+constructor enforces `L_max - 1 = 179`, one base stricter. The code is not
+changed for this. [Inferred. Not probed. A probe at `WINDOW_HALF = 178` would
+confirm it.]
 
 The interior branch's offset axis spans `n_offsets = L_max` (180), covering
 `[o_l_min, o_r_max)` where `o_l_min = WINDOW_HALF`.  Under start admission
@@ -98,7 +161,7 @@ would be a large avoidable loss.
 
 **Placement: on the logit, after the nonlinearity** — not into the
 pre-activation. `logit[m,L,s] = w_out · act(pre) + len_bias[L]`. This is
-`(n_L,)` = **155 parameters**, strand-shared (the FL/GC length term is
+`(n_L,)` = **156 parameters** (`n_L = L_max - L_min + 1`, `cut_site_model.py:369`), strand-shared (the FL/GC length term is
 strand-independent).
 
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
@@ -117,8 +180,8 @@ per offset**, spanning the live range `[o_l_min, o_r_max)` (see §Geometry).
 Re-indexed as `o' = o - o_l_min`. Prefix sum along the re-indexed offset axis:
 
 ```
-u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # x in h-coordinates
-U          = prefix_sum(u, axis=o')       # exclusive, n_offsets+1 = 180 slots
+u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # x = one-hot sequence (cut_site_model.py:494)
+U          = prefix_sum(u, axis=o')       # exclusive, n_offsets+1 = 181 slots
 span       = U[n,m,o_r'] - U[n,m,o_l']   # o_l' = o_l - o_l_min, o_r' = o_r - o_l_min
 ```
 
@@ -168,30 +231,30 @@ L_chunk = 32                            l_in  = 1392 (calc_input_region_size(102
 
 ```
                   ┌────────────────────────────────────────────┐
- one-hot seq      │  (B, 4, 2310)                    2.4 MB    │
+ one-hot seq      │  (B, 4, 1392)                    1.4 MB    │
                   └────────────────────────────────────────────┘
                           │  L1: Conv1d(4 -> 128, k=6) + nonlinearity
                           v
  h  cut-site       ┌───────────────────────────────────────────┐
-    propensity     │  (B, 128, 2304)                  75 MB    │  PER-POSITION
+    propensity     │  (B, 128, 1386)                  45 MB    │  PER-POSITION
                    └───────────────────────────────────────────┘
                      │                              │
         ┌────────────┘                              └──────────────┐
         v  L2a                                                     v  L2b
  ── ENDPOINT BRANCH ─────────────────────        ── INTERIOR BRANCH ──────────────
- a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 179)   22,912 params
+ a[t,s] : (128,128) x4     65,536 params        F : (32, 4, 180)   23,040 params
  B[t,s] : (128,10)  x4      5,120 params        W_span, W_mean : (32,32) each
  W[t,s] : (32,128)  x4     16,384 params
                                                  u never materialised whole;
  FOLD: M_l[g,s] = W_l[s] diag(B_l[s,g]) a_l[s]   prefix-sum over o then difference
        -> 20 matrices of (32,128)  (10 groups x 2 strands)
-                                                 v[h,m,o] = sum_c G[h,c,o]·x[..]
+                                                 v[h,m,o] = sum_c F[h,c,o]·x[..]
  f_l[s] = M_l[g,s] @ h                           U = cumsum(v, axis=o)
         │                                               │
         v                                               v
  ┌──────────────────────────┐                 ┌──────────────────────────────┐
- │ (B,10,2,32,2304) 378 MB  │                 │ (B, 32, 2048, 180)  3.02 GB  │
- │ x2 taps = 756 MB         │                 │ chunk over m -> 377 MB       │
+ │ (B,10,2,32,1024) 168 MB  │                 │ (B, 32, 1024, 181)  1.52 GB  │
+ │ x2 taps = 336 MB         │                 │ chunk over m                 │
  └──────────────────────────┘                 └──────────────────────────────┘
         │  gather at o_l, o_r                         │  difference at o_r, o_l
         └───────────────┬─────────────────────────────┘
@@ -202,13 +265,13 @@ L_chunk = 32                            l_in  = 1392 (calc_input_region_size(102
                         │
                         v   <-- THE ONLY PER-PAIR TENSOR
               ┌──────────────────────────────────────────────┐
-              │ hid = act(pre)  (B,32,2048,L_chunk=32,2)     │
-              │        1074 MB fp32  /  537 MB bf16          │
+              │ hid = act(pre)  (B,32,1024,L_chunk=32,2)     │
+              │        537 MB fp32  /  268 MB bf16          │
               └──────────────────────────────────────────────┘
                         │  logit = w_out · hid + len_bias[L]
                         v
               ┌──────────────────────────────────────────────┐
-              │ logit  (B, 2048, 155, 2)          strand axis │
+              │ logit  (B, 1024, 156, 2)          strand axis │
               └──────────────────────────────────────────────┘
                         │  streaming logsumexp over L blocks
                         v
@@ -221,9 +284,10 @@ folded *into* the prefix tensor, so the difference is taken after projecting to
 (`span = U[o_r] − U[o_l]`, then `W_span·span`); the two are the same quantity,
 `W` being the matrix and `V` the folded prefix.
 
-**Where the cost is:** the offset-axis prefix tensor `(B, 32, 2048, 180)`. The
-prefix sum is cumulative over `o'`, so the axis cannot be tiled. All 179 entries
-are live (dead offsets trimmed). **Chunk over `m`, not over `o`**.
+**Where the cost is:** the offset-axis prefix tensor `(B, 32, 1024, 181)`. The
+prefix sum is cumulative over `o'`, so the axis cannot be tiled. All 180 offsets
+are live; none are trimmed. **Chunk over `m`, not over `o`**. The diagram sizes
+are shape arithmetic at `B = 64`, fp32, `P = 1024`. They are not measured.
 
 ### Forward pass
 
@@ -231,7 +295,7 @@ are live (dead offsets trimmed). **Chunk over `m`, not over `o`**.
 h = L1(seq)                              # (B, N1, model_input_size), post-nonlinearity
 
 # L2a endpoint (per strand s): shared tap weight + per-group gain, folded
-o_l, o_r = 128 - L//2, 128 - L//2 + L    # window offsets of the two CUT SITES
+o_l, o_r = WINDOW_HALF, WINDOW_HALF + L  # L2a right tap is m+L; see §Index conventions
 g        = min((L - 25)//15, 9)          # length group
 f_l[s] = M_l[g,s] @ h ; f_r[s] = M_r[g,s] @ h   # M_x[g,s] = W_x[s] diag(B_x[s,g]) a_x[s]
 
@@ -260,7 +324,8 @@ ancillary NB targets), both derived from the identical fragment list at build
 time.
 
 ```
-/attrs: config_json, config_hash, created_utc, split_version, max_len, sim_dir, sim_study
+/attrs: config_json, config_hash, created_utc, split_version, ...
+        (the length range is in config_json as L_min, L_max; there is no max_len attr)
 /tiles/{contig, start, stop, strand, region_id, split, seq, mask}
 /samples/{library, role, total_fragments}
 /fragments/ (CSR over flat index u = s*T + t)
@@ -273,11 +338,11 @@ time.
     pos      (nnz2,)     uint16   # per-base position
     track    (nnz2,)     uint8    # 0 = first (left endpoint), 1 = last (right)
     data     (nnz2,)     uint16   # count
-/totals/N  (S, T, 2)    uint32    # per-endpoint-track totals over the centre tile
+/totals/N  (S, T, 2)    uint32    # per-endpoint-track totals over the tile
 ```
 
 - **`start`/`length`, not `start`/`stop`.** The multinomial indexes `(p, L)`
-  directly. `L ≤ max_len (256)` and `p ≤ l_target (≤ 2560)` both fit `uint16`.
+  directly. `L ≤ L_max (180)` and `p ≤ l_target (≤ 2560)` both fit `uint16`.
 - **Strand IS stored** because the model conditions on it. (The 12-track store
   omits strand; this one must not.)
 - **Endpoint tracks are the 2 band-free NB targets**, strand-pooled: `first[p]
@@ -294,16 +359,20 @@ time.
 
 ### Config hashing and drift guard
 
-Do **not** add `max_len` to the shared `PlumbingConfig`: hashing a new field
+Do **not** add the length range to the shared `PlumbingConfig`: hashing a new field
 would rehash *every* store, including the real-data production store. The new
 store records its geometry in a separate small config (`tile_size`, `jitter`,
-`rf_budget`, `max_len`, `seed`, `n_train_samples`), hashed with the same
+`rf_budget`, `L_min`, `L_max`, `seed`, `n_train_samples`), hashed with the same
 `hashlib.sha256(canonical_json)` discipline, giving it its own drift guard while
 `config.py` stays frozen for the old class. `split_version` carries over.
 
-**Domain guard.** Because `max_len` defines `D`, the Dataset MUST assert
-`model.max_len == store.attrs["max_len"]` at construction and fail loudly. A
-silent `max_len` mismatch changes `|D|` and reinterprets every reported NLL.
+**Domain guard.** Because `L_min` and `L_max` define `D`, the Dataset MUST
+check them against the store at construction and fail loudly. It does so in
+`validate_length_range` (`cut_site_store.py:105`), which raises `ValueError` on
+any mismatch. The Dataset also asserts `l_seq >= model_input_size + 2 * jitter`
+(`cut_site_dataset.py:98`). A silent length-range mismatch changes `|D|` and
+reinterprets every reported NLL. [Verified: `cut_site_store.py:105-116`,
+`cut_site_dataset.py:81`, `:98`.]
 
 ## Dataset / dataloader
 
@@ -328,11 +397,12 @@ The multinomial shares one per-region `logp` map across the `S` samples:
 `NLL_s = -Σ_{(m,L,s)∈frags_s} logp[m,L,s] / N_s`, averaged over samples.
 
 **Crop.** The jittered crop uses `jitter_matrix` with concentric widths
-(seq → `l_in`, targets → `tile_size`). A fragment survives iff
-`min(fragment_start, fragment_end)` lies in `[0, tile_size)` (start-based
-admission — see §Settled parameters). `frag_m` is the fragment start in
-crop coordinates.  Train draws `j ∈ [-jitter, jitter]`; **val and
-test use `j = 0` (centred crop) — jitter is training-only**. `jitter_matrix`'s
+(seq → `l_in`, targets → `tile_size`). A fragment survives iff its START
+lies in `[0, tile_size)` in crop coordinates (`cut_site_dataset.py:234-237`),
+and its length lies in `[L_min, L_max]`. `frag_m` is that start. The Dataset
+does not recompute an end. The store guarantees start ≤ end.  Train draws `j ∈ [-jitter, jitter]`; **val and
+test use `j = 0` (centred crop) — jitter is training-only**. "Centred" names the
+crop position, not centre admission. `jitter_matrix`'s
 crop requires its input and output lengths to share **matched parity** (not even
 parity per se — see `calculate_start_and_stop_from_jitter`): `l_in` =
 `model.model_input_size` (already includes +5 for the conv margin and
@@ -447,11 +517,11 @@ The sequential truth carries a per-start normaliser `Z_s(p)` (NLL doc). Because
 per-position term absorbs it **exactly** — the joint-vs-sequential distinction is
 *not* the obstruction. The obstruction is spatial reach: the model's per-position
 term is `M_l[g,s] @ h[:,p]`, and L1 is a single width-6 convolution, so `f_l(p)`
-sees only **6 bp**. But `Z_s(p) = Σ_q end_s[hex(q)] · FLGC` sums over ~155 lengths
+sees only **6 bp**. But `Z_s(p) = Σ_q end_s[hex(q)] · FLGC` sums over ~156 lengths
 and so depends on **~256 bp** of surrounding context. The model cannot see far
 enough to represent it.
 
-`Z_s(p)` is an average over ~155 positions, so it is **smooth**; but its variation
+`Z_s(p)` is an average over ~156 positions, so it is **smooth**; but its variation
 across positions could still be of the same order as the whole available bias gap
 (~0.084 nats), which would make the cap material. **Measure `var(log Z_s(p))` over
 the region set early**: it bounds the unreachable fraction, and without it a
@@ -468,26 +538,26 @@ before budgeting GPU time.
 
 ## Required tests
 
-- **±1 bp alignment in CUT-SITE space.** Assert that the cut sites the model
-  indexes are the same genomic cut sites the sampler drew from: the taps at
-  `o_l = 128 - L//2` and `o_r = o_l + L` index the cut sites `p` and `p+L` that
-  the shared `build_region_weights` reads (`fwd_cut[p]` / `rc_cut[p+L]`), noting
-  the taps are `L` apart (`p` and `p+L`, **not** `p` and `p+L-1`). Pin the
-  property, not any line number, in one test on a small region with known
-  fragments: the store's per-base derivation (`first[p]==1`, `last[p+L-1]==1`),
-  the model's cut-site tap indexing, and the centre↔endpoint round-trip
-  `p = m - L//2` for **both parities of `L`** — a shift here is silent, and a
-  test that only exercises even `L` would miss it.
+- **Registration (hex prior).** Implemented in `tests/test_hex_registration.py`.
+  The 5' and 3' lookups read the k-mer that starts `CUT_OFFSET_IN_KMER` before
+  the cut (`:46`, `:83`). Builder and model agree (`:116`). The right-edge lookup
+  covers every cut (`:210`). The minus-strand gathers are probed by value
+  (`:302`, `:344`). An odd `tile_size` raises (`:391`).
+- **3' endpoint convention.** NOT pinned by any test. The hex prior, the store,
+  and `test_hex_registration.py:109` use `m+L-1`. The L2a forward uses `m+L`.
+  See §Open discrepancies, item 1.
+- **Store consistency.** `tests/test_build_cut_site_store.py:172`
+  (`test_endpoint_consistency`).
+- **Domain guard.** `tests/test_cut_site_store_dataset.py:192`
+  (`test_length_range_mismatch_raises`). It checks `L_min`/`L_max`, not `max_len`.
+- **Weak tests.** `tests/test_cut_site_training.py:244-274` assert arithmetic on
+  local constants and never call the model. `tests/test_cut_site_model.py:316`
+  round-trips `p = m - L//2`, the retired centre convention. Neither one checks
+  the alignment it is named for.
+- **Not implemented in this worktree.** The shared `build_region_weights` test
+  and the oracle-below-uniform test. They belong to the sampler and NLL doc. RC
+  equivariance is dropped, as the design says.
 - **No RC-equivariance test** — it is void now.
-- **Store consistency:** `/endpoints/` recomputed from `/fragments/` at build
-  time must match the stored tracks exactly.
-- **Domain guard:** constructing the Dataset against a store whose
-  `attrs["max_len"]` ≠ the model's `max_len` must raise loudly.
-- **Oracle below uniform:** on sim data the oracle's own fragment NLL must come
-  in strictly below `log|D|`.
-- **Shared builder exercised by both paths:** the oracle scorer and the sampler
-  must call one `build_region_weights`, tested together so a change to one
-  cannot silently diverge.
 
 Follow CLAUDE.md testing discipline: run the `background_model` suite via
 `make test PYTEST_ARGS="tests/ -q"` before and after, and measure the baseline
@@ -508,6 +578,57 @@ yourself (it moves per commit).
 - **Separate val AND test** region sets; val/test use the centred crop.
 - **Two stores**, one per model class.
 - Simulator `max_len` = 256, with filtering to the bands before inference.
+
+## Store compatibility (measured)
+
+Measured at 7ea790e. The `model_input_size`, `l_seq`, and slack figures come
+from the coordination log, 2026-10-06 PRE-FLIGHT. The hashes below were
+recomputed in this session. [Verified: `CutSiteStoreConfig(tile_size=1024,
+jitter=256, rf_budget=…)` with other fields at defaults. The results match the
+log exactly.]
+
+| Quantity | Value |
+|---|---|
+| `model_input_size` (= `l_in`) | 1392 |
+| Required `l_seq` (`>= model_input_size + 2*jitter`) | 1904 |
+| OLD store, `rf_budget = 133` | `l_seq = 1802`. REJECTED by `cut_site_dataset.py:98` |
+| NEW store, `rf_budget = 186` | `l_seq = 1908`. Slack 4 |
+| Minimum viable `rf_budget` | 184 |
+| `config_hash`, old → new | `e0699b0902fafafa` → `d5e89191901ea991` |
+
+- [Verified] The new store goes to a NEW path. `quiet_tile1536_v2.zarr` must not
+  be overwritten. It is the only artifact still tied to the retired
+  centre-admission anchors.
+- [Verified] The old store fails at dataset construction. It cannot load silently.
+- [Inferred] The slack is 4 bases. With `rf_budget = 186`, a dataset `jitter`
+  above 258 breaks the guard. No check at the store boundary covers that
+  relation.
+- [Inferred] Changing `L_max` rejects any existing store (`validate_length_range`,
+  `cut_site_store.py:112`). The constructor also fails for `L_max >= 183` at
+  `WINDOW_HALF = 181` (`cut_site_model.py:288`).
+
+## Open discrepancies
+
+Code as committed at 7ea790e. This doc change records these items and does not
+fix them. Each fix changes computed results, so each needs an owner decision.
+
+1. [Verified] **3' endpoint, one base.** The L2a forward taps the 3' endpoint at
+   `m+L` (`cut_site_model.py:636`, `:651`). The hex prior (`:196`), the store
+   (`last[p+L-1]`, §Store schema), and `test_hex_registration.py:109` use
+   `m+L-1`. The learned L2a branch and the hex prior therefore key the 3' cut
+   to different bases. Fixing either side changes the model output.
+2. [Verified] **Interior window.** L2b reads one-hot positions
+   `WINDOW_HALF + m + o'` for `o'` in `[0, L)` (`cut_site_model.py:494`). With
+   `pad = WINDOW_HALF + 3`, these are tile bases `m-3` to `m+L-4`. The window
+   sits 3 bases left of the fragment body `m … m+L-1`. The filter is learned,
+   so this is not a hex registration error. The cut-site code and this doc do
+   not state whether the shift is intended.
+3. [Verified] **Stage-1 builder admission.** `scripts/stage1_hex_baseline.py:188-191`
+   applies `min(st, end)` under the comment "Start-based admission". The store
+   already filtered, and `length >= 25`, so the test is vacuous and changes no
+   result. The comment is wrong. Not changed here, because this change is doc-only.
+4. [Inferred] **Tight margin.** The tight bound is `WINDOW_HALF >= 178` at even
+   `P` (§Margin arithmetic). The constructor enforces 179.
 
 ## Limitations (accepted, not solved here)
 
