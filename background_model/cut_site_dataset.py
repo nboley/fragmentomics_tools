@@ -3,13 +3,10 @@
 Yields one region at a time (S=1 currently).  The item dict contains the
 one-hot sequence, fragment coordinates, endpoint NB targets, and a mask.
 
-Centre-based fragment inclusion: a fragment survives the crop iff its centre
-m = p + L//2 lands inside [0, tile_size).  This gives |D_L| = P for every
-in-band L, eliminating length bias.  Do NOT filter by "both endpoints in
-crop" — that creates length bias (see design doc §Crop).
-
-Shared-jitter coupling (S > 1 only): all samples of a region share one
-jitter offset.  At S=1 this is moot.  Document preserved for future reference.
+Start-based fragment admission: a fragment survives the crop iff
+min(fragment_start, fragment_end) lies in [0, tile_size).  This gives
+|D_L| = P for every in-band L.  ``frag_m`` is the START position, not the
+centre.
 """
 
 from __future__ import annotations
@@ -40,7 +37,7 @@ class CutSiteFragmentDataset(Dataset):
 
     Each item is one (sample, region) pair yielding a dict with:
         x         : (4, l_in)         float32  one-hot sequence
-        frag_m    : (n_frag,)         int64    centre positions in crop coords
+        frag_m    : (n_frag,)         int64    start positions in crop coords
         frag_L_idx: (n_frag,)         int64    L index (0-based, L - L_MIN)
         frag_s    : (n_frag,)         int64    strand (0 or 1)
         frag_N    : scalar int64               total fragment count
@@ -213,12 +210,9 @@ class CutSiteFragmentDataset(Dataset):
             j = 0
 
         # ── Crop: concentric crops with shared jitter offset ─────────────
-        # Sequence → l_in (model_input_size + 5, rounded up to even for
-        # jitter_matrix's matched-parity requirement).  The model trims
-        # any extra position from the rounding.
-        l_in = self.model_input_size + 5
-        l_in_even = l_in + (l_in % 2)  # round up to even
-        x_tokens = jitter_matrix(seq_full, j, l_in_even)
+        # model_input_size already includes the conv margin (+5) and
+        # even-parity rounding — use it directly.
+        x_tokens = jitter_matrix(seq_full, j, self.model_input_size)
 
         # Mask and endpoints → tile_size
         mask = jitter_matrix(mask_full, j, self.tile_size)
@@ -229,7 +223,7 @@ class CutSiteFragmentDataset(Dataset):
         # Zero masked positions (same policy as 12-track dataset)
         ep_cropped = ep_cropped * mask[None, :]
 
-        # ── Fragment coordinates: centre-based crop filter ───────────────
+        # ── Fragment coordinates: start-based admission ──────────────────
         # Crop origin in l_target coordinates
         crop_start, _ = calculate_start_and_stop_from_jitter(
             self.l_target, self.tile_size, j
@@ -237,17 +231,17 @@ class CutSiteFragmentDataset(Dataset):
 
         # Re-base fragment starts to crop coordinates
         frag_p_crop = frag_start.astype(np.int64) - crop_start
+        frag_end_crop = frag_p_crop + frag_length.astype(np.int64) - 1
 
-        # Centre of each fragment in crop coordinates
-        frag_centre = frag_p_crop + frag_length.astype(np.int64) // 2
-
-        # Centre-based filter: m in [0, tile_size)
-        keep = (frag_centre >= 0) & (frag_centre < self.tile_size)
+        # Admission: min(start, end) in [0, tile_size).
+        # Use explicit min — do not assume the h5 stores left-to-right.
+        frag_min_pos = np.minimum(frag_p_crop, frag_end_crop)
+        keep = (frag_min_pos >= 0) & (frag_min_pos < self.tile_size)
 
         # Also filter to in-band lengths
         keep &= (frag_length >= self.L_min) & (frag_length <= self.L_max)
 
-        frag_m = frag_centre[keep]
+        frag_m = frag_p_crop[keep]
         frag_L = frag_length[keep].astype(np.int64)
         frag_s = frag_strand[keep].astype(np.int64)
         frag_L_idx = frag_L - self.L_min  # 0-based index into n_L

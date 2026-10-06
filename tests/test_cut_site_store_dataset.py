@@ -1,4 +1,4 @@
-"""Tests for the cut-site store schema, dataset, and centre-based filtering.
+"""Tests for the cut-site store schema, dataset, and start-based admission.
 
 Uses a synthetic zarr store fixture with known fragments.
 """
@@ -44,7 +44,7 @@ def _create_synthetic_store(tmp_path, tile_size=256, jitter=32, n_tiles=4,
                             n_samples=1, n_frags_per_tile=50, seed=42):
     """Create a minimal cut-site store with random fragments."""
     rng = np.random.default_rng(seed)
-    rf_budget = WINDOW_HALF + 3  # enough for the model
+    rf_budget = WINDOW_HALF + 5  # enough for the model
     cfg = CutSiteStoreConfig(
         tile_size=tile_size, jitter=jitter, rf_budget=rf_budget,
         seed=seed, n_train_samples=n_samples,
@@ -246,9 +246,9 @@ class TestEndpointConsistency:
 # ---------------------------------------------------------------------------
 
 
-class TestCentreBasedFiltering:
+class TestStartBasedAdmission:
     def test_domain_size_per_L_is_P(self, synthetic_store):
-        """Every in-band L should have the same number of scorable centres = P."""
+        """Every in-band L should have the same number of scorable starts = P."""
         store_path, cfg = synthetic_store
         model = CutSiteFragmentModel(
             tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
@@ -299,7 +299,7 @@ class TestCentreBasedFiltering:
         assert all_L.max() >= L_MAX_INBAND - 10, "No long fragments survived"
 
     def test_both_L_parities_survive_crop(self, synthetic_store):
-        """Both even and odd L values should survive the centre-based filter."""
+        """Both even and odd L values should survive the start-based filter."""
         store_path, cfg = synthetic_store
         model = CutSiteFragmentModel(
             tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
@@ -475,11 +475,11 @@ class TestEndpointBoundaryFragment:
         assert ep[1].sum() == 0.0  # last track clipped (right end out of bounds)
 
 
-class TestCentreFilterBoundary:
-    """Verify the centre-based filter boundary: m in [0, tile_size) is half-open."""
+class TestStartFilterBoundary:
+    """Verify the start-based filter boundary: m in [0, tile_size) is half-open."""
 
-    def test_fragment_at_last_valid_centre(self, tmp_path):
-        """A fragment centred at m = tile_size - 1 should be included."""
+    def test_fragment_at_last_valid_start(self, tmp_path):
+        """A fragment starting at m = tile_size - 1 should be included."""
         from background_model.cut_site_dataset import CutSiteFragmentDataset
         tile_size = 256
         store_path, cfg = _create_synthetic_store(
@@ -497,8 +497,8 @@ class TestCentreFilterBoundary:
         )
         item = ds[0]
         frag_m = item["frag_m"].numpy()
-        # All centres must be strictly in [0, tile_size) — half-open
-        assert (frag_m >= 0).all(), f"Centre below 0: min={frag_m.min()}"
-        assert (frag_m < tile_size).all(), f"Centre >= tile_size: max={frag_m.max()}"
+        # All starts must be strictly in [0, tile_size) — half-open
+        assert (frag_m >= 0).all(), f"Start below 0: min={frag_m.min()}"
+        assert (frag_m < tile_size).all(), f"Start >= tile_size: max={frag_m.max()}"
         # Verify at least some fragments exist (sanity)
-        assert len(frag_m) > 0, "No fragments survived the centre filter"
+        assert len(frag_m) > 0, "No fragments survived the start filter"

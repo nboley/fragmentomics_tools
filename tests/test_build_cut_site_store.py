@@ -29,7 +29,7 @@ GOLDEN_H5 = os.path.join(os.path.dirname(__file__), "data", "golden.small.chr6.f
 
 def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179):
     """Build a cut-site store from the golden h5 with synthetic sequence."""
-    rf_budget = 133
+    rf_budget = 186
     cfg = CutSiteStoreConfig(
         tile_size=tile_size, jitter=jitter, rf_budget=rf_budget,
         L_min=L_min, L_max=L_max, seed=42, n_train_samples=1,
@@ -56,9 +56,9 @@ def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179)
             [0 if s in ("+", b"+") else 1 for s in rfa.fragment_strands], dtype=np.uint8
         )
         keep = (lengths >= L_min) & (lengths <= L_max)
-        centres = starts + lengths // 2
-        keep &= (centres >= 0) & (centres < cfg.l_target)
-        keep &= (starts >= 0)  # uint16 can't hold negatives
+        ends = starts + lengths - 1
+        min_pos = np.minimum(starts, ends)
+        keep &= (min_pos >= 0) & (min_pos < cfg.l_target)
         if keep.sum() == 0:
             continue
         valid_regions.append(r)
@@ -278,9 +278,9 @@ class TestExtractWorkerVsLibrary:
             lib_starts = (rfa.starts - reg_start).astype(np.int64)
             lib_lengths = rfa.lengths.astype(np.int64)
             keep = (lib_lengths >= L_min) & (lib_lengths <= L_max)
-            centres = lib_starts + lib_lengths // 2
-            keep &= (centres >= 0) & (centres < 2560)
-            keep &= (lib_starts >= 0)
+            lib_ends = lib_starts + lib_lengths - 1
+            min_pos = np.minimum(lib_starts, lib_ends)
+            keep &= (min_pos >= 0) & (min_pos < 2560)
             lib_starts = lib_starts[keep]
         else:
             lib_starts = np.array([], dtype=np.int64)

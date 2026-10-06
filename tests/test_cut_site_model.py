@@ -39,8 +39,8 @@ class TestGeometryConstants:
         assert N_L == 156  # 180 - 25 + 1
 
     def test_offset_range(self):
-        assert O_L_MIN == 128 - 180 // 2  # 38
-        assert O_R_MAX == O_L_MIN + L_MAX_INBAND  # 218 (unchanged: 39+179 == 38+180)
+        assert O_L_MIN == WINDOW_HALF  # start admission: o_l_min = WINDOW_HALF
+        assert O_R_MAX == WINDOW_HALF + L_MAX_INBAND
         assert N_OFFSETS == L_MAX_INBAND  # 180
 
     def test_excl_prefix_is_strictly_lower_triangular(self):
@@ -106,13 +106,14 @@ class TestModelGeometry:
 
     def test_model_input_size(self):
         m = CutSiteFragmentModel(tile_size=2048)
-        assert m.model_input_size == 2048 + 256  # P + W
+        # model_input_size now returns calc_input_region_size(tile_size)
+        assert m.model_input_size == m.calc_input_region_size(2048)
 
     def test_calc_input_region_size(self):
         m = CutSiteFragmentModel(tile_size=2048)
         l_in = m.calc_input_region_size(2048)
-        # model_input_size + 5 = 2309, rounded up to even = 2310
-        assert l_in == 2310
+        # P + 2*WINDOW_HALF + 5 = 2048 + 362 + 5 = 2415, rounded up to even = 2416
+        assert l_in == 2416
         assert l_in % 2 == 0  # must be even for jitter_matrix
 
     def test_forward_output_matches_tile_size(self):
@@ -284,18 +285,18 @@ class TestCentreBasedDomain:
     def test_taps_within_h_for_all_m_L(self):
         """For m in [0, P) and all in-band L, both taps fall within h."""
         P = 256
-        model_input_size = P + 2 * WINDOW_HALF  # h length
+        h_width = P + 2 * WINDOW_HALF  # h length after conv
         for L in range(L_MIN_INBAND, L_MAX_INBAND + 1):
-            o_l = WINDOW_HALF - L // 2
-            o_r = o_l + L
+            # Start admission: left tap at WINDOW_HALF, right at WINDOW_HALF + L
+            o_l = WINDOW_HALF
+            o_r = WINDOW_HALF + L
             for m in (0, P - 1):
-                # h indices
                 h_left = m + o_l
                 h_right = m + o_r
-                assert 0 <= h_left < model_input_size, (
+                assert 0 <= h_left < h_width, (
                     f"Left tap out of bounds: m={m}, L={L}, h_left={h_left}"
                 )
-                assert 0 <= h_right < model_input_size, (
+                assert 0 <= h_right < h_width, (
                     f"Right tap out of bounds: m={m}, L={L}, h_right={h_right}"
                 )
 
@@ -412,10 +413,10 @@ class TestInteriorPrefixSum:
 
         # Pick L=100 (odd), check span at m=16
         L_val = 100
-        o_l = WINDOW_HALF - L_val // 2   # 128 - 50 = 78
-        o_r = o_l + L_val                 # 178
-        o_l_p = o_l - O_L_MIN            # 78 - 39 = 39
-        o_r_p = o_r - O_L_MIN            # 178 - 39 = 139
+        o_l = WINDOW_HALF                 # start admission: independent of L
+        o_r = WINDOW_HALF + L_val
+        o_l_p = o_l - O_L_MIN            # WINDOW_HALF - WINDOW_HALF = 0
+        o_r_p = o_r - O_L_MIN            # L_val
 
         span_from_U = U[0, :, 16, o_r_p] - U[0, :, 16, o_l_p]
 
@@ -444,23 +445,22 @@ class TestCrossBranchAlignment:
         x_base[:, 0, :] = 1.0  # all A
 
         # Mutant: change one base at the position the left tap of L=100
-        # at scored_m=5 should read.  Endpoint tap h-pos = o_l + scored_m.
+        # at scored_m=5 should read.  Start admission: left tap at WINDOW_HALF + m.
         L_test = 100
         scored_m = 5
-        o_l = WINDOW_HALF - L_test // 2  # 78
-        target_x_pos = o_l + scored_m     # 83 — the position both branches should see
+        o_l = WINDOW_HALF
+        target_x_pos = o_l + scored_m     # WINDOW_HALF + 5
 
         x_mut = x_base.clone()
         x_mut[:, 0, target_x_pos] = 0.0
-        x_mut[:, 2, target_x_pos] = 1.0  # A → G at position 83
+        x_mut[:, 2, target_x_pos] = 1.0  # A → G
 
         # Run the interior prefix on both
         U_base = m._interior_prefix(x_base, 0, P)
         U_mut = m._interior_prefix(x_mut, 0, P)
 
-        # The span covering position 83 should differ between base and mutant.
-        # For L=100: o_l'=o_l-O_L_MIN=39, o_r'=o_r-O_L_MIN=139
-        o_l_p = o_l - O_L_MIN
+        # The span for L=100: o_l'=0, o_r'=L_test
+        o_l_p = o_l - O_L_MIN  # = 0
         o_r_p = o_l_p + L_test
         span_base = U_base[0, :, scored_m, o_r_p] - U_base[0, :, scored_m, o_l_p]
         span_mut = U_mut[0, :, scored_m, o_r_p] - U_mut[0, :, scored_m, o_l_p]
@@ -481,12 +481,9 @@ class TestCrossBranchAlignment:
 
         L_test = 50
         scored_m = 10
-        o_l = WINDOW_HALF - L_test // 2  # 103
-        o_r = o_l + L_test                # 153
+        o_l = WINDOW_HALF
+        o_r = WINDOW_HALF + L_test
 
-        # Mutate a position BEFORE the span (o_l + scored_m - 2 in x coords)
-        outside_pos = o_l + scored_m - 2  # 111, which is < o_l + scored_m = 113
-        # Actually need to ensure it's before o_l in the re-indexed frame.
         # The span covers x positions [o_l + scored_m, o_r + scored_m).
         # Place mutation well before: at position 5 (way outside).
         outside_pos = 5
@@ -519,7 +516,7 @@ class TestCrossBranchAlignment:
         x_base[:, 0, :] = 1.0
 
         scored_m = 10
-        o_l = WINDOW_HALF - L_val // 2
+        o_l = WINDOW_HALF  # start admission: independent of L
         tap_pos = o_l + scored_m  # position in x/h coordinates
 
         x_mut = x_base.clone()
@@ -530,9 +527,9 @@ class TestCrossBranchAlignment:
         with torch.no_grad():
             h_base = m.l1_act(m.l1_conv(x_base))
             h_mut = m.l1_act(m.l1_conv(x_mut))
-            if h_base.shape[-1] > m._model_input_size:
-                h_base = h_base[..., :m._model_input_size]
-                h_mut = h_mut[..., :m._model_input_size]
+            if h_base.shape[-1] > m._h_width:
+                h_base = h_base[..., :m._h_width]
+                h_mut = h_mut[..., :m._h_width]
         # h differs at tap_pos (and its receptive field)
         endpoint_changed = not torch.allclose(
             h_base[0, :, tap_pos], h_mut[0, :, tap_pos], atol=1e-7
@@ -541,7 +538,7 @@ class TestCrossBranchAlignment:
         # Interior branch: prefix sum changes for spans covering tap_pos
         U_base = m._interior_prefix(x_base, 0, P)
         U_mut = m._interior_prefix(x_mut, 0, P)
-        o_l_p = o_l - O_L_MIN
+        o_l_p = o_l - O_L_MIN  # = 0
         o_r_p = o_l_p + L_val
         span_base = U_base[0, :, scored_m, o_r_p] - U_base[0, :, scored_m, o_l_p]
         span_mut = U_mut[0, :, scored_m, o_r_p] - U_mut[0, :, scored_m, o_l_p]
@@ -557,15 +554,11 @@ class TestEndpointTapAlignment:
     def test_tap_positions_match_design(self):
         """For L=25 and L=179, verify o_l and o_r match design formulas."""
         for L_val in (25, 26, 100, 179):
-            o_l = WINDOW_HALF - L_val // 2
-            o_r = o_l + L_val
-            # Design: taps are L apart (cut sites p and p+L)
+            # Start admission: left tap at WINDOW_HALF, right at WINDOW_HALF + L
+            o_l = WINDOW_HALF
+            o_r = WINDOW_HALF + L_val
+            # Design: taps are L apart (cut sites m and m+L)
             assert o_r - o_l == L_val
-            # Start p = m - L//2, so p at m=0 gives p = -L//2
-            p = 0 - L_val // 2
-            # Right cut site: p + L = -L//2 + L = L - L//2 = ceil(L/2)
-            assert o_r - WINDOW_HALF == L_val - L_val // 2  # ceil(L/2)
-            assert o_l - WINDOW_HALF == -(L_val // 2)       # -floor(L/2)
 
     def test_endpoint_feats_use_correct_h_positions(self):
         """The endpoint features at m=0 for the left tap should read h[:,:,o_l]."""
@@ -578,14 +571,14 @@ class TestEndpointTapAlignment:
         logits, _, _ = m(x)
 
         # Manually verify for L=25 (idx=0), strand=0, tap=left
-        h = m.l1_act(m.l1_conv(x))  # (1, N1, model_input_size)
+        h = m.l1_act(m.l1_conv(x))  # (1, N1, h_width)
         L_val = 25
-        o_l = WINDOW_HALF - L_val // 2  # 128 - 12 = 116
+        o_l = WINDOW_HALF  # start admission: independent of L
         group = 0  # (25-25)//15 = 0
         bank_idx = 0  # left tap, strand 0
         M_gs = m._folded_M(bank_idx, group)  # (H, N1)
-        Mh = M_gs @ h  # (1, H, model_input_size)
-        # At m=0, the left tap reads h position 0 + o_l = 116
+        Mh = M_gs @ h  # (1, H, h_width)
+        # At m=0, the left tap reads h position 0 + WINDOW_HALF
         f_l_at_m0 = Mh[0, :, o_l]  # (H,)
 
         # This should match what the forward pass computed for position m=0,
@@ -611,7 +604,7 @@ class TestLinearityCondition:
         bank_idx = 0
         M = m._folded_M(bank_idx, group)  # (H, N1)
 
-        h_fake = torch.randn(1, 8, 293)  # model_input_size for tile=32
+        h_fake = torch.randn(1, 8, 32 + 2 * WINDOW_HALF)  # h_width for tile=32
         result_1x = M @ h_fake
         result_2x = M @ (alpha * h_fake)
         assert torch.allclose(result_2x, alpha * result_1x, atol=1e-5)

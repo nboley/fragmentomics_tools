@@ -32,26 +32,32 @@ parameterisation.
 
 ## Geometry
 
-Window `W` = 256 bases = **257 cut sites**. A fragment of length `L` sits
-centred in the window:
+**Start admission.** A fragment is admitted iff `min(fragment_start,
+fragment_end)` lies in `[0, tile_size)`. `m` is the fragment START position,
+not the centre. This gives `|D_L| = P` for every in-band `L` (length-
+independent — start in `[0, P)` gives `P` positions for every `L`).
+
+`WINDOW_HALF = 181`.  Derivation: the model's reachable cut range in hex-idx
+space is `[WINDOW_HALF, WINDOW_HALF + P + L_max - 2]`.  The widest margin
+needed is `L_max - 1 = 179`, so `WINDOW_HALF >= 179`.  181 is chosen so
+`rf_budget = WINDOW_HALF + 5 = 186` keeps its existing definition.  Symmetric
+by design — the unused left margin is the price of reviewability after the
+off-by-3 incident.
+
+Window `W` = 2 × WINDOW_HALF = 362 bases.
 
 ```
-left tap   o_l = 128 - L//2
-right tap  o_r = o_l + L
+left tap   o_l = WINDOW_HALF           (independent of L)
+right tap  o_r = WINDOW_HALF + L       (L apart = cut site spacing)
 ```
 
-Integer **floor** division; an odd `L` sits half a base off-centre,
-deterministically and always in the same direction. The taps are exactly `L`
-apart, so they index **CUT SITES** (`p` and `p+L`), matching the simulator's
-`fwd_cut[p]` / `rc_cut[p+L]` — **not** per-base end positions.
+The taps are exactly `L` apart, indexing **CUT SITES** (`m` and `m+L`).
 
-The map is indexed by the window **centre**: `(m, L)`, with `p = m - L//2`.
-
-The interior branch's offset axis is **parameterised by `FL_BANDS`**, not sized
-to `max_len`. `n_offsets = L_max_inband` (179), spanning only the live range
-`[o_l_min, o_r_max)` where `o_l_min = 128 - L_max_inband // 2` (39). Offsets
-below `o_l_min` are dead (cancel in the prefix-sum difference) and trimmed.
-The prefix axis has `n_offsets + 1 = 180` slots.
+The interior branch's offset axis spans `n_offsets = L_max` (180), covering
+`[o_l_min, o_r_max)` where `o_l_min = WINDOW_HALF`.  Under start admission
+the left tap doesn't depend on `L`, so `o_l_prime = 0` for all fragments and
+the prefix-sum difference simplifies to just `U[L]`.
+The prefix axis has `n_offsets + 1 = 181` slots.
 
 ## Model architecture
 
@@ -106,7 +112,7 @@ Limitation: 15 bp resolution cannot isolate a sharp effect at ~167.
 
 ### L2b — interior branch
 
-A **second, separate** bank `F (N2=32, 4, n_offsets=179)` with weights **learned
+A **second, separate** bank `F (N2=32, 4, n_offsets=180)` with weights **learned
 per offset**, spanning the live range `[o_l_min, o_r_max)` (see §Geometry).
 Re-indexed as `o' = o - o_l_min`. Prefix sum along the re-indexed offset axis:
 
@@ -116,7 +122,7 @@ U          = prefix_sum(u, axis=o')       # exclusive, n_offsets+1 = 180 slots
 span       = U[n,m,o_r'] - U[n,m,o_l']   # o_l' = o_l - o_l_min, o_r' = o_r - o_l_min
 ```
 
-The centred masks are **nested**, so this is **one subtraction per pair** — not
+Under start admission `o_l' = 0` for all L, so the subtraction is **one subtraction per pair** — not
 a per-candidate 256-wide convolution, which would be ~256× the work. Feed
 **both** `span` and `span/L` explicitly; a dense layer cannot form that ratio
 from `[span, L]`.
@@ -154,10 +160,10 @@ pre-activation.** A nonlinearity on the per-pair features destroys the fold-down
 
 ```
 B    = 64     regions per step          N1  = 128   L1 cut-site bank
-P    = 2048   scored centres m (crop)   K   = 128   L2a bank dim (x4 banks)
-n_L  = 155    in-band L = 25..179       N2  = 32    L2b interior bank
-W    = 256    window bases (257 cuts)   H   = 32    hidden width
-L_chunk = 32                            l_in  = 2310 (2309 rounded to even for jitter_matrix)
+P    = 1024   scored start positions    K   = 128   L2a bank dim (x4 banks)
+n_L  = 156    in-band L = 25..180       N2  = 32    L2b interior bank
+W    = 362    window bases              H   = 32    hidden width
+L_chunk = 32                            l_in  = 1392 (calc_input_region_size(1024))
 ```
 
 ```
@@ -310,7 +316,7 @@ Item = one region, yielding:
 
 ```
 x         : (4, l_in)              float32   one-hot sequence
-frag_m    : (n_frag,)              int64     centre positions in crop coords
+frag_m    : (n_frag,)              int64     start positions in crop coords
 frag_L_idx: (n_frag,)              int64     L index (0-based, L - L_MIN)
 frag_s    : (n_frag,)              int64     strand (0 or 1)
 frag_N    : scalar                 int64     total fragment count
@@ -319,18 +325,19 @@ mask      : (tile_size,)           bool      valid positions
 ```
 
 The multinomial shares one per-region `logp` map across the `S` samples:
-`NLL_s = -Σ_{(p,L,s)∈frags_s} logp[p,L,s] / N_s`, averaged over samples.
+`NLL_s = -Σ_{(m,L,s)∈frags_s} logp[m,L,s] / N_s`, averaged over samples.
 
-**Crop.** The jittered centre crop uses `jitter_matrix` with concentric widths
-(seq → `l_in`, targets → `tile_size`). A fragment survives iff its **centre**
-`m = p + L//2` lands in `[0, tile_size)` (centre-based, not both-endpoint —
-see §Settled parameters). Its `p` is re-based to the crop origin.
-Train draws `j ∈ [-jitter, jitter]`; **val and
+**Crop.** The jittered crop uses `jitter_matrix` with concentric widths
+(seq → `l_in`, targets → `tile_size`). A fragment survives iff
+`min(fragment_start, fragment_end)` lies in `[0, tile_size)` (start-based
+admission — see §Settled parameters). `frag_m` is the fragment start in
+crop coordinates.  Train draws `j ∈ [-jitter, jitter]`; **val and
 test use `j = 0` (centred crop) — jitter is training-only**. `jitter_matrix`'s
 crop requires its input and output lengths to share **matched parity** (not even
-parity per se — see `calculate_start_and_stop_from_jitter`): the jittered crop
-crops the sequence to `l_in = 2310` (`model_input_size + 5`, rounded up to even
-for matched parity). The model trims the extra position after the width-6 conv
+parity per se — see `calculate_start_and_stop_from_jitter`): `l_in` =
+`model.model_input_size` (already includes +5 for the conv margin and
+even-parity rounding — no separate +5 step in the dataset).
+The model trims the extra position after the width-6 conv
 (same pattern as `BackgroundModelKEN`). The parity assertion covers `tile_size` /
 `l_target` / `l_seq` / `l_in`.
 
@@ -489,10 +496,11 @@ yourself (it moves per commit).
 ## Settled parameters
 
 - `min_N` = 10 (total fragment count per sample×region).
-- **Centre-based fragment inclusion**: D = {(m, L, s) : m ∈ [0, P), L in-band,
-  s ∈ {0,1}}. |D_L| = P for all L — no length bias.
-- **F offset range parameterised by FL_BANDS**: `n_offsets = L_max_inband`,
-  `o_l_min = 128 - L_max_inband // 2`. Dead offsets trimmed.
+- **Start-based fragment admission**: D = {(m, L, s) : m ∈ [0, P), L in-band,
+  s ∈ {0,1}}. |D| = P × n_L × 2 = 319,488. |D_L| = P for all L — no length bias.
+- `WINDOW_HALF` = 181, `rf_budget` = 186 (WINDOW_HALF + 5).
+- **F offset range**: `n_offsets = L_max` (180),
+  `o_l_min = WINDOW_HALF`. Under start admission the left tap is fixed.
 - **NB endpoint loss kept, dispersion frozen** at `log_dispersion_init`.
 - **Conv L1** (not embedding). Embedding arm is a Stage 3 improvement.
 - **len_bias (n_L,)**: scalar per-L on the logit (not per-H).

@@ -66,27 +66,33 @@ def _seq_to_hexamer_indices(seq_uint8, k=6):
     return indices
 
 
-def hex_window_for_tile(seq_full, tile_size, k=6):
-    """k-mer index per tile position, registered on the cut junction.
+def hex_window_for_tile(seq_full, tile_size, k=6, width=None):
+    """k-mer index array registered on the cut junction.
 
-    Returns ``(tile_size,)`` where entry ``p`` is the k-mer STARTING
-    ``CUT_OFFSET_IN_KMER`` bases before tile position ``p``.
+    Returns ``(width,)`` where entry ``p`` is the k-mer STARTING
+    ``CUT_OFFSET_IN_KMER`` bases before position ``p`` relative to the
+    tile origin.
+
+    ``width`` defaults to ``tile_size``.  Under start admission the 3'
+    endpoint can be up to ``L_max - 1`` past the tile edge, so pass
+    ``tile_size + L_max - 1`` to cover all reachable positions.
 
     The registration is done by explicit slicing rather than by choosing a crop
     width and letting ``jitter_matrix`` centre it.  That indirection is what
-    broke before: ``jitter_matrix`` crops from the full stored sequence (1802bp,
-    not ``l_target``) and CEILS on odd differences, so the realised offset did
-    not match what ``calculate_start_and_stop_from_jitter`` predicted and nobody
-    noticed the k-mer had moved.
+    broke before: ``jitter_matrix`` crops from the full stored sequence and
+    CEILS on odd differences, so the realised offset did not match what
+    ``calculate_start_and_stop_from_jitter`` predicted.
     """
+    if width is None:
+        width = tile_size
     tile_start = (len(seq_full) - tile_size) // 2
     lo = tile_start - CUT_OFFSET_IN_KMER
-    if lo < 0 or lo + tile_size + k - 1 > len(seq_full):
+    if lo < 0 or lo + width + k - 1 > len(seq_full):
         raise ValueError(
-            f"sequence of length {len(seq_full)} cannot supply k-mers for a "
-            f"{tile_size}bp tile at offset {CUT_OFFSET_IN_KMER} with k={k}"
+            f"sequence of length {len(seq_full)} cannot supply k-mers for "
+            f"{width} positions at offset {CUT_OFFSET_IN_KMER} with k={k}"
         )
-    return _seq_to_hexamer_indices(seq_full[lo:lo + tile_size + k - 1], k)
+    return _seq_to_hexamer_indices(seq_full[lo:lo + width + k - 1], k)
 
 
 def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
@@ -137,6 +143,10 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
     total_frags = 0
     total_tiles = 0
 
+    # Under start admission a 3' endpoint can be up to L_max-1 past the tile
+    # edge. The hex window must cover all reachable positions.
+    hex_width = tile_size + L_max - 1
+
     for t in tile_ok:
         # Get sequence in crop frame
         seq_full = seq_all[t]
@@ -144,8 +154,9 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
 
         mask_crop = jitter_matrix(mask_full, 0, tile_size)
 
-        # valid_hex[p] = k-mer starting CUT_OFFSET_IN_KMER before tile pos p
-        valid_hex = hex_window_for_tile(seq_full, tile_size, k)
+        # valid_hex[p] = k-mer starting CUT_OFFSET_IN_KMER before position p
+        # relative to the tile origin.  Widened to cover 3' endpoints.
+        valid_hex = hex_window_for_tile(seq_full, tile_size, k, width=hex_width)
         for p in range(tile_size):
             if mask_crop[p] and valid_hex[p] >= 0:
                 hex_occurrences[valid_hex[p]] += 1
@@ -171,34 +182,33 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
                 s_val = strands[fi]
                 end = st + L - 1
 
-                # Filter: centre in [0, tile_size), valid length
-                centre = st + L // 2
-                if centre < 0 or centre >= tile_size:
-                    continue
                 if L < L_min or L > L_max:
+                    continue
+
+                # Start-based admission: min(start, end) in [0, tile_size)
+                min_pos = min(st, end)
+                if min_pos < 0 or min_pos >= tile_size:
                     continue
 
                 # Length distribution
                 length_counts[L - L_min] += 1
                 total_frags += 1
 
-                # Cut-site hex indices
-                # start position hexamer (position of the 5' cut)
-                # stop position hexamer (position of the 3' cut)
-                if 0 <= st < tile_size and 0 <= end < tile_size:
-                    hex_start = valid_hex[st] if st < len(valid_hex) else -1
-                    hex_stop = valid_hex[end] if end < len(valid_hex) else -1
+                # Cut-site hex indices (widened window covers end positions
+                # up to tile_size + L_max - 2)
+                hex_start = valid_hex[st] if 0 <= st < len(valid_hex) else -1
+                hex_stop = valid_hex[end] if 0 <= end < len(valid_hex) else -1
 
-                    if s_val == 0:  # + strand: 5' at start, 3' at end
-                        if hex_start >= 0:
-                            start_fwd_counts[hex_start] += 1
-                        if hex_stop >= 0:
-                            stop_fwd_counts[hex_stop] += 1
-                    else:  # - strand: 5' at end, 3' at start
-                        if hex_stop >= 0:
-                            start_rev_counts[hex_stop] += 1
-                        if hex_start >= 0:
-                            stop_rev_counts[hex_start] += 1
+                if s_val == 0:  # + strand: 5' at start, 3' at end
+                    if hex_start >= 0:
+                        start_fwd_counts[hex_start] += 1
+                    if hex_stop >= 0:
+                        stop_fwd_counts[hex_stop] += 1
+                else:  # - strand: 5' at end, 3' at start
+                    if hex_stop >= 0:
+                        start_rev_counts[hex_stop] += 1
+                    if hex_start >= 0:
+                        stop_rev_counts[hex_start] += 1
 
         total_tiles += 1
         if (total_tiles) % 5000 == 0:

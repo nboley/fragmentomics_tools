@@ -237,52 +237,38 @@ class TestEndToEndTraining:
 
 
 class TestAlignmentBothParities:
-    """Verify that for both even and odd L, the fragment centre m maps
-    correctly to the tap indices in h, and the round-trip p = m - L//2
-    recovers the correct start position."""
+    """Verify that for both even and odd L, the fragment start m maps
+    correctly to the tap indices in h."""
 
     @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
     def test_tap_alignment_at_boundaries(self, L_val):
-        """For a fragment at the leftmost and rightmost valid centres,
+        """For a fragment at the leftmost and rightmost valid starts,
         verify the taps land within h."""
         P = 256
-        model_input_size = P + 2 * WINDOW_HALF
-        o_l = WINDOW_HALF - L_val // 2
-        o_r = o_l + L_val
+        h_width = P + 2 * WINDOW_HALF
+        o_l = WINDOW_HALF
+        o_r = WINDOW_HALF + L_val
 
-        # Leftmost centre: m = 0
-        assert 0 <= 0 + o_l < model_input_size
-        assert 0 <= 0 + o_r < model_input_size
+        # Leftmost start: m = 0
+        assert 0 <= 0 + o_l < h_width
+        assert 0 <= 0 + o_r < h_width
 
-        # Rightmost centre: m = P - 1
-        assert 0 <= (P - 1) + o_l < model_input_size
-        assert 0 <= (P - 1) + o_r < model_input_size
-
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_start_roundtrip(self, L_val):
-        """p = m - L//2 and m = p + L//2 must round-trip exactly."""
-        for m in (0, 50, 128, 255):
-            p = m - L_val // 2
-            m_back = p + L_val // 2
-            assert m_back == m
+        # Rightmost start: m = P - 1
+        assert 0 <= (P - 1) + o_l < h_width
+        assert 0 <= (P - 1) + o_r < h_width
 
     @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
     def test_cut_sites_are_L_apart(self, L_val):
-        """The two cut sites p and p+L are exactly L apart (not L-1)."""
-        o_l = WINDOW_HALF - L_val // 2
-        o_r = o_l + L_val
-        # The taps in h-coordinates: m + o_l and m + o_r
-        # Difference: o_r - o_l = L
+        """The two cut sites m and m+L are exactly L apart (not L-1)."""
+        o_l = WINDOW_HALF
+        o_r = WINDOW_HALF + L_val
         assert o_r - o_l == L_val
-        # This means the right CUT SITE is at p + L, not p + L - 1
-        # (the right endpoint BASE is at p + L - 1, but the cut site is at p + L)
 
     def test_endpoint_base_vs_cut_site(self):
-        """Verify the ±1 distinction: right endpoint base = p+L-1,
-        right cut site = p+L."""
+        """Verify the ±1 distinction: right endpoint base = m+L-1,
+        right cut site = m+L."""
         for L_val in (25, 26, 100, 179):
             for m in (0, 128):
-                p = m - L_val // 2
-                right_cut_site = p + L_val       # what the model taps
-                right_base = p + L_val - 1       # what /endpoints/last records
+                right_cut_site = m + L_val       # what the model taps
+                right_base = m + L_val - 1       # what /endpoints/last records
                 assert right_cut_site == right_base + 1

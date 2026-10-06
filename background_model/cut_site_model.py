@@ -1,9 +1,10 @@
 """Cut-site fragment model — per-fragment (m, L, strand) logits.
 
 Implements the architecture described in docs/pending/cut_site_fragment_model.md.
-The model emits one logit per (centre m, length L, strand s) triple and trains
-on the fragment multinomial.  It joins the bake-off alongside the 12-track
-model class but does NOT subclass any existing model or mixin.
+The model emits one logit per (start m, length L, strand s) triple and trains
+on the fragment multinomial.  Start admission: a fragment is admitted iff
+min(start, end) lies in [0, tile_size).  m is the start position, not the
+centre.
 
 Two-stage training (docs/pending/two_stage_training.md):
   Stage 1: Analytical hex-table baseline — log p₀(m, L, s) from empirical
@@ -72,7 +73,10 @@ class EndpointGather(torch.autograd.Function):
 # Window geometry (fixed)
 # ---------------------------------------------------------------------------
 
-WINDOW_HALF = 128                                            # W/2
+# WINDOW_HALF >= L_max - 1 = 179.  Under start admission the max 3' cut is
+# at position (P-1) + L_max - 1 = P + 178, so the model needs hex indices
+# that far past the tile edge.  181 gives rf_budget = WINDOW_HALF + 5 = 186.
+WINDOW_HALF = 181                                            # W/2
 
 # Length groups: 10, half-open, 15 wide from L_min with the last group wider
 N_LENGTH_GROUPS = 10
@@ -87,10 +91,14 @@ DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS)               # 180 (inclusive)
 
 
 def _compute_geometry(L_min: int, L_max: int):
-    """Derive all geometry from explicit length bounds."""
+    """Derive all geometry from explicit length bounds.
+
+    Under start admission the left tap is at WINDOW_HALF + m (independent of L),
+    so the offset range for the interior branch spans [WINDOW_HALF, WINDOW_HALF + L_max).
+    """
     n_L = L_max - L_min + 1
-    o_l_min = WINDOW_HALF - L_max // 2
-    o_r_max = o_l_min + L_max
+    o_l_min = WINDOW_HALF
+    o_r_max = WINDOW_HALF + L_max
     n_offsets = L_max  # live width = L_max
     return n_L, o_l_min, o_r_max, n_offsets
 
@@ -148,6 +156,8 @@ def compute_log_p0(
 ) -> torch.Tensor:
     """Compute factored baseline log p₀(m, L, s) from hex tables.
 
+    Under start admission, m is the fragment START position (not centre).
+
     Args:
         x_onehot: (B, 4, l_in) one-hot sequence (includes conv padding)
         hex_log_*: (4096,) log-probability tables (trainable parameters)
@@ -165,26 +175,10 @@ def compute_log_p0(
     # Hex indices over the full sequence (including margins for endpoint lookup)
     hex_idx = _onehot_to_hex_indices(x_onehot)  # (B, l_in - k + 1)
 
-    # The one-hot sequence has WINDOW_HALF positions of margin on each side
-    # of the tile_size scored positions.  After Conv1d(k=6), h starts at
-    # position 0 of x_onehot, and the scored positions start at WINDOW_HALF
-    # in h-space.  For hex lookups, position p in the tile corresponds to
-    # hex_idx position (WINDOW_HALF + p) in x_onehot-space (since conv
-    # trims k-1=5, but hex_idx also trims k-1, so they align).
-
-    # Per-position log cut probabilities from hex tables
-    # hex_idx covers positions [0, l_in - k + 1) in x_onehot space
-    # Scored positions [0, P) in tile space correspond to hex_idx
-    # positions [WINDOW_HALF, WINDOW_HALF + P) — BUT we also need
-    # endpoint positions at offsets from the scored centre m.
-    #
-    # For fragment (m, L, s):
-    #   +strand: start = m - L//2,           stop = m - L//2 + L - 1
-    #   -strand: start = m - L//2 + L - 1,   stop = m - L//2
-    #
-    # These positions need to be valid hex_idx indices.  The WINDOW_HALF
-    # margin (128) ensures positions up to L_max//2 = 89 outside the tile
-    # are available.
+    # Under start admission, m IS the fragment start.  The hex lookup for a
+    # fragment (m, L) on the + strand reads k-mers at positions m (5' cut)
+    # and m + L - 1 (3' cut) in tile space, which map to hex_idx positions
+    # WINDOW_HALF + m and WINDOW_HALF + m + L - 1.
 
     # Look up per-position log-probs for all 4 tables
     log_sf = hex_log_start_fwd[hex_idx]   # (B, n_hex_pos)
@@ -193,37 +187,27 @@ def compute_log_p0(
     log_er = hex_log_stop_rev[hex_idx]    # (B, n_hex_pos)
 
     # Build log_p0 (B, P, n_L, 2) by gathering endpoint log-probs
-    # For each centre m in [0, P), length L in [L_min, L_max]:
-    #   start_pos = WINDOW_HALF + m - L//2           (in hex_idx coords)
-    #   stop_pos  = WINDOW_HALF + m - L//2 + L - 1
     L_vals = torch.arange(L_min, L_max + 1, device=x_onehot.device)  # (n_L,)
     m_vals = torch.arange(tile_size, device=x_onehot.device)          # (P,)
 
-    # start_pos[m, L] = WINDOW_HALF + m - L//2
-    # stop_pos[m, L]  = start_pos + L - 1
-    #
-    # Do NOT subtract CUT_OFFSET_IN_KMER here.  The WINDOW_HALF convention
-    # already centres the k-mer on the cut: calc_input_region_size reserves
-    # `P + 2*WINDOW_HALF + 5`, and hex_idx[j] is the k-mer spanning
-    # x[j : j+k], so hex_idx[WINDOW_HALF + q] straddles tile position q with
-    # the cut at offset (k-1)//2 = 3.  de6c224 subtracted the offset a second
-    # time, moving the window to cut-6..cut-1 -- entirely upstream of the cut,
-    # which is how a normalised prior ended up WORSE than uniform.
-    # CUT_OFFSET_IN_KMER remains the documented convention and is asserted
-    # against the dataset's actual crop in test_hex_registration.
-    start_pos = (WINDOW_HALF + m_vals[:, None]
-                 - L_vals[None, :] // 2).long()                                # (P, n_L)
-    stop_pos = (start_pos + L_vals[None, :] - 1).long()                        # (P, n_L)
+    # start_pos[m, L] = WINDOW_HALF + m           (5' cut in hex_idx coords)
+    # stop_pos[m, L]  = WINDOW_HALF + m + L - 1   (3' cut in hex_idx coords)
+    # start_pos is the same for all L under start admission.
+    stop_pos = (WINDOW_HALF + m_vals[:, None] + L_vals[None, :] - 1).long()    # (P, n_L)
+    start_pos = (WINDOW_HALF + m_vals[:, None]).long().expand_as(stop_pos)      # (P, n_L)
 
-    # Clamp to valid range (positions outside hex_idx get clamped; they're
-    # in the WINDOW_HALF margin so should be valid, but clamp for safety)
+    # The construction-time check in __init__ guarantees every cell is
+    # reachable (WINDOW_HALF >= L_max - 1), so clamping is unnecessary.
+    # Assert rather than clamp so a geometry regression is caught immediately.
     max_idx = hex_idx.shape[1] - 1
-    start_pos_c = start_pos.clamp(0, max_idx)
-    stop_pos_c = stop_pos.clamp(0, max_idx)
+    assert start_pos.min() >= 0 and stop_pos.max() <= max_idx, (
+        f"hex index out of range: start [{start_pos.min()}, {start_pos.max()}], "
+        f"stop [{stop_pos.min()}, {stop_pos.max()}], max_idx {max_idx}"
+    )
 
     # Flatten for gather: (P * n_L,)
-    flat_start = start_pos_c.reshape(-1)   # (P * n_L,)
-    flat_stop = stop_pos_c.reshape(-1)
+    flat_start = start_pos.contiguous().reshape(-1)   # (P * n_L,)
+    flat_stop = stop_pos.reshape(-1)
 
     # Gather: (B, P * n_L) -> reshape to (B, P, n_L)
     log_sf_g = log_sf[:, flat_start].reshape(B, tile_size, n_L)
@@ -297,6 +281,17 @@ class CutSiteFragmentModel(L.LightningModule):
         self._o_l_min = o_l_min
         self._n_offsets = n_offsets
 
+        # Under start admission the max 3' hex lookup is at
+        # WINDOW_HALF + (P-1) + (L_max-1).  This must be a valid hex_idx
+        # index, which requires WINDOW_HALF >= L_max - 1.  Without this
+        # the clamp below would silently score cells against the wrong k-mer.
+        if WINDOW_HALF < L_max - 1:
+            raise ValueError(
+                f"WINDOW_HALF={WINDOW_HALF} < L_max-1={L_max - 1}: "
+                f"the geometry cannot reach every (m, L) cell.  "
+                f"Increase WINDOW_HALF to at least {L_max - 1}."
+            )
+
         # Strictly-lower-triangular ones, (n_offsets, n_offsets + 1), so that
         # `u @ _excl_prefix` is the exclusive prefix sum of u along its last
         # axis: column k sums the offsets o' < k, giving column 0 == 0.
@@ -312,8 +307,8 @@ class CutSiteFragmentModel(L.LightningModule):
             ),
         )
 
-        W = 2 * WINDOW_HALF  # 256
-        self._model_input_size = tile_size + W  # 2304
+        W = 2 * WINDOW_HALF
+        self._h_width = tile_size + W
 
         # -- L1: cut-site propensity ----------------------------------------
         self.l1_conv = nn.Conv1d(4, N1, kernel_size=6, padding=0)
@@ -431,7 +426,13 @@ class CutSiteFragmentModel(L.LightningModule):
 
     @property
     def model_input_size(self) -> int:
-        return self._model_input_size
+        """Full one-hot input width, including conv margin and even-parity rounding.
+
+        This is the SINGLE definition of the model's input size.  Callers
+        (dataset, training script, inference) use this value directly — do NOT
+        add +5 or round separately.
+        """
+        return self.calc_input_region_size(self.hparams.tile_size)
 
     # -- Folded endpoint matrices -------------------------------------------
 
@@ -462,12 +463,8 @@ class CutSiteFragmentModel(L.LightningModule):
         """
         # x_onehot index for scored position m and re-indexed offset o':
         #   x_idx = m + O_L_MIN + o'
-        # The endpoint branch reads h at index (o_l + scored_m) where
-        # o_l = WINDOW_HALF - L//2.  h[j] = conv(x_onehot[j:j+6]), so
-        # h-position j starts at x_onehot[j].  The interior branch must
-        # read x_onehot at the same h-aligned positions: for re-indexed
-        # offset o' (absolute offset o = o' + O_L_MIN), x_onehot position
-        # is scored_m + O_L_MIN + o'.
+        # Under start admission O_L_MIN = WINDOW_HALF, so
+        #   x_idx = m + WINDOW_HALF + o'
 
         B = x_onehot.shape[0]
         N2 = self.interior_F.shape[0]
@@ -543,8 +540,8 @@ class CutSiteFragmentModel(L.LightningModule):
         # -- L1: cut-site propensity ----------------------------------------
         h = self.l1_act(self.l1_conv(x_onehot))  # (B, N1, l_in - 5)
         # Trim extra position from even-parity rounding (if l_in was rounded up)
-        if h.shape[-1] > self._model_input_size:
-            h = h[..., :self._model_input_size]
+        if h.shape[-1] > self._h_width:
+            h = h[..., :self._h_width]
 
         # -- Endpoint heads (NB loss) on centre P positions of h ------------
         h_centre = h[:, :, WINDOW_HALF:WINDOW_HALF + P]   # (B, N1, P)
@@ -620,8 +617,10 @@ class CutSiteFragmentModel(L.LightningModule):
         # Groups are contiguous within each chunk (L values are sorted, groups
         # are consecutive L ranges). We gather per group and concatenate —
         # no scatter into a pre-allocated buffer, eliminating CopySlices backward.
-        o_l = WINDOW_HALF - chunk_L // 2       # (chunk_size,)
-        o_r = o_l + chunk_L                     # (chunk_size,)
+        # Under start admission the left tap is at WINDOW_HALF + m (independent
+        # of L), and the right tap is at WINDOW_HALF + m + L.
+        o_l = torch.full_like(chunk_L, WINDOW_HALF)  # (chunk_size,)
+        o_r = WINDOW_HALF + chunk_L                   # (chunk_size,)
         p_range = torch.arange(P, device=h.device)
 
         # Collect per-group gathered results in order, then cat

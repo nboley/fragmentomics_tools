@@ -71,7 +71,8 @@ def test_compute_log_p0_reads_kmer_starting_cut_offset_before_the_cut():
         for L in (L_min, 33, L_max):
             li = L - L_min
             got = int(round(float(log_p0[0, m, li, 0])))
-            cut_in_x = WINDOW_HALF + m - L // 2
+            # Under start admission m IS the start; 5' cut is at m.
+            cut_in_x = WINDOW_HALF + m
             expected = int(hex_idx[cut_in_x])
             assert got == expected, (
                 f"m={m} L={L}: gathered k-mer {got}, expected {expected} "
@@ -104,7 +105,8 @@ def test_stop_endpoint_uses_the_same_registration():
         for L in (L_min, L_max):
             li = L - L_min
             got = int(round(float(log_p0[0, m, li, 0])))
-            stop_in_x = WINDOW_HALF + m - L // 2 + L - 1
+            # Under start admission: 3' cut is at m + L - 1.
+            stop_in_x = WINDOW_HALF + m + L - 1
             expected = int(hex_idx[stop_in_x])
             assert got == expected, (
                 f"m={m} L={L}: stop k-mer {got}, expected {expected}"
@@ -178,3 +180,115 @@ def test_calc_input_region_size_implies_the_cut_offset():
             f"tile_size={tile_size}: padding {pad} puts the cut at offset "
             f"{pad - WINDOW_HALF} inside the k-mer, want {CUT_OFFSET_IN_KMER}"
         )
+
+
+def test_training_and_inference_agree_on_l_in():
+    """model_input_size and calc_input_region_size must give the same l_in.
+
+    The old code had two conventions sharing one name: model_input_size
+    returned tile_size + 2*WINDOW_HALF, and the dataset added +5 to that.
+    inference.py called calc_input_region_size which already included +5.
+    If someone passed calc_input_region_size to the dataset, l_in would be
+    6 bases too wide — a 3-base frame shift per side.
+    """
+    from background_model.cut_site_model import CutSiteFragmentModel
+
+    for tile_size in (256, 512, 1024):
+        model = CutSiteFragmentModel(tile_size=tile_size)
+        assert model.model_input_size == model.calc_input_region_size(tile_size), (
+            f"tile_size={tile_size}: model_input_size={model.model_input_size} != "
+            f"calc_input_region_size={model.calc_input_region_size(tile_size)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Regression test: the model's hex lookup COVERS every cut site the dataset
+# can produce, including the far-right edge under start admission.
+# ---------------------------------------------------------------------------
+
+
+def test_hex_lookup_covers_all_cuts_under_start_admission():
+    """For every (m, L, strand) cell the dataset can produce, the model's
+    hex lookup must index a valid hex_idx position whose k-mer CONTAINS the
+    cut site.
+
+    This is the test that would have caught the WINDOW_HALF=128 silent
+    overrun: at the right edge, 1,275 of 159,744 cells per strand (0.80%)
+    were clamped to the wrong hexamer with no error.
+    """
+    from background_model.cut_site_model import CutSiteFragmentModel, DEFAULT_L_MIN, DEFAULT_L_MAX
+
+    tile_size = 1024
+    L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
+    model = CutSiteFragmentModel(tile_size=tile_size, L_min=L_min, L_max=L_max)
+    l_in = model.model_input_size
+
+    x, bases = _random_onehot(l_in, seed=42)
+    hex_idx = _onehot_to_hex_indices(x)[0].numpy()
+    max_hex = len(hex_idx) - 1
+
+    n_hex = 4 ** HEX_K
+    identity = torch.arange(n_hex, dtype=torch.float64)
+    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
+    n_L = L_max - L_min + 1
+    log_pL = torch.zeros(n_L, dtype=torch.float64)
+
+    log_p0 = compute_log_p0(
+        x, identity, zeros_tab, zeros_tab, zeros_tab, log_pL,
+        tile_size, L_min, L_max,
+    )
+
+    # Probe the corners: {+ strand, - strand} × {L_min, L_max} × right edge
+    probe_cases = [
+        (0, L_min, 0, "left edge, L_min, + strand"),
+        (tile_size - 1, L_min, 0, "right edge, L_min, + strand"),
+        (tile_size - 1, L_max, 0, "right edge, L_max, + strand"),
+        (0, L_min, 1, "left edge, L_min, - strand"),
+        (tile_size - 1, L_max, 1, "right edge, L_max, - strand"),
+    ]
+
+    for m, L, strand, label in probe_cases:
+        li = L - L_min
+        # Under start admission: 5' cut at m, 3' cut at m + L - 1.
+        start_pos = WINDOW_HALF + m
+        stop_pos = WINDOW_HALF + m + L - 1
+        assert 0 <= start_pos <= max_hex, (
+            f"{label}: start_pos {start_pos} out of hex_idx range [0, {max_hex}]"
+        )
+        assert 0 <= stop_pos <= max_hex, (
+            f"{label}: stop_pos {stop_pos} out of hex_idx range [0, {max_hex}]"
+        )
+
+        # The gathered value must match the hex_idx at that position
+        got_start = int(round(float(log_p0[0, m, li, 0])))
+        assert got_start == int(hex_idx[start_pos]), (
+            f"{label}: start hex {got_start} != expected {hex_idx[start_pos]}"
+        )
+
+
+def test_builder_widened_window_covers_right_edge():
+    """The hex table builder's widened window must reach the 3' endpoint
+    of a L_max fragment starting at tile_size - 1.
+    """
+    from scripts.stage1_hex_baseline import hex_window_for_tile
+    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+
+    tile_size = 64
+    L_max = DEFAULT_L_MAX
+    hex_width = tile_size + L_max - 1
+    l_seq = tile_size + 2 * WINDOW_HALF + 2 * L_max
+
+    _, bases = _random_onehot(l_seq, seed=99)
+    builder_hex = hex_window_for_tile(
+        bases.astype(np.uint8), tile_size, HEX_K, width=hex_width,
+    )
+    assert len(builder_hex) == hex_width
+
+    # The furthest 3' endpoint: start at tile_size-1, length L_max
+    far_end = tile_size - 1 + L_max - 1
+    assert far_end < len(builder_hex), (
+        f"far 3' endpoint at {far_end} is outside builder window of {len(builder_hex)}"
+    )
+    assert builder_hex[far_end] >= 0, (
+        f"hex index at far 3' endpoint is invalid ({builder_hex[far_end]})"
+    )

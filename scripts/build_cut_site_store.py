@@ -132,12 +132,13 @@ def _extract_worker(args_tuple):
         (raw_strand == b'+') | (raw_strand == '+'), 0, 1
     ).astype(np.uint8)
 
-    # Filter: in-band length, centre in [0, l_target), start >= 0
+    # Admission: min(start, end) in [0, l_target), in-band length.
+    # Use explicit min — do not assume the h5 stores left-to-right.
     l_target = reg_stop - reg_start
+    ends = starts + lengths - 1
+    min_pos = np.minimum(starts, ends)
     keep = (lengths >= L_min) & (lengths <= L_max)
-    centres = starts + lengths // 2
-    keep &= (centres >= 0) & (centres < l_target)
-    keep &= (starts >= 0)
+    keep &= (min_pos >= 0) & (min_pos < l_target)
 
     return (
         starts[keep].astype(np.uint16),
@@ -300,7 +301,7 @@ def main():
     p.add_argument("--output", required=True, help="Output zarr store path")
     p.add_argument("--tile-size", type=int, default=2048)
     p.add_argument("--jitter", type=int, default=256)
-    p.add_argument("--rf-budget", type=int, default=133)
+    p.add_argument("--rf-budget", type=int, default=186)
     p.add_argument("--L-min", type=int, default=25)
     p.add_argument("--L-max", type=int, default=180)
     p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
