@@ -1105,6 +1105,48 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 
 ## 10. Cut-Site Fragment Model — Ablation & Baseline Comparison (2026-10-01)
 
+> ## ⚠⚠ SECOND RETRACTION (2026-10-05, later) — 12.847500 and 12.183534 are BOTH void
+>
+> The first retraction below replaced the 12.024 baseline with **12.847500**,
+> measured through the model's own val path, and reported the correction as
+> worth **−0.663966 nats**. **Both numbers are now withdrawn.** They were
+> measured against a prior that was *anti-informative*.
+>
+> `de6c224` subtracted `CUT_OFFSET_IN_KMER` from the hex gather index in
+> `compute_log_p0`. The `WINDOW_HALF` convention already centres the k-mer, so
+> the offset was applied **twice**, moving the gathered window to
+> `cut-6 .. cut-1` — entirely upstream of the cut, carrying no information
+> about it. Reverted in `a3abc8f`.
+>
+> Measured on 300 val regions with the geometry `train_cut_site.py` uses:
+>
+> | hex prior | NLL |
+> |---|---|
+> | correct registration (offset 3) | **12.143030** |
+> | uniform, `ln\|D\|` = `ln(319488)` | 12.674475 |
+> | with the `de6c224` bug (offset 6) | 12.975469 |
+>
+> **The broken prior scored 0.30 nats worse than guessing uniformly.** That is
+> what made the "gain" look large: the model spent 20 epochs partly undoing a
+> misregistration, and the correctly-registered prior alone (~12.143) is
+> already better than the trained model ever reached (12.183534).
+>
+> How it was found: the owner asked why uniform beat the baseline. For a
+> normalised `q`, `E_p[-log q] = H(p) + KL(p‖q)`, so losing to uniform means
+> `KL(p‖q) > KL(p‖uniform)` — the prior points the *wrong way*. That cannot be
+> explained by a weak prior, which is what my first two explanations (a
+> fit/apply population mismatch, then a start/stop table swap) both assumed.
+> Only an actively misregistered window does it.
+>
+> **Do not cite any Stage-2 number in §10.** Both the baseline and the trained
+> figure need re-measuring from the corrected prior: batch `ebe12cb1`
+> (baseline, full val) and `fcd41e26` (20-epoch full-data retrain).
+>
+> Guard added: `test_calc_input_region_size_implies_the_cut_offset` derives the
+> cut offset from the model's padding alone. The two pre-existing registration
+> probes build their own `l_in`, so they asserted the index the buggy code
+> produced and passed throughout.
+
 > ## ⚠ RETRACTION (2026-10-05) — read before using any number in §10
 >
 > **Every Stage-2-vs-baseline comparison in §10 is invalid.** The two sides were
