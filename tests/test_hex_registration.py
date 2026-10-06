@@ -292,3 +292,121 @@ def test_builder_widened_window_covers_right_edge():
     assert builder_hex[far_end] >= 0, (
         f"hex index at far 3' endpoint is invalid ({builder_hex[far_end]})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: value-level minus-strand probe
+# ---------------------------------------------------------------------------
+
+
+def test_minus_strand_start_rev_gathers_at_stop_pos():
+    """Probe minus-strand start_rev: it gathers at flat_stop, so with an
+    identity table on start_rev the value at log_p0[0, m, li, 1] should be
+    hex_idx[stop_pos] where stop_pos = WINDOW_HALF + m + L - 1.
+    """
+    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+
+    tile_size = 64
+    L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
+    n_L = L_max - L_min + 1
+    raw = tile_size + 2 * WINDOW_HALF + 5
+    l_in = raw + (raw % 2)
+
+    x, _ = _random_onehot(l_in, seed=55)
+    hex_idx = _onehot_to_hex_indices(x)[0].numpy()
+
+    n_hex = 4 ** HEX_K
+    identity = torch.arange(n_hex, dtype=torch.float64)
+    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
+    log_pL = torch.zeros(n_L, dtype=torch.float64)
+
+    log_p0 = compute_log_p0(
+        x, zeros_tab, zeros_tab, identity, zeros_tab, log_pL,
+        tile_size, L_min, L_max,
+    )
+
+    for m, L, label in [
+        (0, L_min, "left edge, L_min"),
+        (0, L_max, "left edge, L_max"),
+        (tile_size - 1, L_min, "right edge, L_min"),
+        (tile_size - 1, L_max, "right edge, L_max"),
+    ]:
+        li = L - L_min
+        got = int(round(float(log_p0[0, m, li, 1])))
+        stop_in_x = WINDOW_HALF + m + L - 1
+        expected = int(hex_idx[stop_in_x])
+        assert got == expected, (
+            f"{label}: minus-strand start_rev gathered {got}, "
+            f"expected {expected} at stop_pos {stop_in_x}"
+        )
+
+
+def test_minus_strand_stop_rev_gathers_at_start_pos():
+    """Probe minus-strand stop_rev: it gathers at flat_start, so with an
+    identity table on stop_rev the value at log_p0[0, m, li, 1] should be
+    hex_idx[start_pos] where start_pos = WINDOW_HALF + m.
+    """
+    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+
+    tile_size = 64
+    L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
+    n_L = L_max - L_min + 1
+    raw = tile_size + 2 * WINDOW_HALF + 5
+    l_in = raw + (raw % 2)
+
+    x, _ = _random_onehot(l_in, seed=77)
+    hex_idx = _onehot_to_hex_indices(x)[0].numpy()
+
+    n_hex = 4 ** HEX_K
+    identity = torch.arange(n_hex, dtype=torch.float64)
+    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
+    log_pL = torch.zeros(n_L, dtype=torch.float64)
+
+    log_p0 = compute_log_p0(
+        x, zeros_tab, zeros_tab, zeros_tab, identity, log_pL,
+        tile_size, L_min, L_max,
+    )
+
+    for m, L, label in [
+        (0, L_min, "left edge, L_min"),
+        (0, L_max, "left edge, L_max"),
+        (tile_size - 1, L_min, "right edge, L_min"),
+        (tile_size - 1, L_max, "right edge, L_max"),
+    ]:
+        li = L - L_min
+        got = int(round(float(log_p0[0, m, li, 1])))
+        start_in_x = WINDOW_HALF + m
+        expected = int(hex_idx[start_in_x])
+        assert got == expected, (
+            f"{label}: minus-strand stop_rev gathered {got}, "
+            f"expected {expected} at start_pos {start_in_x}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding 8: odd tile_size must raise
+# ---------------------------------------------------------------------------
+
+
+def test_odd_tile_size_raises():
+    """An odd tile_size silently slides CUT_OFFSET_IN_KMER by 1."""
+    from background_model.cut_site_model import CutSiteFragmentModel
+
+    with pytest.raises(ValueError, match="tile_size must be even"):
+        CutSiteFragmentModel(tile_size=1023)
+
+
+# ---------------------------------------------------------------------------
+# Finding 9: rf_budget must equal WINDOW_HALF + 5
+# ---------------------------------------------------------------------------
+
+
+def test_rf_budget_equals_window_half_plus_5():
+    """rf_budget in CutSiteStoreConfig must stay in sync with WINDOW_HALF."""
+    from background_model.cut_site_store import CutSiteStoreConfig
+
+    cfg = CutSiteStoreConfig()
+    assert cfg.rf_budget == WINDOW_HALF + 5, (
+        f"rf_budget={cfg.rf_budget} != WINDOW_HALF + 5 = {WINDOW_HALF + 5}.  "
+        f"Update CutSiteStoreConfig.rf_budget when WINDOW_HALF changes."
+    )

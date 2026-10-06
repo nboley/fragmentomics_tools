@@ -229,16 +229,12 @@ class CutSiteFragmentDataset(Dataset):
             self.l_target, self.tile_size, j
         )
 
-        # Re-base fragment starts to crop coordinates
+        # Re-base fragment starts to crop coordinates.
+        # The store guarantees length >= L_min > 0, so start <= end.
         frag_p_crop = frag_start.astype(np.int64) - crop_start
-        frag_end_crop = frag_p_crop + frag_length.astype(np.int64) - 1
 
-        # Admission: min(start, end) in [0, tile_size).
-        # Use explicit min — do not assume the h5 stores left-to-right.
-        frag_min_pos = np.minimum(frag_p_crop, frag_end_crop)
-        keep = (frag_min_pos >= 0) & (frag_min_pos < self.tile_size)
-
-        # Also filter to in-band lengths
+        # Admission: start in [0, tile_size), in-band length.
+        keep = (frag_p_crop >= 0) & (frag_p_crop < self.tile_size)
         keep &= (frag_length >= self.L_min) & (frag_length <= self.L_max)
 
         frag_m = frag_p_crop[keep]

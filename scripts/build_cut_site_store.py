@@ -112,6 +112,16 @@ def _extract_worker(args_tuple):
     if len(starts_abs) == 0:
         return np.empty(0, np.uint16), np.empty(0, np.uint16), np.empty(0, np.uint8)
 
+    # Verify the h5 stores fragments left-to-right (starts <= stops).
+    # A reversed pair would have negative length and be silently dropped
+    # by the length filter — raise instead so the contract is explicit.
+    if np.any(stops_abs < starts_abs):
+        n_bad = int(np.sum(stops_abs < starts_abs))
+        raise ValueError(
+            f"Region {chrom}:{reg_start}-{reg_stop}: {n_bad} fragments have "
+            f"stop < start.  The h5 must store left-to-right coordinates."
+        )
+
     lengths = (stops_abs - starts_abs).astype(np.int64)
     raw_strand = supp['strand']
 
@@ -132,13 +142,10 @@ def _extract_worker(args_tuple):
         (raw_strand == b'+') | (raw_strand == '+'), 0, 1
     ).astype(np.uint8)
 
-    # Admission: min(start, end) in [0, l_target), in-band length.
-    # Use explicit min — do not assume the h5 stores left-to-right.
+    # Admission: start in [0, l_target), in-band length.
     l_target = reg_stop - reg_start
-    ends = starts + lengths - 1
-    min_pos = np.minimum(starts, ends)
     keep = (lengths >= L_min) & (lengths <= L_max)
-    keep &= (min_pos >= 0) & (min_pos < l_target)
+    keep &= (starts >= 0) & (starts < l_target)
 
     return (
         starts[keep].astype(np.uint16),

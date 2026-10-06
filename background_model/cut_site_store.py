@@ -53,7 +53,7 @@ class CutSiteStoreConfig:
     """
     tile_size: int = 2048
     jitter: int = 256
-    rf_budget: int = 186     # WINDOW_HALF + ceil(conv_margin/2) = 181 + 5 = 186
+    rf_budget: int = 186     # Must equal WINDOW_HALF + 5 (asserted in tests/test_hex_registration.py)
     L_min: int = _DEFAULT_L_MIN
     L_max: int = _DEFAULT_L_MAX
     seed: int = 42

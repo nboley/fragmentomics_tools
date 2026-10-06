@@ -196,14 +196,15 @@ def compute_log_p0(
     stop_pos = (WINDOW_HALF + m_vals[:, None] + L_vals[None, :] - 1).long()    # (P, n_L)
     start_pos = (WINDOW_HALF + m_vals[:, None]).long().expand_as(stop_pos)      # (P, n_L)
 
-    # The construction-time check in __init__ guarantees every cell is
-    # reachable (WINDOW_HALF >= L_max - 1), so clamping is unnecessary.
-    # Assert rather than clamp so a geometry regression is caught immediately.
-    max_idx = hex_idx.shape[1] - 1
-    assert start_pos.min() >= 0 and stop_pos.max() <= max_idx, (
-        f"hex index out of range: start [{start_pos.min()}, {start_pos.max()}], "
-        f"stop [{stop_pos.min()}, {stop_pos.max()}], max_idx {max_idx}"
-    )
+    # Shape check: the input tensor must be wide enough for every (m, L)
+    # cell.  Uses Python ints (hex_idx.shape[1]), not tensor reductions,
+    # so there is no device-to-host sync on the hot path.
+    required_width = WINDOW_HALF + tile_size + L_max - 1
+    if hex_idx.shape[1] < required_width:
+        raise ValueError(
+            f"hex_idx width {hex_idx.shape[1]} < required {required_width}: "
+            f"input tensor too narrow for the geometry"
+        )
 
     # Flatten for gather: (P * n_L,)
     flat_start = start_pos.contiguous().reshape(-1)   # (P * n_L,)
@@ -283,13 +284,25 @@ class CutSiteFragmentModel(L.LightningModule):
 
         # Under start admission the max 3' hex lookup is at
         # WINDOW_HALF + (P-1) + (L_max-1).  This must be a valid hex_idx
-        # index, which requires WINDOW_HALF >= L_max - 1.  Without this
-        # the clamp below would silently score cells against the wrong k-mer.
+        # index, which requires WINDOW_HALF >= L_max - 1.
         if WINDOW_HALF < L_max - 1:
             raise ValueError(
                 f"WINDOW_HALF={WINDOW_HALF} < L_max-1={L_max - 1}: "
                 f"the geometry cannot reach every (m, L) cell.  "
                 f"Increase WINDOW_HALF to at least {L_max - 1}."
+            )
+
+        # Verify the k-mer registration offset.  CUT_OFFSET_IN_KMER=3
+        # holds only when raw = P + 2*WINDOW_HALF + 5 is ODD, which
+        # requires an even tile_size.  An odd tile_size silently slides
+        # the offset by 1, breaking hexamer registration with no error.
+        l_in = self.calc_input_region_size(tile_size)
+        pad = (l_in - tile_size) // 2
+        if pad - WINDOW_HALF != CUT_OFFSET_IN_KMER:
+            raise ValueError(
+                f"Geometry error: padding {pad} - WINDOW_HALF {WINDOW_HALF} = "
+                f"{pad - WINDOW_HALF}, expected CUT_OFFSET_IN_KMER = "
+                f"{CUT_OFFSET_IN_KMER}.  tile_size must be even."
             )
 
         # Strictly-lower-triangular ones, (n_offsets, n_offsets + 1), so that
@@ -528,7 +541,7 @@ class CutSiteFragmentModel(L.LightningModule):
             x_onehot: (B, 4, l_in) one-hot sequence
 
         Returns:
-            logits: (B, P, n_L, 2) per-(centre, length, strand) logits
+            logits: (B, P, n_L, 2) per-(start, length, strand) logits
             endpoint_shape: (B, 2, P) per-position endpoint shape logits
             disp_bp: (B, 2, P) per-position dispersion (frozen)
         """
