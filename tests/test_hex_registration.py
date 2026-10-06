@@ -72,7 +72,7 @@ def test_compute_log_p0_reads_kmer_starting_cut_offset_before_the_cut():
             li = L - L_min
             got = int(round(float(log_p0[0, m, li, 0])))
             cut_in_x = WINDOW_HALF + m - L // 2
-            expected = int(hex_idx[cut_in_x - CUT_OFFSET_IN_KMER])
+            expected = int(hex_idx[cut_in_x])
             assert got == expected, (
                 f"m={m} L={L}: gathered k-mer {got}, expected {expected} "
                 f"(k-mer starting {CUT_OFFSET_IN_KMER} before the cut)"
@@ -105,7 +105,7 @@ def test_stop_endpoint_uses_the_same_registration():
             li = L - L_min
             got = int(round(float(log_p0[0, m, li, 0])))
             stop_in_x = WINDOW_HALF + m - L // 2 + L - 1
-            expected = int(hex_idx[stop_in_x - CUT_OFFSET_IN_KMER])
+            expected = int(hex_idx[stop_in_x])
             assert got == expected, (
                 f"m={m} L={L}: stop k-mer {got}, expected {expected}"
             )
@@ -135,4 +135,46 @@ def test_builder_and_model_agree_on_registration():
         expected = int(model_hex[cut_in_seq - CUT_OFFSET_IN_KMER])
         assert int(builder_hex[p]) == expected, (
             f"p={p}: builder gave {builder_hex[p]}, model frame gives {expected}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The invariant that would have caught the real bug
+# ---------------------------------------------------------------------------
+#
+# The two probes above build their own `l_in = tile_size + 2*WINDOW_HALF` and
+# assert compute_log_p0 against that.  Both passed while the registration was
+# wrong, because the error lived in the *contract between* the model's geometry
+# and the dataset's crop, and neither probe touches either.  The dataset added
+# a k-mer margin that calc_input_region_size already contained, so x arrived 6
+# bases wide; centred, that shifted the tile 3 bases right of where
+# compute_log_p0 indexes it.
+#
+# These two tests pin that contract.  They need no store and no fixture.
+
+
+def test_calc_input_region_size_implies_the_cut_offset():
+    """The model's own padding must put the cut at CUT_OFFSET_IN_KMER.
+
+    hex_idx[j] spans x[j : j+HEX_K] and the model gathers at WINDOW_HALF + q,
+    so the cut's offset inside the gathered k-mer is determined entirely by how
+    much padding calc_input_region_size reserves:
+
+        pad  = (l_in - P) // 2        <- where the dataset centres the tile
+        off  = pad - WINDOW_HALF      <- where the cut lands in the k-mer
+
+    If these disagree the prior is silently misregistered, and a misregistered
+    hex prior measures WORSE than uniform (12.835 vs ln|D| = 12.674) while
+    still looking like a trained-model improvement.
+    """
+    from background_model.cut_site_model import CutSiteFragmentModel
+
+    for tile_size in (256, 512, 1024):
+        model = CutSiteFragmentModel(tile_size=tile_size)
+        l_in = model.calc_input_region_size(tile_size)
+        assert l_in % 2 == 0, f"tile_size={tile_size}: l_in={l_in} must be even"
+        pad = (l_in - tile_size) // 2
+        assert pad - WINDOW_HALF == CUT_OFFSET_IN_KMER, (
+            f"tile_size={tile_size}: padding {pad} puts the cut at offset "
+            f"{pad - WINDOW_HALF} inside the k-mer, want {CUT_OFFSET_IN_KMER}"
         )

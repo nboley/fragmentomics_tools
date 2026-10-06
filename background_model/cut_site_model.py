@@ -201,11 +201,18 @@ def compute_log_p0(
 
     # start_pos[m, L] = WINDOW_HALF + m - L//2
     # stop_pos[m, L]  = start_pos + L - 1
-    # Subtract CUT_OFFSET_IN_KMER so the gathered k-mer STARTS that many bases
-    # before the cut, putting the cut junction mid-k-mer.  stop_pos is derived
-    # from start_pos so it inherits the same registration for the 3' cut.
-    start_pos = (WINDOW_HALF + m_vals[:, None] - L_vals[None, :] // 2
-                 - CUT_OFFSET_IN_KMER).long()                                  # (P, n_L)
+    #
+    # Do NOT subtract CUT_OFFSET_IN_KMER here.  The WINDOW_HALF convention
+    # already centres the k-mer on the cut: calc_input_region_size reserves
+    # `P + 2*WINDOW_HALF + 5`, and hex_idx[j] is the k-mer spanning
+    # x[j : j+k], so hex_idx[WINDOW_HALF + q] straddles tile position q with
+    # the cut at offset (k-1)//2 = 3.  de6c224 subtracted the offset a second
+    # time, moving the window to cut-6..cut-1 -- entirely upstream of the cut,
+    # which is how a normalised prior ended up WORSE than uniform.
+    # CUT_OFFSET_IN_KMER remains the documented convention and is asserted
+    # against the dataset's actual crop in test_hex_registration.
+    start_pos = (WINDOW_HALF + m_vals[:, None]
+                 - L_vals[None, :] // 2).long()                                # (P, n_L)
     stop_pos = (start_pos + L_vals[None, :] - 1).long()                        # (P, n_L)
 
     # Clamp to valid range (positions outside hex_idx get clamped; they're
