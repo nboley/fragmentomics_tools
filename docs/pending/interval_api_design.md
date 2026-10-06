@@ -142,23 +142,21 @@ involved, and under the three-layer model it is layer 1. The distinction
 matters: if a per-region tabix fetch is ever wanted back, it returns as a
 loader, not as interval algebra.
 
-### Position space at the boundary — DECIDED after implementation
+### Position space at the boundary — DECIDED
 
 `bioframe` reports matches as the **index labels** of whatever the input frames
 carried. `intervals` therefore normalises on entry and does all internal work in
 position space.
 
-This was not the original design, and it was adopted because the alternative
-failed four times in one 527-line module. Every internal lookup independently
-had to remember not to treat labels as positions. Two instances raised
-`IndexError`; two returned plausible wrong answers, and the most-used function
-in the family — `overlaps` — silently returned an all-**False** mask for any
-frame whose index was not `0..n-1`, which is what any filter or slice produces.
+Mixing labels and positions is the hazard this removes, and it fails silently
+in both directions: a label used as a position raises `IndexError` on some
+frames and returns a plausible wrong answer on others. `overlaps` returned an
+all-**False** mask for any frame whose index was not `0..n-1` — which is what
+any filter or slice produces.
 
-Worth recording precisely because of how it hid: default-indexed frames are
-safe, `from_bed` produces one, and so unit fixtures, a 47-check review, my own
-verification, and a 964,593-region real-data run all exercised only the safe
-path.
+Default-indexed frames are safe and `from_bed` produces one, so unit fixtures
+and even a 964,593-region real-data run exercise only the safe path. Tests
+must use a **non-default index** to probe this at all.
 
 **Positions are now the public contract, not an internal detail mapped back to
 labels on exit.** `overlap_indices` and `nearest` return `a_pos`/`b_pos` —
@@ -179,20 +177,19 @@ trip correctly.
 
 `overlap_indices` and `nearest` sort on `(a_pos, b_pos)` before returning.
 
-Row order was already part of the contract by design — two implementations can
-agree on the set of pairs and still differ on ordering, which silently breaks
-any caller that zips or positionally indexes. What was not known until
-implementation is that the order was **not stable across processes**: identical
-code on identical input produced a different digest in every process, while
-pinning `PYTHONHASHSEED` made them identical, so something upstream iterates a
-set or dict ordered by hash randomisation. It was stable *within* a process,
-which is exactly why every in-process check missed it.
+Row order is part of the contract. Two implementations can agree on the set of
+pairs and still differ on ordering, which silently breaks any caller that zips
+or positionally indexes.
 
-This predates the module's first commit rather than arriving with it. Its
-practical consequence was that the fixture manifest could never have worked as
-a baseline — the digests recorded for these operations were samples of a random
-variable. After sorting, the manifest is byte-identical across runs for the
-first time.
+Unsorted, the order is **not stable across processes**: identical code on
+identical input produces a different digest in every process, and pinning
+`PYTHONHASHSEED` makes them agree, so something upstream iterates a set or
+dict ordered by hash randomisation. It is stable *within* a process, which is
+why no in-process test can detect it — the check has to run two subprocesses
+and compare, as `test/test_interval_real_data.py` does.
+
+Without the sort the fixture manifest cannot work as a baseline at all,
+because its digests are samples of a random variable rather than values.
 
 ### The import graph — DECIDED, and it is the point of extracting the module
 
@@ -223,13 +220,12 @@ Per-dependency, measured, with what each is actually for:
 | `matplotlib` | 0.45 s | `fragment_matrix.py`, `plot/` | **lazy** now; plotting moves into `plot/` in a later phase |
 | `pybedtools` | 0.44 s | interval algebra | **removed from the library** |
 | `pysam` | **0.09 s** | FASTA/tabix in `region.py`, `formats.py` | **stays eager** — it is not the problem |
-| `intervaltree` | 0.03 s | `overlaps_rdf` | removable once that method migrates; a later phase |
+| `intervaltree` | 0.03 s | nothing — `overlaps_rdf` is deleted | **removed from the library** |
 
-**Correct a claim the layering document makes.** Its problem statement says
-interval arithmetic "cannot be imported without pulling in pysam, the motif
-stack, and `pybedtools`". `pysam` costs **0.09 s** — naming it first is
-misleading, and the 2.22 s dependency goes unmentioned. Cost, not count, is
-what matters here.
+**Cost, not count, is what matters.** `pysam` is the dependency most often
+named as the problem and it costs 0.09 s. `sklearn` cost 2.22 s — a third of
+the original import time — for a single `shuffle` call, and nobody chose it;
+it arrived incidentally. Measure before deciding what to cut.
 
 **`dataframe.py` imports `intervals` lazily too.** Eagerly, `bioframe`'s 1.80 s
 lands on every `import fragmentomics_tools.dataframe` and consumes most of what
@@ -544,95 +540,37 @@ section below as they are found, so the diff is visible rather than silently
 absorbed. That costs a line per movement and is the only thing standing between
 "we changed the semantics deliberately" and "we changed them by accident".
 
-### Fixture movements — append during implementation
+### The real-data baseline
 
-Measured by re-running `scripts/capture_interval_fixtures.py` on the real data
-(hg38 blacklist, 636 regions; CTCF, 964,593) after the migration.
+`test/fixtures/interval_manifest.tsv` holds the current counts and digests,
+regenerated by `scripts/capture_interval_fixtures.py` and asserted by
+`test/test_interval_real_data.py`. **That file is the baseline; this document
+does not duplicate it**, because two copies of the same numbers diverge and
+the copy in prose is the one that goes stale.
 
-**Unchanged — the replacement reproduces the old answer exactly:**
+Inputs are the hg38 blacklist (636 regions) and CTCF (964,593).
 
-| operation | n | note |
-|---|---|---|
-| `overlaps_rdf` -> `overlaps`, ctcf x blacklist | 964,593 | **byte-identical digest** |
-| `overlaps_rdf` -> `overlaps`, blacklist x ctcf | 636 | **byte-identical** |
-| `overlaps_rdf_d10` -> `overlaps_w10` | 964,593 | **byte-identical** |
-| `merge_regions` -> `merge`, blacklist | 636 | **byte-identical** |
-| `sort`, `unique_regions`, `load`, inputs | — | unchanged |
+Two results from it are worth stating here, because they are evidence about
+the design rather than values that move:
 
-`overlaps` reproducing `overlaps_rdf` bit-for-bit across 964,593 regions in both
-directions is the strongest evidence in this change that the bioframe swap is
-faithful — far stronger than the synthetic tests, which only probe constructed
-edge cases.
+**`merge` is byte-identical to bedtools** on 964,593 real regions —
+950,936 rows, digest `ea10500ba93aa568`, matching what `pybedtools` produced
+before the migration. `overlaps` likewise reproduces the old `overlaps_rdf`
+bit-for-bit in both directions. That is far stronger evidence that the
+`bioframe` swap is faithful than the synthetic tests, which only probe
+constructed edge cases.
 
-**Moved:**
+**Where current output deliberately differs from the pre-migration code,
+there are exactly two causes**, both decided and both pinned by tests:
 
-| operation | old | new | why |
-|---|---|---|---|
-| `merge`, ctcf | 950,936 | **951,528** (+592) | old `wiggle=0` did not merge book-ended; bedtools `merge` did. Now `min_dist=0` (default) merges book-ended, matching bedtools. |
-| `from_beds_merged` | 942,977 | **943,554** (+577) | same cause — delegates to `merge()`, now `min_dist=0` by default |
-| `drop_overlapping_regions` -> `overlap_indices_anti` | 955,789 | 955,789 | **same row count**, digest differs only because the return shape changed from rows to index pairs. The matching count is an independent check that the anti-join replacement is correct. |
+| difference | cause |
+|---|---|
+| `merge` and `from_beds_merged` join book-ended intervals | `min_dist=0` is the default, matching `bedtools merge -d 0`. `min_dist=None` gives strictly-overlapping-only. |
+| `nearest` reports `gap + 1` for non-overlapping pairs | the bedtools convention. It makes `distance == 0` mean *overlapping* only; the raw gap left `0` ambiguous between overlapping and book-ended. |
 
-**A prediction of mine that was wrong, corrected here rather than left
-standing.** This table previously asserted that `overlaps_rdf_d10` would move,
-because the migration fixed an off-by-one that made `max_distance=N` reach only
-`N-1`. The fix is real and is pinned by a discriminating unit test — but the
-real-data digest is **identical**, because no CTCF/blacklist pair in this
-dataset has an edge-to-edge gap of exactly 10 bp. The lesson is that a
-correctness fix and an observable change are different things, and predicting
-the second from the first is a guess.
+Anything else that moves is a regression, not a decision.
 
-**Moved again, later, for a reason worth separating from the rest:**
-`overlap_indices` (both directions) and `nearest` changed digest when pair
-ordering was made deterministic. Row counts were unaffected — 8,804, 8,804 and
-964,593. The *previous* digests for these three were not a baseline at all;
-they were single samples of a hash-seed-dependent ordering, and no two runs
-would have agreed. These are the first reproducible values.
-
-**Retired with their methods** (no replacement digest, the operation no longer
-exists): `join_on_overlap` both directions, `get_overlapping_base_counts`,
-`merge_regions` as a method.
-
-**New coverage added:** `cluster` (both datasets), `nearest`,
-`overlap_bases_sum` (the `groupby` that replaces
-`get_overlapping_base_counts`), `overlap_indices` both directions.
-| `overlap_indices`, `nearest`, fixture manifest | `a_index`/`b_index` columns | `a_pos`/`b_pos` columns | Column rename from labels to positions. Serialisation change only — the values are identical (both were positions internally); the column names now reflect the contract. Manifest digests move because the column header is part of the CSV digest. |
-| `merge_book_ended` | 1 merged row | **1 merged row (restored)** | `merge()` with default `min_dist=0` now merges book-ended, matching bedtools. The previous wiggle=0 behaviour is available via `min_dist=None`. |
-| `from_beds_merged_book_ended` | 1 merged row | **1 merged row (restored)** | `from_beds_merged` delegates to `merge()` with default `min_dist=0`; same reason |
-
-**Moved again: `wiggle` → `pad`/`min_dist` rename (API alignment with bedtools/bioframe conventions).**
-
-The `min_dist=0` default now merges book-ended intervals, reversing the
-+592/+577 movements from the bedtools→bioframe migration. This is the
-bedtools `merge -d 0` behaviour, which was the correct default all along.
-
-| operation | old n | new n | old digest | new digest | why |
-|---|---|---|---|---|---|
-| `merge`, ctcf | 951,528 | **950,936** (−592) | `a48500b095969201` | `ea10500ba93aa568` | `min_dist=0` (default) merges book-ended — reverses the +592 |
-| `cluster`, ctcf | 964,593 | 964,593 | `08251b5ca62a1c6b` | `a6fa06033cae2d5c` | same count, labels changed (book-ended now cluster together) |
-| `from_beds_merged` | 943,554 | **942,977** (−577) | `090a66334e779ceb` | `2881f8420eba3880` | same cause |
-| `overlaps_w10` → `overlaps_p10` | 964,593 | 964,593 | `310a0f2220058dca` | `310a0f2220058dca` | **identical digest** — renamed only; no CTCF/blacklist pair at exactly gap=10 |
-
-Everything else — overlap_indices (both directions), overlap_indices_anti,
-overlaps (both), overlap_bases_sum, merge blacklist, cluster
-blacklist, all inputs — is **byte-identical**.
-
-**Moved: `nearest` distance convention adopted from bedtools.**
-
-| operation | old digest | new digest | why |
-|---|---|---|---|
-| `nearest` | (previous) | (new) | distance for non-overlapping pairs changed from gap (0-based) to gap+1 (bedtools convention). Semantic change: the previous `distance == 0` was ambiguous (overlapping OR book-ended); now `distance == 0` means overlapping only, and book-ended pairs get `distance == 1`. Row count and pair identity unchanged — only the distance column values move. |
-| `merge_regions_c_o_collapse` | test deleted | — | `merge()` is a free function; bedtools `-c/-o` column aggregation is not part of the new API |
-| `get_overlapping_base_counts` | test deleted | — | method deleted (0 live callers); expressible as `overlap_indices(...).groupby("a_pos").overlap_bases.sum()` |
-| `_get_fragment_coverage_sum` | test deleted | — | method deleted (0 live callers) |
-| `join_on_overlap` return type | test deleted | — | method deleted; `overlap_indices` returns a plain DataFrame by design |
-| `intersect_with_rdf` raises | test deleted | — | method deleted along with `join_on_overlap` |
-| `overlaps_rdf` missing-contig | test deleted | — | replaced by `TestOverlapsWithMissingContig` using `intervals.overlaps` |
-| `get_interval_dict` | test deleted | — | method deleted (was internal to `overlaps_rdf`) |
-| `drop_overlapping_regions` | test deleted | — | replaced by `TestAntiJoinReplacement` using `overlap_indices(how="anti")` |
-| `label_balanced` | test deleted | — | method deleted (scope decision, not interval algebra) |
-
-**Phase 1 — the interval API on `bioframe`.** One phase, collapsed from the
-previous two.
+**Phase 1 — the interval API on `bioframe`.**
 
 0. **Preserve the `ref` equality check.** `join_on_overlap` currently asserts
    `self.ref == other.ref`; that is what stops an hg19 frame being joined
@@ -643,10 +581,9 @@ previous two.
    Validate `how` ourselves against an explicit allowed set, raising on anything
    else — `bioframe.overlap` does not validate it at all, and an unrecognised
    value yields the inner join, so `how="anti"` returns the exact complement of
-   what it means rather than raising. Implement `anti` ourselves as a **left**
-   join filtered to null right-hand rows — an earlier draft of this document
-   said *outer*, which is wrong: an anti-join is over A, and an outer join
-   would additionally drag in unmatched B rows. Implement the fraction
+   what it means rather than raising. Implement `anti` as a **left** join
+   filtered to null right-hand rows — not an outer join, which would drag in
+   unmatched B rows as well; an anti-join is over A. Implement the fraction
    thresholds ourselves; `bioframe` has no `-f`/`-F`/`-r` equivalent. Build the
    two-frame `cluster` as real code, not a delegation.
 2. Delete the methods in the Net change table.

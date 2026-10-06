@@ -5,8 +5,13 @@ compatibility shim, no deprecation period.
 
 ## Problem
 
-`RegionDataFrame` has 61 methods spanning concerns that share nothing but the
-rows they sit on:
+`RegionDataFrame` had 61 methods spanning concerns that share nothing but the
+rows they sit on. The interval-API work has since removed the algebra and
+fragment-coverage buckets, taking it to **44**; the table below is the state
+this design was written against, and the two consequences under it still hold
+for every bucket the work has not reached.
+
+Recount with `python -c` over `ast.parse`, not against this table.
 
 | Concern | Methods | Needs |
 |---|---:|---|
@@ -45,11 +50,15 @@ naive layering breaks: `sort` (plumbing + ordering semantics), `lift_over`
 annotation).
 
 Two consequences. Interval arithmetic — the most reusable and most testable
-code here — cannot be imported without pulling in pysam, the motif stack, and
-`pybedtools` (which additionally needs the `bedtools` *binary* on `PATH` —
-see [`interval_api_design.md`](interval_api_design.md), which replaces it).
-And every new data source means another method on the class, so the class only
+code here — could not be imported without the whole dependency stack. And
+every new data source means another method on the class, so the class only
 ever grows.
+
+The first consequence is **fixed** for interval algebra:
+[`interval_api_design.md`](interval_api_design.md) extracted it to an
+`intervals` module, removed `pybedtools` from the library, and took
+`import fragmentomics_tools.dataframe` from 2,779 modules to 1,631. The second
+consequence is what Phases 3-4 below address, and it is unchanged.
 
 ## Layers
 
@@ -395,15 +404,73 @@ All of this happens in a worktree, not on `main`.
 **The interval-API phases are specified in
 [`interval_api_design.md`](interval_api_design.md)** — differential fixtures,
 then the API built directly on `bioframe`, then the `bedtools` equivalence
-document and its tests. They are prerequisites for what follows, and nothing
-below can start until the `intervals` module exists.
+document and its tests. **Those are complete.** Nothing below could start
+until the `intervals` module existed.
 
-**Phase 3 — remaining module extraction.** The rest of layer 2 — geometry,
-resizing, binning — moves out alongside the `intervals` module Phase 1
-created, with `RegionDataFrame` delegating; `FlDist` moves out.
+### Phase 3 — remaining layer-2 extraction
 
-**Phase 4 — annotation protocol.** Sources, `on_resize` with `shrink_only`,
-`lift_over` invalidation.
+Geometry, resizing and binning move out alongside `intervals`, with
+`RegionDataFrame` delegating. `FlDist` moves out of `dataframe.py`.
+
+Methods in scope, nine of them:
+
+```
+center_on_summit        expand_regions        resize_regions
+region_lengths          truncate_regions      bin_regions_into_windows
+_resize_region_boundaries   _error_on_invalid_new_starts/_stops   _valid_regions_mask
+```
+
+The last four are internals. They move with the public methods but stay
+private to the new module; they are not part of its API.
+
+Follow the pattern Phase 1 established, which is what makes this mechanical
+rather than novel:
+
+- Free functions taking and returning frames, in a module that does **not**
+  import `dataframe.py`. The whole benefit is that layer 2 is importable
+  without the dependency stack, and an import of `dataframe` to get a type
+  annotation forfeits it.
+- `RegionDataFrame` keeps thin delegating methods, so call sites do not change.
+- Positions, not index labels, in anything that identifies rows. The index is
+  not a row identity in this library — `bin_regions_into_windows` emits N rows
+  all carrying the parent region's label, which is why `intervals` returns
+  `a_pos`.
+- Measure `import fragmentomics_tools.dataframe` before and after. Phase 1
+  took it from 2,779 modules to 1,631; Phase 3 must not give that back.
+
+**Three choices this design does not make.** The target module name
+(`geometry.py` alongside `intervals.py`, or folding into `intervals.py` since
+resizing is interval arithmetic). `FlDist`'s destination — its own module, or
+`fragment_array/`, given it is a fragment-length distribution. And whether
+`region_lengths` is geometry or plumbing; it is counted under geometry above
+only because every other bucket is exactly accounted for without it.
+
+### Phase 4 — annotation protocol
+
+Sources, `on_resize` with `shrink_only`, and `lift_over` invalidation. The
+protocol itself is specified above under "Annotation: composition, not a value
+protocol" and "`SampleAndRegionDataFrame` — the hardest problem"; this phase
+implements that specification rather than adding to it.
+
+**Build fragment arrays first.** They are the only existing annotation that
+already needs `on_resize` — the four SRDF geometry overrides exist precisely
+because resizing a region must resize its attached fragment data. Every other
+candidate source (sequence, one-hot, TF scoring) is positionally inert or
+produces new geometry, so none of them exercises the hook. Migrating
+`RegionFragmentArray` to `PositionalAnnotation` is the real test of whether the
+protocol works.
+
+**This phase carries the project's most expensive trap.**
+`from_fragments_h5` reverses coordinates and swaps strands for minus-strand
+regions, the correction applier deliberately *refuses* flipped input, and
+getting the ordering wrong silently destroys strand asymmetry rather than
+failing. Build a recorded real-data baseline with an asserting test before
+changing any of it. `test/test_interval_real_data.py` with
+`scripts/capture_interval_fixtures.py` is the working pattern: a committed
+manifest, regenerated and compared by a test that skips when EFS is absent,
+with a make target that refuses to skip.
+
+`center_regions_on_tf_motif` is **not** in this phase — see "Still open".
 
 The `joblib` -> `parallel_apply` consolidation stays a later phase, after all
 of the above.
