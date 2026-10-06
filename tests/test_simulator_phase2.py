@@ -479,7 +479,7 @@ class TestPrecomputeMatchesOld:
     def test_bit_identical_on_acgt_sequence(self):
         """Synthetic all-ACGT sequence: both implementations agree."""
         import sys
-        sys.path.insert(0, "scripts")
+        sys.path.insert(0, "attic/v3_simulator")  # moved out of scripts/: reference only
         from sim_fragments import hexamer_indices as old_hex
 
         rng = np.random.default_rng(42)
@@ -496,7 +496,7 @@ class TestPrecomputeMatchesOld:
     def test_bit_identical_with_n_bases(self):
         """Sequence containing N bases: both implementations agree."""
         import sys
-        sys.path.insert(0, "scripts")
+        sys.path.insert(0, "attic/v3_simulator")  # moved out of scripts/: reference only
         from sim_fragments import hexamer_indices as old_hex
 
         rng = np.random.default_rng(99)

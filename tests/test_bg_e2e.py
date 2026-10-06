@@ -1025,7 +1025,7 @@ class TestFlBandsGuard:
         import importlib.util
 
         here = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(here, "..", "scripts", "sim_build_store.py")
+        path = os.path.join(here, "..", "attic", "v3_simulator", "sim_build_store.py")
         spec = importlib.util.spec_from_file_location("sim_build_store", path)
         sbs = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sbs)
