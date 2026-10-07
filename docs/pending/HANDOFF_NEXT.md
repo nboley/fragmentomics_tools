@@ -66,12 +66,25 @@ flake.
 
 ## What is left
 
-1. **Layering Phase 4 — annotation protocol.** Annotation sources plus
-   `on_resize`/`shrink_only`. Replaces the four SRDF geometry overrides with a
-   `runtime_checkable` `Protocol`. Specified in the layering design under
-   "Annotation: composition, not a value protocol" and
+1. **Layering Phase 4 — annotation protocol. NEXT (owner, 2026-10-07).**
+   Annotation sources plus `on_resize`/`shrink_only`. Replaces the four SRDF
+   geometry overrides with a `runtime_checkable` `Protocol`. Specified in the
+   layering design under "Annotation: composition, not a value protocol" and
    "`SampleAndRegionDataFrame` — the hardest problem".
    **Scope was reduced:** `lift_over` is no longer part of it.
+
+   **The owner is reviewing the design themselves before implementation
+   starts** — this phase's design gate is theirs, not a `design-reviewer`
+   agent's.
+
+   **Two requirements for the implementation prompt, both earned by the
+   previous two phases.** Make a **usage-site trace the opening step**: it is
+   what caught Phase 3's polymorphic-dispatch hazard, and its absence is why
+   D3's `reorder_columns` regression was found by reading a diff rather than
+   by any step in the process. And require **discrimination proved by
+   reverting, not argued**. Phase 4 rewrites the SRDF override relationship —
+   the same silent-coupling class that bit both previous phases — so it is the
+   highest-risk phase for it, not the lowest.
 2. **`joblib` → `parallel_apply` consolidation.** Owner decision: **collapse
    the two helpers only, keep `fork`.** Dropping `fork` would close the
    demonstrated deadlock class but costs lambda support and copy-on-write
@@ -89,6 +102,27 @@ Deferred with reasons, unchanged: `fragment_matrix` migration (17 live
 notebooks, needs its own design), plot submodule, `numba` review, dropping
 `intervaltree`, re-exporting `TabixBedReader`, rewriting
 `scripts/build_inactive_regions.py`.
+
+## Known and deliberately unaddressed
+
+**`_critical_bed_columns` has become the de-facto schema declaration, and
+nothing says so.** One three-element list, `["contig", "start", "stop"]`, now
+serves four jobs across eight sites in `dataframe.py`: the declaration
+(`:412`), composing `_standard_bed_columns` (`:419`),
+**validation/construction** (`:445`, `:449`, `:502`), **display ordering**
+(`:422`, `:1259`), and **file output** (`:893` — what `save_as_bed` writes).
+
+The last three are separate contracts that merely coincide today. Editing the
+list for one purpose silently changes the other two: deciding BED output
+should carry `strand`, or that display should hoist `id`, would quietly change
+what `from_bed` accepts as a valid frame.
+
+It acquired the role by accident — `_required_columns` held the schema job,
+and when D3 deleted that, `bed_df` and `reorder_columns` were repointed here
+because it was the nearest list with the right contents. Not a defect today.
+Recorded because it is the shape that becomes one two phases later, and
+because the next person to touch it will otherwise assume the coincidence is
+intentional.
 
 ## Traps — each of these cost real time
 
