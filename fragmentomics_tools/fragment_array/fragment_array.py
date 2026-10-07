@@ -121,10 +121,36 @@ def add_at_intervals_inplace(arr, starts, stops, amount):
 
 
 def _switch_plus_with_minus_and_minus_with_plus(fragment_strands):
-    # plus_mask = ((fragment_strands == '+') | (fragment_strands == b'+'))
-    # minus_mask = ((fragment_strands == '-') | (fragment_strands == b'-'))
-    plus_mask = fragment_strands == "+"
-    minus_mask = fragment_strands == "-"
+    """Swap ``+`` and ``-``; leave anything else (e.g. ``.``) alone.
+
+    **Must accept BOTH dtypes.** This is called from ``from_fragments_h5`` on
+    ``supp_data["strand"]``, which is the raw ``|S1`` BYTES array, and the
+    ``U1`` coercion in ``RegionFragmentArray.__init__`` happens afterwards. A
+    str-only comparison against a bytes array yields an all-False mask, so both
+    masks come out empty and this returns an unchanged copy with no error.
+
+    That was the live behaviour until 2026-10-07: for a minus-strand region the
+    coordinates were mirrored but the strand labels were not swapped, so the two
+    halves of the flipped frame disagreed. Measured on one real region queried
+    twice -- strandless vs minus -- the strand counts came back identical
+    (57 plus / 62 minus both ways) where the minus query should have reported
+    62/57.
+
+    Why that matters: flipping exists so plus- and minus-strand features can be
+    aggregated in a common 5'->3' frame. The coordinate mirror makes "position
+    20" mean the same thing for both; the label swap makes "plus" mean "same
+    orientation as the feature" rather than "genomic plus". With only the first
+    half working, strand-resolved aggregation over mixed-strand features inverts
+    the asymmetry on the minus half and averages it toward zero.
+
+    The two widened comparisons below were present but COMMENTED OUT from the
+    function's first commit (`ebc0be4`), never live, with no reason recorded --
+    most likely written on the assumption that the ``U1`` coercion ran first.
+    Widening rather than coercing preserves the caller's dtype; coercing would
+    hand ``S1`` callers back ``U1``.
+    """
+    plus_mask = (fragment_strands == "+") | (fragment_strands == b"+")
+    minus_mask = (fragment_strands == "-") | (fragment_strands == b"-")
     fragment_strands = fragment_strands.copy()
     fragment_strands[plus_mask] = "-"
     fragment_strands[minus_mask] = "+"

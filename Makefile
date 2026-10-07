@@ -217,6 +217,15 @@ FLGC_PYTHONPATH ?= /home/nathanboley/src/biomarker
 # Override for a different env: make test PYTHON=/path/to/python
 PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
 
+# The interpreter's own bin/ goes on PATH too, and pinning PYTHON alone is NOT
+# enough. Several tests reach BINARIES that live beside it, not python modules:
+# `bedtools` (via pybedtools -- CLAUDE.md flags this specifically), plus `bgzip`
+# and `tabix`. Pinning only the interpreter took the suite from 2 failed to
+# **54 failed**, every one of them "intersectBed does not appear to be installed
+# or on the path". The failures look like broken interval logic, not a missing
+# binary, which is what makes it worth spelling out here.
+PYTHON_BIN := $(dir $(PYTHON))
+
 test:
 	@if [ ! -x "$(PYTHON)" ]; then \
 		echo "❌ interpreter not found: $(PYTHON)"; \
@@ -226,6 +235,7 @@ test:
 		exit 2; \
 	fi
 	@PYTHONPATH="$(FLGC_PYTHONPATH):$$PYTHONPATH" \
+	PATH="$(PYTHON_BIN):$$PATH" \
 	timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
