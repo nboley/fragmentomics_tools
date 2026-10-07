@@ -18,17 +18,26 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **2 failed / 557 passed /
-  3 skipped / 2 xfailed** (measured 2026-10-07 at version_2 HEAD).
+  Baseline at `version_2` HEAD, measured 2026-10-07: `make test`
+  **2 failed / 596 passed / 3 skipped / 2 xfailed**. Total 603 either way —
+  see the PATH note below, which moves 39 tests between passed and failed
+  without changing the total, and is the single easiest way to misread this
+  suite.
   The 2 failures are missing data, not defects:
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference.
   The 2 xfails are pinned production defects in `from_fragments_h5`'s
   minus-strand block (strand swap and weights reversal — see Known traps).
   The 3 skips are Region doctests needing the optional `fbio`.
-  **`test_formats.py` is environment-sensitive**: 40 tests fail when
-  `bedToBigBed`/`tabix`/`bedtools` are not on `PATH` — these are not
-  regressions. On a machine with all binaries, expect ~597 passed;
+  **`test_formats.py` is PATH-sensitive and this has burned two agents.**
+  It drives the `bedToBigBed`, `tabix` and `bedtools` *binaries*. Without
+  them on `PATH` the suite reports **41 failed / 557 passed / 3 skipped /
+  2 xfailed** — 40 of those 41 in `test_formats.py` — and none of it is a
+  regression. The `Makefile` now puts `$(PYTHON)`'s own `bin/` first on
+  `PATH` so `make test` is self-contained; the 41/557 figure is what you get
+  running pytest by hand in a shell without the env activated. Note that
+  `2 failed / 557 passed` is an **impossible pair** and means two runs got
+  spliced together;
   `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself

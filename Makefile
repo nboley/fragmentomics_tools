@@ -14,6 +14,15 @@ IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 # with `make test PYTHON=/path/to/other/python` to test a different env.
 PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
 
+# Pinning the interpreter is not sufficient on its own: `test_formats.py`
+# drives the `bedToBigBed`, `tabix` and `bedtools` BINARIES, which live in the
+# same env's bin/ and are not found via the interpreter. Measured at 0603def:
+# ambient PATH gives 41 failed / 557 passed, and 40 of those 41 are
+# test_formats.py alone; with the binaries it is 2 failed / 596 passed, the 2
+# being the known missing-data pair. Putting $(PYTHON)'s own bin/ first makes
+# `make test` self-contained instead of PATH-dependent.
+export PATH := $(dir $(PYTHON)):$(PATH)
+
 # Wall-clock bound on a test run. This is a hang detector, not a perf budget:
 # the library suite finishes in well under a minute. Override for slow hosts
 # or a bigger suite: make test TEST_TIMEOUT=7200
