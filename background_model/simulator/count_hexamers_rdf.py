@@ -990,14 +990,24 @@ def count_srdf(
             )
 
         # (2) BALANCE -- advisory, and the tolerance scales with the number of
-        # REGIONS rather than fragments. MEASURED on RD-56804: plus_frac was
-        # 0.3758 over 10 regions (322 frags), 0.5296 over 200 (8,695) and
-        # 0.5041 over 2,000 (73,545). Against fragment-level binomial SE those
-        # are 4.5, 5.5 and 2.2 sigma -- and the first two deviate in OPPOSITE
-        # directions, so this is not a bias, it is overdispersion: strand is
-        # CLUSTERED WITHIN A REGION, so fragments are not independent draws.
+        # REGIONS rather than fragments.
+        #
+        # MEASURED on RD-56804: plus_frac was 0.3758 over 10 regions (322
+        # frags), 0.5296 over 200 (8,695) and 0.5041 over 2,000 (73,545).
+        # Against fragment-level binomial SE those are 4.5, 5.5 and 2.2 sigma,
+        # and the first two deviate in OPPOSITE directions -- so this is not a
+        # bias but OVERDISPERSION relative to independent fragment draws.
         # Recomputed with n_regions as the effective sample size they are 0.8,
-        # 0.84 and 0.37 sigma, i.e. unremarkable.
+        # 0.84 and 0.37 sigma, i.e. unremarkable, which is why n_regions is the
+        # denominator here.
+        #
+        # The overdispersion is measured; its MECHANISM is not. Within-region
+        # strand clustering would explain it, but so would structure at any
+        # coarser scale, and within-region correlation has never been measured
+        # directly. Do not cite this as evidence for clustering specifically.
+        # Note the SIMULATOR's own draw is an independent per-region binomial,
+        # so whatever this is lives in the real-data counts and is not
+        # reproduced downstream.
         #
         # Hence the bound below. A fragment-count tolerance is simply the wrong
         # denominator and false-positives on any small run -- it rejected a
