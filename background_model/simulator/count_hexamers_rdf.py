@@ -795,10 +795,36 @@ def propensities(
 ) -> Dict[str, np.ndarray]:
     """``r(h) = C(h) / N(h)``, observed over expected, for all four tables.
 
-    The minus-strand tables divide by the PERMUTED expectation: ``start_rev``
-    counts reverse-complement hexamer indices, so its denominator must be the
-    expected count of the same relabelled hexamer.  Using the forward table
-    there would misalign every cell.
+    Two independent things decide a denominator, and conflating them is how
+    this function was wrong until 2026-10-07.
+
+    **1. Which expectation: table names are MOLECULE-relative, denominators
+    must be POSITION-relative.** ``start``/``end`` name the molecule's 5' and
+    3' cut site, but a minus-strand fragment's 5' cut site sits at its GENOMIC
+    STOP.  ``counts_from_hexamers`` therefore tallies genomic stops into
+    ``start_rev`` and genomic starts into ``end_rev``, and ``sample_region``
+    applies them that way round too.  The null expectation has to match the
+    positions actually tallied, so:
+
+        start_fwd <- genomic starts -> N_start
+        end_fwd   <- genomic stops  -> N_end
+        start_rev <- genomic STOPS  -> N_end    (not N_start)
+        end_rev   <- genomic STARTS -> N_start  (not N_end)
+
+    This is not a relabelling: ``N_start`` weights every position 1 while
+    ``N_end`` carries ``fl_end_weight``'s edge ramp, so the two differ for
+    every position within ``max_fl`` of a region edge -- **11.7% of a 1536 bp
+    tile**, by up to 156x at offset 25 and 2.05x at offset 100, and offsets
+    below ``min_fl`` have ``N_end == 0`` where ``N_start`` is positive.
+    Measured by drawing 6e6 fragments from the uniform null and asking which
+    denominator makes ``r`` constant: the correct pairing gives CV 0.041 (pure
+    sampling noise), the swapped one 0.064-0.067.
+
+    **2. Which indexing: the ``_rev`` tables are permuted.** They tally
+    reverse-complement hexamer indices, so the denominator must be the expected
+    count of the same RELABELLED hexamer -- hence ``[perm]``.  A
+    reverse-complement hexamer at a position is a relabelling, not a different
+    position, which is why one permutation serves both ``_rev`` tables.
 
     Cells with ``N <= min_expected`` yield 0 rather than a divide -- a hexamer
     the null never places cannot have a measured rate, and letting it become
@@ -809,8 +835,10 @@ def propensities(
     denom = {
         "start_fwd": n_start.astype(np.float64),
         "end_fwd": n_end.astype(np.float64),
-        "start_rev": n_start.astype(np.float64)[perm],
-        "end_rev": n_end.astype(np.float64)[perm],
+        # Crossed on purpose -- see point 1 above. start_rev tallies genomic
+        # STOPS, so it needs the END expectation, and vice versa.
+        "start_rev": n_end.astype(np.float64)[perm],
+        "end_rev": n_start.astype(np.float64)[perm],
     }
     out = {}
     for name in TABLE_NAMES:
