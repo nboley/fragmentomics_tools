@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Capture real-data orientation facts for fragment arrays.
 
-Pins the strand-flip behaviour of ``RegionFragmentArray.from_fragments_h5``
+Pins the no-autoflip behaviour of ``RegionFragmentArray.from_fragments_h5``
 and the fragment-array coupling in ``SampleAndRegionDataFrame``'s geometry
 overrides (``resize_regions``, ``bin_regions_into_windows``).
 
@@ -9,21 +9,18 @@ What is committed:
   - The manifest (counts + digests), in test/fixtures/orientation_manifest.tsv.
 
 Why this exists:
-  ``from_fragments_h5`` reverses coordinates and swaps strands for minus-strand
-  regions (``is_flipped``).  The correction applier refuses flipped/minus input.
-  Getting the ordering wrong silently destroys strand asymmetry.
+  ``from_fragments_h5`` returns fragment data in genomic order regardless of
+  the region's strand.  Orientation is deferred to the consumer layer via
+  ``reverse_strand()`` or ``make_data_direction_match_strand()``.
 
-  Phases 3-4 of the dataframe layering move the four SRDF geometry overrides
-  (``expand_regions``, ``resize_regions``, ``_resize_region_boundaries``,
-  ``bin_regions_into_windows``) that keep fragment arrays coupled to region
-  coordinates.  This manifest detects a coupling break on real data, where
-  the synthetic in-process tests have already failed to catch seven defects.
+  This manifest detects coupling breaks on real data, where the synthetic
+  in-process tests have already failed to catch seven defects.
 
 Captured facts:
   Per region (20 regions, all from CTCF sites):
     - load with strand="+", strand="-", strand="." (strandless)
-    - fragment count, coordinate digest, strand digest, is_flipped
-    - strand symmetry: reverse_strand(strandless) matches minus-strand load
+    - fragment count, coordinate digest, is_flipped (always False)
+    - no-autoflip invariant: minus load matches strandless load
   SRDF coupling:
     - attach fragments to a stranded region set
     - resize_regions (shrink) — fragment arrays must follow
@@ -187,14 +184,7 @@ def capture():
             region = Region(chrom, start, stop, strand_val, ref="hg38")
             rfa = RegionFragmentArray.from_fragments_h5(h5, region)
 
-            # load_minus pins broken output: rfa_digest includes
-            # fragment_strands which are neither reversed nor swapped
-            # (defect 1: _switch_plus_with_minus uses string literals
-            # against |S1 byte data, and [::-1] is missing).
-            # dense_minus is correct: dense_array depends only on
-            # coordinates (correctly reversed) and ignores strands.
-            load_status = ("pinned_broken:strand_swap"
-                           if strand_label == "minus" else "correct")
+            load_status = "correct"
             record(
                 f"load_{strand_label}", region_name, len(rfa.starts_0),
                 rfa_digest(rfa),
@@ -207,37 +197,29 @@ def capture():
                 note=f"dense_array shape={rfa.dense_array.shape}",
             )
 
-        # ── Strand symmetry check ────────────────────────────────────
-        # Loading strandless and then reversing should match loading minus
+        # ── No-autoflip invariant ────────────────────────────────────
+        # After removing construction-time autoflip, loading minus must
+        # produce the same array data as loading strandless (both unflipped).
         region_sl = Region(chrom, start, stop, ".", ref="hg38")
         rfa_sl = RegionFragmentArray.from_fragments_h5(h5, region_sl)
-        rfa_sl_rev = rfa_sl.reverse_strand()
 
         region_minus = Region(chrom, start, stop, "-", ref="hg38")
         rfa_minus = RegionFragmentArray.from_fragments_h5(h5, region_minus)
 
-        # Compare starts_0 arrays (should be identical)
-        starts_match = np.array_equal(rfa_sl_rev.starts_0, rfa_minus.starts_0)
-        stops_match = np.array_equal(rfa_sl_rev.stops_0, rfa_minus.stops_0)
-        strands_match = (
-            rfa_sl_rev.fragment_strands is None and rfa_minus.fragment_strands is None
-        ) or (
-            rfa_sl_rev.fragment_strands is not None
-            and rfa_minus.fragment_strands is not None
-            and np.array_equal(rfa_sl_rev.fragment_strands, rfa_minus.fragment_strands)
-        )
-        flipped_match = rfa_sl_rev.is_flipped == rfa_minus.is_flipped
-        symmetry_ok = starts_match and stops_match and strands_match and flipped_match
+        starts_match = np.array_equal(rfa_sl.starts_0, rfa_minus.starts_0)
+        stops_match = np.array_equal(rfa_sl.stops_0, rfa_minus.stops_0)
+        both_unflipped = (not rfa_sl.is_flipped) and (not rfa_minus.is_flipped)
+        symmetry_ok = starts_match and stops_match and both_unflipped
 
         sym_digest = _sha_str(
             f"starts={starts_match}|stops={stops_match}|"
-            f"strands={strands_match}|flipped={flipped_match}"
+            f"unflipped={both_unflipped}"
         )
-        sym_status = "correct" if symmetry_ok else "pinned_broken:strand_swap"
+        sym_status = "correct" if symmetry_ok else "broken:no_autoflip_violated"
         record(
             "symmetry_reverse_strandless_vs_minus", region_name,
             1 if symmetry_ok else 0, sym_digest,
-            note=f"starts={starts_match} stops={stops_match} strands={strands_match} flipped={flipped_match}",
+            note=f"starts={starts_match} stops={stops_match} unflipped={both_unflipped}",
             status=sym_status,
         )
 
@@ -257,8 +239,7 @@ def capture():
 
     for i, (_, row) in enumerate(srdf.iterrows()):
         rfa = row.fragment_array
-        attach_status = ("pinned_broken:strand_swap"
-                         if row.strand == "-" else "correct")
+        attach_status = "correct"
         record(
             "srdf_attach", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
@@ -270,8 +251,7 @@ def capture():
     srdf_resized = srdf.resize_regions(1024)
     for i, (_, row) in enumerate(srdf_resized.iterrows()):
         rfa = row.fragment_array
-        resize_status = ("pinned_broken:strand_swap"
-                         if row.strand == "-" else "correct")
+        resize_status = "correct"
         record(
             "srdf_resize_1024", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
@@ -283,8 +263,7 @@ def capture():
     srdf_binned = srdf.bin_regions_into_windows(512, mode="valid")
     for i, (_, row) in enumerate(srdf_binned.iterrows()):
         rfa = row.fragment_array
-        bin_status = ("pinned_broken:strand_swap"
-                      if row.strand == "-" else "correct")
+        bin_status = "correct"
         record(
             "srdf_bin_512", f"srdf_window_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
@@ -299,8 +278,7 @@ def capture():
     srdf_reindexed_resized = srdf_reindexed.resize_regions(1024)
     for i, (idx, row) in enumerate(srdf_reindexed_resized.iterrows()):
         rfa = row.fragment_array
-        reindex_status = ("pinned_broken:strand_swap"
-                          if row.strand == "-" else "correct")
+        reindex_status = "correct"
         record(
             "srdf_reindex_resize", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
@@ -334,9 +312,7 @@ def capture():
                 h5, region, generate_weights_callback=_position_weights,
             )
 
-            is_minus = (strand_label == "minus")
-            wt_status = ("pinned_broken:strand_swap+weights_unreversed"
-                         if is_minus else "correct")
+            wt_status = "correct"
             record(
                 f"weighted_load_{strand_label}", region_name,
                 len(rfa.starts_0), weighted_rfa_digest(rfa),
@@ -344,20 +320,19 @@ def capture():
                 status=wt_status,
             )
 
-        # Weights symmetry: reverse_strand(strandless) vs minus load
+        # Weights no-autoflip: minus and strandless loads produce same weights
         region_sl = Region(chrom, start, stop, ".", ref="hg38")
         rfa_sl = RegionFragmentArray.from_fragments_h5(
             h5, region_sl, generate_weights_callback=_position_weights,
         )
-        rfa_sl_rev = rfa_sl.reverse_strand()
 
         region_minus = Region(chrom, start, stop, "-", ref="hg38")
         rfa_minus = RegionFragmentArray.from_fragments_h5(
             h5, region_minus, generate_weights_callback=_position_weights,
         )
 
-        weights_match = np.array_equal(rfa_sl_rev.weights, rfa_minus.weights)
-        starts_match = np.array_equal(rfa_sl_rev.starts_0, rfa_minus.starts_0)
+        weights_match = np.array_equal(rfa_sl.weights, rfa_minus.weights)
+        starts_match = np.array_equal(rfa_sl.starts_0, rfa_minus.starts_0)
         wt_sym_ok = weights_match and starts_match
         wt_sym_digest = _sha_str(
             f"weights={weights_match}|starts={starts_match}"
@@ -366,7 +341,7 @@ def capture():
             "symmetry_weights_strandless_vs_minus", region_name,
             1 if wt_sym_ok else 0, wt_sym_digest,
             note=f"weights={weights_match} starts={starts_match}",
-            status="correct" if wt_sym_ok else "pinned_broken:weights_unreversed",
+            status="correct" if wt_sym_ok else "broken:weights_mismatch",
         )
 
     h5.close()

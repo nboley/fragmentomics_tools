@@ -18,27 +18,36 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baseline at `version_2` HEAD, measured 2026-10-07: `make test`
-  **2 failed / 596 passed / 3 skipped / 2 xfailed**. Total 603 either way —
-  see the PATH note below, which moves 39 tests between passed and failed
-  without changing the total, and is the single easiest way to misread this
-  suite.
+  Baseline at `version_2` HEAD, measured 2026-10-07 after merging `main`:
+  `make test` **2 failed / 612 passed / 3 skipped / 0 xfailed**, total 617.
+  Before the merge it was 2 / 610 / 3 / 2 — the same total, because the merge
+  brought in the orientation fix and turned the two pinned-defect xfails into
+  passes without changing what is collected.
   The 2 failures are missing data, not defects:
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference.
-  The 2 xfails are pinned production defects in `from_fragments_h5`'s
-  minus-strand block (strand swap and weights reversal — see Known traps).
-  The 3 skips are Region doctests needing the optional `fbio`.
+  The 3 skips are Region doctests needing the optional `fbio`. There are no
+  longer any xfails: the two that existed pinned the `from_fragments_h5`
+  minus-strand defects, and both were fixed on `main` and merged in.
+  **Reconcile the TOTAL first** when two measurements disagree. The total is
+  invariant under environment, so a matching total means you are looking at an
+  environment difference, while a differing total means tests went
+  uncollected. Two separate measurement confusions on this work would have
+  been one-step diagnoses with that check.
   **`test_formats.py` is PATH-sensitive and this has burned two agents.**
-  It drives the `bedToBigBed`, `tabix` and `bedtools` *binaries*. Without
-  them on `PATH` the suite reports **41 failed / 557 passed / 3 skipped /
-  2 xfailed** — 40 of those 41 in `test_formats.py` — and none of it is a
-  regression. The `Makefile` now puts `$(PYTHON)`'s own `bin/` first on
-  `PATH` so `make test` is self-contained; the 41/557 figure is what you get
-  running pytest by hand in a shell without the env activated. Note that
-  `2 failed / 557 passed` is an **impossible pair** and means two runs got
-  spliced together;
-  `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
+  It drives the `bedToBigBed`, `tabix` and `bedtools` *binaries*. Without them
+  on `PATH` roughly 40 `test_formats.py` tests fail and none of it is a
+  regression — measured at an earlier commit as `41 failed / 557 passed`
+  against `2 failed / 596 passed` with them, the same total either way. The
+  `Makefile` now puts `$(PYTHON)`'s own `bin/` first on `PATH` so `make test`
+  is self-contained; the failing figure is what you get running pytest by hand
+  in a shell without the env activated. Note that `2 failed / 557 passed` is an
+  **impossible pair** and means two runs got spliced together;
+  **`make test` does NOT cover `tests/`** — `PYTEST_ARGS` is
+  `test/ fragmentomics_tools/`, so any change under `fragment_array/` needs an
+  explicit `make test PYTEST_ARGS="tests/ -q"` run or a `background_model`
+  regression ships unseen.
+  `tests/` **494 passed, 0 skipped** (re-measured 2026-10-07), where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself
   before and after your change** rather than quoting this line — the `tests/`
@@ -138,11 +147,18 @@ forward.
 - **`Region(strand=".")` normalizes `.strand` to `None`.** Asserting
   `strand == "."` therefore fails on the ordinary strandless path. Accept
   `{None, ".", "+"}`.
-- **Minus-strand regions arrive flipped.** `from_fragments_h5` reverses
-  coordinates and swaps strands for minus-strand regions (`is_flipped`). The
-  correction applier deliberately *refuses* flipped/minus input: query
-  strandless, then orient at the aggregation layer (reverse the position axis
-  and permute tracks). Getting this wrong silently destroys strand asymmetry.
+- **Minus-strand regions are NOT flipped on construction.** `from_fragments_h5`
+  always returns data in genomic order with `is_flipped=False`, regardless of
+  the region's strand. Orientation is deferred to the consumer layer via
+  `reverse_strand()` or `make_data_direction_match_strand()`. The correction
+  applier requires unflipped input — query strandless or plus-strand, then
+  orient at the aggregation layer.
+- **`_switch_plus_with_minus_and_minus_with_plus` compares `str` against
+  `|S1` bytes.** The `from_fragments_h5` call site that used it was removed
+  (autoflip removal), but the function survives for `reverse_strand()` and
+  `strand_bias.py`. Those callers receive `dtype="U1"` arrays (normalised by
+  `__init__`), so the string comparison works. If you add a new caller that
+  passes raw h5 byte data, the comparison will silently match nothing.
 - **`SparseIntVector` is a misnomer** — only `coords` are ints; `data` keeps
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight
@@ -158,30 +174,6 @@ forward.
 - **Store/zarr pinning**: the zarr store is v2 format; `zarr==2.18.3` with
   `numcodecs==0.13.1`. Newer numcodecs privatized symbols zarr 2.18 imports,
   which breaks at import time — pin both together.
-- **UNFIXED: `from_fragments_h5` minus-strand block does not reverse
-  `fragment_strands`.** Two independent causes, both in
-  `fragment_array/fragment_array.py`. (1) The `[::-1]` is missing from
-  `fragment_strands` at `:1793`, so `strand[j]` refers to a different
-  fragment than `starts_0[j]` after the coordinate flip. (2) The swap
-  function `_switch_plus_with_minus_and_minus_with_plus` (`:123-131`)
-  compares string literals `'+'/'-'` against the `|S1` byte array the h5
-  returns — matches nothing, so the swap is a no-op. The commented-out
-  lines 124-125 handled both encodings. Only this one call site is affected:
-  `__init__` normalises to `dtype="U1"` at `:297-299`, so `reverse_strand()`
-  and `strand_bias.py` operate on already-converted arrays. Pinned in
-  `test/test_orientation_real_data.py` as `strict=True` xfail. Unfixed
-  pending owner approval (changes computed results).
-- **UNFIXED: `from_fragments_h5` minus-strand block does not reverse
-  `weights`.** `generate_weights_callback` returns weights in original
-  genomic order (`:1756-1757`). The minus-strand block reverses coordinates
-  but not weights, so `weight[j]` refers to a different fragment than
-  `starts_0[j]` after the flip. `reverse_strand()` does reverse weights
-  (`:759`). Only bites when a callback is supplied; the default all-ones
-  weights are reversal-invariant. Per-fragment weights are the correction
-  pathway and `SparseIntVector` preserves fractional weights, so this
-  silently corrupts corrected pileups rather than raising. Pinned in
-  `test/test_orientation_real_data.py` as `strict=True` xfail. Unfixed
-  pending owner approval.
 
 ## Working agreements
 
