@@ -1,5 +1,11 @@
 # bedtools equivalence
 
+> **Status: CURRENT REFERENCE.** Archived from `docs/pending/` on 2026-10-07.
+> This is a live reference document, not a superseded proposal: every row is
+> verified against the running CLI, and `test/test_bedtools_equivalence.py`
+> tests against it. `make test-equivalence` errors rather than skips when the
+> `bedtools` binary is absent, so the mapping cannot silently rot.
+
 How each common `bedtools` command is expressed in the `intervals` API, verified
 by running both sides on real data.  This is a reference for anyone porting a
 bedtools pipeline, and the specification that `test/test_bedtools_equivalence.py`

@@ -26,8 +26,8 @@ composition rather than a method per source.
 | File | Role |
 |---|---|
 | [`dataframe_layering_design.md`](dataframe_layering_design.md) | Parent design. Layers, annotation protocol, `SampleAndRegionDataFrame`, module layout, Phases 3-4. |
-| [`interval_api_design.md`](interval_api_design.md) | Carved out of the parent. Holds the **nine binding Requirements**. Phases 0-2, all complete. |
-| [`bedtools_equivalence.md`](bedtools_equivalence.md) | `bedtools` command to API mapping, every row verified against the live CLI. |
+| [`interval_api_design.md`](../architecture/interval_api_design.md) | Carved out of the parent. Holds the **nine binding Requirements**. Phases 0-2, all complete. |
+| [`bedtools_equivalence.md`](../architecture/bedtools_equivalence.md) | `bedtools` command to API mapping, every row verified against the live CLI. |
 | [`dataframe_critical_review.md`](dataframe_critical_review.md) | The findings ledger that started the work. |
 
 `CLAUDE.md` at the repo root is binding convention, not design. Read it first.
@@ -111,7 +111,7 @@ A clean break by decision — no shim, no deprecation. `RegionDataFrame` went
 from 61 methods to 44. Four of those removals are renames that moved the
 function to `intervals`; thirteen are deletions, plus two on `Region`. The
 full table, with a replacement expression for every deletion, is in
-[`interval_api_design.md`](interval_api_design.md) under "Net change".
+[`interval_api_design.md`](../architecture/interval_api_design.md) under "Net change".
 
 The renames are what downstream will hit:
 

@@ -5,7 +5,7 @@ The old bedtools-backed methods have been removed; these tests now exercise
 the bioframe-backed replacements.
 
 Fixture movements from the Phase 0 baseline are recorded in the design doc
-(docs/pending/interval_api_design.md, §Fixture movements).
+(docs/architecture/interval_api_design.md, §Fixture movements).
 
 **Parameter conventions.**  Overlap functions (``overlap_indices``,
 ``overlaps``) take ``pad``: gap < pad (``bedtools window -w`` convention).

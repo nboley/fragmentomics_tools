@@ -123,7 +123,7 @@ class TestManifestStillDescribesReality:
                 "  python scripts/capture_interval_fixtures.py "
                 "--out test/fixtures/interval_manifest.tsv\n"
                 "and record WHY in the fixture-movements table of "
-                "docs/pending/interval_api_design.md.\n"
+                "docs/architecture/interval_api_design.md.\n"
                 "A movement recorded without investigation is how a "
                 "592-interval regression got rationalised once already.\n\n"
                 + moved.to_string(index=False)

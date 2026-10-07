@@ -1,5 +1,15 @@
 # The interval API
 
+> **Status: IMPLEMENTED.** Phases 0-2 are complete and shipped on branch
+> `version_2`. Archived from `docs/pending/` on 2026-10-07; this document now
+> describes what the code *is*, not what was proposed. The five functions live
+> in `fragmentomics_tools/intervals.py`. Gates: design review r1-r4, impl
+> review r1-r5 (A-/A-/A/A/A), test audit with zero wrong assertions, and
+> `merge` byte-identical to `bedtools` on 964,593 real regions.
+>
+> Still unbuilt and still in `docs/pending/`: Phases 3-4 of
+> [`dataframe_layering_design.md`](../pending/dataframe_layering_design.md).
+
 Design for the interval-algebra layer of `fragmentomics_tools`: five free
 functions over region frames, backed by `bioframe`, replacing the thirteen
 `bedtools`-backed methods on `RegionDataFrame` and removing the `pybedtools`

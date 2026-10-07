@@ -7,7 +7,7 @@ Layer 2 of the three-layer model (load → operate → write).  Takes and
 returns ``RegionDataFrame``; imports it lazily so that ``import
 fragmentomics_tools.intervals`` does not pull in the heavy stack.
 
-See ``docs/pending/interval_api_design.md`` for the design rationale.
+See ``docs/architecture/interval_api_design.md`` for the design rationale.
 """
 
 from __future__ import annotations

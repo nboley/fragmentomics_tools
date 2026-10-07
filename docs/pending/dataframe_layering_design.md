@@ -55,7 +55,7 @@ every new data source means another method on the class, so the class only
 ever grows.
 
 The first consequence is **fixed** for interval algebra:
-[`interval_api_design.md`](interval_api_design.md) extracted it to an
+[`interval_api_design.md`](../architecture/interval_api_design.md) extracted it to an
 `intervals` module, removed `pybedtools` from the library, and took
 `import fragmentomics_tools.dataframe` from 2,779 modules to 1,631. The second
 consequence is what Phases 3-4 below address, and it is unchanged.
@@ -331,7 +331,7 @@ derived annotation, and turns a hard error into a defined operation.
 ## Interval algebra — specified separately
 
 The interval-algebra surface of layer 2 is large enough to stand alone and is
-specified in [`interval_api_design.md`](interval_api_design.md): the five
+specified in [`interval_api_design.md`](../architecture/interval_api_design.md): the five
 functions that replace the thirteen `bedtools`-backed methods, the removal of
 `pybedtools` in favour of `bioframe`, and the phases which deliver them.
 
@@ -373,7 +373,7 @@ makes the algebra importable without the class, which is the point of the
 layering. The methods stay for ergonomics.
 
 The module is created by Phase 1 in
-[`interval_api_design.md`](interval_api_design.md), which puts the five
+[`interval_api_design.md`](../architecture/interval_api_design.md), which puts the five
 interval functions there. Phase 3 moves the *rest* of layer 2 — geometry,
 resizing, binning — in alongside them.
 
@@ -402,7 +402,7 @@ not just syntax. It is not a precondition for anything here.
 All of this happens in a worktree, not on `main`.
 
 **The interval-API phases are specified in
-[`interval_api_design.md`](interval_api_design.md)** — differential fixtures,
+[`interval_api_design.md`](../architecture/interval_api_design.md)** — differential fixtures,
 then the API built directly on `bioframe`, then the `bedtools` equivalence
 document and its tests. **Those are complete.** Nothing below could start
 until the `intervals` module existed.

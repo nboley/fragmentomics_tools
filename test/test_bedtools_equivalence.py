@@ -1,6 +1,6 @@
 """Differential tests: run bedtools and our API on the same input, compare.
 
-Every mapping documented in ``docs/pending/bedtools_equivalence.md`` is tested
+Every mapping documented in ``docs/architecture/bedtools_equivalence.md`` is tested
 here by running the real ``bedtools`` binary and comparing the result against
 our ``intervals`` module.  This is the regression net that hand-written
 expectations cannot provide — six real bugs survived 81 synthetic tests and

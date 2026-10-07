@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 # RegionFragmentArray, FragmentArray, merge_fragment_arrays are imported lazily
 # inside the methods that need them, to avoid pulling numba (0.80s) at import
-# time.  See docs/pending/interval_api_design.md §import-graph.
+# time.  See docs/architecture/interval_api_design.md §import-graph.
 
 
 NUM_CORES = -1
