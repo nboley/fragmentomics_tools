@@ -36,6 +36,28 @@ def pytest_addoption(parser):
         default=False,
         help="run extra slow tests",
     )
+    parser.addoption(
+        "--realdata",
+        action="store_true",
+        default=False,
+        help=(
+            "require real-data tests to RUN rather than skip. Without this, "
+            "tests marked requires_real_data skip when their EFS inputs are "
+            "absent; with it, absent inputs are a failure. Used by "
+            "`make test-realdata`, which exists so a real-data regression "
+            "check cannot silently pass."
+        ),
+    )
+
+
+def pytest_configure(config):
+    # Registered so `--strict-markers` stays usable and `-m requires_real_data`
+    # is selectable without a warning.
+    config.addinivalue_line(
+        "markers",
+        "requires_real_data: needs the real fragment h5 inputs on /efs; skips "
+        "when they are absent unless --realdata is given",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
