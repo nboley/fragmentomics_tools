@@ -1,0 +1,213 @@
+op	dataset	n	sha256_16	note
+input	h5	715907654	dd917ad1335f2ba7	/efs/analytics/nathanboley/biomarker-projects/data_cache/DC4-16709/764d5ce67737e478b927fc0ef17f2df1-86-AC-124104-Lib1_DC4-16709_S22.hg38.fragments.h5
+input	ctcf_source	34974234	7083e4b96742c555	/efs/analytics/lily/ssDNA/top_1000_TF/CTCF.hg38.bed
+load_plus	region_00	117	f485c57e203cede3	chr1:15153763-15155811 strand=+ flipped=False
+dense_plus	region_00	1048576	a88e5985843b3098	dense_array shape=(512, 2048)
+load_minus	region_00	117	ba31946fd6d22ffc	chr1:15153763-15155811 strand=- flipped=True
+dense_minus	region_00	1048576	8528fd1823a16d9d	dense_array shape=(512, 2048)
+load_strandless	region_00	117	9a5876625c0035cb	chr1:15153763-15155811 strand=. flipped=False
+dense_strandless	region_00	1048576	a88e5985843b3098	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_00	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_01	248	111d32666ee06fcc	chr1:206884906-206886954 strand=+ flipped=False
+dense_plus	region_01	1048576	fff2dc025e87d0a5	dense_array shape=(512, 2048)
+load_minus	region_01	248	8d2b37fa3a31b470	chr1:206884906-206886954 strand=- flipped=True
+dense_minus	region_01	1048576	d53ae3cedc177c25	dense_array shape=(512, 2048)
+load_strandless	region_01	248	be6da3dc80059aef	chr1:206884906-206886954 strand=. flipped=False
+dense_strandless	region_01	1048576	fff2dc025e87d0a5	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_01	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_02	239	7b1ac2a79802aa4d	chr1:209109376-209111424 strand=+ flipped=False
+dense_plus	region_02	1048576	6e2e09b606fe41e7	dense_array shape=(512, 2048)
+load_minus	region_02	239	b860de3ea87ddb34	chr1:209109376-209111424 strand=- flipped=True
+dense_minus	region_02	1048576	1e06033b58e2ce0a	dense_array shape=(512, 2048)
+load_strandless	region_02	239	6209fe00a3186e79	chr1:209109376-209111424 strand=. flipped=False
+dense_strandless	region_02	1048576	6e2e09b606fe41e7	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_02	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_03	240	214c2d6785dbd04b	chr1:234220362-234222410 strand=+ flipped=False
+dense_plus	region_03	1048576	7724ca2678e802aa	dense_array shape=(512, 2048)
+load_minus	region_03	240	3a7ca7562efb506f	chr1:234220362-234222410 strand=- flipped=True
+dense_minus	region_03	1048576	c375659b3f95946a	dense_array shape=(512, 2048)
+load_strandless	region_03	240	b968e8bd52f24928	chr1:234220362-234222410 strand=. flipped=False
+dense_strandless	region_03	1048576	7724ca2678e802aa	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_03	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_04	208	5b24e33134d39a02	chr1:244970321-244972369 strand=+ flipped=False
+dense_plus	region_04	1048576	eaf0e0e86c847807	dense_array shape=(512, 2048)
+load_minus	region_04	208	dbaad366d22386b9	chr1:244970321-244972369 strand=- flipped=True
+dense_minus	region_04	1048576	5c2bb2c594510c04	dense_array shape=(512, 2048)
+load_strandless	region_04	208	8db0139042b2aac5	chr1:244970321-244972369 strand=. flipped=False
+dense_strandless	region_04	1048576	eaf0e0e86c847807	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_04	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_05	202	61894f235b4a0356	chr2:8870105-8872153 strand=+ flipped=False
+dense_plus	region_05	1048576	5bf05df3b1631a88	dense_array shape=(512, 2048)
+load_minus	region_05	202	5faf0a3d2a9a5861	chr2:8870105-8872153 strand=- flipped=True
+dense_minus	region_05	1048576	75d3488b069a4e5c	dense_array shape=(512, 2048)
+load_strandless	region_05	202	4c30a4dda7b80797	chr2:8870105-8872153 strand=. flipped=False
+dense_strandless	region_05	1048576	5bf05df3b1631a88	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_05	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_06	267	94e3745d8b77c877	chr2:38028079-38030127 strand=+ flipped=False
+dense_plus	region_06	1048576	4c2e5594e276449f	dense_array shape=(512, 2048)
+load_minus	region_06	267	edaf69000e788b3a	chr2:38028079-38030127 strand=- flipped=True
+dense_minus	region_06	1048576	6c4bc073f3fa8130	dense_array shape=(512, 2048)
+load_strandless	region_06	267	f163d32cb610c23d	chr2:38028079-38030127 strand=. flipped=False
+dense_strandless	region_06	1048576	4c2e5594e276449f	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_06	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_07	209	1ded3cab60101b72	chr2:41586650-41588698 strand=+ flipped=False
+dense_plus	region_07	1048576	d93b93cd338beec3	dense_array shape=(512, 2048)
+load_minus	region_07	209	7ba06b9c8639f293	chr2:41586650-41588698 strand=- flipped=True
+dense_minus	region_07	1048576	ab904503377fb51b	dense_array shape=(512, 2048)
+load_strandless	region_07	209	461241beabb2748b	chr2:41586650-41588698 strand=. flipped=False
+dense_strandless	region_07	1048576	d93b93cd338beec3	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_07	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_08	162	7c9e3f9ec1c04ab7	chr2:66774858-66776906 strand=+ flipped=False
+dense_plus	region_08	1048576	fd5497df36a4b23b	dense_array shape=(512, 2048)
+load_minus	region_08	162	d26b486e760dec05	chr2:66774858-66776906 strand=- flipped=True
+dense_minus	region_08	1048576	f16561acda328346	dense_array shape=(512, 2048)
+load_strandless	region_08	162	dda343a1d4c61cb5	chr2:66774858-66776906 strand=. flipped=False
+dense_strandless	region_08	1048576	fd5497df36a4b23b	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_08	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_09	170	e76c84b2d65516f3	chr2:108988255-108990303 strand=+ flipped=False
+dense_plus	region_09	1048576	09cc77508bb46e03	dense_array shape=(512, 2048)
+load_minus	region_09	170	c81a7260eabbc36d	chr2:108988255-108990303 strand=- flipped=True
+dense_minus	region_09	1048576	ebac1bc700fa4228	dense_array shape=(512, 2048)
+load_strandless	region_09	170	4d812dbafbe57453	chr2:108988255-108990303 strand=. flipped=False
+dense_strandless	region_09	1048576	09cc77508bb46e03	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_09	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_10	176	c8655042d64983c5	chr5:3638378-3640426 strand=+ flipped=False
+dense_plus	region_10	1048576	b41b2ffc07a6779b	dense_array shape=(512, 2048)
+load_minus	region_10	176	971bee837d0f2acf	chr5:3638378-3640426 strand=- flipped=True
+dense_minus	region_10	1048576	e6d16347c9182a63	dense_array shape=(512, 2048)
+load_strandless	region_10	176	b71e3259f335875c	chr5:3638378-3640426 strand=. flipped=False
+dense_strandless	region_10	1048576	b41b2ffc07a6779b	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_10	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_11	193	464bb8efa513a3cd	chr5:24414941-24416989 strand=+ flipped=False
+dense_plus	region_11	1048576	b43978723e58ff18	dense_array shape=(512, 2048)
+load_minus	region_11	193	3adae1eeb385fc76	chr5:24414941-24416989 strand=- flipped=True
+dense_minus	region_11	1048576	50fbba147f2de90d	dense_array shape=(512, 2048)
+load_strandless	region_11	193	c4d9f840a5ab4349	chr5:24414941-24416989 strand=. flipped=False
+dense_strandless	region_11	1048576	b43978723e58ff18	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_11	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_12	201	3cffeb8fff1f15cf	chr5:40645449-40647497 strand=+ flipped=False
+dense_plus	region_12	1048576	9c8de7f826e27cbe	dense_array shape=(512, 2048)
+load_minus	region_12	201	a98b45d70ac77997	chr5:40645449-40647497 strand=- flipped=True
+dense_minus	region_12	1048576	548548e412416a8b	dense_array shape=(512, 2048)
+load_strandless	region_12	201	00572b9750d05a94	chr5:40645449-40647497 strand=. flipped=False
+dense_strandless	region_12	1048576	9c8de7f826e27cbe	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_12	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_13	266	621e6c4787ff1147	chr5:133459470-133461518 strand=+ flipped=False
+dense_plus	region_13	1048576	d37b16eb293ee5f6	dense_array shape=(512, 2048)
+load_minus	region_13	266	8111cc08958df97b	chr5:133459470-133461518 strand=- flipped=True
+dense_minus	region_13	1048576	cf06f46d98d9acca	dense_array shape=(512, 2048)
+load_strandless	region_13	266	0034e4ba4a0d589c	chr5:133459470-133461518 strand=. flipped=False
+dense_strandless	region_13	1048576	d37b16eb293ee5f6	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_13	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_14	206	26a469a34bb5cc7d	chr5:179466587-179468635 strand=+ flipped=False
+dense_plus	region_14	1048576	6c816bcc4aa5d6b7	dense_array shape=(512, 2048)
+load_minus	region_14	206	6a0157d021461b6f	chr5:179466587-179468635 strand=- flipped=True
+dense_minus	region_14	1048576	693c790670901a58	dense_array shape=(512, 2048)
+load_strandless	region_14	206	a7cfdbe257d81420	chr5:179466587-179468635 strand=. flipped=False
+dense_strandless	region_14	1048576	6c816bcc4aa5d6b7	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_14	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_15	173	f1bf6767551b85cf	chr10:20951353-20953401 strand=+ flipped=False
+dense_plus	region_15	1048576	a24a64b1c0c92e00	dense_array shape=(512, 2048)
+load_minus	region_15	173	f34a1afe4fb800b3	chr10:20951353-20953401 strand=- flipped=True
+dense_minus	region_15	1048576	fefc6c6c702134ac	dense_array shape=(512, 2048)
+load_strandless	region_15	173	0c8df44aafbc217d	chr10:20951353-20953401 strand=. flipped=False
+dense_strandless	region_15	1048576	a24a64b1c0c92e00	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_15	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_16	207	d93fe015e24faf3e	chr10:44822717-44824765 strand=+ flipped=False
+dense_plus	region_16	1048576	dcbee672b194c98b	dense_array shape=(512, 2048)
+load_minus	region_16	207	6b7bed95cd9ed253	chr10:44822717-44824765 strand=- flipped=True
+dense_minus	region_16	1048576	62ff24cc1afdf1ae	dense_array shape=(512, 2048)
+load_strandless	region_16	207	e6bb442d4aaebb10	chr10:44822717-44824765 strand=. flipped=False
+dense_strandless	region_16	1048576	dcbee672b194c98b	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_16	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_17	205	30e182d3821fbb9a	chr10:49534460-49536508 strand=+ flipped=False
+dense_plus	region_17	1048576	24099046405b5245	dense_array shape=(512, 2048)
+load_minus	region_17	205	96a21d14c0c11de4	chr10:49534460-49536508 strand=- flipped=True
+dense_minus	region_17	1048576	af162555187c7f2f	dense_array shape=(512, 2048)
+load_strandless	region_17	205	10e2cfa820a18294	chr10:49534460-49536508 strand=. flipped=False
+dense_strandless	region_17	1048576	24099046405b5245	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_17	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_18	257	49aedd3d7a3b64ab	chr10:93164587-93166635 strand=+ flipped=False
+dense_plus	region_18	1048576	960d7f7bda928f4b	dense_array shape=(512, 2048)
+load_minus	region_18	257	9c10554c124b2c2e	chr10:93164587-93166635 strand=- flipped=True
+dense_minus	region_18	1048576	c5cf490e5ce75bd5	dense_array shape=(512, 2048)
+load_strandless	region_18	257	0121ca9b4b5938c6	chr10:93164587-93166635 strand=. flipped=False
+dense_strandless	region_18	1048576	960d7f7bda928f4b	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_18	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+load_plus	region_19	211	7c571b8bbfda35a9	chr10:94443766-94445814 strand=+ flipped=False
+dense_plus	region_19	1048576	5e3ee04fdf5ad805	dense_array shape=(512, 2048)
+load_minus	region_19	211	2453a6fa7bff3020	chr10:94443766-94445814 strand=- flipped=True
+dense_minus	region_19	1048576	3b832bd26a8ad8dd	dense_array shape=(512, 2048)
+load_strandless	region_19	211	5a956a3f8f587393	chr10:94443766-94445814 strand=. flipped=False
+dense_strandless	region_19	1048576	5e3ee04fdf5ad805	dense_array shape=(512, 2048)
+symmetry_reverse_strandless_vs_minus	region_19	0	4bf579f1cb0e7663	starts=True stops=True strands=False flipped=True
+srdf_attach	srdf_region_00	117	f485c57e203cede3	strand=+ flipped=False
+srdf_attach	srdf_region_01	248	8d2b37fa3a31b470	strand=- flipped=True
+srdf_attach	srdf_region_02	239	7b1ac2a79802aa4d	strand=+ flipped=False
+srdf_attach	srdf_region_03	240	3a7ca7562efb506f	strand=- flipped=True
+srdf_attach	srdf_region_04	208	5b24e33134d39a02	strand=+ flipped=False
+srdf_attach	srdf_region_05	202	5faf0a3d2a9a5861	strand=- flipped=True
+srdf_attach	srdf_region_06	267	94e3745d8b77c877	strand=+ flipped=False
+srdf_attach	srdf_region_07	209	7ba06b9c8639f293	strand=- flipped=True
+srdf_attach	srdf_region_08	162	7c9e3f9ec1c04ab7	strand=+ flipped=False
+srdf_attach	srdf_region_09	170	c81a7260eabbc36d	strand=- flipped=True
+srdf_resize_1024	srdf_region_00	84	9b4cd42d84e695a1	strand=+ flipped=False region=chr1:15154275-15155299
+srdf_resize_1024	srdf_region_01	95	562a4e079ad05bea	strand=- flipped=True region=chr1:206885418-206886442
+srdf_resize_1024	srdf_region_02	121	58738e5de1fed4e4	strand=+ flipped=False region=chr1:209109888-209110912
+srdf_resize_1024	srdf_region_03	124	e5d3cde5b80ee0e7	strand=- flipped=True region=chr1:234220874-234221898
+srdf_resize_1024	srdf_region_04	106	0d525b8073e6ddad	strand=+ flipped=False region=chr1:244970833-244971857
+srdf_resize_1024	srdf_region_05	104	edaf218e99e485a6	strand=- flipped=True region=chr2:8870617-8871641
+srdf_resize_1024	srdf_region_06	146	2f3f56e5905b10bf	strand=+ flipped=False region=chr2:38028591-38029615
+srdf_resize_1024	srdf_region_07	94	231a7b96b4125525	strand=- flipped=True region=chr2:41587162-41588186
+srdf_resize_1024	srdf_region_08	44	996d501839ca0c88	strand=+ flipped=False region=chr2:66775370-66776394
+srdf_resize_1024	srdf_region_09	95	bd8bf065bb8755bc	strand=- flipped=True region=chr2:108988767-108989791
+srdf_bin_512	srdf_window_00	15	22004024e082a627	strand=+ flipped=False region=chr1:15153763-15154275
+srdf_bin_512	srdf_window_01	31	17929165031c0e29	strand=+ flipped=False region=chr1:15154275-15154787
+srdf_bin_512	srdf_window_02	55	73f09c11fdc184b4	strand=+ flipped=False region=chr1:15154787-15155299
+srdf_bin_512	srdf_window_03	26	9ea2871f96756cef	strand=+ flipped=False region=chr1:15155299-15155811
+srdf_bin_512	srdf_window_04	84	0c56912b48f39f69	strand=- flipped=True region=chr1:206884906-206885418
+srdf_bin_512	srdf_window_05	40	b7af26c306afa8a4	strand=- flipped=True region=chr1:206885418-206885930
+srdf_bin_512	srdf_window_06	59	db58827fe0048bb0	strand=- flipped=True region=chr1:206885930-206886442
+srdf_bin_512	srdf_window_07	88	6d8cd50a3b24efc3	strand=- flipped=True region=chr1:206886442-206886954
+srdf_bin_512	srdf_window_08	62	cdb987332285ffb1	strand=+ flipped=False region=chr1:209109376-209109888
+srdf_bin_512	srdf_window_09	67	61adba3e03b32459	strand=+ flipped=False region=chr1:209109888-209110400
+srdf_bin_512	srdf_window_10	56	35e6162c4fe66e36	strand=+ flipped=False region=chr1:209110400-209110912
+srdf_bin_512	srdf_window_11	70	5ec57328d4ddfd0d	strand=+ flipped=False region=chr1:209110912-209111424
+srdf_bin_512	srdf_window_12	65	838c6d8eec56b087	strand=- flipped=True region=chr1:234220362-234220874
+srdf_bin_512	srdf_window_13	75	682c498251ac15be	strand=- flipped=True region=chr1:234220874-234221386
+srdf_bin_512	srdf_window_14	62	c61c6020dd88d64c	strand=- flipped=True region=chr1:234221386-234221898
+srdf_bin_512	srdf_window_15	70	2f461a617a28291e	strand=- flipped=True region=chr1:234221898-234222410
+srdf_bin_512	srdf_window_16	58	b607118041b56a3e	strand=+ flipped=False region=chr1:244970321-244970833
+srdf_bin_512	srdf_window_17	46	063d249fa077df2e	strand=+ flipped=False region=chr1:244970833-244971345
+srdf_bin_512	srdf_window_18	63	a5f5ab1f9c55e0fe	strand=+ flipped=False region=chr1:244971345-244971857
+srdf_bin_512	srdf_window_19	67	3d8f7145eb165ffb	strand=+ flipped=False region=chr1:244971857-244972369
+srdf_bin_512	srdf_window_20	54	6f7814a9c1be2b39	strand=- flipped=True region=chr2:8870105-8870617
+srdf_bin_512	srdf_window_21	71	e8cfa55f3f95dd29	strand=- flipped=True region=chr2:8870617-8871129
+srdf_bin_512	srdf_window_22	34	86478bece6612d9f	strand=- flipped=True region=chr2:8871129-8871641
+srdf_bin_512	srdf_window_23	59	7fc189ad963ba1e6	strand=- flipped=True region=chr2:8871641-8872153
+srdf_bin_512	srdf_window_24	62	658c900f29d399e7	strand=+ flipped=False region=chr2:38028079-38028591
+srdf_bin_512	srdf_window_25	73	c7310b862676ec60	strand=+ flipped=False region=chr2:38028591-38029103
+srdf_bin_512	srdf_window_26	79	d78ea36e197923b5	strand=+ flipped=False region=chr2:38029103-38029615
+srdf_bin_512	srdf_window_27	88	d22cab3219379203	strand=+ flipped=False region=chr2:38029615-38030127
+srdf_bin_512	srdf_window_28	61	6a58922201babcca	strand=- flipped=True region=chr2:41586650-41587162
+srdf_bin_512	srdf_window_29	45	7ac6db854f65171b	strand=- flipped=True region=chr2:41587162-41587674
+srdf_bin_512	srdf_window_30	50	d25c806fadb8d002	strand=- flipped=True region=chr2:41587674-41588186
+srdf_bin_512	srdf_window_31	69	04c944b9e17666f6	strand=- flipped=True region=chr2:41588186-41588698
+srdf_bin_512	srdf_window_32	41	2ff817c7cf2d4fd9	strand=+ flipped=False region=chr2:66774858-66775370
+srdf_bin_512	srdf_window_33	16	ad53811bfc23bfae	strand=+ flipped=False region=chr2:66775370-66775882
+srdf_bin_512	srdf_window_34	41	5af542f1d37cf31a	strand=+ flipped=False region=chr2:66775882-66776394
+srdf_bin_512	srdf_window_35	82	6862a3b2cfcf0c82	strand=+ flipped=False region=chr2:66776394-66776906
+srdf_bin_512	srdf_window_36	44	c64beb4cbad7c042	strand=- flipped=True region=chr2:108988255-108988767
+srdf_bin_512	srdf_window_37	49	7162ae9aac3551ba	strand=- flipped=True region=chr2:108988767-108989279
+srdf_bin_512	srdf_window_38	59	0d7ab405b0d26770	strand=- flipped=True region=chr2:108989279-108989791
+srdf_bin_512	srdf_window_39	41	b9be998ff8055d0e	strand=- flipped=True region=chr2:108989791-108990303
+srdf_reindex_resize	srdf_region_00	84	9b4cd42d84e695a1	index=100 strand=+ flipped=False
+srdf_reindex_resize	srdf_region_01	95	562a4e079ad05bea	index=101 strand=- flipped=True
+srdf_reindex_resize	srdf_region_02	121	58738e5de1fed4e4	index=102 strand=+ flipped=False
+srdf_reindex_resize	srdf_region_03	124	e5d3cde5b80ee0e7	index=103 strand=- flipped=True
+srdf_reindex_resize	srdf_region_04	106	0d525b8073e6ddad	index=104 strand=+ flipped=False
+srdf_reindex_resize	srdf_region_05	104	edaf218e99e485a6	index=105 strand=- flipped=True
+srdf_reindex_resize	srdf_region_06	146	2f3f56e5905b10bf	index=106 strand=+ flipped=False
+srdf_reindex_resize	srdf_region_07	94	231a7b96b4125525	index=107 strand=- flipped=True
+srdf_reindex_resize	srdf_region_08	44	996d501839ca0c88	index=108 strand=+ flipped=False
+srdf_reindex_resize	srdf_region_09	95	bd8bf065bb8755bc	index=109 strand=- flipped=True

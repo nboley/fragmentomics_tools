@@ -226,7 +226,7 @@ clean:
 # how both survived.
 test-realdata:
 	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
-		test/test_interval_real_data.py -v --realdata; \
+		test/test_interval_real_data.py test/test_orientation_real_data.py -v --realdata; \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \
