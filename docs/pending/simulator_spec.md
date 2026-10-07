@@ -152,13 +152,78 @@ Unmeasurable on the current region set — 0 invalid cut windows in 1,373,600 ov
 asymmetry and it bites a region set with gaps near cut sites. Not yet an owner
 decision either way.
 
-`N_start` weights every position 1; `N_end` weights by `f(L)` per route, which
-per position is
+### There are TWO expectations, and they differ in domain as well as weight
+
+`uniform_hexamer_counts` returns `{"start": N_start, "end": N_end}`. Both are
+used; neither is "the" normalisation.
+
+| | weight per position | domain |
+|---|---|---|
+| `N_start` | 1 — under a uniform start model every position is an equally likely start | `[0, region_len)` only, because only those positions can be starts |
+| `N_end` | `f(L)`-weighted, see below | the **whole padded track**, because a fragment starting near the right edge has its end out in the flank |
+
+`N_start` is sequence-only, so it is a property of `(region set, reference)`.
+`N_end` is keyed to `(region set, reference, f(L))`.
+
+The end weight per position:
 
     w(i) = F(min(i, max_fl)) − F(max(min_fl − 1, i − region_len))
 
-for the `FragmentLengthDist` CDF `F` over its own support. `f` reaches only the
-edge ramp: interior positions carry weight 1 under any normalised `f`.
+for the `FragmentLengthDist` CDF `F` over its own support. It is the **null's own
+prediction** of how often each position is an end, not a correction applied to
+ends. An end at `i` is reached from start `s = i − L` for each `L`, so its weight
+is the `f(L)` mass over routes whose start is admissible:
+
+    L ∈ [ max(min_fl, i − region_len + 1) , min(max_fl, i) ]
+
+### Why the end weight ramps, and why that is correct rather than a loss
+
+Verified against brute-force enumeration (closed form matches exactly). Two
+*different* truncations, which are easy to conflate:
+
+| | when | the excluded routes would need | span, for `region_len = 500` |
+|---|---|---|
+| left | `i < max_fl` | `L > i`, i.e. a start **left of** the region | `w = 0` on `[0, 24]`, ramping on `[25, 179]` |
+| right | `i ≥ region_len + min_fl − 1` | `L < i − region_len + 1`, i.e. a start **at or right of** `region_len` | ramping on `[524, 679]` — **in the FLANK, past `region_len`** |
+
+`w == 1` exactly on `[max_fl, region_len + min_fl − 2]`. Both ramps are the same
+length and are mirror images of `F`, but they sit in different places: the left
+one occupies the start of the region, the right one lies outside it.
+
+**The flank does not fix this, and is not meant to.** It is easy to think the
+right ramp is a sequence problem — we pad by `max_fl + HEX_HALF`, so surely the
+hexamer is readable? It is. **Sequence availability and admissibility are
+separate axes.** The flank exists so a fragment whose END lands past the region
+edge still has a readable hexamer; it deliberately does NOT extend the start
+domain, because start-in-region (§3) is what makes each fragment belong to
+exactly one tile.
+
+**So a route needing `s ≥ region_len` is not lost — it is counted in the NEXT
+tile.** Measured over three contiguous tiles, summing `w` for each genomic end
+position across all of them:
+
+    interior of the run: min = 1.000000, max = 1.000000  (exactly complete)
+    ends of the run:     0.4872 at the left, 0.5128 at the right
+
+The per-tile ramp is the **partition boundary**, not a deficiency. And it is what
+makes `N` *correct*: `C` is tabulated under the same partition — each real
+fragment is counted in the tile holding its start — so if `N_end` did not ramp it
+would credit a tile with candidate routes `C` can never claim there, and `r`
+would be depressed at every tile edge.
+
+Note the contrast with the validity gate above: **`C` and `N` agree on the
+partition and disagree on the validity gate.** The first is right by
+construction; the second is the open item.
+
+**Where the truncation IS genuine: isolated tiles.** The ramps complement only
+where a neighbouring tile exists. The 66,649-tile set is not uniformly
+contiguous — its first six lines are isolated, lines 8-10 contiguous — so an
+isolated tile has no neighbour to claim its edge routes. Nothing in the code
+knows which case a tile is in, and it does not need to: ramping identically is
+correct per-tile either way. But **coverage near the edges of an isolated tile is
+genuinely depleted**, which matters to whoever computes the oracle and picks the
+model's crop width — they must use the same truncated domain or the ceiling is
+wrong.
 
 ### Which expectation each table divides by
 
@@ -182,12 +247,14 @@ be POSITION-relative, so the table applied at genomic starts needs the start
 expectation whatever it is called.
 
 This is not a relabelling: `N_start` weights every position 1 while `N_end`
-carries the edge ramp above, so the two differ for every position within
-`max_fl` of a region edge — 11.7% of a 1536 bp tile. Getting it backwards cost
-a measured median 1.2% and max 16% error per `r` cell on real regions, silently,
-with every total intact. Fixed 2026-10-07; `[perm]` applies because the `_rev`
-tables index reverse-complement hexamers, which is a relabelling of the same
-position.
+carries the ramp above, so the two differ over the **180 in-region positions of
+the left ramp — 11.7% of a 1536 bp tile** (25 where `w = 0`, 155 ramping). That
+is the left ramp only, because it is the part that overlaps the start domain;
+the right ramp lies in the flank, where `N_start` is not defined at all.
+Getting the pairing backwards cost a measured median 1.2% and max 16% error per
+`r` cell on real regions, silently, with every total intact. Fixed 2026-10-07;
+`[perm]` applies because the `_rev` tables index reverse-complement hexamers,
+which is a relabelling of the same position.
 
 ## 6. Code
 
