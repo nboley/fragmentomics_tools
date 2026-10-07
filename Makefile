@@ -24,7 +24,13 @@ TEST_TIMEOUT ?= 3600
 # The two ignored packages import optional dependencies (datamanifest, fbio)
 # that are absent from the test environment, so their modules cannot even be
 # collected. That is an environment gap, not a code defect.
-PYTEST_ARGS ?= test/ fragmentomics_tools/ -q --doctest-modules \
+# `tests/` (background_model) IS collected, alongside `test/` (library). It was
+# omitted until 2026-10-07, which meant 677 tests never ran under the default
+# target -- including a module whose only coverage had just been added. A suite
+# that does not run by default is close to no suite.
+# The two suites are easy to confuse: `test/` is the library, `tests/` is
+# background_model. Both are here on purpose.
+PYTEST_ARGS ?= test/ tests/ fragmentomics_tools/ -q --doctest-modules \
 	--ignore=fragmentomics_tools/bias_correction \
 	--ignore=fragmentomics_tools/public_data_resources
 
@@ -202,9 +208,25 @@ docker-push:
 # path ever breaks the suite goes red instead of quiet.
 FLGC_PYTHONPATH ?= /home/nathanboley/src/biomarker
 
+# The interpreter is PINNED, not taken from PATH. A bare `python` resolves to
+# whatever the caller's shell has, and in an agent/MCP shell that was
+# /opt/conda/envs/claude-mcp/bin/python -- no pybedtools, no torch. The run then
+# died with 12 COLLECTION ERRORS that look exactly like broken tests. That cost
+# two people time independently on 2026-10-07, each initially reading it as repo
+# breakage rather than a wrong interpreter.
+# Override for a different env: make test PYTHON=/path/to/python
+PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
+
 test:
+	@if [ ! -x "$(PYTHON)" ]; then \
+		echo "❌ interpreter not found: $(PYTHON)"; \
+		echo "   This target pins the interpreter on purpose -- a bare 'python'"; \
+		echo "   picks up whatever is on PATH and fails as collection errors."; \
+		echo "   Override with: make test PYTHON=/path/to/python"; \
+		exit 2; \
+	fi
 	@PYTHONPATH="$(FLGC_PYTHONPATH):$$PYTHONPATH" \
-	timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest $(PYTEST_ARGS); \
+	timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \
