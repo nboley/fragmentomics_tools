@@ -249,13 +249,19 @@ def _hexamers_at(seq: np.ndarray, pos: np.ndarray):
 
     **``valid`` is returned because it cannot be inferred from the index.**
     ``hexamer_indices`` gives an invalid window -- one containing a non-ACGT
-    base -- the index ``0``, not a sentinel.  A caller that ignores ``valid``
-    therefore does not *lose* N-containing cut sites, it miscounts every one of
-    them as ``AAAAAA``, inflating a real cell with garbage.  Index 0 is
-    indistinguishable from a genuine ``AAAAAA``, so the flag is the only way to
-    tell them apart.  Both of a fragment's cut sites must be valid for it to
-    count, which is why this returns the flag rather than filtering: the caller
-    has to AND the two together.
+    base -- the index of its **N-as-A reading**, not a sentinel and not ``0``:
+    ``ACGTAN`` returns the index of ``ACGTAA``, and only an all-N window
+    returns 0.  So a caller that ignores ``valid`` does not *lose* N-containing
+    cut sites, it miscounts each one into a NEIGHBOURING hexamer -- one
+    differing from the truth only at the N positions -- which is
+    indistinguishable from a genuine observation of that hexamer.  The flag is
+    the only way to tell them apart.  Both of a fragment's cut sites must be
+    valid for it to count, which is why this returns the flag rather than
+    filtering: the caller has to AND the two together.
+
+    (This docstring said "index 0 / ``AAAAAA``" until 2026-10-07. The sibling
+    claim in ``hexamer_indices`` was corrected first and this one was missed,
+    so the wrong version survived one round of fixing it.)
     """
     if isinstance(seq, str):
         seq = seq.encode("ascii")

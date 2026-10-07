@@ -55,7 +55,19 @@ def hexamer_indices(seq_bytes: np.ndarray):
     - ``rc_idx[c]``: reverse-complement hexamer index at the same position.
     - ``valid[c]``: False if the 6-mer window contains a non-ACGT base.
 
-    Invalid windows carry index 0 (callers must gate on ``valid``).
+    Invalid windows carry the index of their **N-as-A reading**, NOT index 0
+    (callers must gate on ``valid``).  ``safe = np.where(win == 255, 0, win)``
+    below zeroes the offending BASE, not the window, so ``ACGTAN`` yields the
+    index of ``ACGTAA`` (432) and only an all-N window yields 0.  An ungated
+    caller therefore miscounts into a NEIGHBOURING hexamer rather than into one
+    recognisable cell.  Corrected 2026-10-07; the same wrong claim stood in two
+    docstrings in ``count_hexamers_rdf.py``.
+
+    Verified the same day: this encoder and ``count_hexamers_rdf``'s agree
+    exactly on ``ACGTAN`` -> 432, ``ANGTAA`` -> 176, ``NNNNNN`` -> 0. The two
+    copies have NOT drifted, which is worth knowing because the pinning test
+    that ``count_hexamers_rdf`` cites as the guard against that drift
+    (``test_encoder_matches_precompute``) does not exist.
     """
     codes = _BASE_LUT[seq_bytes].astype(np.int64)
     win = np.lib.stride_tricks.sliding_window_view(codes, KMER)  # (L-5, 6)
