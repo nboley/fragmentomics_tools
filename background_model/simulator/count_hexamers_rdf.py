@@ -3,7 +3,10 @@
 Two artifacts, with different lifetimes:
 
 - ``C(h)`` -- observed cut-site counts, **per sample**.  ``count_sample``, or
-  the three passes by hand.  Parallel.
+  the three passes by hand.  Parallel.  The same pass also returns the
+  per-region admitted counts (the spec's stage 4), since the frame it already
+  built is the only place that count exists; see ``count_srdf`` for the
+  distinction between those and the hexamer-valid totals.
 - ``N(h)`` -- EXPECTED hexamer counts under a uniform start/end null.
   ``uniform_hexamer_counts``.  Serial.
 
@@ -618,8 +621,15 @@ def sample_region(
             continue
         w, starts, tot = w[live], starts[live], tot[live]
         cdf = np.cumsum(w / tot[:, None], axis=1)
+        # NOT clamped, deliberately. float64 throughout (e_tab and fl.densities
+        # are both float64), but cumsum is a SEQUENTIAL accumulation, so
+        # cdf[-1] lands just under 1.0 in ~43% of rows, by at most ~6.5 eps
+        # (measured). `pick` can therefore reach len(Ls) when u > cdf[-1] --
+        # probability 1.3e-16 per draw, about one occurrence per 3e9 full runs.
+        # If that ever happens we want the IndexError: clamping it would hand
+        # one fragment the longest length silently, and a loud failure at
+        # 1-in-3e9 is worth more than a quiet wrong value.
         pick = (cdf < rng.random((len(starts), 1))).sum(axis=1)
-        pick = np.minimum(pick, len(Ls) - 1)
 
         out_s.append(starts)
         out_L.append(Ls[pick])
@@ -631,6 +641,150 @@ def sample_region(
     return (np.concatenate(out_s).astype(np.int64),
             np.concatenate(out_L).astype(np.int64),
             np.concatenate(out_p))
+
+
+def simulate_fragments_to_bed(
+    srdf,
+    out_path: str,
+    *,
+    r: Dict[str, np.ndarray],
+    fl: "FragmentLengthDist",
+    region_counts,
+    rng,
+    p_plus: float = 0.5,
+    l_max: int = L_MAX,
+    mapq: int = 60,
+) -> Dict[str, int]:
+    """Draw fragments for every region and write an 8-column BED.
+
+    The BED is the input to ``fragments_h5.build_fragments_h5``, which needs it
+    bgzipped and tabix-indexed -- that is the caller's next step, not this
+    function's.
+
+    ``region_counts`` is the per-row ``n``, as returned by ``count_srdf``.
+    ``rng`` is required rather than defaulted: an unseeded run cannot be
+    reproduced, and the seed is this artifact's only provenance.
+
+    Column layout, verified against ``fragments_h5.fragment.tsv_to_fragments``:
+
+        contig  start  stop  <empty>  0  strand  mapq  mapq
+
+    - **Exactly 8 columns.** 7 is rejected outright by the reader, and a row
+      whose column count differs from the first row's is skipped.
+    - **Column 4 is EMPTY, not** ``"."``. The reader takes
+      ``parts[3] if parts[3] else None``, and ``"."`` is truthy -- it would
+      write a literal ``"."`` cell barcode into the h5. Empty writes none.
+    - **MAPQ is written explicitly** in columns 7 and 8, and must be 0-255.
+      Omitting it stores a 255 sentinel that reads back as ``-1``, and the
+      model's ``min_mapq=10`` then drops **every** fragment. The default 60
+      clears that with room to spare.
+    - 0-based half-open, matching ``starts_0``/``stops_0``.
+
+    Output is sorted by ``(contig, start, stop)`` because tabix requires each
+    contig's records contiguous and position-ordered. Sorting here is why
+    ``sample_region``'s draw order is not part of its contract.
+
+    Next step, verified end to end against the real reader::
+
+        gz = pysam.tabix_index(bed_path, preset="bed", force=True)
+        build_fragments_h5(gz, out_h5, fasta_filename=...)   # FASTA required
+
+    **``pysam.tabix_index`` CONSUMES the plain BED** -- measured: after the call
+    only ``sim.bed.gz`` and ``sim.bed.gz.tbi`` remain. Do not plan to re-read or
+    hash the plain file afterwards. Convenient for the two-output contract,
+    since the intermediate deletes itself, but surprising if unexpected.
+
+    Returns a stats dict. ``n_drawn < n_requested`` is possible and is reported
+    rather than raised -- see the spec's Settled note on the dropped-start
+    shortfall.
+    """
+    if out_path.endswith(".gz"):
+        raise ValueError(
+            f"write a PLAIN bed, got {out_path!r}. pandas would gzip it, and "
+            f"tabix needs BGZIP, which gzip is not -- the index step would fail "
+            f"on a file that looks correct. bgzip it as a separate step."
+        )
+    region_counts = np.asarray(region_counts)
+    if region_counts.shape != (len(srdf),):
+        raise ValueError(
+            f"region_counts has shape {region_counts.shape}, expected "
+            f"({len(srdf)},) -- one entry per row of srdf, in row order"
+        )
+    for col in ("contig", "start", "stop", "fragment_array", "sequence"):
+        if col not in srdf.columns:
+            raise ValueError(f"srdf has no {col!r} column")
+
+    # The frame sample_region assumes: left_pad = HEX_HALF makes a hexamer index
+    # equal its region-local coordinate, and right_pad = l_max + HEX_HALF covers
+    # a fragment that overhangs the far edge. Checking the exact length pins
+    # BOTH pads, and is the only thing standing between us and a silently
+    # truncated sequence at a contig end -- which would shift every hexamer
+    # index without any other symptom.
+    expected_seq_len_extra = 2 * HEX_HALF + l_max
+
+    chunks = []
+    n_requested = n_drawn = n_short = 0
+    for i, (contig, gstart, gstop, fa, seq) in enumerate(zip(
+        srdf["contig"], srdf["start"], srdf["stop"],
+        srdf["fragment_array"], srdf["sequence"],
+    )):
+        region_len = int(gstop) - int(gstart)
+        if fa.length != region_len:
+            raise AssertionError(
+                f"row {i}: fragment_array.length {fa.length} != stop-start "
+                f"{region_len}. Admission used the former and the sequence "
+                f"frame the latter, so they must agree."
+            )
+        if len(seq) != region_len + expected_seq_len_extra:
+            raise AssertionError(
+                f"row {i} ({contig}:{gstart}-{gstop}): sequence is {len(seq)} b, "
+                f"expected {region_len + expected_seq_len_extra} "
+                f"(region {region_len} + left_pad {HEX_HALF} + right_pad "
+                f"{l_max + HEX_HALF}). A short sequence means the flank was "
+                f"truncated -- a region within {l_max + HEX_HALF} b of a contig "
+                f"end cannot supply it -- and every hexamer index would shift."
+            )
+
+        n = int(region_counts[i])
+        n_requested += n
+        if n == 0:
+            continue
+        starts_0, lengths, is_plus = sample_region(
+            seq, region_len, n, r=r, fl=fl, p_plus=p_plus, rng=rng,
+        )
+        n_drawn += len(starts_0)
+        if len(starts_0) < n:
+            n_short += 1
+        if not len(starts_0):
+            continue
+
+        starts = int(gstart) + starts_0
+        chunks.append(pd.DataFrame({
+            "contig": contig,
+            "start": starts,
+            "stop": starts + lengths,
+            "name": "",
+            "score": 0,
+            "strand": np.where(is_plus, "+", "-"),
+            "mapq1": mapq,
+            "mapq2": mapq,
+        }))
+
+    if chunks:
+        bed = pd.concat(chunks, ignore_index=True)
+        bed.sort_values(["contig", "start", "stop"], kind="stable", inplace=True)
+    else:
+        bed = pd.DataFrame(columns=["contig", "start", "stop", "name", "score",
+                                    "strand", "mapq1", "mapq2"])
+    bed.to_csv(out_path, sep="\t", header=False, index=False)
+
+    return dict(
+        n_regions=len(srdf),
+        n_requested=n_requested,
+        n_drawn=n_drawn,
+        n_short_regions=n_short,
+        n_rows_written=len(bed),
+    )
 
 
 def propensities(
@@ -671,15 +825,56 @@ def propensities(
 def count_srdf(
     srdf,
     *,
+    strand_tol: float = 0.1,
     n_workers: int | None = None,
     verbose: bool = True,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, Dict[str, int]]:
     """Count over a frame that already has ``fragment_array`` and ``sequence``.
 
     One ``parallel_apply`` returning three columns per fragment, which
     ``parallel_apply`` concatenates; then four ``bincount`` calls.  The frame is
     expected to be already deduplicated and length-filtered by the
     ``fragment_array_callback`` used at attach time.
+
+    Returns ``(counts, region_counts, stats)``.
+
+    ``region_counts``
+        int64, one entry **per ROW, in row order** -- entry ``i`` is the number
+        of fragments admitted to row ``i``.  This is the spec's stage-4
+        "fragments per region", and it is what the sampler's ``n`` is drawn
+        against.
+
+        "Per region" holds because ``count_sample`` builds the frame from a
+        single sample, so rows are regions.  An ``srdf`` carrying several
+        samples has one row per ``(sample, region)`` PAIR -- ``len`` is rows,
+        not regions and not fragments -- and then these counts are per pair.
+        The same caveat applies to ``stats["n_regions"]``.
+
+        It counts fragments that survived, in order: MAPQ at fetch, dedup on
+        ``(starts_0, stops_0)``, the length filter, and start-in-region
+        admission.  **It is NOT the hexamer-valid count.**
+        ``cut_site_hexamers`` additionally drops a fragment whose start or stop
+        hexamer contains a non-ACGT base, so
+
+            region_counts.sum() >= stats["n_counted"]
+
+        and the gap is the N-containing cut sites.  The two differ per region,
+        not by a global factor, because N content is not uniform across the
+        region set.  **The owner has accepted this divergence** (2026-10-06):
+        the sampler's ``n`` is the post-admission count, so a simulated region
+        gets as many fragments as were admitted, including the few whose real
+        counterparts carried an N in a cut site and so never reached ``C(h)``.
+        Do not "fix" this to the hexamer-valid count without asking.
+
+        Read off the frame rather than reduced through ``parallel_apply``,
+        matching how the scalar stats below are produced: the reduction
+        concatenates per-region frames and so discards region identity, and
+        recovering it would mean giving ``cut_site_hexamers`` a region key it
+        does not currently carry.
+
+        ``stats["n_after_filters"]`` is this vector's sum **by construction**
+        (computed from it, not alongside it), so the scalar and the vector
+        cannot drift apart.
     """
 
     for col in ("fragment_array", "sequence"):
@@ -708,20 +903,70 @@ def count_srdf(
             f"odd hexamer total {total} -- every fragment must contribute one "
             f"start and one end"
         )
+
+    # Per-strand totals are EXACT IDENTITIES of the tables, not estimates:
+    # counts_from_hexamers puts one start and one end per fragment into its own
+    # strand's pair, so each pair's two sums must agree to the fragment. A
+    # mismatch means the strand routing is broken -- which the `total % 2`
+    # check above cannot see, since it passes for any even total.
+    n_plus, n_plus_end = int(counts["start_fwd"].sum()), int(counts["end_fwd"].sum())
+    n_minus, n_minus_end = int(counts["start_rev"].sum()), int(counts["end_rev"].sum())
+    if n_plus != n_plus_end or n_minus != n_minus_end:
+        raise AssertionError(
+            f"strand routing is broken: start/end totals disagree within a "
+            f"strand pair -- plus {n_plus} vs {n_plus_end}, minus {n_minus} vs "
+            f"{n_minus_end}. Every fragment contributes exactly one start and "
+            f"one end to ITS OWN strand's pair, so these are identities."
+        )
+    # Per-region admitted counts, in row order. Length follows from the column
+    # itself, so there is nothing to assert: it is this frame's own column.
+    region_counts = np.array(
+        [fa.n_frags for fa in srdf["fragment_array"]], dtype=np.int64
+    )
     stats = dict(
         n_regions=len(srdf),
         # Post-callback: MAPQ at load, then dedup and the length filter. NOT
         # the raw fetched count -- that is gone by the time the frame exists.
-        n_after_filters=int(sum(fa.n_frags for fa in srdf["fragment_array"])),
+        # DERIVED from region_counts so the scalar cannot disagree with the
+        # vector.
+        n_after_filters=int(region_counts.sum()),
         n_counted=total // 2,
+        n_plus=n_plus,
+        n_minus=n_minus,
+        plus_frac=(n_plus / (n_plus + n_minus)) if (n_plus + n_minus) else float("nan"),
     )
+
+    # Strand balance. A cfDNA fragment is double-stranded and has no intrinsic
+    # orientation: the strand label records which of its two ends became read 1,
+    # and adapter ligation is symmetric, so the label is a fair coin independent
+    # of sequence. p_plus is therefore 0.5 BY CONSTRUCTION, not by fitting, and
+    # this is an assertion rather than a measurement.
+    #
+    # What it is really guarding: `rfa.fragment_strands` is `<U1` ('+'), not the
+    # `b'+'` bytes FragmentsH5.fetch_array returns. Comparing against bytes
+    # yields an all-False plus mask and so an EMPTY minus or plus table -- and
+    # sample_region skips a strand whose start weights are all zero *silently*,
+    # which would make the simulator emit strand-pure data with no error
+    # anywhere. This is the cheapest place to catch that.
+    #
+    # The tolerance is deliberately loose. It exists to catch a table that is
+    # empty or grossly lopsided, not to police a few percent of real skew, and a
+    # tight bound would false-positive on ordinary variation. Note the fraction
+    # is over the hexamer-VALID population (n_counted), not the admitted one.
+    if (n_plus + n_minus) and abs(stats["plus_frac"] - 0.5) > strand_tol:
+        raise AssertionError(
+            f"strand fraction {stats['plus_frac']:.4f} is more than {strand_tol} "
+            f"from 0.5 ({n_plus} plus, {n_minus} minus). Strand carries no "
+            f"sequence information, so this is not biology. Check that "
+            f"fragment_strands was compared against '+' and not b'+'."
+        )
     if stats["n_regions"] and not stats["n_after_filters"]:
         raise ValueError(
             "MAPQ removed ALL fragments. Unknown MAPQ is stored as -1, so "
             "this is almost certainly the '-1 >= min_mapq' trap: MAPQ was "
             "never carried into the h5."
         )
-    return counts, stats
+    return counts, region_counts, stats
 
 
 def filter_fragments(fa, *, l_min: int = L_MIN, l_max: int = L_MAX):
@@ -758,11 +1003,35 @@ def count_sample(
     min_mapq: int = 10,
     l_min: int = L_MIN,
     l_max: int = L_MAX,
+    strand_tol: float = 0.1,
 
     n_workers: int | None = None,
     verbose: bool = True,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
-    """The three passes end to end for one sample. Returns ``C(h)``.
+) -> Tuple[
+    Dict[str, np.ndarray], np.ndarray, Dict[str, int], "SampleAndRegionDataFrame"
+]:
+    """The three passes end to end for one sample.
+
+    Returns ``(counts, region_counts, stats, srdf)`` -- ``C(h)``, the per-region
+    admitted counts in the row order of ``rdf``, the stats, and the frame that
+    produced them.  See ``count_srdf`` for what ``region_counts`` does and does
+    not count.
+
+    **The frame is returned rather than discarded** because it is the only
+    place three later inputs exist:
+
+    - ``f(L)`` -- ``FragmentLengthDist.from_srdf`` reads the ``fragment_array``
+      column, and f(L) must come from the same admitted population as ``C``.
+    - the **padded sequences** the sampler draws against, already attached with
+      the asymmetric frame.
+    - the **region coordinates**, needed to lift a region-local draw to a
+      genomic one.
+
+    Rebuilding it would cost a second fetch and a second serial FASTA walk.
+    Note ``uniform_hexamer_counts`` takes the ``rdf``, NOT this frame -- it
+    refuses one carrying fragment arrays -- so ``N(h)`` is a separate pass by
+    design, and f(L) must be built before it, since its end weights are
+    f(L)-weighted.
 
     Pair with ``uniform_hexamer_counts`` and ``propensities`` to get ``r(h)``:
     counts alone are not weights.
@@ -809,4 +1078,7 @@ def count_sample(
             verbose=verbose,
         )
     )
-    return count_srdf(srdf, n_workers=n_workers, verbose=verbose)
+    counts, region_counts, stats = count_srdf(
+        srdf, strand_tol=strand_tol, n_workers=n_workers, verbose=verbose
+    )
+    return counts, region_counts, stats, srdf
