@@ -6,10 +6,27 @@
 |---|-------|--------|
 | 1 | Fragment h5 | manifest key `ibd/frag_h5s/<SEQRUN>/<SAMPLE>-Lib1.hg38.fragments.h5` |
 | 2 | Regions BED | `quiet_v2_pad1200_repeats_removed_tile1536.bed` |
-| 3 | Reference FASTA | `s3://karius-biomarker-data-assets/pipeline-assets/hg38/sequence.fa.bgz` |
+| 3 | Reference FASTA | nominally `s3://karius-biomarker-data-assets/pipeline-assets/hg38/sequence.fa.bgz` — **but see below; no run has used it** |
 
 Manifest: `~/src/biomarker-projects/tf_binding_site_classification/projects/ibd/manifests/ibd.data_manifest.tsv`
 — 763 h5, mirror `s3://karius-biomarker-data-assets/projects`.
+
+**The FASTA actually in use is GRCh38.p12**, not the asset named above
+(owner, 2026-10-07, "accept p12 for now"):
+`/efs/analytics/nathanboley/test_fragments_h5/GRCh38.p12.genome.fa.gz`. The
+canonical `sequence.fa.bgz` is not present at any local path checked, and the
+only local file of that name belongs to another user and has no `.fai`.
+Coverage is fine — all 23 BED contigs are present — and GRCh38 patch releases do
+not alter primary assembly sequence, though **that last point was not verified
+here**.
+
+**The consequence is provenance, not sequence.** The store's `config_hash`
+hashes the reference `.fai`, so a store built against p12 will not match one
+built against `sequence.fa.bgz` **even where the sequence is byte-identical**.
+p12-derived artifacts are therefore not interchangeable with the rest of the
+pipeline's. Record the reference path and its `.fai` md5 in any output, so a
+later switch is detectable rather than silent, and re-raise this before
+comparing a p12 artifact against a pipeline one.
 
 ### Regions BED options
 
@@ -127,15 +144,50 @@ A hexamer's weight is observed over expected-under-uniform:
 §4 normalises it per region for starts and per start for stops.
 
 `C` and `N` are one tabulation counted two ways, so both cover the same
-candidate positions and the same validity gate. `N_start` weights every
-position 1; `N_end` weights by `f(L)` per route, which per position is
+candidate positions. **They do NOT use the same validity gate**, and the
+earlier claim here that they did was wrong: `C` requires BOTH of a fragment's
+cut-site windows to be ACGT-only, while `N_start` gates only its own window.
+Unmeasurable on the current region set — 0 invalid cut windows in 1,373,600 over
+800 regions, and 4 of 66,649 regions hold any non-ACGT base — but it is a real
+asymmetry and it bites a region set with gaps near cut sites. Not yet an owner
+decision either way.
+
+`N_start` weights every position 1; `N_end` weights by `f(L)` per route, which
+per position is
 
     w(i) = F(min(i, max_fl)) − F(max(min_fl − 1, i − region_len))
 
 for the `FragmentLengthDist` CDF `F` over its own support. `f` reaches only the
-edge ramp: interior positions carry weight 1 under any normalised `f`. The
-`_rev` tables divide by the permuted expectation,
-`N_rc == N_fwd[rc_permutation()]`.
+edge ramp: interior positions carry weight 1 under any normalised `f`.
+
+### Which expectation each table divides by
+
+**This is the pairing, stated explicitly, because leaving it implicit is what
+allowed a live defect to sit here undetected.** The previous wording said only
+that "the `_rev` tables divide by the permuted expectation,
+`N_rc == N_fwd[rc_permutation()]`" — true but silent on *which* of
+`N_start`/`N_end`, which is precisely where the bug was.
+
+| table | tallies | divides by |
+|---|---|---|
+| `start_fwd` | genomic starts | `N_start` |
+| `end_fwd` | genomic stops | `N_end` |
+| `start_rev` | genomic **STOPS** | `N_end[perm]` |
+| `end_rev` | genomic **STARTS** | `N_start[perm]` |
+
+The `_rev` rows are **crossed relative to their names, on purpose.** Table names
+are MOLECULE-relative — `start` means the molecule's 5′ cut site — but a
+minus-strand fragment's 5′ cut site sits at its genomic STOP. Denominators must
+be POSITION-relative, so the table applied at genomic starts needs the start
+expectation whatever it is called.
+
+This is not a relabelling: `N_start` weights every position 1 while `N_end`
+carries the edge ramp above, so the two differ for every position within
+`max_fl` of a region edge — 11.7% of a 1536 bp tile. Getting it backwards cost
+a measured median 1.2% and max 16% error per `r` cell on real regions, silently,
+with every total intact. Fixed 2026-10-07; `[perm]` applies because the `_rev`
+tables index reverse-complement hexamers, which is a relabelling of the same
+position.
 
 ## 6. Code
 
@@ -147,8 +199,9 @@ numpy, pandas, `fragmentomics_tools.dataframe`.
 | `filter_fragments` | dedup, length filter, admission. All filtering |
 | `cut_site_hexamers` | per region → `start_hex`, `stop_hex`, `strand` |
 | `counts_from_hexamers` | genomic start/stop + strand → the four tables |
-| `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. Asserts strand balance and the start/end identities |
-| `count_sample` | the three passes end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. Asserts only that BOTH strand tables are non-empty — there is no balance check, see Settled |
+| `count_sample` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `simulate_fragments_to_bed` | draws for every region → the 8-column BED that `build_fragments_h5` consumes. Sorts its output; `n_drawn < n_requested` is reported, not raised |
 | `FragmentLengthDist` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
 | `uniform_hexamer_counts` | → `N(h)` |
 | `fl_end_weight` | `w(i)` above |
@@ -175,28 +228,45 @@ arrays, so the length draw is one `(n, n_lengths)` block.
 
 Needs action. Nothing here has been decided.
 
-- **No tests.** Not "thin" — *none*. No test anywhere references
-  `count_hexamers_rdf`. `sample_region` is the worst place for that, because its
-  failure modes are silent: swapped 5′/3′ strand pairing inverts the asymmetry
-  the four untied tables exist to capture, and an off-by-one in the padded frame
-  reads a neighbouring hexamer while leaving every total plausible.
+- **4 mutations from the test design have no test**: M12 (dedup before MAPQ),
+  M15 (midpoint instead of start-in-region admission), M24 (which of the three
+  length-weight factors zeroed), M25 (end-hexamer offset). Scoped out of the
+  implementation on purpose, so this is a known gap rather than an oversight —
+  but admission order and the length draw are both places a silent error would
+  live, so it is the most valuable remaining test work.
 
-- **`attach_sequence` near a contig end is UNVERIFIED.** The frame in §3 assumes
-  183 bp of right flank is always obtainable. A region within 183 bp of a contig
-  end cannot supply it, and nothing has established whether `attach_sequence`
-  pads, truncates, or raises there. `uniform_hexamer_counts` is documented as
-  raising on a truncated fetch, but the sampler's path has not been checked.
-  Verify with a region placed within 183 bp of a contig end on the test FASTA.
-  A truncated sequence would shift every hexamer index silently, since the whole
-  frame rests on `left_pad = HEX_HALF` making an index equal its coordinate.
+- **`tests/conftest.py` cannot exist.** Its module name collides with
+  `test/fragment_array/conftest.py` under pytest's `prepend` import mode, so the
+  implementing agent deleted it and registered markers inline. That is a
+  workaround: the collision returns the moment anyone re-adds the file, which is
+  an ordinary thing to want. The fix is `importmode = "importlib"` in
+  `pyproject.toml`, which changes pytest behaviour repo-wide and so needs its
+  own validation run.
+
+- **`C` and `N` disagree on the validity gate** (§5). `C` needs both cut sites
+  valid, `N_start` only its own. Unmeasurable on this region set; an owner
+  decision either way is still open.
 
 - **Second copy of the encoder** in `simulator/precompute.py`, kept until the
   old simulator is deleted (deferred: ~8 files still import it, some belonging
-  to another stream). **The guard named for this drift does not exist** —
-  `count_hexamers_rdf.py` cites `test_encoder_matches_precompute` as what keeps
-  the two from "diverging silently", and no such test is in the repo. Either
-  write it or delete the claim; a comment asserting a guard that isn't there is
-  worse than silence.
+  to another stream). The drift is now actually guarded —
+  `test_encoder_matches_oracle_all_4096` checks all 4096 against an INDEPENDENT
+  oracle, which is stronger than checking the two copies against each other
+  since those could drift in step. Measured 2026-10-07: they agree exactly.
+  **What remains is a naming lie**: `count_hexamers_rdf.py` still cites
+  `test_encoder_matches_precompute`, which does not exist. Delete that citation.
+
+### Closed since this section was last accurate
+
+Kept briefly because the Open list claimed all three for longer than they were
+true, and a reader who saw it mid-day would have acted on stale information.
+
+- ~~**No tests.**~~ 47 now reference `count_hexamers_rdf` (`844f227`, `45b32ec`,
+  `d9c6e90`) — 43 plus an independent oracle, plus 4 propensity tests. Mutation
+  tested: 18 mutations applied programmatically, all now caught.
+- ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
+  `test_contig_ends_raise` and `test_frame_through_attach_sequence` pin it: it
+  raises, and the padded length is asserted exactly, which pins both pads.
 
 ---
 
@@ -281,9 +351,18 @@ looks like a defect, read the reason before changing it.
 
 - **A start with no valid length is dropped**, so that region yields fewer than
   `n` fragments. `P(start)` does not condition on a valid fragment existing.
-  Not observed on the 1536 tiles — 38,637 drawn for 38,637 requested over ~1000
-  regions, reported by a prior session and not re-measured since — but it is a
-  silent shortfall where it does occur.
+
+  **OBSERVED, on the first real run — this said "not observed" until
+  2026-10-07.** A 10-region run requested 322 and drew 320, one region short.
+  The earlier 38,637-for-38,637 over ~1000 regions also stands; both are true,
+  and the difference is the useful part:
+
+  **The shortfall rate tracks how sparsely `r(h)` is estimated, not the
+  sequence.** At 10 regions only 108-151 of 4096 cells were nonzero, so most end
+  hexamers carried `r = 0` and whole length sets vanished — the `r_end` factor
+  in §4, not the `valid` factor. It therefore shrinks as the region set grows,
+  and **a shortfall on a small run is expected rather than a defect.** Do not
+  chase one without first checking how many `r` cells are populated.
 
   **DEFERRED by owner, 2026-10-06: documented only. No counter, no test.**
   Recorded so the next reader does not re-open it as an oversight.
