@@ -132,9 +132,14 @@ def hexamer_indices(seq):
     - ``rc_idx[c]``: reverse-complement index at the same position.
     - ``valid[c]``: False if the window contains a non-ACGTacgt base.
 
-    **Invalid windows carry index 0**, so a caller that does not gate on
-    ``valid`` miscounts every N-containing window as ``AAAAAA`` rather than
-    losing it.
+    **An invalid window carries the index of its N-as-A reading, NOT index 0.**
+    ``safe = np.where(win == 255, 0, win)`` zeroes the offending BASE, not the
+    window, so ``ACGTAN`` returns the index of ``ACGTAA`` (432) and only an
+    all-N window returns 0.  A caller that does not gate on ``valid`` therefore
+    miscounts an N-containing window into a NEIGHBOURING hexamer -- one
+    differing only at the N positions -- which is harder to notice than
+    everything piling into a single cell.  Measured, after the docstring here
+    claimed index 0 for months and that claim was repeated downstream.
 
     >>> fwd, rc, valid = hexamer_indices("acgtAC")
     >>> int(fwd[0]) == int(hexamer_indices("ACGTAC")[0][0]), bool(valid[0])
@@ -932,11 +937,18 @@ def count_srdf(
             f"start and one end"
         )
 
-    # Per-strand totals are EXACT IDENTITIES of the tables, not estimates:
-    # counts_from_hexamers puts one start and one end per fragment into its own
-    # strand's pair, so each pair's two sums must agree to the fragment. A
-    # mismatch means the strand routing is broken -- which the `total % 2`
-    # check above cannot see, since it passes for any even total.
+    # Per-strand totals must agree within a pair, because counts_from_hexamers
+    # puts one start and one end per fragment into its own strand's pair.
+    #
+    # DO NOT MISTAKE THIS FOR ROUTING PROTECTION. I originally claimed it
+    # "catches broken strand routing"; it does not, and that was measured:
+    # feeding counts_from_hexamers a start/stop SWAP leaves both identities
+    # true, because each sum is just the number of rows of that strand however
+    # the hexamers are routed. Together with the `total % 2` check above it is
+    # a TAUTOLOGY for any `counts` this module produced.
+    # What it does still buy: a malformed `counts` dict from somewhere else --
+    # hand-built, or loaded from a stored artifact -- fails here rather than
+    # silently downstream. That is the only reason it stays.
     n_plus, n_plus_end = int(counts["start_fwd"].sum()), int(counts["end_fwd"].sum())
     n_minus, n_minus_end = int(counts["start_rev"].sum()), int(counts["end_rev"].sum())
     if n_plus != n_plus_end or n_minus != n_minus_end:
@@ -1013,22 +1025,36 @@ def count_srdf(
         # denominator and false-positives on any small run -- it rejected a
         # legitimate 10-region smoke test. Check (1) already covers the dead
         # table, so this one is free to be generous.
+        # CAPPED below 0.5, because `plus_frac` lives in [0, 1] and so
+        # `abs(plus_frac - 0.5) <= 0.5` always: an uncapped bound is VACUOUS
+        # wherever it reaches 0.5, i.e. n_regions <= 9 (measured). Rescaling by
+        # n_regions was itself the fix for a 10-region false positive, and it
+        # silently made the check dead on anything smaller.
         n_regions = max(int(stats["n_regions"]), 1)
-        tol = max(strand_tol, 1.5 / np.sqrt(n_regions))
+        tol = min(0.45, max(strand_tol, 1.5 / np.sqrt(n_regions)))
         if abs(stats["plus_frac"] - 0.5) > tol:
             raise AssertionError(
                 f"strand fraction {stats['plus_frac']:.4f} is more than "
                 f"{tol:.3f} from 0.5 ({n_plus} plus, {n_minus} minus over "
                 f"{n_regions} regions). Both tables are non-empty, so this is "
-                f"not the b'+' trap. Strand is clustered within regions, so the "
-                f"bound already allows for that -- a deviation this large wants "
-                f"explaining before the data is used."
+                f"not the b'+' trap. The real-data fraction is OVERDISPERSED "
+                f"relative to independent fragment draws -- mechanism "
+                f"unmeasured -- and this bound already allows for that, so a "
+                f"deviation this large wants explaining before the data is "
+                f"used. Note a wholesale plus/minus swap maps the fraction to "
+                f"1 - itself and so is invisible here."
             )
     if stats["n_regions"] and not stats["n_after_filters"]:
         raise ValueError(
-            "MAPQ removed ALL fragments. Unknown MAPQ is stored as -1, so "
-            "this is almost certainly the '-1 >= min_mapq' trap: MAPQ was "
-            "never carried into the h5."
+            "EVERY fragment was removed before counting. The admission chain "
+            "is MAPQ at fetch, then dedup, the length filter and "
+            "start-in-region, and ANY of them can empty the frame -- the "
+            "message used to blame MAPQ alone, which made this guard read as "
+            "MAPQ coverage that it does not provide. MAPQ is still the first "
+            "thing to check: unknown MAPQ is stored as -1, so a h5 built "
+            "without MAPQ hits the '-1 >= min_mapq' trap and loses "
+            "everything. Also check that the regions overlap the h5's contigs "
+            "and that the length bounds are not inverted."
         )
     return counts, region_counts, stats
 
