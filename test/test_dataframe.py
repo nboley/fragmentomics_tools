@@ -214,6 +214,17 @@ class TestReorderColumns:
         result = dfb.reorder_columns()
         assert list(result.columns) == ["b", "a"]
 
+    def test_rdf_hoists_bed_columns(self):
+        rdf = RegionDataFrame(
+            pd.DataFrame({
+                "score": [1], "stop": [200], "extra": ["a"],
+                "contig": ["chr1"], "start": [100], "strand": ["."],
+            }),
+            ref="hg19",
+        )
+        result = rdf.reorder_columns()
+        assert list(result.columns)[:3] == ["contig", "start", "stop"]
+
     def test_srdf_hoists_fragment_array(self):
         srdf = _make_srdf()
         srdf["fragment_array"] = [None, None]

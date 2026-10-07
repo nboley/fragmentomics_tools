@@ -177,9 +177,29 @@ class DataFrameBase(pandas.DataFrame):
         return f
 
     def _repr_html_(self, *args, **kwargs):
+        # Kept deliberately, unlike the `to_string` override that sat beside it
+        # and was deleted with the required-columns assert. That one existed
+        # ONLY to dodge the assert, so it became dead weight. This one is
+        # measured to produce output identical to the inherited path, so it is
+        # defence-in-depth against subclass display quirks rather than a
+        # workaround — and removing it would be a display change, not a
+        # cleanup. Do not "tidy" the two to match.
         return self.df._repr_html_(*args, **kwargs)
 
     def reorder_columns(self):
+        """No-op by design: the base class has no privileged columns.
+
+        Subclasses that do override this and hoist their own — see
+        `RegionDataFrame` (BED columns) and `SampleAndRegionDataFrame`
+        (BED columns, sample identity, then `fragment_array`). This returns a
+        new frame rather than `self` so the aliasing contract matches those
+        overrides, which is the only reason the reconstruction is here.
+
+        This used to read `self[self._required_columns + ...]`, which raised
+        `TypeError` on any plain `DataFrameBase` because the base attribute
+        was a tuple and the method concatenated a list to it. It had therefore
+        never worked on this class.
+        """
         return self[list(self.columns)]
 
     @classmethod
@@ -417,6 +437,11 @@ class RegionDataFrame(DataFrameBase):
     }
     _optional_bed_columns = ["id", "score", "strand"]
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
+
+    def reorder_columns(self):
+        front = list(self._critical_bed_columns)
+        rest = [c for c in self.columns if c not in set(front)]
+        return self[front + rest]
 
     def get_fasta_path(self):
         if self.ref == 'hg38':
