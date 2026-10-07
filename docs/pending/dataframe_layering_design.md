@@ -464,11 +464,59 @@ protocol works.
 `from_fragments_h5` reverses coordinates and swaps strands for minus-strand
 regions, the correction applier deliberately *refuses* flipped input, and
 getting the ordering wrong silently destroys strand asymmetry rather than
-failing. Build a recorded real-data baseline with an asserting test before
-changing any of it. `test/test_interval_real_data.py` with
-`scripts/capture_interval_fixtures.py` is the working pattern: a committed
-manifest, regenerated and compared by a test that skips when EFS is absent,
-with a make target that refuses to skip.
+failing.
+
+**The real-data baseline this phase asked for now EXISTS, and it was built
+before Phase 3 rather than Phase 4.** Reconciled 2026-10-07.
+
+- `scripts/capture_orientation_fixtures.py` + `test/fixtures/orientation_manifest.tsv`
+  (232 rows) + `test/test_orientation_real_data.py`, wired into
+  `make test-realdata`, which refuses to skip. Built on the
+  `capture_interval_fixtures.py` pattern this section named, and it reuses the
+  capture module via `importlib` rather than reimplementing the digest logic.
+- It pins per-region loading under `+`/`-`/`.`, dense pileups, strand
+  symmetry, the **SRDF resize and bin coupling** — the four methods this phase
+  replaces with `on_resize` — a non-default index, and cross-process
+  determinism.
+- Moved earlier than this document specified, deliberately: **Phase 3 moves
+  the same four methods SRDF overrides**, so the coupling is disturbed by
+  Phase 3 and rewritten by Phase 4. One baseline covers both.
+
+**It immediately found two defects in the code this phase will rewrite.
+Read these before touching `from_fragments_h5`.** Both are in
+`fragment_array/fragment_array.py`, both pre-existing, both verified by
+execution, and both **unfixed pending owner approval** because fixing them
+changes computed results. Full detail is in CLAUDE.md's Known traps.
+
+1. The minus-strand block leaves `fragment_strands` **neither swapped nor
+   reordered** — the `[::-1]` is missing, *and*
+   `_switch_plus_with_minus_and_minus_with_plus` compares string literals
+   against the `|S1` bytes the h5 returns, so the swap matches nothing. Only
+   that one call site is affected; `__init__` normalises to `"U1"`, so
+   `reverse_strand()` and `analysis/strand_bias.py` are fine.
+2. The same block **never reverses `weights`**. It bites only when
+   `generate_weights_callback` is supplied, but per-fragment weights are the
+   correction pathway and `SparseIntVector` preserves fractional weights, so it
+   corrupts corrected pileups rather than raising.
+
+**Both share one root cause, and it bears directly on how this phase should be
+built: the minus-strand block hand-duplicates `reverse_strand()`, and the copy
+drifted field by field** — strands lost their reversal, weights were never
+added, methyl and gc kept theirs. The `TODO` at that block says "move this into
+reverse strand". Constructing strandless and then calling `reverse_strand()`
+deletes the duplicate and makes this defect class unreachable. That is
+CLAUDE.md's first rule — two implementations of one rule drift, and the
+divergence fails silently — appearing inside the library rather than in a
+caller. The consolidation is owner-gated and **not** part of this phase's
+agreed scope; do not assume it has happened.
+
+**The manifest marks defects as defects.** A `status` column carries
+`correct` or `pinned_broken:<which>`, it is part of the comparison keys, and
+`test_pinned_broken_rows_exist` blocks silently dropping the tracking. Both
+defects are also `strict=True` xfails, so a fix flips them loudly. **Do not
+regenerate the manifest to make a diff go away** — that is exactly how a
+592-interval `merge` regression was once recorded as a deliberate fixture
+movement in this very document.
 
 `center_regions_on_tf_motif` is **not** in this phase — see "Still open".
 
