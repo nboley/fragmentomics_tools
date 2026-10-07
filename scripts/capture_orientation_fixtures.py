@@ -94,6 +94,19 @@ def dense_digest(rfa):
     return _sha_array(dense)
 
 
+def weighted_rfa_digest(rfa):
+    """Like rfa_digest but includes weights — for testing the weights path."""
+    parts = [
+        _sha_array(rfa.starts_0),
+        _sha_array(rfa.stops_0),
+        _sha_array(rfa.weights),
+        str(rfa.is_flipped),
+        str(len(rfa.starts_0)),
+    ]
+    combined = "|".join(parts)
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+
 def select_regions(ctcf_path, n=N_REGIONS, size=REGION_SIZE, seed=RNG_SEED):
     """Select N CTCF regions, expand to `size` bp, from diverse chromosomes.
 
@@ -143,7 +156,7 @@ def input_provenance():
         file_size, digest = _digest_file(path)
         rows.append({
             "op": "input", "dataset": name, "n": file_size,
-            "sha256_16": digest, "note": str(path),
+            "sha256_16": digest, "status": "correct", "note": str(path),
         })
     return rows
 
@@ -154,12 +167,12 @@ def capture():
 
     rows = []
 
-    def record(op, dataset, n, digest, note=""):
+    def record(op, dataset, n, digest, note="", status="correct"):
         rows.append({
             "op": op, "dataset": dataset, "n": n,
-            "sha256_16": digest, "note": note,
+            "sha256_16": digest, "status": status, "note": note,
         })
-        print(f"  {op:40} {dataset:30} n={n:<10} {digest}")
+        print(f"  {op:40} {dataset:30} n={n:<10} {digest} [{status}]")
 
     regions = select_regions(CTCF_SRC)
     print(f"Selected {len(regions)} regions")
@@ -174,10 +187,19 @@ def capture():
             region = Region(chrom, start, stop, strand_val, ref="hg38")
             rfa = RegionFragmentArray.from_fragments_h5(h5, region)
 
+            # load_minus pins broken output: rfa_digest includes
+            # fragment_strands which are neither reversed nor swapped
+            # (defect 1: _switch_plus_with_minus uses string literals
+            # against |S1 byte data, and [::-1] is missing).
+            # dense_minus is correct: dense_array depends only on
+            # coordinates (correctly reversed) and ignores strands.
+            load_status = ("pinned_broken:strand_swap"
+                           if strand_label == "minus" else "correct")
             record(
                 f"load_{strand_label}", region_name, len(rfa.starts_0),
                 rfa_digest(rfa),
                 note=f"{chrom}:{start}-{stop} strand={strand_val} flipped={rfa.is_flipped}",
+                status=load_status,
             )
             record(
                 f"dense_{strand_label}", region_name, rfa.dense_array.size,
@@ -211,10 +233,12 @@ def capture():
             f"starts={starts_match}|stops={stops_match}|"
             f"strands={strands_match}|flipped={flipped_match}"
         )
+        sym_status = "correct" if symmetry_ok else "pinned_broken:strand_swap"
         record(
             "symmetry_reverse_strandless_vs_minus", region_name,
             1 if symmetry_ok else 0, sym_digest,
             note=f"starts={starts_match} stops={stops_match} strands={strands_match} flipped={flipped_match}",
+            status=sym_status,
         )
 
     # ── SRDF coupling: resize_regions ────────────────────────────────
@@ -233,30 +257,39 @@ def capture():
 
     for i, (_, row) in enumerate(srdf.iterrows()):
         rfa = row.fragment_array
+        attach_status = ("pinned_broken:strand_swap"
+                         if row.strand == "-" else "correct")
         record(
             "srdf_attach", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
             note=f"strand={row.strand} flipped={rfa.is_flipped}",
+            status=attach_status,
         )
 
     # Resize (shrink to 1024)
     srdf_resized = srdf.resize_regions(1024)
     for i, (_, row) in enumerate(srdf_resized.iterrows()):
         rfa = row.fragment_array
+        resize_status = ("pinned_broken:strand_swap"
+                         if row.strand == "-" else "correct")
         record(
             "srdf_resize_1024", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
             note=f"strand={row.strand} flipped={rfa.is_flipped} region={row.contig}:{row.start}-{row.stop}",
+            status=resize_status,
         )
 
     # Bin into windows (512bp, valid mode)
     srdf_binned = srdf.bin_regions_into_windows(512, mode="valid")
     for i, (_, row) in enumerate(srdf_binned.iterrows()):
         rfa = row.fragment_array
+        bin_status = ("pinned_broken:strand_swap"
+                      if row.strand == "-" else "correct")
         record(
             "srdf_bin_512", f"srdf_window_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
             note=f"strand={row.strand} flipped={rfa.is_flipped} region={row.contig}:{row.start}-{row.stop}",
+            status=bin_status,
         )
 
     # ── Non-default index ────────────────────────────────────────────
@@ -266,10 +299,74 @@ def capture():
     srdf_reindexed_resized = srdf_reindexed.resize_regions(1024)
     for i, (idx, row) in enumerate(srdf_reindexed_resized.iterrows()):
         rfa = row.fragment_array
+        reindex_status = ("pinned_broken:strand_swap"
+                          if row.strand == "-" else "correct")
         record(
             "srdf_reindex_resize", f"srdf_region_{i:02d}", len(rfa.starts_0),
             rfa_digest(rfa),
             note=f"index={idx} strand={row.strand} flipped={rfa.is_flipped}",
+            status=reindex_status,
+        )
+
+    # ── Weights callback path ───────────────────────────────────────
+    # Defect 2: generate_weights_callback returns weights in original
+    # genomic order; the minus-strand block of from_fragments_h5 does NOT
+    # reverse them, while reverse_strand() does (line 759).  A position-
+    # dependent callback makes the reversal observable.
+    print("\n  Weights callback test...")
+
+    def _position_weights(starts, stops, supp_data):
+        if len(starts) == 0:
+            return np.array([], dtype=np.float64)
+        mids = (starts.astype(np.float64) + stops.astype(np.float64)) / 2.0
+        span = mids.max() - mids.min()
+        if span == 0:
+            return np.ones(len(starts), dtype=np.float64)
+        return 1.0 + (mids - mids.min()) / span
+
+    weight_regions = regions[:5]
+    for i, (chrom, start, stop) in enumerate(weight_regions):
+        region_name = f"wt_region_{i:02d}"
+
+        for strand_label, strand_val in [("plus", "+"), ("minus", "-"), ("strandless", ".")]:
+            region = Region(chrom, start, stop, strand_val, ref="hg38")
+            rfa = RegionFragmentArray.from_fragments_h5(
+                h5, region, generate_weights_callback=_position_weights,
+            )
+
+            is_minus = (strand_label == "minus")
+            wt_status = ("pinned_broken:strand_swap+weights_unreversed"
+                         if is_minus else "correct")
+            record(
+                f"weighted_load_{strand_label}", region_name,
+                len(rfa.starts_0), weighted_rfa_digest(rfa),
+                note=f"{chrom}:{start}-{stop} strand={strand_val}",
+                status=wt_status,
+            )
+
+        # Weights symmetry: reverse_strand(strandless) vs minus load
+        region_sl = Region(chrom, start, stop, ".", ref="hg38")
+        rfa_sl = RegionFragmentArray.from_fragments_h5(
+            h5, region_sl, generate_weights_callback=_position_weights,
+        )
+        rfa_sl_rev = rfa_sl.reverse_strand()
+
+        region_minus = Region(chrom, start, stop, "-", ref="hg38")
+        rfa_minus = RegionFragmentArray.from_fragments_h5(
+            h5, region_minus, generate_weights_callback=_position_weights,
+        )
+
+        weights_match = np.array_equal(rfa_sl_rev.weights, rfa_minus.weights)
+        starts_match = np.array_equal(rfa_sl_rev.starts_0, rfa_minus.starts_0)
+        wt_sym_ok = weights_match and starts_match
+        wt_sym_digest = _sha_str(
+            f"weights={weights_match}|starts={starts_match}"
+        )
+        record(
+            "symmetry_weights_strandless_vs_minus", region_name,
+            1 if wt_sym_ok else 0, wt_sym_digest,
+            note=f"weights={weights_match} starts={starts_match}",
+            status="correct" if wt_sym_ok else "pinned_broken:weights_unreversed",
         )
 
     h5.close()

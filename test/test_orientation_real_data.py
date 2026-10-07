@@ -63,19 +63,45 @@ def _require_real_data(request):
     pytest.skip(f"real-data inputs unavailable: {missing[0]} (and possibly others)")
 
 
-@pytest.mark.requires_real_data
-class TestOrientationManifestStillDescribesReality:
+VALID_STATUS_VALUES = {"correct", "pinned_broken:strand_swap",
+                       "pinned_broken:weights_unreversed",
+                       "pinned_broken:strand_swap+weights_unreversed"}
+
+
+class TestManifestFileIntegrity:
+    """Structural checks on the committed manifest — no real data needed."""
+
     def test_manifest_file_is_committed_and_parsable(self):
         assert MANIFEST.exists(), f"{MANIFEST} is missing"
         df = pd.read_csv(MANIFEST, sep="\t")
-        assert list(df.columns) == ["op", "dataset", "n", "sha256_16", "note"]
+        assert list(df.columns) == [
+            "op", "dataset", "n", "sha256_16", "status", "note",
+        ]
         assert len(df) > 0
 
+    def test_status_values_are_from_allowed_set(self):
+        df = pd.read_csv(MANIFEST, sep="\t")
+        bad = set(df["status"].unique()) - VALID_STATUS_VALUES
+        assert not bad, f"Unknown status values in manifest: {bad}"
+
+    def test_pinned_broken_rows_exist(self):
+        """A manifest with zero pinned_broken rows means someone silently
+        dropped the status tracking — which is exactly what item 3 prevents."""
+        df = pd.read_csv(MANIFEST, sep="\t")
+        broken = df[df["status"].str.startswith("pinned_broken")]
+        assert len(broken) > 0, (
+            "No pinned_broken rows in manifest. If all defects are fixed, "
+            "update the status column and remove this assertion."
+        )
+
+
+@pytest.mark.requires_real_data
+class TestOrientationManifestStillDescribesReality:
     def test_regenerated_manifest_matches_the_committed_one(self, request):
         """The actual regression net.
 
-        Compares op/dataset/n/sha256_16. The ``note`` column is excluded: it
-        carries human-readable context that legitimately changes (paths, etc.).
+        Compares op/dataset/n/sha256_16/status. The ``note`` column is
+        excluded: it carries human-readable context that legitimately changes.
         """
         _require_real_data(request)
 
@@ -86,7 +112,7 @@ class TestOrientationManifestStillDescribesReality:
         )
 
         committed = pd.read_csv(MANIFEST, sep="\t")
-        keys = ["op", "dataset", "n", "sha256_16"]
+        keys = ["op", "dataset", "n", "sha256_16", "status"]
 
         got = regenerated[keys].sort_values(keys).reset_index(drop=True)
         want = committed[keys].sort_values(keys).reset_index(drop=True)
@@ -123,15 +149,22 @@ class TestStrandSymmetryInvariant:
 
     @pytest.mark.xfail(
         reason=(
-            "PRODUCTION DEFECT: from_fragments_h5 does not reverse "
-            "fragment_strands when flipping for minus-strand regions "
-            "(fragment_array.py:1793). Coordinates are reversed ([::-1]) "
-            "but strands are only swapped, not reordered — so strand[j] "
-            "refers to a different fragment than starts_0[j] after the flip. "
-            "The methyl arrays and gc ARE reversed (lines 1797-1802); only "
-            "strands are missed. The TODO at line 1786 confirms this was "
-            "meant to be refactored into reverse_strand(), which does "
-            "reverse strands correctly (line 747). "
+            "PRODUCTION DEFECT (two independent causes): "
+            "(1) from_fragments_h5 does not reverse fragment_strands when "
+            "flipping for minus-strand regions (fragment_array.py:1793). "
+            "Coordinates are reversed ([::-1]) but strands are only swapped, "
+            "not reordered — so strand[j] refers to a different fragment "
+            "than starts_0[j] after the flip. "
+            "(2) The swap itself is inert: _switch_plus_with_minus_and_minus_"
+            "with_plus (fragment_array.py:123-131) compares string literals "
+            "'+'/'-' against the |S1 byte array returned by the h5, which "
+            "matches nothing — (arr == '+').sum() == 0 vs (arr == b'+').sum()"
+            " == 2. The commented-out lines 124-125 handled both encodings. "
+            "A fix addressing only the missing [::-1] without fixing the "
+            "byte/string comparison would still produce wrong strands. "
+            "Only this call site is affected: __init__ normalises to "
+            "dtype='U1' at :297-299, so reverse_strand and strand_bias.py "
+            "operate on converted arrays. "
             "This is a FINDING — do not patch it away."
         ),
         strict=True,
@@ -152,6 +185,60 @@ class TestStrandSymmetryInvariant:
         if len(failures) > 0:
             pytest.fail(
                 f"Strand symmetry broken for {len(failures)} regions:\n"
+                + failures[["dataset", "note"]].to_string(index=False)
+            )
+
+
+@pytest.mark.requires_real_data
+class TestWeightsSymmetryInvariant:
+    """Verify the weights-path defect is pinned.
+
+    Defect 2: generate_weights_callback returns weights in original genomic
+    order.  The minus-strand block of from_fragments_h5 does NOT reverse them
+    (fragment_array.py:1756-1818), while reverse_strand() does (line 759).
+    Per-fragment weights are the correction pathway; this defect corrupts
+    corrected pileups silently (SparseIntVector preserves fractional weights,
+    so no TypeError or clamp to zero — just wrong values).
+
+    NOTE: correction.py's is_flipped refusal (the assert at line 197) is
+    already exercised by tests/test_bg_correction.py (test_minus_strand_-
+    region_refused, test_plus_region_but_is_flipped_refused, and
+    test_minus_strand_region_via_from_fragments_h5_refused).  This manifest
+    pins the data-level consequence (wrong weight ordering), not the
+    correction-layer guard.
+    """
+
+    @pytest.mark.xfail(
+        reason=(
+            "PRODUCTION DEFECT: generate_weights_callback returns weights "
+            "in original genomic order; the minus-strand block of "
+            "from_fragments_h5 reverses coordinates but NOT weights "
+            "(fragment_array.py:1756-1818).  reverse_strand() does reverse "
+            "them (line 759).  So weight[j] refers to a different fragment "
+            "than starts_0[j] after the flip.  Per-fragment weights are the "
+            "correction pathway — this silently corrupts corrected pileups. "
+            "This is a FINDING — do not patch it away."
+        ),
+        strict=True,
+    )
+    def test_weights_symmetry_rows_all_pass(self, request):
+        _require_real_data(request)
+
+        cap = _load_capture_module()
+        manifest = pd.concat(
+            [pd.DataFrame(cap.input_provenance()), cap.capture()],
+            ignore_index=True,
+        )
+
+        sym_rows = manifest[
+            manifest["op"] == "symmetry_weights_strandless_vs_minus"
+        ]
+        assert len(sym_rows) > 0, "No weights symmetry rows found"
+
+        failures = sym_rows[sym_rows["n"] == 0]
+        if len(failures) > 0:
+            pytest.fail(
+                f"Weights symmetry broken for {len(failures)} regions:\n"
                 + failures[["dataset", "note"]].to_string(index=False)
             )
 

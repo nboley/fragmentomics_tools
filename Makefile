@@ -10,6 +10,10 @@ IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 
 .PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test test-realdata test-equivalence
 
+# Pin the interpreter so `make test` uses the correct conda env. Override
+# with `make test PYTHON=/path/to/other/python` to test a different env.
+PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
+
 # Wall-clock bound on a test run. This is a hang detector, not a perf budget:
 # the library suite finishes in well under a minute. Override for slow hosts
 # or a bigger suite: make test TEST_TIMEOUT=7200
@@ -194,7 +198,7 @@ docker-push:
 # SIGKILL rather than SIGTERM: a process stuck in an uninterruptible futex
 # wait will not act on a catchable signal.
 test:
-	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest $(PYTEST_ARGS); \
+	@timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \
@@ -225,7 +229,7 @@ clean:
 # in-process test could observe. A regression net that can silently skip is
 # how both survived.
 test-realdata:
-	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
+	@timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest \
 		test/test_interval_real_data.py test/test_orientation_real_data.py -v --realdata; \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
@@ -239,7 +243,7 @@ test-realdata:
 # against our intervals module. --bedtools makes absent bedtools/data a failure
 # rather than a skip — the same pattern as test-realdata/--realdata.
 test-equivalence:
-	@timeout --signal=KILL $(TEST_TIMEOUT) python -m pytest \
+	@timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest \
 		test/test_bedtools_equivalence.py -v --bedtools; \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \

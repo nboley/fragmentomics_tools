@@ -18,11 +18,17 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **2 failed / 463 passed /
-  3 skipped** (both failures are missing data, not defects:
+  Baselines as of the last update: `make test` **2 failed / 557 passed /
+  3 skipped / 2 xfailed** (measured 2026-10-07 at version_2 HEAD).
+  The 2 failures are missing data, not defects:
   `test_slice_encode_big_wig` needs an ENCODE bigwig,
-  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
-  the 3 skips are Region doctests needing the optional `fbio`);
+  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference.
+  The 2 xfails are pinned production defects in `from_fragments_h5`'s
+  minus-strand block (strand swap and weights reversal — see Known traps).
+  The 3 skips are Region doctests needing the optional `fbio`.
+  **`test_formats.py` is environment-sensitive**: 40 tests fail when
+  `bedToBigBed`/`tabix`/`bedtools` are not on `PATH` — these are not
+  regressions. On a machine with all binaries, expect ~597 passed;
   `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself
@@ -143,6 +149,30 @@ forward.
 - **Store/zarr pinning**: the zarr store is v2 format; `zarr==2.18.3` with
   `numcodecs==0.13.1`. Newer numcodecs privatized symbols zarr 2.18 imports,
   which breaks at import time — pin both together.
+- **UNFIXED: `from_fragments_h5` minus-strand block does not reverse
+  `fragment_strands`.** Two independent causes, both in
+  `fragment_array/fragment_array.py`. (1) The `[::-1]` is missing from
+  `fragment_strands` at `:1793`, so `strand[j]` refers to a different
+  fragment than `starts_0[j]` after the coordinate flip. (2) The swap
+  function `_switch_plus_with_minus_and_minus_with_plus` (`:123-131`)
+  compares string literals `'+'/'-'` against the `|S1` byte array the h5
+  returns — matches nothing, so the swap is a no-op. The commented-out
+  lines 124-125 handled both encodings. Only this one call site is affected:
+  `__init__` normalises to `dtype="U1"` at `:297-299`, so `reverse_strand()`
+  and `strand_bias.py` operate on already-converted arrays. Pinned in
+  `test/test_orientation_real_data.py` as `strict=True` xfail. Unfixed
+  pending owner approval (changes computed results).
+- **UNFIXED: `from_fragments_h5` minus-strand block does not reverse
+  `weights`.** `generate_weights_callback` returns weights in original
+  genomic order (`:1756-1757`). The minus-strand block reverses coordinates
+  but not weights, so `weight[j]` refers to a different fragment than
+  `starts_0[j]` after the flip. `reverse_strand()` does reverse weights
+  (`:759`). Only bites when a callback is supplied; the default all-ones
+  weights are reversal-invariant. Per-fragment weights are the correction
+  pathway and `SparseIntVector` preserves fractional weights, so this
+  silently corrupts corrected pileups rather than raising. Pinned in
+  `test/test_orientation_real_data.py` as `strict=True` xfail. Unfixed
+  pending owner approval.
 
 ## Working agreements
 
