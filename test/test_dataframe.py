@@ -34,7 +34,9 @@ import pytest
 from pathlib import Path
 
 from fragmentomics_tools.dataframe import (
+    DataFrameBase,
     RegionDataFrame,
+    SampleAndRegionDataFrame,
     intersect_region_dataframes,
 )
 from fragmentomics_tools.region import Region
@@ -149,3 +151,111 @@ def test_rdfs_equal():
     assert rdf.equals(rdf_same)
     assert not rdf.equals(rdf_different_1)
     assert not rdf.equals(rdf_different_2)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Bucket 2 — required-column removal: pandas operations and bed_df
+# ═══════════════════════════════════════════════════════════════════════
+
+def _make_rdf():
+    return RegionDataFrame.from_regions(
+        [Region("chr1", 100, 200), Region("chr1", 300, 400),
+         Region("chr2", 500, 600)], ref="hg19",
+    )
+
+
+def _make_srdf():
+    return SampleAndRegionDataFrame(
+        pd.DataFrame({
+            "contig": ["chr1", "chr2"],
+            "start": [100, 300],
+            "stop": [200, 400],
+            "strand": [".", "."],
+            "sample_id": ["s1", "s2"],
+            "frag_h5": ["/data/s1.h5", "/data/s2.h5"],
+        }),
+        ref="hg19",
+    )
+
+
+class TestPandasOpsNoLongerRaise:
+    """groupby().first(), describe(), and .T used to raise AssertionError."""
+
+    def test_rdf_groupby_first(self):
+        result = _make_rdf().groupby("contig").first()
+        assert result.shape[0] == 2
+
+    def test_rdf_describe(self):
+        result = _make_rdf().describe()
+        assert "start" in result.columns
+
+    def test_rdf_transpose(self):
+        result = _make_rdf().T
+        assert result.shape[0] == len(_make_rdf().columns)
+
+    def test_srdf_groupby_first(self):
+        result = _make_srdf().groupby("contig").first()
+        assert result.shape[0] == 2
+
+    def test_srdf_describe(self):
+        result = _make_srdf().describe()
+        assert "start" in result.columns
+
+    def test_srdf_transpose(self):
+        result = _make_srdf().T
+        assert result.shape[0] == len(_make_srdf().columns)
+
+
+class TestReorderColumns:
+    """reorder_columns runs on all classes."""
+
+    def test_base(self):
+        dfb = DataFrameBase({"b": [1], "a": [2]})
+        result = dfb.reorder_columns()
+        assert list(result.columns) == ["b", "a"]
+
+    def test_srdf_hoists_fragment_array(self):
+        srdf = _make_srdf()
+        srdf["fragment_array"] = [None, None]
+        srdf["extra"] = [1, 2]
+        result = srdf.reorder_columns()
+        cols = list(result.columns)
+        assert cols.index("fragment_array") < cols.index("extra")
+        assert cols.index("fragment_array") < cols.index("strand")
+
+    def test_srdf_without_fragment_array(self):
+        srdf = _make_srdf()
+        result = srdf.reorder_columns()
+        assert list(result.columns)[:3] == ["contig", "start", "stop"]
+
+
+class TestBedDf:
+    """bed_df selects _critical_bed_columns; SRDF drops sample_id and frag_h5."""
+
+    def test_rdf_bed_df_columns(self):
+        rdf = _make_rdf()
+        bed = rdf.bed_df
+        assert list(bed.columns) == ["contig", "start", "stop", "strand"]
+
+    def test_rdf_bed_df_values(self):
+        rdf = _make_rdf()
+        bed = rdf.bed_df
+        assert list(bed["contig"]) == ["chr1", "chr1", "chr2"]
+        assert list(bed["start"]) == [100, 300, 500]
+
+    def test_srdf_bed_df_columns(self):
+        srdf = _make_srdf()
+        bed = srdf.bed_df
+        assert list(bed.columns) == ["contig", "start", "stop", "strand"]
+        assert "sample_id" not in bed.columns
+        assert "frag_h5" not in bed.columns
+
+    def test_srdf_save_as_bed_roundtrip(self):
+        srdf = _make_srdf()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".bed", delete=False) as f:
+            srdf.save_as_bed(f.name)
+            lines = Path(f.name).read_text().strip().split("\n")
+        assert len(lines) == 2
+        fields = lines[0].split("\t")
+        assert len(fields) == 4
+        assert fields[0] == "chr1"

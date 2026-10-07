@@ -165,7 +165,6 @@ def _bytes_to_float(b):
 class DataFrameBase(pandas.DataFrame):
     _metadata = ()  # Metadata is optional, you can pass it in
     _required_metadata = ()  # This must be a subset of metadata, but it is required for init
-    _required_columns = ()  # These columns will be checked for existence during init.
     _potentially_confused_columns = {}
 
     @property
@@ -180,15 +179,8 @@ class DataFrameBase(pandas.DataFrame):
     def _repr_html_(self, *args, **kwargs):
         return self.df._repr_html_(*args, **kwargs)
 
-    def to_string(self, *args, **kwargs):
-        """When formatting for pandas dfs columns are sometimes dropped and then the
-           constructor can raise an error if those were required columns. This just
-           calls to_string on the base dataframe since it doesn't matter for this type 
-           of printing"""
-        return self.df.to_string(*args, **kwargs)
-
     def reorder_columns(self):
-        return self[self._required_columns + list(filter(lambda x: x not in set(self._required_columns), self.columns))]
+        return self[list(self.columns)]
 
     @classmethod
     def from_fname_s3_or_local(cls, fname, *args, **kwargs):
@@ -240,13 +232,6 @@ class DataFrameBase(pandas.DataFrame):
                             columns={potential_confused_column: needed_column},
                             inplace=True,
                         )
-
-        # Sanity check on whether self.columns has everything needed
-        missing_key_cols = set(self._required_columns) - set(self.columns)
-        assert len(missing_key_cols) == 0, (
-            f"Missing these columns in dataframe: {missing_key_cols}, "
-            f"found {self.columns}."
-        )
 
     def _parallel_apply(self, fn, n_workers, verbose):
         # Use a fork context so the frame is inherited copy-on-write rather
@@ -432,17 +417,6 @@ class RegionDataFrame(DataFrameBase):
     }
     _optional_bed_columns = ["id", "score", "strand"]
     _standard_bed_columns = _critical_bed_columns + _optional_bed_columns
-    # These MUST stay lists, not tuples. `_required_columns` below concatenates
-    # them with `_critical_bed_columns`, and `reorder_columns` concatenates that
-    # result with another list -- `tuple + list` is a TypeError. Converting them
-    # to tuples "for consistency" with the immutable defaults on DataFrameBase
-    # broke 69 library and 25 background_model tests. The B8 mutable-default
-    # protection applies to the base class only, which has no such concatenation.
-    _additional_required_columns = []
-
-    @property
-    def _required_columns(self):
-        return self._critical_bed_columns + self._additional_required_columns
 
     def get_fasta_path(self):
         if self.ref == 'hg38':
@@ -926,12 +900,7 @@ class RegionDataFrame(DataFrameBase):
 
     @property
     def bed_df(self):
-        columns = self._required_columns
-        assert all(c in self.columns for c in columns)
-
-        bed_df = self.copy(deep=True)
-
-        return bed_df[columns]
+        return self.copy(deep=True)[self._critical_bed_columns]
 
     def save_as_bed(self, path):
         self.bed_df.to_csv(path, index=False, sep="\t", header=False)
@@ -1470,7 +1439,6 @@ def _close_h5_handles(df):
 
 
 class SampleAndRegionDataFrame(RegionDataFrame):
-    _additional_required_columns = ["sample_id", "frag_h5"]
 
     def detach_h5(self):
         """Replace live FragmentsH5 handles with their file paths.
@@ -1493,13 +1461,11 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         return self
 
     def reorder_columns(self):
-        # hacky way to make sure that fragmnet array is displayed at the start if it exists
-        req = self._required_columns
-        not_req = list(filter(lambda x: x not in set(self._required_columns), self.columns))
-        if 'fragment_array' in not_req:
-            not_req.remove('fragment_array')
-            req.append('fragment_array')
-        return self[req + not_req]
+        front = list(self._critical_bed_columns) + ["sample_id", "frag_h5"]
+        if "fragment_array" in self.columns:
+            front.append("fragment_array")
+        rest = [c for c in self.columns if c not in set(front)]
+        return self[front + rest]
 
     @classmethod
     def init_from_rdf_and_sdf(cls, rdf, sdf):
@@ -1845,7 +1811,6 @@ class SampleDataFrame(DataFrameBase):
     # with a list during propagation, and `tuple + list` is a TypeError.
     # Inheriting the base's `()` here breaks pickling after detach_h5.
     _metadata = []
-    _required_columns = ["sample_id", "frag_h5"]
 
     # NOTE: constructing a SampleDataFrame does NOT build a fragment-length
     # distribution. Call `FlDist.init_from_sdf(sdf)` where you need one.

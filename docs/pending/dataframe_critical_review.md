@@ -61,15 +61,6 @@ still deadlock a worker. Demonstrated, not theoretical. Closing it means
 abandoning `fork`, and with it lambda support and copy-on-write frames.
 Recorded in the `parallel_apply` docstring.
 
-**`groupby().first()`, `describe()` and `.T` raise.** pandas reconstructs the
-subclass with a reduced column set, and the required-columns assert in
-`DataFrameBase.__init__` fires. `groupby().size()` and `groupby().agg()` are
-unaffected. This predates the layering work and is present on `main`. A
-candidate fix is the geopandas constructor-fallback shape — `_constructor`
-returns a plain `DataFrame` when required columns are absent rather than
-asserting — but that pattern is **unverified here**, because geopandas is not
-installed.
-
 ---
 
 ## Not in this file
