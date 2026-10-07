@@ -936,30 +936,56 @@ def count_srdf(
         plus_frac=(n_plus / (n_plus + n_minus)) if (n_plus + n_minus) else float("nan"),
     )
 
-    # Strand balance. A cfDNA fragment is double-stranded and has no intrinsic
-    # orientation: the strand label records which of its two ends became read 1,
-    # and adapter ligation is symmetric, so the label is a fair coin independent
-    # of sequence. p_plus is therefore 0.5 BY CONSTRUCTION, not by fitting, and
-    # this is an assertion rather than a measurement.
+    # Strand balance, in two separate checks because they catch different things
+    # and only one of them can be stated without a tolerance.
     #
-    # What it is really guarding: `rfa.fragment_strands` is `<U1` ('+'), not the
-    # `b'+'` bytes FragmentsH5.fetch_array returns. Comparing against bytes
-    # yields an all-False plus mask and so an EMPTY minus or plus table -- and
-    # sample_region skips a strand whose start weights are all zero *silently*,
-    # which would make the simulator emit strand-pure data with no error
-    # anywhere. This is the cheapest place to catch that.
+    # Why 0.5 is expected at all: a cfDNA fragment is double-stranded and has no
+    # intrinsic orientation. The strand label records which of its two ends
+    # became read 1, and adapter ligation is symmetric, so the label carries no
+    # sequence information. p_plus is 0.5 BY CONSTRUCTION, not by fitting.
     #
-    # The tolerance is deliberately loose. It exists to catch a table that is
-    # empty or grossly lopsided, not to police a few percent of real skew, and a
-    # tight bound would false-positive on ordinary variation. Note the fraction
-    # is over the hexamer-VALID population (n_counted), not the admitted one.
-    if (n_plus + n_minus) and abs(stats["plus_frac"] - 0.5) > strand_tol:
-        raise AssertionError(
-            f"strand fraction {stats['plus_frac']:.4f} is more than {strand_tol} "
-            f"from 0.5 ({n_plus} plus, {n_minus} minus). Strand carries no "
-            f"sequence information, so this is not biology. Check that "
-            f"fragment_strands was compared against '+' and not b'+'."
-        )
+    # (1) BOTH STRANDS PRESENT -- exact, no tolerance, cannot false-positive.
+    # This is the check that earns its place. `rfa.fragment_strands` is `<U1`
+    # ('+'), not the `b'+'` bytes FragmentsH5.fetch_array returns; comparing
+    # against bytes yields an all-False mask and so an ENTIRELY EMPTY strand
+    # table. sample_region then skips that strand silently and the simulator
+    # emits strand-pure data with nothing anywhere reporting it. An emptied
+    # table is exactly what this catches, and it needs no threshold.
+    if n_counted := (n_plus + n_minus):
+        if not n_plus or not n_minus:
+            raise AssertionError(
+                f"one strand table is EMPTY: {n_plus} plus, {n_minus} minus "
+                f"over {n_counted} counted fragments. Strand carries no "
+                f"sequence information, so this is not biology. Check that "
+                f"fragment_strands was compared against '+' and not b'+' -- "
+                f"it is <U1, and the bytes comparison yields an all-False mask."
+            )
+
+        # (2) BALANCE -- advisory, and the tolerance scales with the number of
+        # REGIONS rather than fragments. MEASURED on RD-56804: plus_frac was
+        # 0.3758 over 10 regions (322 frags), 0.5296 over 200 (8,695) and
+        # 0.5041 over 2,000 (73,545). Against fragment-level binomial SE those
+        # are 4.5, 5.5 and 2.2 sigma -- and the first two deviate in OPPOSITE
+        # directions, so this is not a bias, it is overdispersion: strand is
+        # CLUSTERED WITHIN A REGION, so fragments are not independent draws.
+        # Recomputed with n_regions as the effective sample size they are 0.8,
+        # 0.84 and 0.37 sigma, i.e. unremarkable.
+        #
+        # Hence the bound below. A fragment-count tolerance is simply the wrong
+        # denominator and false-positives on any small run -- it rejected a
+        # legitimate 10-region smoke test. Check (1) already covers the dead
+        # table, so this one is free to be generous.
+        n_regions = max(int(stats["n_regions"]), 1)
+        tol = max(strand_tol, 1.5 / np.sqrt(n_regions))
+        if abs(stats["plus_frac"] - 0.5) > tol:
+            raise AssertionError(
+                f"strand fraction {stats['plus_frac']:.4f} is more than "
+                f"{tol:.3f} from 0.5 ({n_plus} plus, {n_minus} minus over "
+                f"{n_regions} regions). Both tables are non-empty, so this is "
+                f"not the b'+' trap. Strand is clustered within regions, so the "
+                f"bound already allows for that -- a deviation this large wants "
+                f"explaining before the data is used."
+            )
     if stats["n_regions"] and not stats["n_after_filters"]:
         raise ValueError(
             "MAPQ removed ALL fragments. Unknown MAPQ is stored as -1, so "
