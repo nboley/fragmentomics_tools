@@ -858,7 +858,6 @@ def propensities(
 def count_srdf(
     srdf,
     *,
-    strand_tol: float = 0.1,
     n_workers: int | None = None,
     verbose: bool = True,
 ) -> Tuple[Dict[str, np.ndarray], np.ndarray, Dict[str, int]]:
@@ -1001,49 +1000,28 @@ def count_srdf(
                 f"it is <U1, and the bytes comparison yields an all-False mask."
             )
 
-        # (2) BALANCE -- advisory, and the tolerance scales with the number of
-        # REGIONS rather than fragments.
+        # (2) There is deliberately NO BALANCE CHECK. `plus_frac`, `n_plus` and
+        # `n_minus` are REPORTED in stats and nothing asserts them.
         #
-        # MEASURED on RD-56804: plus_frac was 0.3758 over 10 regions (322
-        # frags), 0.5296 over 200 (8,695) and 0.5041 over 2,000 (73,545).
-        # Against fragment-level binomial SE those are 4.5, 5.5 and 2.2 sigma,
-        # and the first two deviate in OPPOSITE directions -- so this is not a
-        # bias but OVERDISPERSION relative to independent fragment draws.
-        # Recomputed with n_regions as the effective sample size they are 0.8,
-        # 0.84 and 0.37 sigma, i.e. unremarkable, which is why n_regions is the
-        # denominator here.
+        # Removed by owner decision 2026-10-07 ("doesn't seem useful"), after
+        # three measured reasons accumulated:
         #
-        # The overdispersion is measured; its MECHANISM is not. Within-region
-        # strand clustering would explain it, but so would structure at any
-        # coarser scale, and within-region correlation has never been measured
-        # directly. Do not cite this as evidence for clustering specifically.
-        # Note the SIMULATOR's own draw is an independent per-region binomial,
-        # so whatever this is lives in the real-data counts and is not
-        # reproduced downstream.
+        # - It could not catch the failure it appeared to. A wholesale
+        #   plus/minus swap maps plus_frac to 1 - plus_frac and leaves every
+        #   total intact, so a balanced sample passes either way round.
+        # - It false-positived on a legitimate 10-region run. The real-data
+        #   fraction is OVERDISPERSED relative to independent fragment draws --
+        #   0.3758 / 0.5296 / 0.5041 at 10 / 200 / 2,000 regions, the first two
+        #   deviating in OPPOSITE directions -- so no fragment-count bound is
+        #   right. The mechanism was never measured.
+        # - Rescaling to n_regions to fix that made the bound VACUOUS below 10
+        #   regions, since abs(plus_frac - 0.5) <= 0.5 by construction. That
+        #   needed a cap in turn. A guard requiring two corrections to stop
+        #   being either wrong or dead is not carrying its weight.
         #
-        # Hence the bound below. A fragment-count tolerance is simply the wrong
-        # denominator and false-positives on any small run -- it rejected a
-        # legitimate 10-region smoke test. Check (1) already covers the dead
-        # table, so this one is free to be generous.
-        # CAPPED below 0.5, because `plus_frac` lives in [0, 1] and so
-        # `abs(plus_frac - 0.5) <= 0.5` always: an uncapped bound is VACUOUS
-        # wherever it reaches 0.5, i.e. n_regions <= 9 (measured). Rescaling by
-        # n_regions was itself the fix for a 10-region false positive, and it
-        # silently made the check dead on anything smaller.
-        n_regions = max(int(stats["n_regions"]), 1)
-        tol = min(0.45, max(strand_tol, 1.5 / np.sqrt(n_regions)))
-        if abs(stats["plus_frac"] - 0.5) > tol:
-            raise AssertionError(
-                f"strand fraction {stats['plus_frac']:.4f} is more than "
-                f"{tol:.3f} from 0.5 ({n_plus} plus, {n_minus} minus over "
-                f"{n_regions} regions). Both tables are non-empty, so this is "
-                f"not the b'+' trap. The real-data fraction is OVERDISPERSED "
-                f"relative to independent fragment draws -- mechanism "
-                f"unmeasured -- and this bound already allows for that, so a "
-                f"deviation this large wants explaining before the data is "
-                f"used. Note a wholesale plus/minus swap maps the fraction to "
-                f"1 - itself and so is invisible here."
-            )
+        # Check (1) above is what actually guards the b'+' trap, and it needs no
+        # threshold. Do not reintroduce a balance assertion without naming a
+        # failure mode it detects that (1) does not.
     if stats["n_regions"] and not stats["n_after_filters"]:
         raise ValueError(
             "EVERY fragment was removed before counting. The admission chain "
@@ -1093,7 +1071,6 @@ def count_sample(
     min_mapq: int = 10,
     l_min: int = L_MIN,
     l_max: int = L_MAX,
-    strand_tol: float = 0.1,
 
     n_workers: int | None = None,
     verbose: bool = True,
@@ -1169,6 +1146,6 @@ def count_sample(
         )
     )
     counts, region_counts, stats = count_srdf(
-        srdf, strand_tol=strand_tol, n_workers=n_workers, verbose=verbose
+        srdf, n_workers=n_workers, verbose=verbose
     )
     return counts, region_counts, stats, srdf

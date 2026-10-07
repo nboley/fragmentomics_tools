@@ -231,13 +231,30 @@ looks like a defect, read the reason before changing it.
   the strand label records which of its two ends became read 1, and adapter
   ligation is symmetric, so the label is a fair coin independent of sequence.
   There is nothing to measure and no producer is needed.
-  `count_srdf` nevertheless **asserts** the observed fraction is within
-  `strand_tol` (default 0.1) of 0.5, because the failure it catches is silent:
-  `fragment_strands` is `<U1`, and comparing it against `b'+'` empties a strand
-  table, after which `sample_region` skips that strand without error and the
-  simulator emits strand-pure data. It also checks `start_fwd.sum() ==
-  end_fwd.sum()` and the `rev` pair, which are exact identities and so catch
-  broken strand routing that no aggregate total can reveal.
+  `count_srdf` **asserts only that BOTH strand tables are non-empty**, and
+  reports `n_plus` / `n_minus` / `plus_frac` without asserting them. That one
+  check needs no threshold and catches the silent failure that matters:
+  `fragment_strands` is `<U1`, so comparing it against `b'+'` yields an
+  all-False mask and an *entirely empty* strand table, after which
+  `sample_region` skips that strand without error and the simulator emits
+  strand-pure data.
+
+  **There is no balance check. Removed by owner decision 2026-10-07; do not
+  reintroduce one without naming a failure mode the non-empty check misses.**
+  Three measured reasons: a wholesale plus/minus swap maps `plus_frac` to
+  `1 - plus_frac` and preserves every total, so it was blind to the error it
+  appeared to guard; the real-data fraction is **overdispersed** relative to
+  independent fragment draws (0.3758 / 0.5296 / 0.5041 at 10 / 200 / 2,000
+  regions, the first two deviating in *opposite* directions, mechanism never
+  measured), so it false-positived on a legitimate 10-region run; and rescaling
+  it to `n_regions` to fix that made it vacuous below 10 regions, since
+  `|plus_frac - 0.5| <= 0.5` by construction.
+
+  Also note `start_fwd.sum() == end_fwd.sum()` and the `rev` pair are
+  **tautologies**, not routing protection — measured: feeding
+  `counts_from_hexamers` a start/stop swap leaves both true, because each sum is
+  just that strand's row count however the hexamers are routed. They stay only
+  to catch a malformed `counts` dict from outside this module.
 
   Scope of that guard, so it is not mistaken for more than it is.
   `sample_region` skips a whole strand block on `if tot <= 0: continue`, with no
