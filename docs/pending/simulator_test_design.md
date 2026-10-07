@@ -438,6 +438,50 @@ test that stays green under its mutation is not done. Line numbers are at HEAD `
 | M41 | propensity | module `:840-841` | restore the pre-fix pairing: `start_rev` ÷ `N_start[perm]`, `end_rev` ÷ `N_end[perm]` | the tandem block and the null regions | `t4_null_identity[start_rev]`, `t4_null_identity[end_rev]` |
 | M42 | expectation | module `:553`, `:561` | drop `valid` in `uniform_hexamer_counts` | planted N in a start window | `t4_uniform_hexamer_counts_matches_enumeration_toy`, `t4_uniform_hexamer_counts_chr6` |
 
+### 4.2a Implementation status — read this before trusting the matrix above
+
+**The matrix names a test for nearly every row. That is the DESIGN, not the state
+of the repo.** 18 of 42 mutations have been applied programmatically and verified
+red (commit `45b32ec` + the sweep); the rest are unverified, and four have no
+test at all. Treat an unverified row as unknown, not as covered.
+
+**Verified red** (sweep at `45b32ec`, re-verified at `d9c6e90`): M1, M2, M3, M4,
+M7, M8, M9, M10, M19, M20, M26, M31, M33, M37, M38, M41, M42. M14 is an
+equivalent mutant by construction and is excluded.
+
+**M7 and M33 were NOT red on the first sweep, and the reason corrects this
+table.** M7 came back with **zero** red tests. The trigger column above says
+"single-N stop window colliding (as A) with a planted hexamer" — that diagnosis
+is wrong. **The fixture planted no N-window fragment at all**: it placed the
+fragment at `n_pos - 3`, whose cut-site window is `[n_pos-6, n_pos)`, which
+EXCLUDES the N. Off by one. Compounding it, the assertion was
+`n_admitted >= n_counted`, true by construction however the code behaves. Two
+defects stacked: a fixture that planted nothing and an assertion that could not
+have noticed. Fixed in `d9c6e90` — the fixture now plants one invalid-START and
+one invalid-END fragment, and the expected drop is derived from the genome string
+and asserted EXACTLY. M7 now 2 red, M33 1 → 3 red.
+**Lesson for the rows below: a test named in this matrix is worth nothing until a
+mutation has been shown to turn it red.**
+
+### 4.2b The four mutations with no test
+
+Scoped out of `45b32ec` deliberately, so this is a known gap. Both pairs sit on
+genuinely silent paths, which is why they are the most valuable remaining work.
+
+| Mutation | Test to write | What it must construct | Why it is worth it |
+|---|---|---|---|
+| **M12** — dedup moved before MAPQ | `t2_mapq_filter_precedes_dedup` | Two fragments sharing `(start, stop)`: A mapq 5, B mapq 30, on *opposite strands* so the surviving one is identifiable (their hexamers are equal, so only strand discriminates). Correct order keeps B; mutated order dedups to A and then MAPQ drops it, losing the pair entirely. | This is the ONE admission ordering that is load-bearing (spec §3). Everything else commutes. Getting it wrong silently loses real fragments. |
+| **M15** — midpoint instead of start-in-region admission | `t2_straddler_counted_in_start_tile` | A fragment straddling a tile boundary whose START is in tile *k* and whose MIDPOINT is in tile *k+1*. Assert it is counted in *k* and absent from *k+1*. | Midpoint admission is the rule the rewrite REVERSED, and two agents have already read stale docs asserting it. A regression here reintroduces the whole pre-rewrite geometry. |
+| **M24** — drop one factor of the length weight | `t5_zero_weight_cause[f_zero\|non_acgt\|r_zero]` | Three single-cause fixtures, one per factor of `w[l] = f(l)·r_end·valid`: a length with `f(l)=0`, an end window with a non-ACGT base, and an end hexamer with `r_end=0`. Each must change the drawn length set when its factor is removed. | §4 says the code "cannot distinguish the three causes" — it only tests `w.sum() > 0`. These are the only tests that pin each factor independently. |
+| **M25** — end hexamer read at `i+l-1` | `t5_point_mass_exact_output`, `t5_length_probabilities` | A point-mass `r_end` on one hexamer, so the drawn length is deterministic and an off-by-one in the end index shifts it by exactly 1. | A one-position shift in the end lookup leaves every total plausible and every marginal nearly right — the definition of a silent failure. |
+
+**M12 carries a caveat that must be settled first.** It depends on the h5
+returning A before B for equal `(start, stop)`, which the Least-sure-of section
+records as verified on exactly **one** case — "one case is not a law". If the
+ordering turns out to be unspecified, M12 cannot be tested through
+`from_fragments_h5` and needs a direct `filter_fragments` test on a hand-built
+fragment array instead. Settle the ordering before writing the test, not after.
+
 `r1_…` and `r2_…` abbreviate the full R ids of §2.4.
 
 **Cross-check.** Every §5 test id appears in at least one row, and vice versa. No coverage

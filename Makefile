@@ -30,9 +30,29 @@ TEST_TIMEOUT ?= 3600
 # that does not run by default is close to no suite.
 # The two suites are easy to confuse: `test/` is the library, `tests/` is
 # background_model. Both are here on purpose.
+# `--ignore=tests/conftest.py` is NOT about skipping tests. It exists so that
+# a `tests/conftest.py` CAN exist at all.
+#
+# --doctest-modules makes pytest COLLECT conftest.py files as modules to scan
+# for doctests. With no __init__.py in these directories, prepend import mode
+# imports every one under the bare name `conftest`, so the second collection
+# fails with "import file mismatch" against test/fragment_array/conftest.py.
+# An agent hit this, diagnosed it correctly and then deleted its conftest,
+# which is the wrong lever.
+#
+# --ignore stops the COLLECTION only; pytest still loads the file as a plugin,
+# so fixtures, markers and hooks all work. Verified by a pytest_report_header
+# hook firing under this exact invocation.
+#
+# Rejected alternatives: importmode=importlib and adding __init__.py both fix
+# the collision but break `import cut_site_oracle` in
+# tests/test_count_hexamers_rdf.py, which relies on prepend mode putting
+# tests/ on sys.path. Moving test/fragment_array/conftest.py to the root
+# breaks its DATA_DIR, which is built from __file__.
 PYTEST_ARGS ?= test/ tests/ fragmentomics_tools/ -q --doctest-modules \
 	--ignore=fragmentomics_tools/bias_correction \
-	--ignore=fragmentomics_tools/public_data_resources
+	--ignore=fragmentomics_tools/public_data_resources \
+	--ignore=tests/conftest.py
 
 help:
 	@echo "Usage: make [target]"
