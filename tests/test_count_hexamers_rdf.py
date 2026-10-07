@@ -207,10 +207,24 @@ def bruteforce_h5(toy_dir, toy_genome):
         strand = "+" if rng.random() < 0.5 else "-"
         frags.append(("chrT", start, start + length, strand, 30, 30))
 
-    # Add some with N in a cut-site window
+    # Fragments with an N in a cut-site window, one per side.
+    #
+    # The window for a cut site at genomic `gc` is genome[gc-HEX_HALF : gc+HEX_HALF],
+    # so it contains the N at `n_pos` iff gc - 3 <= n_pos < gc + 3, i.e.
+    # gc in [n_pos-2, n_pos+3]. This was `n_pos - 3`, whose window is
+    # [n_pos-6, n_pos) and EXCLUDES the N -- off by one, so the fixture planted
+    # nothing and `test_n_window_fragment_dropped_from_tables` had nothing to
+    # detect. That, not a hexamer collision, is why mutation M7 (dropping the
+    # validity gate) went uncaught by all 47 tests.
     n_block_start = DB_CORE_LEN + TANDEM_REPEATS * len(TANDEM_HEX)
     n_pos = n_block_start + 6  # the single-N position in the n_block
-    frags.append(("chrT", n_pos - 3, n_pos - 3 + 50, "+", 30, 30))
+    # invalid START window, valid end (the end lands in the soft-masked copy,
+    # which is ACGT and case-folded, so it stays valid)
+    frags.append(("chrT", n_pos, n_pos + 50, "+", 30, 30))
+    # invalid END window, valid start (the start sits in the tandem repeat,
+    # pure ACGT) -- covers the `e_ok` half of `ok = s_ok & e_ok` separately,
+    # so a mutation dropping only one side is still caught
+    frags.append(("chrT", n_pos - 50, n_pos, "+", 30, 30))
 
     h5 = _build_h5(frags, toy_dir["fasta"], toy_dir["dir"], name="bruteforce")
     return h5
@@ -436,9 +450,20 @@ class TestT2Admission:
         )
         fa = srdf["fragment_array"].iloc[0]
         starts = set(fa.starts_0.tolist())
-        # min(60,9)=9 < 10 at offset 100: should be dropped
-        assert (100) not in starts or True  # may have been deduped with another frag
-        # min(10,10)=10 at offset 150: should be kept
+        # min(60, 9) = 9 < 10 at offset 100: must be dropped.
+        #
+        # This was `assert (100) not in starts or True`, i.e. vacuous -- the
+        # `or True` made it pass unconditionally, so it never tested the lower
+        # side of the MAPQ boundary at all. The comment excusing it said the
+        # fragment "may have been deduped with another frag"; if that were
+        # true the right fix would be the fixture, not disarming the check.
+        assert 100 not in starts, (
+            "MAPQ=9 fragment at offset 100 survived; min(mapq1, mapq2) >= 10 "
+            "must drop it. If the fixture now collides at (start, stop) with "
+            "another fragment, fix the fixture -- do not weaken this."
+        )
+        # min(10,10)=10 at offset 150: should be kept. The boundary is
+        # inclusive, so this is the case an `>` instead of `>=` would break.
         assert 150 in starts, "MAPQ=10 fragment dropped (should keep)"
 
     def test_length_bounds(self, admission_h5, toy_dir, toy_regions):
@@ -575,14 +600,46 @@ class TestT3CountSample:
             "start": [s for s, _ in toy_regions],
             "stop": [e for _, e in toy_regions],
         }), ref="hg38")
-        counts, region_counts, stats, _ = count_sample(
+        counts, region_counts, stats, srdf = count_sample(
             rdf, "test", bruteforce_h5, toy_dir["fasta"],
             n_workers=1, verbose=False,
         )
         n_counted = stats["n_counted"]
         n_admitted = int(region_counts.sum())
-        assert n_admitted >= n_counted, (
-            "region_counts.sum() must be >= n_counted (accepted divergence)"
+
+        # Derive the expected drop INDEPENDENTLY, from the genome string rather
+        # than from the module: a fragment is excluded from the tables iff
+        # either of its cut-site windows holds a non-ACGT base. With
+        # left_pad == HEX_HALF the window for a cut site at genomic `gc` is
+        # genome[gc - HEX_HALF : gc + HEX_HALF].
+        expected_drop = 0
+        for fa, (g_start, _g_stop) in zip(srdf["fragment_array"], toy_regions):
+            for s0, e0 in zip(fa.starts_0.tolist(), fa.stops_0.tolist()):
+                for gc in (g_start + s0, g_start + e0):
+                    window = toy_genome[gc - HEX_HALF:gc + HEX_HALF]
+                    if any(b not in "ACGTacgt" for b in window):
+                        expected_drop += 1
+                        break
+
+        # Guard the guard: if the fixture ever stops planting an N-window
+        # fragment, every assertion below passes trivially and this test goes
+        # quiet. That is how M7 survived the first version of it.
+        assert expected_drop > 0, (
+            "fixture plants no admitted fragment with an N in a cut-site "
+            "window, so this test cannot detect a missing validity gate"
+        )
+
+        # EXACT, not `>=`. The previous version asserted
+        # `n_admitted >= n_counted`, which is true BY CONSTRUCTION -- the gap is
+        # non-negative however the code behaves -- so mutation M7 (dropping
+        # `ok = s_ok & e_ok` in cut_site_hexamers) collapsed the gap to 0 and
+        # the assertion still held. Zero of 47 tests caught it.
+        assert n_admitted - n_counted == expected_drop, (
+            f"{n_admitted - n_counted} fragments were dropped from the tables, "
+            f"expected exactly {expected_drop} (the ones with a non-ACGT base "
+            f"in a cut-site window). A gap of 0 means the validity gate in "
+            f"cut_site_hexamers is not being applied, and N-containing cut "
+            f"sites are being miscounted into neighbouring hexamers."
         )
 
     def test_one_empty_strand_raises(self, toy_dir, toy_genome):
@@ -887,14 +944,12 @@ class TestT5Sampler:
             r["end_rev"][boosted_hex] = 10.0
             n_plus_val = 0
 
-        dummy_starts = np.array([100] * (5 if strand == "plus" else 5))
+        dummy_starts = np.array([100] * 5)
         dummy_u = np.full((5, 1), 0.5)
-        rng = _RecordingRng(
-            n_plus_values=[n_plus_val if strand == "plus" else 5 - n_plus_val],
-            choice_returns=[dummy_starts],
-            random_values=[dummy_u],
-        )
-
+        # NOTE: a second _RecordingRng is built below and is the one actually
+        # passed to sample_region. An earlier version constructed one here too,
+        # which was then shadowed and never used -- dead code that read as
+        # setup. `n_plus_val` is likewise only used to pick the table above.
         rdf = RegionDataFrame(pd.DataFrame({
             "contig": ["chrT"], "start": [g0], "stop": [g1],
         }), ref="hg38")
