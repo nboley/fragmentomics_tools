@@ -101,6 +101,35 @@ list, do not "tidy" either one.
 Note this does not fix the root cause: the `_constructor` hack that bypasses
 `__init__` will defeat *any* future invariant enforced there. Known limitation.
 
+> **DONE, reconciled 2026-10-07.** `_required_columns`,
+> `_additional_required_columns` and the `__init__` assert are gone;
+> `groupby().first()`, `describe()` and `.T` now work. `_critical_bed_columns`
+> survives and has quietly become the de-facto schema declaration —
+> load-bearing in eight places (three construction sites, `bed_df`, both
+> `reorder_columns`, `_standard_bed_columns`, and the attribute itself) with
+> nothing stating that role.
+>
+> **Two consequences this section did not anticipate.**
+>
+> `bed_df`/`save_as_bed` selected their output columns from
+> `_required_columns`, and SRDF never overrode `bed_df` — so
+> `srdf.save_as_bed()` was emitting six tab-separated fields **including the
+> h5 path**. It now selects `_critical_bed_columns`: RDF output unchanged, SRDF
+> 6 columns → 4. That is a computed-output change and carries explicit owner
+> approval.
+>
+> `DataFrameBase.reorder_columns` had **never worked** — the base attribute was
+> a tuple and the method concatenated a list to it, so it raised `TypeError` on
+> any plain `DataFrameBase`. But `RegionDataFrame` *did* work, because its
+> `_required_columns` property returned a list. Removing the attribute
+> therefore silently turned the RDF method into a no-op, with two live
+> consumers (`public_data_resources/gencode.py`, and `ccres/catlas.py` in
+> `biomarker-projects`) and no test. RDF now has its own explicit override and
+> a test pinning the hoist. **The general lesson, which applies to every
+> remaining phase: deleting an attribute requires asking "what reads this?"
+> before asking "does the new code work?" — the second question is the one that
+> gets asked by default, and only the first would have caught this.**
+
 **Keep h5 handles in the column.** Storing `sample_id` with a
 `sample_id -> handle` map elsewhere was rejected: it threads two objects
 through every call site, and an explicit detach-for-serialization method is
@@ -323,10 +352,40 @@ old reference, and anything derived from those is invalid rather than
 shifted. It also fails per region (`pd.NA` since I20), can flip strand, and
 can split one region into several — none of which a transform hook models.
 
-The safe semantics are **invalidation**: `lift_over` drops every derived
-annotation and the caller re-attaches against the new assembly. That
-generalises the current refusal — which covers fragment arrays only — to every
-derived annotation, and turns a hard error into a defined operation.
+This document previously concluded that the safe semantics are
+**invalidation** — `lift_over` drops every derived annotation and the caller
+re-attaches against the new assembly, generalising the fragment-array-only
+refusal and turning a hard error into a defined operation.
+
+> **SUPERSEDED by owner decision, 2026-10-07. Do not implement the paragraph
+> above.**
+>
+> **`lift_over` is removed from Phase 4 and becomes a phase of its own, and it
+> needs a new design before any code.** The target is that liftover should
+> **actually lift the fragment arrays** where that is required, rather than
+> discarding them.
+>
+> The reasoning that invalidation is "safe" does not survive contact with that
+> target. Invalidation is safe for *correctness* — it cannot produce
+> new-assembly coordinates beside old-assembly fragments — but it is not safe
+> for the *caller*, who loses data that was expensive to attach and is
+> sometimes reconstructible only by going back to the h5. Two options were put
+> to the owner, invalidate-silently and invalidate-with-a-warning, and both
+> were rejected on the grounds that they differ only in whether the loss is
+> announced. A warning does not make discarded data less discarded.
+>
+> **Interim contract, in force until that phase is designed: liftover is
+> restricted to `RegionDataFrame`.** The SRDF refusal stays exactly as it is
+> and is now the documented contract rather than a stopgap awaiting
+> replacement. A caller holding an annotated frame detaches explicitly before
+> lifting.
+>
+> What the new design has to work out, none of which this section answers:
+> whether a fragment array can be lifted at all when a region splits into
+> several or flips strand; what happens to the regions where liftover returns
+> `pd.NA`; whether lifting is done from the array in memory or by re-querying
+> the h5 against the new assembly; and whether sequence-derived annotations
+> (one-hot, GC) are liftable in principle or genuinely must be recomputed.
 
 ## Interval algebra — specified separately
 
@@ -445,12 +504,65 @@ resizing is interval arithmetic). `FlDist`'s destination — its own module, or
 `region_lengths` is geometry or plumbing; it is counted under geometry above
 only because every other bucket is exactly accounted for without it.
 
+> **PHASE 3 IS COMPLETE.** Reconciled 2026-10-07.
+>
+> The three open choices were settled as: **`geometry.py`** alongside
+> `intervals.py` (the split holds because `intervals` returns index arrays
+> while `geometry` returns frames); **`fldist.py`** at the package root, not
+> under `fragment_array/`, because `FlDist.init_from_sdf` takes a
+> `SampleDataFrame` and has no dependency on the fragment-array package, so
+> placing it there would imply a coupling the code does not have; and
+> **`region_lengths` is geometry** — it is `stop - start`, and it is consumed
+> as a precondition by `truncate_regions`.
+>
+> Import weight held: **1,631 → 1,633 modules**, the +2 being the two new
+> modules themselves, so Phase 1's reduction from 2,779 stayed bought. The
+> no-`dataframe`-import constraint was verified by execution rather than by
+> reading the import list — `geometry` and `fldist` both import with
+> `fragmentomics_tools.dataframe` blocked by a `sys.meta_path` hook, which also
+> rules out transitive paths.
+>
+> **One constraint this section did not anticipate, and it is the important
+> part.** `expand_regions` and `truncate_regions` **cannot** be thin
+> delegators. They dispatch through `self._resize_region_boundaries()`, which
+> is polymorphic: when `self` is an SRDF, the override runs and resizes the
+> attached fragment arrays. A delegator calling the `geometry` free function
+> directly bypasses that override, leaving arrays at their old extent while the
+> region shrinks — **silently**. Those two methods therefore keep their own
+> dispatch, and only their *validation* is shared with the free functions
+> (`check_nonneg_resize_amounts`, `check_truncation_fits` in `geometry.py`).
+>
+> The `geometry.expand_regions` / `geometry.truncate_regions` free functions
+> are a live hazard for the same reason and say so in their docstrings: called
+> directly on an SRDF they skip the coupling. For `expand_regions` the bypass
+> is worse than losing coupling, because the SRDF method *refuses* outright
+> when arrays are attached — so the free function silently produces what the
+> method deliberately rejects. `test_bypass_leaves_fragment_arrays_stale` pins
+> the difference.
+>
+> **A measurement worth carrying into Phase 4's review.** Reverting the
+> extraction while keeping all tests gave `3 failed / 615 passed` — the only
+> new failure being the bypass test, and only because it imports the deleted
+> module. **All 612 pre-existing tests passed unchanged against the
+> pre-extraction code.** The suite exercises the *method* API, which both trees
+> satisfy identically, so it was blind to the entire 448-line extraction.
+> Suite parity is therefore not evidence that a refactor of this shape is
+> behaviour-preserving, and Phase 4's review must not treat it as such.
+
 ### Phase 4 — annotation protocol
 
-Sources, `on_resize` with `shrink_only`, and `lift_over` invalidation. The
-protocol itself is specified above under "Annotation: composition, not a value
-protocol" and "`SampleAndRegionDataFrame` — the hardest problem"; this phase
-implements that specification rather than adding to it.
+Sources, and `on_resize` with `shrink_only`. The protocol itself is specified
+above under "Annotation: composition, not a value protocol" and
+"`SampleAndRegionDataFrame` — the hardest problem"; this phase implements that
+specification rather than adding to it.
+
+> **SCOPE REDUCED, owner decision 2026-10-07.** `lift_over` is **no longer
+> part of this phase**. It becomes its own phase and needs a fresh design
+> first — see the superseded invalidation paragraph under
+> "`SampleAndRegionDataFrame` — the hardest problem". Phase 4 is now annotation
+> sources plus the resize hook, nothing else. Until the lift_over phase is
+> designed, liftover stays restricted to `RegionDataFrame` and the SRDF
+> refusal is the documented contract.
 
 **Build fragment arrays first.** They are the only existing annotation that
 already needs `on_resize` — the four SRDF geometry overrides exist precisely
