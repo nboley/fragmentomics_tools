@@ -1691,14 +1691,34 @@ class RegionFragmentArray(FragmentArray):
         min_mapq: int = None,
         return_gc: bool = None,
     ) -> "RegionFragmentArray":
-        """
-        :param flip_data_to_match_region_strand: If True, the data is placed on the strand matching the region strand (if set).
-            If False, strand is ignored in the region and the data is always on the default reference strand.
-        :param include_fragment_strand: If true, include a vector of strands for each fragment.
-        :param in_fragments_h5: fragment h5
+        """Load the fragments overlapping `region`, in genomic order.
+
+        **Never flips.** The returned array is always in forward genomic
+        orientation with `is_flipped=False`, whatever the region's strand. A
+        minus-strand region therefore gives the same fragment data as a
+        strandless one; only `region.strand` differs. Orientation belongs to
+        the consumer: call `reverse_strand()` or
+        `make_data_direction_match_strand()` when you want it.
+
+        This used to auto-flip on a minus-strand region, and two defects lived
+        in that block — `fragment_strands` was neither reordered nor actually
+        swapped, and `weights` was never reversed at all. The block
+        hand-duplicated `reverse_strand()` and the copy had drifted field by
+        field. Removing it deleted both defects rather than patching them.
+
+        :param in_fragments_h5: fragments h5, as a path or an open handle. A
+            path is opened and closed here; a handle is left open for the
+            caller.
         :param region: region to query
+        :param max_frag_len: max fragment length filter
+        :param generate_weights_callback: optional
+            `(starts, stops, supp_data) -> weights`. Called with fragments in
+            genomic order, which is also the order they are stored in.
+        :param fetch_array_kwargs: passed through to the h5 fetch
         :param min_mapq: mapq filter
-        :param max_frag_len: max frag len filter
+        :param return_gc: include per-fragment GC. Defaults to the h5's
+            `has_gc` when available, else to whether a weights callback was
+            supplied.
         """
         if isinstance(in_fragments_h5, str):
             fragments_h5 = FragmentsH5(in_fragments_h5, cache_pointers=False)

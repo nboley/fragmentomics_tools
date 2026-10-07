@@ -18,11 +18,21 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
   (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **2 failed / 388 passed /
-  3 skipped** (both failures are missing data, not defects:
-  `test_slice_encode_big_wig` needs an ENCODE bigwig,
+  Baseline on this branch, measured 2026-10-07 at the autoflip-removal commit:
+  `make test` **2 failed / 398 passed / 3 skipped / 0 xfailed**, total 403.
+  Its parent gave **2 failed / 396 passed / 3 skipped / 2 xfailed** — same
+  total 403, because removing the autoflip turned the two pinned-defect xfails
+  into passes and moved nothing else. **Reconcile the TOTAL first** when two
+  measurements disagree: it is invariant under environment, so a matching
+  total means you are looking at an environment difference while a differing
+  total means tests went uncollected. Both failures are missing data, not
+  defects: `test_slice_encode_big_wig` needs an ENCODE bigwig,
   `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
-  the 3 skips are Region doctests needing the optional `fbio`);
+  the 3 skips are Region doctests needing the optional `fbio`.
+  **`make test` does NOT cover `tests/`** — `PYTEST_ARGS` is
+  `test/ fragmentomics_tools/`, so any change under `fragment_array/` needs an
+  explicit `make test PYTEST_ARGS="tests/ -q"` run or a `background_model`
+  regression ships unseen. That suite is **494 passed** at this commit.
   `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
   `self.log()`-without-Trainer warnings are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself
