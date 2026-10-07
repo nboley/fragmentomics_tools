@@ -932,8 +932,12 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        assert (np.array(left_amt) >= 0).all()
-        assert (np.array(right_amt) >= 0).all()
+        # Validation is shared with `geometry.expand_regions`; the dispatch is
+        # not, and cannot be. This must call `self._resize_region_boundaries`
+        # so that SampleAndRegionDataFrame's override stays in the path and
+        # attached fragment arrays follow the geometry.
+        from fragmentomics_tools.geometry import check_nonneg_resize_amounts
+        check_nonneg_resize_amounts(left_amt, right_amt)
         return self._resize_region_boundaries(
             -left_amt, right_amt, inplace, strand_aware,
             discard_invalid_resizes,
@@ -948,14 +952,13 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        assert (np.array(left_amt) >= 0).all()
-        assert (np.array(right_amt) >= 0).all()
-        total_truncation = np.array(left_amt) + np.array(right_amt)
-        from fragmentomics_tools.geometry import region_lengths
-        if (total_truncation >= region_lengths(self)).any():
-            raise ValueError(
-                "truncation amounts exceed region length for at least one region"
-            )
+        # Same split as `expand_regions`: validation shared, dispatch not.
+        from fragmentomics_tools.geometry import (
+            check_nonneg_resize_amounts,
+            check_truncation_fits,
+        )
+        check_nonneg_resize_amounts(left_amt, right_amt)
+        check_truncation_fits(self, left_amt, right_amt)
         return self._resize_region_boundaries(
             left_amt, -right_amt, inplace, strand_aware,
             discard_invalid_resizes,

@@ -169,6 +169,35 @@ def _resize_region_boundaries(
 
 # ── expand_regions ─────────────────────────────────────────────────
 
+def check_nonneg_resize_amounts(left_amt, right_amt) -> None:
+    """Shared precondition for expand/truncate.
+
+    Lives here, and is called from BOTH this module's free functions and
+    `RegionDataFrame`'s methods, because the two cannot delegate to each
+    other: the methods must call `self._resize_region_boundaries` to keep
+    `SampleAndRegionDataFrame`'s override in the path, while these functions
+    call the module-level one. Only the *dispatch* has to be duplicated — the
+    *validation* does not, and two copies of one rule is what CLAUDE.md's
+    first rule exists to prevent.
+    """
+    assert (np.array(left_amt) >= 0).all()
+    assert (np.array(right_amt) >= 0).all()
+
+
+def check_truncation_fits(rdf: "RegionDataFrame", left_amt, right_amt) -> None:
+    """Refuse a truncation that would consume a whole region.
+
+    Shared for the same reason as `check_nonneg_resize_amounts`. Keeping the
+    message in one place matters more here: it is prose, and prose edited in
+    one of two copies drifts without anything failing.
+    """
+    total_truncation = np.array(left_amt) + np.array(right_amt)
+    if (total_truncation >= region_lengths(rdf)).any():
+        raise ValueError(
+            "truncation amounts exceed region length for at least one region"
+        )
+
+
 def expand_regions(
     rdf: "RegionDataFrame",
     /,
@@ -178,8 +207,16 @@ def expand_regions(
     strand_aware: bool = False,
     discard_invalid_resizes: bool = False,
 ):
-    assert (np.array(left_amt) >= 0).all()
-    assert (np.array(right_amt) >= 0).all()
+    """Grow each region by `left_amt` and `right_amt`.
+
+    **Same dispatch hazard as `truncate_regions`** — calling this directly on
+    a `SampleAndRegionDataFrame` bypasses the SRDF override and so does not
+    touch attached fragment arrays. In SRDF's case the method additionally
+    *refuses* outright when arrays are attached (widening cannot be served
+    from an in-memory array; it needs the h5 again), so going through this
+    function would silently produce what the method deliberately rejects.
+    """
+    check_nonneg_resize_amounts(left_amt, right_amt)
     return _resize_region_boundaries(
         rdf, -left_amt, right_amt, inplace, strand_aware,
         discard_invalid_resizes,
@@ -197,13 +234,19 @@ def truncate_regions(
     strand_aware: bool = False,
     discard_invalid_resizes: bool = False,
 ):
-    assert (np.array(left_amt) >= 0).all()
-    assert (np.array(right_amt) >= 0).all()
-    total_truncation = np.array(left_amt) + np.array(right_amt)
-    if (total_truncation >= region_lengths(rdf)).any():
-        raise ValueError(
-            "truncation amounts exceed region length for at least one region"
-        )
+    """Shrink each region by `left_amt` and `right_amt`.
+
+    **Calling this directly on a `SampleAndRegionDataFrame` SILENTLY SKIPS
+    fragment-array resizing.** SRDF overrides `_resize_region_boundaries` so
+    that attached arrays follow the geometry, and that override is only
+    reached through the *method* — `srdf.truncate_regions(...)`. This free
+    function calls the module-level `_resize_region_boundaries` instead, so
+    the arrays keep their old extent while the region shrinks, with no error.
+    Use the method on anything that might carry fragment arrays.
+    `test_bypass_leaves_fragment_arrays_stale` pins this difference.
+    """
+    check_nonneg_resize_amounts(left_amt, right_amt)
+    check_truncation_fits(rdf, left_amt, right_amt)
     return _resize_region_boundaries(
         rdf, left_amt, -right_amt, inplace, strand_aware,
         discard_invalid_resizes,

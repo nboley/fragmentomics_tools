@@ -8,11 +8,14 @@ purpose, so they do not depend on any external fixture.
 import os
 import tempfile
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from fragmentomics_tools.dataframe import RegionDataFrame
+from fragmentomics_tools.dataframe import RegionDataFrame, SampleAndRegionDataFrame
+from fragmentomics_tools.fragment_array import RegionFragmentArray
 from fragmentomics_tools.intervals import merge, overlap_indices, overlaps
+from fragmentomics_tools.region import Region
 
 
 @pytest.fixture
@@ -417,3 +420,75 @@ class TestBinRegionsIntoWindows:
         result = rdf.bin_regions_into_windows(window_size=window_size, mode="valid")
         got = [(int(a), int(b)) for a, b in zip(result["start"], result["stop"])]
         assert got == expected
+
+
+def _make_srdf_with_fragments(start=1000, stop=2000):
+    """Build a synthetic SRDF with a real RegionFragmentArray attached."""
+    region = Region("chr1", start, stop, ref="hg38")
+    length = stop - start
+    frag_starts = np.array([100, 200, 300, 400, 500])
+    frag_stops = np.array([250, 350, 450, 550, 650])
+    rfa = RegionFragmentArray(frag_starts, frag_stops, region, max_frag_len=511)
+
+    srdf = SampleAndRegionDataFrame(
+        pd.DataFrame({
+            "contig": ["chr1"],
+            "start": [start],
+            "stop": [stop],
+            "sample_id": ["s1"],
+            "frag_h5": ["/data/s1.h5"],
+        }),
+        ref="hg38",
+    )
+    srdf["fragment_array"] = [rfa]
+    return srdf
+
+
+class TestSRDFTruncateRegionsCoupling:
+    """truncate_regions on an SRDF must resize attached fragment arrays.
+
+    The SRDF override of ``_resize_region_boundaries`` is the mechanism.
+    If ``truncate_regions`` ever bypasses the method dispatch (e.g. by
+    calling ``geometry.truncate_regions`` directly), fragment arrays stop
+    following the geometry silently.
+    """
+
+    def test_fragment_array_follows_truncation(self):
+        srdf = _make_srdf_with_fragments()
+        result = srdf.truncate_regions(left_amt=200, right_amt=300)
+        fa = result.iloc[0].fragment_array
+        expected_length = 500  # 1000 - 200 - 300
+        assert result.iloc[0].start == 1200
+        assert result.iloc[0].stop == 1700
+        assert fa.length == expected_length
+        assert fa.region.start == 1200
+        assert fa.region.stop == 1700
+
+    def test_fragment_array_follows_truncation_left_only(self):
+        srdf = _make_srdf_with_fragments()
+        result = srdf.truncate_regions(left_amt=300)
+        fa = result.iloc[0].fragment_array
+        assert fa.length == 700
+        assert fa.region.start == 1300
+        assert fa.region.stop == 2000
+
+    def test_fragment_array_follows_truncation_right_only(self):
+        srdf = _make_srdf_with_fragments()
+        result = srdf.truncate_regions(right_amt=400)
+        fa = result.iloc[0].fragment_array
+        assert fa.length == 600
+        assert fa.region.start == 1000
+        assert fa.region.stop == 1600
+
+    def test_bypass_leaves_fragment_arrays_stale(self):
+        """Prove the test is discriminating: calling geometry directly skips
+        the SRDF override, so fragment arrays do NOT follow."""
+        from fragmentomics_tools import geometry
+
+        srdf = _make_srdf_with_fragments()
+        result = geometry.truncate_regions(srdf, left_amt=200, right_amt=300)
+        fa = result.iloc[0].fragment_array
+        assert fa.length == 1000, (
+            "If this fails, it means the bypass path now ALSO resizes "
+            "fragment arrays, and this discrimination test needs updating."
+        )
