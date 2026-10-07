@@ -1,5 +1,4 @@
 import os
-import math
 import copy
 import logging
 import warnings
@@ -32,14 +31,11 @@ import traceback
 # from p_tqdm import p_map
 
 
-# seaborn imported lazily inside FlDist.plot to avoid matplotlib at import time.
-
 import pysam
 import logging
 
-from fragmentomics_tools.region import Region, OutOfBoundsError
+from fragmentomics_tools.region import Region
 from fragmentomics_tools.formats import BedReader, BigWigReader
-from fragmentomics_tools.contig import CONTIG_LENGTHS
 # Pfm import deferred to avoid top-level torch dependency (see motif.py)
 # from fragmentomics_tools.motif import Pfm
 from fragmentomics_tools.util.liftover import RegionLiftOver
@@ -138,24 +134,8 @@ def _error_if_not_main_thread():
 
 
 
-def windowed_range(start, stop, window_size):
-    """
-    >>> list(windowed_range(0, 5, 2))
-    [(0, 2), (2, 4), (4, 5)]
-    >>> list(windowed_range(0, 1, 2))
-    [(0, 1)]
-    >>> list(windowed_range(0, 11, 3))
-    [(0, 3), (3, 6), (6, 9), (9, 11)]
-    >>> list(windowed_range(-3, 3, 3))
-    [(-3, 0), (0, 3)]
-    """
-    if window_size <= 0:
-        raise ValueError("invalid window size")
-    if stop <= start:
-        raise ValueError("invalid start/stop")
-
-    for start in range(start, stop, window_size):
-        yield start, min(stop, start + window_size)
+# windowed_range moved to geometry.py; re-exported for backward compat.
+from fragmentomics_tools.geometry import windowed_range  # noqa: F401
 
 
 def _bytes_to_float(b):
@@ -566,27 +546,12 @@ class RegionDataFrame(DataFrameBase):
 
     @property
     def region_lengths(self):
-        return self.stop - self.start
+        from fragmentomics_tools.geometry import region_lengths
+        return region_lengths(self)
 
     def center_on_summit(self, inplace=False):
-        """Center regions on summit, resize the regions, and then drop the summit column."""
-        if "summit" not in self.columns:
-            raise TypeError("Must contain a 'summit' column to center on the summit.")
-
-        rdf = self if inplace else self.copy()
-        region_lengths = (rdf.stop - rdf.start).copy()
-
-        # check if the summit is within start
-        if ((rdf.summit >= rdf.start) & (rdf.summit < rdf.stop)).all():
-            rdf["start"] = rdf.summit - region_lengths // 2
-        elif (rdf.summit <= rdf.region_lengths).all():
-            rdf["start"] = rdf.start + rdf.summit - region_lengths // 2
-        else:
-            raise ValueError("summits must either be within the region interval or less than the length of the region.")
-
-        rdf["stop"] = rdf.start + region_lengths
-
-        return rdf.drop(columns=["summit"])
+        from fragmentomics_tools.geometry import center_on_summit
+        return center_on_summit(self, inplace=inplace)
 
     def center_regions_on_tf_motif(
         self,
@@ -944,45 +909,6 @@ class RegionDataFrame(DataFrameBase):
             data = None
             yield Region(r.contig, r.start, r.stop, strand, ref=self.ref, data=data)
 
-    @staticmethod
-    def _error_on_invalid_new_starts(new_start):
-        if (new_start < 0).any():
-            raise OutOfBoundsError(
-                f"There is not enough flanking sequence to modify this region"
-                f"(would result in a start coordinate of '{new_start.min()} at idx {new_start.argmin()}')"
-            )
-
-    @staticmethod
-    def _error_on_invalid_new_stops(rdf, new_stop):
-        if rdf.ref == 'NA':
-            return
-
-        valid_contig_set = set(CONTIG_LENGTHS[rdf.ref].keys())
-        for contig in sorted(set(rdf.contig)):
-            new_stops_for_contig = new_stop[rdf.contig == contig]
-            if (
-                contig in valid_contig_set
-                and new_stops_for_contig.max() > CONTIG_LENGTHS[rdf.ref][contig]
-            ):
-                raise OutOfBoundsError(
-                    f"There is not enough flanking sequence to modify a region "
-                    f"(would result in a stop coordinate of '{new_stops_for_contig.max()}' at "
-                    f"idx {new_stops_for_contig.argmax()} but the "
-                    f"chrom length is '{CONTIG_LENGTHS[rdf.ref][contig]}')"
-                )
-
-    def _valid_regions_mask(self, new_start, new_stop, discard_buffer_bp=0):
-        # assert self.shape[0] == new_start.shape
-        # assert self.shape[0] == new_stop.shape
-        ok = (new_start - discard_buffer_bp) >= 0
-        for contig in sorted(set(self.contig)):
-            max_len = CONTIG_LENGTHS[self.ref][contig]
-            contig_good = (new_stop + discard_buffer_bp) <= max_len
-            contig_good |= self.contig != contig
-            ok &= contig_good
-
-        return ok
-
     def _resize_region_boundaries(
         self,
         left: int = 0,
@@ -991,43 +917,11 @@ class RegionDataFrame(DataFrameBase):
         strand_aware: bool = False,
         discard_invalid_resizes: bool = False,
     ):
-        """Resize region boundaries by `left`/`right`.
-
-        Note: `inplace` is ignored when `discard_invalid_resizes=True`. That
-        path has to decide which rows survive *before* writing coordinates, so
-        it always returns a filtered copy and leaves `self` untouched. Writing
-        first and filtering afterwards is exactly what corrupted `self` with
-        invalid (including negative) coordinates (R8).
-        """
-        if strand_aware:
-            neg_mask = self.strand == "-"
-
-        new_starts = self.start + left
-        if strand_aware:
-            new_starts[neg_mask] = self.loc[neg_mask, "start"] - right
-
-        new_stops = self.stop + right
-        if strand_aware:
-            new_stops[neg_mask] = self.loc[neg_mask, "stop"] - left
-
-        if discard_invalid_resizes:
-            valid_regions_mask = self._valid_regions_mask(
-                new_starts, new_stops, discard_buffer_bp=0
-            )
-            rdf = self.loc[valid_regions_mask, :].copy()
-            rdf["start"] = new_starts[valid_regions_mask]
-            rdf["stop"] = new_stops[valid_regions_mask]
-        else:
-            self._error_on_invalid_new_starts(new_starts)
-            self._error_on_invalid_new_stops(self, new_stops)
-            if inplace:
-                rdf = self
-            else:
-                rdf = self.copy()
-            rdf["start"] = new_starts
-            rdf["stop"] = new_stops
-
-        return rdf
+        from fragmentomics_tools.geometry import _resize_region_boundaries
+        return _resize_region_boundaries(
+            self, left, right, inplace, strand_aware,
+            discard_invalid_resizes,
+        )
 
     def expand_regions(
         self,
@@ -1041,7 +935,8 @@ class RegionDataFrame(DataFrameBase):
         assert (np.array(left_amt) >= 0).all()
         assert (np.array(right_amt) >= 0).all()
         return self._resize_region_boundaries(
-            -left_amt, right_amt, inplace, strand_aware, discard_invalid_resizes
+            -left_amt, right_amt, inplace, strand_aware,
+            discard_invalid_resizes,
         )
 
     def truncate_regions(
@@ -1056,12 +951,14 @@ class RegionDataFrame(DataFrameBase):
         assert (np.array(left_amt) >= 0).all()
         assert (np.array(right_amt) >= 0).all()
         total_truncation = np.array(left_amt) + np.array(right_amt)
-        if (total_truncation >= self.region_lengths).any():
+        from fragmentomics_tools.geometry import region_lengths
+        if (total_truncation >= region_lengths(self)).any():
             raise ValueError(
                 "truncation amounts exceed region length for at least one region"
             )
         return self._resize_region_boundaries(
-            left_amt, -right_amt, inplace, strand_aware, discard_invalid_resizes
+            left_amt, -right_amt, inplace, strand_aware,
+            discard_invalid_resizes,
         )
 
     def resize_regions(
@@ -1071,145 +968,15 @@ class RegionDataFrame(DataFrameBase):
         discard_invalid_resizes: bool = False,
         discard_buffer_bp: int = 0,
     ):
-        if not inplace:
-            rdf = self.copy()
-        else:
-            rdf = self
-
-        sizes = rdf.stop - rdf.start
-        # midpoints = rdf.start + sizes // 2
-        # new_start = midpoints - new_size // 2
-        new_start = Region.get_resize_starts(rdf.start, sizes, new_size, rdf.strand)
-        new_stop = new_start + new_size
-
-        if discard_invalid_resizes:
-            ok = (new_start - discard_buffer_bp) >= 0
-            filter = None
-            for contig in sorted(set(rdf.contig)):
-                max_len = CONTIG_LENGTHS[rdf.ref][contig]
-                contig_bad = ((new_stop + discard_buffer_bp) > max_len) & (
-                    rdf.contig == contig
-                )
-                if filter is None:
-                    filter = contig_bad
-                else:
-                    filter = filter | contig_bad
-            ok = ok & ~filter
-
-            rdf = rdf.loc[ok, :]
-            new_start = new_start[ok]
-            new_stop = new_stop[ok]
-            n_discarded = np.sum(~ok)
-            if n_discarded > 0:
-                logger.warning(
-                    f"Discarded {n_discarded} of {len(ok)} regions due to invalid resize."
-                )
-
-        self._error_on_invalid_new_starts(new_start)
-        self._error_on_invalid_new_stops(rdf, new_stop)
-        rdf["start"] = new_start
-        rdf["stop"] = new_stop
-        return rdf
+        from fragmentomics_tools.geometry import resize_regions
+        return resize_regions(
+            self, new_size, inplace, discard_invalid_resizes,
+            discard_buffer_bp,
+        )
 
     def bin_regions_into_windows(self, window_size, mode, stride=None):
-        """Multiply all regions by tiling windows across each region in self.
-
-        :param window_size: the size of the window
-        :param mode: 'full' or valid'
-                      full: expand the region boundaries to produce ceil(region_length/window_size) windows
-                      valid: shrink the region boundaries to produce floor(region_length/window_size) windows
-                      exact: raise an error if any region_length isn't even divisble by stride and window_size
-        :param stride: stride length. window_size%stride must equal 0. Default: window_size
-        """
-        assert mode in ["full", "valid", "exact"]
-        if stride is None:
-            stride = window_size
-        else:
-            if window_size % stride != 0:
-                raise ValueError(
-                    f"window size ({window_size}) must be evenly divisble by stride ({stride})"
-                )
-
-        def _resize(region):
-            if mode == "full":
-                return region.resize(int(stride * math.ceil(region.length / stride)))
-            elif mode == "valid":
-                if region.length < window_size:
-                    raise ValueError(
-                        f"region {region.chrom}:{region.start}-{region.stop} "
-                        f"(length {region.length}) is shorter than window_size "
-                        f"({window_size}); no valid windows can be produced"
-                    )
-                n_windows = (region.length - window_size) // stride + 1
-                # `extent` is the span the windows actually occupy once the
-                # widening step below has extended each one rightward by
-                # (window_size - stride). By construction extent <= length, so
-                # centring it keeps every window inside the original region --
-                # which is what 'valid' mode promises and previously broke.
-                extent = (n_windows - 1) * stride + window_size
-                # Centred, NOT start-anchored. The remainder must be dropped
-                # equally from both ends, because callers centre regions on a
-                # feature first (center_on_summit().resize_regions(...)) and
-                # then bin. Start-anchoring drops the whole remainder off the
-                # right, shifting every window and silently decentring the
-                # profile relative to the feature. When stride == window_size
-                # (the default, and what every production caller uses) this
-                # reduces to the original centred resize for even window_size.
-                # For ODD window_size the two can differ by 1bp, because
-                # (a - b) // 2 != a // 2 - b // 2 when b is odd -- this form
-                # floors the combined remainder, Region.resize() floors each
-                # term separately. No caller anywhere uses an odd window_size
-                # (checked across 4 repos: 64, 8 and 10000 in .py, none in any
-                # notebook), so nothing computed is affected today.
-                offset = (region.length - extent) // 2
-                tiled_start = region.start + offset
-                return Region(
-                    region.chrom, tiled_start, tiled_start + n_windows * stride,
-                    region.strand, region.ref, region.data,
-                )
-            elif mode == "exact":
-                assert window_size % stride == 0
-                if region.length % stride != 0:
-                    raise ValueError(
-                        f"region length ({region.length}) must be evenly divisible by stride ({stride}) in 'exact' mode."
-                    )
-                return region
-            else:
-                assert False, "UNREACHABLE"
-
-        # first build all the windows
-        index_name = self.index.name
-        self_copy = self.reset_index()
-        all_windows = []
-        for region, record in tqdm(
-            self_copy.iter_region_row(), total=self_copy.shape[0], disable=False
-        ):
-            region = _resize(region)
-            all_windows.extend(
-                (record.name, x[0], x[1])
-                for x in windowed_range(region.start, region.stop, stride)
-            )
-
-        window_df = pd.DataFrame(
-            all_windows, columns=["index", "new_start", "new_stop"]
-        ).set_index("index")
-        window_df["new_stop"] = window_df["new_stop"] + window_size - stride
-
-        rv = (
-            self_copy.join(window_df)
-            .rename(
-                columns=dict(
-                    new_start="start",
-                    new_stop="stop",
-                    start="old_start",
-                    stop="old_stop",
-                )
-            )
-            .drop(columns=["old_start", "old_stop"])
-            .set_index("index")
-        )
-        rv.index.rename(index_name, inplace=True)
-        return rv
+        from fragmentomics_tools.geometry import bin_regions_into_windows
+        return bin_regions_into_windows(self, window_size, mode, stride)
 
     def split_on_query(self, query):
         """Split self into two dataframes.
@@ -1774,60 +1541,8 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         return self
 
 
-class FlDist:
-    @classmethod
-    def init_from_sdf(cls, sdf):
-        sample_ids = list(sdf["sample_id"])
-        dupes = sorted(set(sid for sid in sample_ids if sample_ids.count(sid) > 1))
-        if dupes:
-            raise ValueError(
-                f"Duplicate sample_id(s) in SDF: {dupes}. "
-                f"FlDist requires unique sample ids."
-            )
-        max_frag_len = 512
-        columns = {}
-        for record in sdf.itertuples():
-            cnts = record.frag_h5.fragment_length_counts
-            if len(cnts) < max_frag_len:
-                cnts = np.pad(cnts, (0, max_frag_len - len(cnts)))
-            else:
-                cnts = cnts[:max_frag_len]
-            # normalize to library depth
-            total = cnts.sum()
-            if total > 0:
-                cnts = cnts / total
-            columns[record.sample_id] = cnts
-
-        fl_df = pd.DataFrame(columns)
-        fl_df = fl_df.set_index(fl_df.index + 1)
-
-        return cls(fl_df)
-
-    def subset_by_sample_ids(self, sample_ids):
-        missing = set(sample_ids) - set(self.fl_df.columns)
-        if missing:
-            raise KeyError(
-                f"sample_id(s) not found in FlDist: {sorted(missing)}"
-            )
-        fl_df = self.fl_df.T.loc[sample_ids].T
-        return type(self)(fl_df)
-
-    def __init__(self, fl_df):
-        self.fl_df = fl_df
-
-
-    def plot(self, figsize=(20, 8), legend=False, max_frag_len=None, include_reference=True):
-        import seaborn as sns
-        sns.set(rc={"figure.figsize": figsize})
-
-        # add the reference
-        fl_df = self.fl_df.copy()
-        if include_reference:
-            ref_fl_dist = fl_df.mean(axis=1)
-            ref_fl_dist = ref_fl_dist / ref_fl_dist.sum()
-            fl_df.loc[:, "Reference"] = ref_fl_dist
-
-        return fl_df.loc[0:max_frag_len, :].plot(legend=legend)
+# FlDist moved to fldist.py; re-exported for backward compat.
+from fragmentomics_tools.fldist import FlDist  # noqa: F401
 
 
 class SampleDataFrame(DataFrameBase):
