@@ -336,10 +336,8 @@ class TestS1Lock:
         not os.path.exists(_GOLDEN_H5), reason=f"golden h5 missing ({_GOLDEN_H5})"
     )
     def test_minus_strand_region_via_from_fragments_h5_refused(self):
-        # Exercise is_flipped via the REAL path (not a constructor kwarg): a
-        # '-'-strand region drives from_fragments_h5 to set is_flipped =
-        # region.is_minus_strand() (fragment_array.py:1843).  The applier must
-        # refuse it up front.
+        # A '-'-strand region via from_fragments_h5 is refused by the
+        # strand assertion (region.strand not in {None, '.', '+'}).
         from fragments_h5 import FragmentsH5
 
         h5 = FragmentsH5(_GOLDEN_H5, cache_pointers=False)
@@ -348,9 +346,10 @@ class TestS1Lock:
             h5, region, min_mapq=10, max_frag_len=175
         )
         h5.close()
-        assert rfa.is_flipped  # set by the real path, not a constructor kwarg
+        assert not rfa.is_flipped  # autoflip removed: always False
+        assert rfa.region.strand == "-"  # region strand is preserved
         m = _uniform_model()
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="strandless"):
             apply_fragment_weights(
                 rfa, m, _fasta(), clamp=WeightClampConfig.identity(),
                 contig_len=_CONTIG_LEN, tile_size=_TILE,

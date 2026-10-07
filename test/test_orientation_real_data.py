@@ -63,9 +63,7 @@ def _require_real_data(request):
     pytest.skip(f"real-data inputs unavailable: {missing[0]} (and possibly others)")
 
 
-VALID_STATUS_VALUES = {"correct", "pinned_broken:strand_swap",
-                       "pinned_broken:weights_unreversed",
-                       "pinned_broken:strand_swap+weights_unreversed"}
+VALID_STATUS_VALUES = {"correct"}
 
 
 class TestManifestFileIntegrity:
@@ -84,14 +82,14 @@ class TestManifestFileIntegrity:
         bad = set(df["status"].unique()) - VALID_STATUS_VALUES
         assert not bad, f"Unknown status values in manifest: {bad}"
 
-    def test_pinned_broken_rows_exist(self):
-        """A manifest with zero pinned_broken rows means someone silently
-        dropped the status tracking — which is exactly what item 3 prevents."""
+    def test_no_pinned_broken_rows_remain(self):
+        """All construction-time defects are fixed — no pinned_broken rows
+        should remain in the manifest."""
         df = pd.read_csv(MANIFEST, sep="\t")
         broken = df[df["status"].str.startswith("pinned_broken")]
-        assert len(broken) > 0, (
-            "No pinned_broken rows in manifest. If all defects are fixed, "
-            "update the status column and remove this assertion."
+        assert len(broken) == 0, (
+            f"{len(broken)} pinned_broken rows remain in manifest after "
+            "autoflip removal — regenerate the manifest."
         )
 
 
@@ -139,36 +137,14 @@ class TestOrientationManifestStillDescribesReality:
 
 @pytest.mark.requires_real_data
 class TestStrandSymmetryInvariant:
-    """Verify the strand-flip invariant holds on real data.
+    """Verify the no-autoflip invariant holds on real data.
 
-    For any genomic interval, loading with strand="-" must produce the
-    same fragments as loading strandless and then calling reverse_strand.
-    This is the invariant that correction.py depends on: it queries
-    strandless, corrects, then orients at the aggregation layer.
+    After removing construction-time autoflip, loading with strand="-"
+    must produce the same array data as loading strandless — both return
+    unflipped genomic-order data.  Orientation is deferred to the consumer
+    layer via reverse_strand() or make_data_direction_match_strand().
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "PRODUCTION DEFECT (two independent causes): "
-            "(1) from_fragments_h5 does not reverse fragment_strands when "
-            "flipping for minus-strand regions (fragment_array.py:1793). "
-            "Coordinates are reversed ([::-1]) but strands are only swapped, "
-            "not reordered — so strand[j] refers to a different fragment "
-            "than starts_0[j] after the flip. "
-            "(2) The swap itself is inert: _switch_plus_with_minus_and_minus_"
-            "with_plus (fragment_array.py:123-131) compares string literals "
-            "'+'/'-' against the |S1 byte array returned by the h5, which "
-            "matches nothing — (arr == '+').sum() == 0 vs (arr == b'+').sum()"
-            " == 2. The commented-out lines 124-125 handled both encodings. "
-            "A fix addressing only the missing [::-1] without fixing the "
-            "byte/string comparison would still produce wrong strands. "
-            "Only this call site is affected: __init__ normalises to "
-            "dtype='U1' at :297-299, so reverse_strand and strand_bias.py "
-            "operate on converted arrays. "
-            "This is a FINDING — do not patch it away."
-        ),
-        strict=True,
-    )
     def test_symmetry_rows_all_pass(self, request):
         _require_real_data(request)
 
@@ -191,36 +167,13 @@ class TestStrandSymmetryInvariant:
 
 @pytest.mark.requires_real_data
 class TestWeightsSymmetryInvariant:
-    """Verify the weights-path defect is pinned.
+    """Verify the weights no-autoflip invariant on real data.
 
-    Defect 2: generate_weights_callback returns weights in original genomic
-    order.  The minus-strand block of from_fragments_h5 does NOT reverse them
-    (fragment_array.py:1756-1818), while reverse_strand() does (line 759).
-    Per-fragment weights are the correction pathway; this defect corrupts
-    corrected pileups silently (SparseIntVector preserves fractional weights,
-    so no TypeError or clamp to zero — just wrong values).
-
-    NOTE: correction.py's is_flipped refusal (the assert at line 197) is
-    already exercised by tests/test_bg_correction.py (test_minus_strand_-
-    region_refused, test_plus_region_but_is_flipped_refused, and
-    test_minus_strand_region_via_from_fragments_h5_refused).  This manifest
-    pins the data-level consequence (wrong weight ordering), not the
-    correction-layer guard.
+    After removing construction-time autoflip, weights from a minus-strand
+    load must be identical to weights from a strandless load — both in
+    original genomic order.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "PRODUCTION DEFECT: generate_weights_callback returns weights "
-            "in original genomic order; the minus-strand block of "
-            "from_fragments_h5 reverses coordinates but NOT weights "
-            "(fragment_array.py:1756-1818).  reverse_strand() does reverse "
-            "them (line 759).  So weight[j] refers to a different fragment "
-            "than starts_0[j] after the flip.  Per-fragment weights are the "
-            "correction pathway — this silently corrupts corrected pileups. "
-            "This is a FINDING — do not patch it away."
-        ),
-        strict=True,
-    )
     def test_weights_symmetry_rows_all_pass(self, request):
         _require_real_data(request)
 

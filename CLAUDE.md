@@ -121,11 +121,18 @@ forward.
 - **`Region(strand=".")` normalizes `.strand` to `None`.** Asserting
   `strand == "."` therefore fails on the ordinary strandless path. Accept
   `{None, ".", "+"}`.
-- **Minus-strand regions arrive flipped.** `from_fragments_h5` reverses
-  coordinates and swaps strands for minus-strand regions (`is_flipped`). The
-  correction applier deliberately *refuses* flipped/minus input: query
-  strandless, then orient at the aggregation layer (reverse the position axis
-  and permute tracks). Getting this wrong silently destroys strand asymmetry.
+- **Minus-strand regions are NOT flipped on construction.** `from_fragments_h5`
+  always returns data in genomic order with `is_flipped=False`, regardless of
+  the region's strand. Orientation is deferred to the consumer layer via
+  `reverse_strand()` or `make_data_direction_match_strand()`. The correction
+  applier requires unflipped input — query strandless or plus-strand, then
+  orient at the aggregation layer.
+- **`_switch_plus_with_minus_and_minus_with_plus` compares `str` against
+  `|S1` bytes.** The `from_fragments_h5` call site that used it was removed
+  (autoflip removal), but the function survives for `reverse_strand()` and
+  `strand_bias.py`. Those callers receive `dtype="U1"` arrays (normalised by
+  `__init__`), so the string comparison works. If you add a new caller that
+  passes raw h5 byte data, the comparison will silently match nothing.
 - **`SparseIntVector` is a misnomer** — only `coords` are ints; `data` keeps
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight

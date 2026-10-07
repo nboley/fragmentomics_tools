@@ -1779,28 +1779,6 @@ class RegionFragmentArray(FragmentArray):
         starts_0 = (starts - region.start)
         stops_0 = (stops - region.start)
 
-        # if the region is on the minus strand then flip the data to be in the
-        # correct orientation. (if we *dont* want this to happen, then just pass
-        # '.' in as the region's strand)
-        if region.is_minus_strand():
-            ## TODO -- move this into reverse strand
-            # Store into temp variables so we can swap. One depends on other.
-            _starts_0 = (region.length - stops_0)[::-1]
-            _stops_0 = (region.length - starts_0)[::-1]
-            starts_0 = _starts_0
-            stops_0 = _stops_0
-            if fragment_strands is not None:
-                fragment_strands = _switch_plus_with_minus_and_minus_with_plus(
-                    fragment_strands
-                )
-            if return_methyl:
-                num_cpgs = num_cpgs[::-1]
-                num_converted_cpgs = num_converted_cpgs[::-1]
-                num_cytosines = num_cytosines[::-1]
-                num_converted_cytosines = num_converted_cytosines[::-1]
-            if return_gc:
-                gc = gc[::-1]
-
         if do_close:
             fragments_h5.close()
 
@@ -1816,7 +1794,7 @@ class RegionFragmentArray(FragmentArray):
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             weights=weights,
-            is_flipped=region.is_minus_strand(),
+            is_flipped=False,
             gc=gc,
         )
 
