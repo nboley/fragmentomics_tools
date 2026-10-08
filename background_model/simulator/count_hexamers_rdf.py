@@ -90,8 +90,10 @@ from fragmentomics_tools.dataframe import (
 # independent of that package so it survives its deletion.
 #
 # While BOTH copies exist they are a shared-contract hazard: two encoders free
-# to drift, with counts diverging silently.  test_encoder_matches_precompute
-# pins them bit-for-bit until the old package goes.
+# to drift, with counts diverging silently.  test_encoder_matches_oracle_all_4096
+# guards this copy by checking all 4096 hexamers against an INDEPENDENT oracle
+# -- which is stronger than pinning the two copies to each other, since those
+# could drift in step and still agree.
 
 KMER: int = 6
 HEX_HALF: int = 3            # 3 bases in, 3 out, around a cut site
