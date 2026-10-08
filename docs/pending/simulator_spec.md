@@ -144,13 +144,16 @@ A hexamer's weight is observed over expected-under-uniform:
 §4 normalises it per region for starts and per start for stops.
 
 `C` and `N` are one tabulation counted two ways, so both cover the same
-candidate positions. **They do NOT use the same validity gate**, and the
-earlier claim here that they did was wrong: `C` requires BOTH of a fragment's
-cut-site windows to be ACGT-only, while `N_start` gates only its own window.
-Unmeasurable on the current region set — 0 invalid cut windows in 1,373,600 over
-800 regions, and 4 of 66,649 regions hold any non-ACGT base — but it is a real
-asymmetry and it bites a region set with gaps near cut sites. Not yet an owner
-decision either way.
+candidate positions. **They do NOT use the same validity gate** — `C` applies a
+JOINT gate (both of a fragment's cut-site windows must be ACGT-only) while
+`N_start` and `N_end` each gate MARGINALLY, on their own window only. An earlier
+version of this section claimed they matched, which was wrong.
+
+**This is settled and is NOT a defect: `r` is definitional, not an estimate.**
+See Settled, "`C` and `N` gate validity differently". The simulator draws from
+`r` and the oracle is computed from the same `r`, so the gate choice determines
+what the model *is* rather than whether it is right. Zero effect on the current
+region set in any case. Do not re-open it.
 
 ### There are TWO expectations, and they differ in domain as well as weight
 
@@ -302,9 +305,6 @@ Needs action. Nothing here has been decided.
   but admission order and the length draw are both places a silent error would
   live, so it is the most valuable remaining test work.
 
-- **`C` and `N` disagree on the validity gate** (§5). `C` needs both cut sites
-  valid, `N_start` only its own. Unmeasurable on this region set; an owner
-  decision either way is still open.
 
 - **Second copy of the encoder** in `simulator/precompute.py`, kept until the
   old simulator is deleted (deferred: ~8 files still import it, some belonging
@@ -346,6 +346,37 @@ looks like a defect, read the reason before changing it.
 - **Bulk GC is not modelled.** The length marginal matches by construction; the
   `(length, GC)` joint does not. Accepted consequence of dropping the capture
   model, not a defect.
+
+- **`C` and `N` gate validity differently, and that is NOT a defect here**
+  (owner, 2026-10-08: "the simulator gets to define the probability model…
+  not interested in further pursuing this"). **Do not re-open it.**
+
+  The mechanism, so nobody has to re-derive it: `C` applies a JOINT gate
+  (`ok = s_ok & e_ok` — a fragment needs both cut-site windows ACGT-only),
+  while `N_start` and `N_end` each gate MARGINALLY, on their own window only.
+  So a fragment with one bad window is dropped from `C` entirely while `N`
+  keeps its valid partner as a candidate, depressing `r` at that partner's
+  hexamer.
+
+  **Why it does not matter: `r` is DEFINITIONAL, not an estimate.** The
+  simulator draws from `r`, and the oracle is computed from the *same* `r`, so
+  parameter recovery and the ceiling are self-consistent whichever gate `N`
+  uses. There is no true `r` being approximated — the gate choice changes what
+  the model *is*, not whether it is right. The simulator defines its own
+  probability model; this is one of the things it gets to define.
+
+  Scale, for the record: zero today. 0 invalid cut windows in 1,373,600
+  positions over 800 regions; 4 of 66,649 regions contain any non-ACGT base.
+
+  **The one circumstance that would change this**: if `r(h)` were ever read as
+  a *measurement* of physical cut-site preference rather than as a generative
+  parameter — a claim about biology rather than a knob — then the marginal gate
+  biases that estimate and the joint gate would be the correct one. Nothing
+  does that today.
+
+  Note `uniform_hexamer_counts`' own comment still says "the validity gate must
+  match the fragment pass", which reads as an unmet requirement. It is a
+  reasonable thing to have wanted; it is simply not required for this purpose.
 - **The length bound is enforced ONCE, at fragment-array construction** — not
   downstream (owner, 2026-10-07). `filter_fragments` runs as the
   `fragment_array_callback`, so `subset_fragment_lengths(l_min, l_max + 1)` has
