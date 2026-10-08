@@ -37,10 +37,14 @@ region-set-scoped. That is why both are passed around below.
 
 Costs worth knowing before running at scale
 -------------------------------------------
-- ``build_fragments_h5`` walks the WHOLE CONTIG regardless of fragment count:
-  measured 248,956,422 bp in 1 m 47 s to place 320 fragments. The cost scales
-  with genome size, not with depth, and is paid per contig. A full run over all
-  autosomes pays it ~22 times.
+- ``build_fragments_h5`` reads the reference for every 10 Mbp chunk of every
+  contig holding at least one fragment, to compute per-fragment GC, so its cost
+  scales with genome covered, not with fragment count. **It runs serially
+  unless given** ``num_processes`` (its Pool is used only for values other than
+  None and 1), so this script forwards ``--n-workers`` -- resolving None to
+  every CPU, the same rule ``parallel_apply`` uses for the counting step.
+  Measured on 322 fragments on chr1, warm cache: serial 54.4 s, 16 processes
+  12.4 s. The 1 m 47 s once quoted here was a cold, serial build.
 - ``pysam.tabix_index`` CONSUMES the plain BED. After it returns, only
   ``.bed.gz`` and ``.bed.gz.tbi`` remain. Do not plan to re-read or hash the
   plain file afterwards.
@@ -64,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import sys
 import time
@@ -156,19 +161,18 @@ def main(argv=None):
         print(f"[r(h)]    {name:<10} nonzero {nz:4d}/4096  max {r[name].max():.4f}")
 
     bed_path = f"{stem}.bed"
+    # seed and sample_id go into the p sidecar's header: the seed is the
+    # output's only provenance, so a sidecar separated from run.json must still
+    # say which run produced it.
     emit = simulate_fragments_to_bed(
         srdf, bed_path, r=r, fl=fl, region_counts=region_counts,
         rng=np.random.default_rng(args.seed), p_plus=args.p_plus,
+        seed=args.seed, sample_id=args.sample_id,
     )
     print(f"[emit]    {emit}")
-    if emit["n_drawn"] < emit["n_requested"]:
-        # Expected on small runs, not a defect: a sparsely estimated r(h) leaves
-        # many hexamers at zero, so some starts have no valid length. The rate
-        # falls as the region set grows. See the spec's Settled section.
-        short = emit["n_requested"] - emit["n_drawn"]
-        print(f"[emit]    NOTE {short} fragment(s) short across "
-              f"{emit['n_short_regions']} region(s) -- expected when r(h) is "
-              f"sparsely estimated; see the spec's dropped-start note")
+    # No short-draw branch: dead starts and duplicates are redrawn, and an
+    # infeasible request raises inside sample_region, so n_drawn == n_requested
+    # whenever this line is reached.
 
     run = dict(
         sample_id=args.sample_id, seed=args.seed, n_regions=len(rdf),
@@ -189,8 +193,11 @@ def main(argv=None):
         out_h5 = f"{stem}.fragments.h5"
         if os.path.exists(out_h5):
             os.remove(out_h5)
-        print(f"[h5]      building (walks the whole contig -- slow by design)")
-        build_fragments_h5(gz, out_h5, fasta_filename=args.fasta)
+        n_proc = (args.n_workers if args.n_workers is not None
+                  else multiprocessing.cpu_count())
+        print(f"[h5]      building with {n_proc} process(es)")
+        build_fragments_h5(gz, out_h5, fasta_filename=args.fasta,
+                           num_processes=n_proc)
 
         with FragmentsH5(out_h5) as f:
             total = int(f.fragment_length_counts.sum())
@@ -198,14 +205,13 @@ def main(argv=None):
               f"(wrote {emit['n_rows_written']})")
         run.update(fragments_h5_out=out_h5, h5_total_fragments=total,
                    bed_gz=gz)
-        # Not an assertion: the ingest dedups on (start, stop) with strand
-        # excluded, so a drawn collision is removed here. Measured at ~0.0075%
-        # for 1536-bp tiles, and the owner has accepted it as faithful -- the
-        # real assay has no UMIs either.
+        # The ingest does NOT dedup (an earlier version of this comment said it
+        # did; it never has). Duplicates are redrawn at emission instead, so the
+        # h5 should hold exactly the rows written. A mismatch is unexpected.
         if total != emit["n_rows_written"]:
-            print(f"[h5]      NOTE {emit['n_rows_written'] - total} row(s) lost "
-                  f"to the (start, stop) dedup at ingest -- expected, see the "
-                  f"spec's replacement note")
+            print(f"[h5]      WARNING h5 holds {total} but {emit['n_rows_written']} "
+                  f"rows were written -- unexpected; duplicates are redrawn at "
+                  f"emission and the ingest does not dedup")
 
     run["elapsed_s"] = round(time.time() - t0, 1)
     meta_path = f"{stem}.run.json"
