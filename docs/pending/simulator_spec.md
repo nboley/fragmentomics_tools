@@ -298,13 +298,13 @@ arrays, so the length draw is one `(n, n_lengths)` block.
 
 Needs action. Nothing here has been decided.
 
-- **4 mutations from the test design have no test**: M12 (dedup before MAPQ),
-  M15 (midpoint instead of start-in-region admission), M24 (which of the three
-  length-weight factors zeroed), M25 (end-hexamer offset). Scoped out of the
-  implementation on purpose, so this is a known gap rather than an oversight —
-  but admission order and the length draw are both places a silent error would
-  live, so it is the most valuable remaining test work.
-
+- **18 of 42 mutation rows are named-but-UNVERIFIED.** Every row in the test
+  design's matrix now has a test, and 24 have been shown RED under their own
+  mutation (18 from the review sweep, 6 closed in `02f7f39`). The rest are
+  unverified: a test exists and passes, but nothing has shown it would fail
+  against the defect it targets. **Treat those as unknown, not covered** — M7
+  passed for weeks while catching nothing, because its fixture planted no
+  N-window fragment at all.
 
 - **Second copy of the encoder** in `simulator/precompute.py`, kept until the
   old simulator is deleted (deferred: ~8 files still import it, some belonging
@@ -326,6 +326,12 @@ true, and a reader who saw it mid-day would have acted on stale information.
 - ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
   `test_contig_ends_raise` and `test_frame_through_attach_sequence` pin it: it
   raises, and the padded length is asserted exactly, which pins both pads.
+- ~~**4 mutations have no test** (M12, M15, M24, M25).~~ Implemented and each
+  verified RED under its own mutation, `02f7f39`. Settling M12 first required
+  resolving the h5 ordering for equal `(start, stop)`, which the design had
+  flagged as "one case is not a law": `_build_h5` uses a STABLE sort, so ties
+  keep fixture order and the ordering is fixture-controlled. This item was
+  closed and sat in Open anyway until the same day.
 - ~~**`tests/conftest.py` cannot exist.**~~ It can; `2eb09ac`. The collision was
   real but narrow: `--doctest-modules` makes pytest COLLECT conftest files, and
   with no `__init__.py` each is imported under the bare name `conftest`.
