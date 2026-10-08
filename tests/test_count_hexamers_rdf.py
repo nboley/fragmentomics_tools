@@ -624,8 +624,17 @@ class TestT2Admission:
         )
 
     def test_max_overhang_fragment_counted(self, admission_h5, toy_dir, toy_genome, toy_regions):
-        """M16 (right_pad=l_max), M32 (clip stops to region)."""
+        """M16 (right_pad=l_max), M32 (clip stops to region).
+
+        The fixture plants a max-overhang fragment at (g0+R-1, g0+R-1+180, '+')
+        with starts_0=999 and L=180. A DIFFERENT fragment (the straddler at
+        (g0+R-1, g0+R+79, '-'), L=80) also has starts_0=999, so asserting
+        ``999 in starts_0`` is a tautology — the straddler guarantees it
+        regardless of whether the max-overhang fragment survived. Assert the
+        specific (start, stop) pair instead.
+        """
         g0, g1 = toy_regions[0]
+        R = g1 - g0
         rdf = RegionDataFrame(pd.DataFrame({
             "contig": ["chrT"], "start": [g0], "stop": [g1],
         }), ref="hg38")
@@ -634,10 +643,16 @@ class TestT2Admission:
             n_workers=1, verbose=False,
         )
         fa = srdf["fragment_array"].iloc[0]
-        overhang_start = g0 + 1000 - 1 - g0  # starts_0 = R-1
-        assert overhang_start in fa.starts_0.tolist(), "max-overhang fragment dropped"
-        # Stop hexamer should come from the genome, not clipped
-        stop_pos = g0 + 1000 - 1 + 180
+        overhang_start = R - 1       # starts_0 = 999
+        overhang_stop = R - 1 + 180  # stops_0 = 1179
+        pairs = list(zip(fa.starts_0.tolist(), fa.stops_0.tolist()))
+        assert (overhang_start, overhang_stop) in pairs, (
+            f"max-overhang fragment (starts_0={overhang_start}, "
+            f"stops_0={overhang_stop}, L=180) not found. Under M16 "
+            f"(right_pad=l_max instead of l_max+HEX_HALF) the sequence "
+            f"is too short to cover this fragment's stop hexamer."
+        )
+        stop_pos = g0 + R - 1 + 180
         expected_hex = oracle.hex_at(toy_genome, stop_pos)
         assert oracle.valid(expected_hex), "stop hex should be valid in toy genome"
 
@@ -1027,25 +1042,17 @@ class TestT5Sampler:
 
     @pytest.mark.parametrize("strand", ["plus", "minus"])
     def test_start_probabilities(self, strand, toy_dir, toy_genome, simple_fl):
-        """M21 (minus s_tab), M22 (minus on fwd track), M23 (drop valid on starts)."""
+        """M21 (minus s_tab), M22 (minus on fwd track), M23 (drop valid on starts).
+
+        The minus path in sample_region reads ``w_s = end_rev[rc[pos]] * valid[pos]``.
+        The boosted hexamer must therefore appear in the RC track at a position
+        INSIDE the region. The original used ``IDX("AACGTC")`` whose RC "GACGTT"
+        occurs only once in the de Bruijn core — at a position outside ``[3, 1003)``.
+        Fix: compute the actual rc indices inside the region and boost one that is
+        present, then assert as a precondition that the boosted cell is reached.
+        """
         g0, g1 = 3, 1003
         R = g1 - g0
-        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
-        # Make one hexamer 10x stronger in the appropriate start table
-        boosted_hex = oracle.IDX("AACGTC")
-        if strand == "plus":
-            r["start_fwd"][boosted_hex] = 10.0
-            n_plus_val = 5
-        else:
-            r["end_rev"][boosted_hex] = 10.0
-            n_plus_val = 0
-
-        dummy_starts = np.array([100] * 5)
-        dummy_u = np.full((5, 1), 0.5)
-        # NOTE: a second _RecordingRng is built below and is the one actually
-        # passed to sample_region. An earlier version constructed one here too,
-        # which was then shadowed and never used -- dead code that read as
-        # setup. `n_plus_val` is likewise only used to pick the table above.
         rdf = RegionDataFrame(pd.DataFrame({
             "contig": ["chrT"], "start": [g0], "stop": [g1],
         }), ref="hg38")
@@ -1058,6 +1065,53 @@ class TestT5Sampler:
         )
         seq = srdf["sequence"].iloc[0]
         n = 5
+
+        # For the minus case, plant an N inside the region so valid[] is not
+        # all-True. Without it, dropping ``* valid[pos]`` (M23) has no effect
+        # and the test cannot detect the missing mask. One N invalidates six
+        # consecutive cut sites because the window spans [c, c+KMER).
+        if strand == "minus":
+            n_inject_pos = 500 + HEX_HALF
+            seq_bytes = bytearray(seq)
+            seq_bytes[n_inject_pos] = ord(b"N")
+            seq = bytes(seq_bytes)
+
+        seq_upper = bytes(seq).upper().decode()
+        fwd, rc_arr, valid = hexamer_indices(seq_upper)
+
+        if strand == "minus":
+            # Verify the injected N actually invalidates positions in the region.
+            n_invalid_in_region = int((~valid[:R]).sum())
+            assert n_invalid_in_region >= 1, (
+                "injected N did not invalidate any position in [0, R) — "
+                "the test cannot detect a missing valid mask"
+            )
+
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        if strand == "plus":
+            boosted_hex = oracle.IDX("AACGTC")
+            r["start_fwd"][boosted_hex] = 10.0
+            n_reached = int((fwd[:R][valid[:R]] == boosted_hex).sum())
+            assert n_reached >= 1, (
+                f"boosted hexamer AACGTC (idx {boosted_hex}) not reachable on "
+                f"fwd track within region [0, {R})"
+            )
+        else:
+            # Pick a hexamer that appears in the RC track inside the region.
+            # Position 100 is well inside [0, 1000) and valid in the de Bruijn
+            # core, far from the injected N at 500.
+            probe_pos = 100
+            assert valid[probe_pos], "probe position must be valid"
+            boosted_hex = int(rc_arr[probe_pos])
+            r["end_rev"][boosted_hex] = 10.0
+            n_reached = int((rc_arr[:R][valid[:R]] == boosted_hex).sum())
+            assert n_reached >= 1, (
+                f"boosted hexamer (rc idx {boosted_hex}) not reachable on "
+                f"rc track within region [0, {R})"
+            )
+
+        dummy_starts = np.array([100] * n)
+        dummy_u = np.full((n, 1), 0.5)
 
         if strand == "plus":
             rng_n_plus = [n]
@@ -1074,15 +1128,12 @@ class TestT5Sampler:
         assert len(rng.recorded_start_weights) == 1
         recorded_p = rng.recorded_start_weights[0]
 
-        # Compute expected weights with the oracle
-        seq_upper = bytes(seq).upper().decode()
-        track = "fwd" if strand == "plus" else "rc"
+        track_name = "fwd" if strand == "plus" else "rc"
         expected_w = np.zeros(R, dtype=np.float64)
-        fwd, rc, valid = hexamer_indices(seq_upper)
         for i in range(R):
             if not valid[i]:
                 continue
-            idx = int(fwd[i]) if track == "fwd" else int(rc[i])
+            idx = int(fwd[i]) if track_name == "fwd" else int(rc_arr[i])
             tab = r["start_fwd"] if strand == "plus" else r["end_rev"]
             expected_w[i] = tab[idx]
 
@@ -1432,7 +1483,11 @@ class TestT6WriterAndRoundTrip:
             assert cur >= prev, "BED not sorted"
             prev = cur
 
-        assert roundtrip_data["sim_stats"]["n_rows_written"] == roundtrip_data["sim_stats"]["n_drawn"]
+        # n_rows_written == n_drawn was here but is a tautology: both are
+        # counted from the same arrays in simulate_fragments_to_bed with no
+        # filtering between them, so the equality holds by construction.
+        # The meaningful check above — len(lines) == n_rows_written — verifies
+        # the file was actually written, so that one stays.
 
     def test_recount_equals_distinct_pairs(self, roundtrip_data):
         """M28 (strand column wrong), M29 (1-based start)."""
@@ -1454,6 +1509,171 @@ class TestT6WriterAndRoundTrip:
             assert actual == expected, (
                 f"recount region_counts[{ri}]={actual} != {expected} distinct pairs"
             )
+
+    def test_writer_absolute_coordinates(self, toy_dir, toy_genome, simple_fl):
+        """M29 (writer start is 1-based).
+
+        The existing test_recount_equals_distinct_pairs is self-referential:
+        both the expected and actual distinct-pair count derive from the same
+        BED, so a constant +1 on every coordinate cancels out. This test
+        re-derives expected absolute coordinates from the in-memory draw
+        (starts_0 + gstart) and compares them to the post-round-trip read-back.
+
+        Built on the real round-trip chain: count_sample -> sample_region ->
+        simulate_fragments_to_bed -> tabix -> build_fragments_h5 -> fetch_array.
+        """
+        from fragments_h5 import FragmentsH5
+
+        g0, g1 = 503, 1003
+        R = g1 - g0
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+
+        rng_fix = np.random.RandomState(77)
+        frags = []
+        for i in range(200):
+            s = g0 + rng_fix.randint(0, R)
+            L = rng_fix.randint(L_MIN, L_MAX + 1)
+            strand = "+" if rng_fix.random() < 0.5 else "-"
+            frags.append(("chrT", s, s + L, strand, 30, 30))
+        h5 = _build_h5(frags, toy_dir["fasta"], toy_dir["dir"], name="abs_coord_src")
+
+        counts, region_counts, stats, srdf = count_sample(
+            rdf, "test", h5, toy_dir["fasta"], n_workers=1, verbose=False,
+        )
+        fl = FragmentLengthDist.from_srdf(srdf)
+        N, _ = uniform_hexamer_counts(rdf, toy_dir["fasta"], fl, verbose=False)
+        r = propensities(counts, N)
+
+        # Run sample_region directly to capture the raw draws.
+        seq = srdf["sequence"].iloc[0]
+        n = int(region_counts[0])
+        rng_sim = np.random.default_rng(42)
+        starts_0, lengths, is_plus = sample_region(
+            seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
+        )
+        assert len(starts_0) > 0, "no fragments drawn"
+
+        # Derive absolute coordinates from the draw.
+        expected_starts = g0 + starts_0
+        expected_stops = expected_starts + lengths
+        expected_strands = np.where(is_plus, "+", "-")
+
+        # Write through the real chain.
+        sim_bed = os.path.join(toy_dir["dir"], "abs_coord.bed")
+        rng_sim2 = np.random.default_rng(42)
+        simulate_fragments_to_bed(
+            srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
+            rng=rng_sim2, p_plus=0.5,
+        )
+        gz = pysam.tabix_index(sim_bed, preset="bed", force=True)
+        sim_h5 = os.path.join(toy_dir["dir"], "abs_coord.frag.h5")
+        subprocess.run(
+            ["build-fragments-h5", gz, sim_h5, "--fasta", toy_dir["fasta"],
+             "--quiet"],
+            check=True, capture_output=True,
+        )
+
+        # Read back from h5 and compare.
+        fh5 = FragmentsH5(sim_h5)
+        h5_starts, h5_stops, extras = fh5.fetch_array(
+            "chrT", 0, len(toy_genome), return_strand=True,
+        )
+        fh5.close()
+
+        # Sort both sides by (start, stop) for comparison. The h5 reader
+        # returns sorted by start; the draw is in draw order.
+        draw_order = np.lexsort((expected_stops, expected_starts))
+        h5_order = np.lexsort((h5_stops, h5_starts))
+
+        np.testing.assert_array_equal(
+            expected_starts[draw_order], h5_starts[h5_order],
+            err_msg="absolute start coordinates do not match the in-memory draw"
+        )
+        np.testing.assert_array_equal(
+            expected_stops[draw_order], h5_stops[h5_order],
+            err_msg="absolute stop coordinates do not match the in-memory draw"
+        )
+
+    def test_round_trip_strand_per_fragment(self, toy_dir, toy_genome, simple_fl):
+        """M28 (writer strand column flipped).
+
+        The original test_round_trip_through_real_reader only checked
+        set(strands).issubset({"+","-"}), which a wholesale +/- swap still
+        satisfies. This test checks per-fragment strand correctness by
+        comparing the in-memory draw's strand labels to the h5 read-back.
+        """
+        from fragments_h5 import FragmentsH5
+
+        g0, g1 = 503, 1003
+        R = g1 - g0
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+
+        rng_fix = np.random.RandomState(88)
+        frags = []
+        for i in range(200):
+            s = g0 + rng_fix.randint(0, R)
+            L = rng_fix.randint(L_MIN, L_MAX + 1)
+            strand = "+" if rng_fix.random() < 0.5 else "-"
+            frags.append(("chrT", s, s + L, strand, 30, 30))
+        h5 = _build_h5(frags, toy_dir["fasta"], toy_dir["dir"], name="strand_rt_src")
+
+        counts, region_counts, stats, srdf = count_sample(
+            rdf, "test", h5, toy_dir["fasta"], n_workers=1, verbose=False,
+        )
+        fl = FragmentLengthDist.from_srdf(srdf)
+        N, _ = uniform_hexamer_counts(rdf, toy_dir["fasta"], fl, verbose=False)
+        r = propensities(counts, N)
+
+        seq = srdf["sequence"].iloc[0]
+        n = int(region_counts[0])
+        rng_sim = np.random.default_rng(77)
+        starts_0, lengths, is_plus = sample_region(
+            seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
+        )
+        assert len(starts_0) > 0
+
+        expected_starts = g0 + starts_0
+        expected_stops = expected_starts + lengths
+        expected_strands = np.where(is_plus, "+", "-")
+
+        sim_bed = os.path.join(toy_dir["dir"], "strand_rt.bed")
+        rng_sim2 = np.random.default_rng(77)
+        simulate_fragments_to_bed(
+            srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
+            rng=rng_sim2, p_plus=0.5,
+        )
+        gz = pysam.tabix_index(sim_bed, preset="bed", force=True)
+        sim_h5 = os.path.join(toy_dir["dir"], "strand_rt.frag.h5")
+        subprocess.run(
+            ["build-fragments-h5", gz, sim_h5, "--fasta", toy_dir["fasta"],
+             "--quiet"],
+            check=True, capture_output=True,
+        )
+
+        fh5 = FragmentsH5(sim_h5)
+        h5_starts, h5_stops, extras = fh5.fetch_array(
+            "chrT", 0, len(toy_genome), return_strand=True,
+        )
+        fh5.close()
+
+        h5_strands = np.array([s.decode() for s in extras["strand"]])
+
+        # Sort both sides by (start, stop, strand) for deterministic comparison.
+        draw_sort = np.lexsort((expected_strands, expected_stops, expected_starts))
+        h5_sort = np.lexsort((h5_strands, h5_stops, h5_starts))
+
+        # Guard: both strands must be present, otherwise a swap is undetectable.
+        assert "+" in set(expected_strands) and "-" in set(expected_strands), (
+            "fixture must produce both strands for this test to detect a swap"
+        )
+        np.testing.assert_array_equal(
+            expected_strands[draw_sort], h5_strands[h5_sort],
+            err_msg="per-fragment strand labels do not match the in-memory draw"
+        )
 
     def test_round_trip_through_real_reader(self, roundtrip_data):
         """M28 (strand flipped), M29 (1-based start)."""
@@ -1522,6 +1742,148 @@ class TestT6WriterAndRoundTrip:
                 rdf_with_fa, "/dev/null",
                 FragmentLengthDist(np.ones(10, dtype=np.int64), 25),
                 verbose=False,
+            )
+
+    def test_count_srdf_all_empty_raises(self, toy_dir, toy_genome):
+        """C1: count_srdf raises when every fragment is removed before counting."""
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+        from fragmentomics_tools import RegionFragmentArray
+        from fragmentomics_tools.region import Region
+
+        g0, g1 = 3, 103
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("test", toy_dir["fasta"])])
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        # Replace fragment_array with an empty one so n_after_filters == 0.
+        srdf["fragment_array"] = [
+            RegionFragmentArray([], [], Region("chrT", g0, g1), L_MAX)
+        ]
+        with pytest.raises(ValueError, match="EVERY fragment was removed"):
+            count_srdf(srdf, n_workers=1, verbose=False)
+
+    def test_count_srdf_missing_sequence_raises(self, admission_h5, toy_dir, toy_regions):
+        """C2: count_srdf raises when 'sequence' column is missing."""
+        g0, g1 = toy_regions[0]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("test", admission_h5)])
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_fragment_arrays(
+            min_mapq=10,
+            fragment_array_callback=filter_fragments,
+            verbose=False,
+        )
+        with pytest.raises(ValueError, match="has no 'sequence' column"):
+            count_srdf(srdf, n_workers=1, verbose=False)
+
+    def test_simulate_guard_region_counts_shape(self, admission_h5, toy_dir, toy_regions, simple_fl, tmp_path):
+        """C3: simulate_fragments_to_bed raises on region_counts shape mismatch."""
+        g0, g1 = toy_regions[0]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("test", admission_h5)])
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_fragment_arrays(
+            min_mapq=10, fragment_array_callback=filter_fragments, verbose=False,
+        )
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        with pytest.raises(ValueError, match="region_counts has shape"):
+            simulate_fragments_to_bed(
+                srdf, str(tmp_path / "test.bed"),
+                r=r, fl=simple_fl,
+                region_counts=np.array([10, 20]),
+                rng=np.random.default_rng(0),
+            )
+
+    def test_simulate_guard_missing_column(self, simple_fl, tmp_path):
+        """C4: simulate_fragments_to_bed raises when a required column is missing."""
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        srdf_no_seq = pd.DataFrame({
+            "contig": ["chrT"], "start": [3], "stop": [103],
+            "fragment_array": [None],
+        })
+        with pytest.raises(ValueError, match="has no 'sequence' column"):
+            simulate_fragments_to_bed(
+                srdf_no_seq, str(tmp_path / "test.bed"),
+                r=r, fl=simple_fl,
+                region_counts=np.array([10]),
+                rng=np.random.default_rng(0),
+            )
+
+    def test_simulate_guard_fa_length_mismatch(self, admission_h5, toy_dir, toy_regions, simple_fl, tmp_path):
+        """C5: simulate_fragments_to_bed raises when fa.length != stop - start."""
+        from fragmentomics_tools import RegionFragmentArray
+        from fragmentomics_tools.region import Region
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+
+        g0, g1 = toy_regions[0]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("test", admission_h5)])
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_fragment_arrays(
+            min_mapq=10, fragment_array_callback=filter_fragments, verbose=False,
+        )
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        wrong_len = (g1 - g0) + 50
+        srdf["fragment_array"] = [
+            RegionFragmentArray([], [], Region("chrT", g0, g0 + wrong_len), L_MAX)
+        ]
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        with pytest.raises(AssertionError, match="fragment_array.length"):
+            simulate_fragments_to_bed(
+                srdf, str(tmp_path / "test.bed"),
+                r=r, fl=simple_fl,
+                region_counts=np.array([10]),
+                rng=np.random.default_rng(0),
+            )
+
+    def test_simulate_guard_sequence_length_mismatch(self, admission_h5, toy_dir, toy_regions, simple_fl, tmp_path):
+        """C6: simulate_fragments_to_bed raises on sequence length mismatch."""
+        from fragmentomics_tools import RegionFragmentArray
+        from fragmentomics_tools.region import Region
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+
+        g0, g1 = toy_regions[0]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("test", admission_h5)])
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_fragment_arrays(
+            min_mapq=10, fragment_array_callback=filter_fragments, verbose=False,
+        )
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        original_seq = srdf["sequence"].iloc[0]
+        srdf["sequence"] = [original_seq[:-10]]
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        with pytest.raises(AssertionError, match="sequence is .* b, expected"):
+            simulate_fragments_to_bed(
+                srdf, str(tmp_path / "test.bed"),
+                r=r, fl=simple_fl,
+                region_counts=np.array([10]),
+                rng=np.random.default_rng(0),
             )
 
 
