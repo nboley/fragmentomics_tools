@@ -115,8 +115,13 @@ Normalised **within the strand**:
 pairs already drawn in this region.  Strand is NOT in the key, matching the
 read-time dedup convention.  On collision, both start and length are redrawn
 from the same distribution.  Requesting `n > region_len` raises `ValueError`.
-An attempt bound of `100 * k` per strand prevents near-capacity draws from
-crawling silently.
+**Total draw attempts for a region are capped at `2n`**: once duplicate redraws
+exceed `n`, `sample_region` raises `RuntimeError` (owner, 2026-10-08).  The
+counter is region-scoped -- one budget for the whole region, not per fragment
+or per strand.  This forbids near-exhaustive draws by design: rejection-sampling
+`n` distinct pairs from a live space of size `M` costs `M(H_M - H_{M-n}) - n`
+redraws, which crosses `n` near `n/M = 0.8`.  Real data sits near `n/M = 0.6%`,
+so it does not fire there; a test that deliberately exhausts the space will.
 
 With duplicates redrawn, no duplicate `(start, stop)` ever reaches the BED, so
 read-time `drop_duplicate_fragments` removes **nothing**.  Emitted rows map
@@ -488,12 +493,16 @@ looks like a defect, read the reason before changing it.
   the read-time convention.  With duplicates gone, read-time
   `drop_duplicate_fragments` is a no-op and emitted rows map 1:1 to h5 rows.
 
-  Requesting `n > region_len` raises `ValueError`.  An attempt bound of
-  `100 * k` prevents near-capacity draws from crawling silently.
+  Requesting `n > region_len` raises `ValueError`, and total draw attempts
+  above `2n` for a region raise `RuntimeError` (see §4).  Both raise rather than
+  cap: a silent cap would quietly emit fewer fragments than requested, the same
+  class of shortfall the redraw exists to remove.
 
   Storing the first-draw marginal rather than the conditional makes the oracle
-  read slightly high (duplicate-redrawing samples without replacement); accepted
-  as negligible at the observed ~0.0075% collision rate.
+  read slightly high (duplicate-redrawing samples without replacement).  Accepted
+  by the owner, 2026-10-08, regardless of the rate -- so no rate is quoted here.
+  (An earlier version cited ~0.0075%; that figure was never measured under this
+  draw, and a 10-region run measured 3.4%, from too small a sample to settle it.)
 
 - **Draw order is not part of the contract.** `sample_region` returns the plus
   block then the minus block, unsorted within each. Output goes straight into
