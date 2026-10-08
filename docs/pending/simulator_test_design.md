@@ -1,6 +1,35 @@
 # Test design: `background_model/simulator/count_hexamers_rdf.py`
 
-**Status (2026-10-07): DRAFT v4 for owner approval. Nothing here is implemented.**
+**Status (2026-10-08): v5, reconciled against HEAD `eda1b14`. The tests this design proposed
+are now LARGELY IMPLEMENTED** (`tests/test_count_hexamers_rdf.py`, 43 test functions, added in
+`45b32ec` and closed out through `02f7f39`) **— this revision is a drift fix, not a new
+proposal.** v4 (below) was last synced at `b50ab4f`; 14 commits landed between `b50ab4f` and
+`eda1b14` and this file was only partially kept up to date (`2eb09ac` updated the mutation-matrix
+status; nothing after that touched this file until now) [Verified: `git log --oneline --
+docs/pending/simulator_test_design.md` shows `2eb09ac`, `aeb35b9`, `8eb5dc2` only; `git log
+--oneline b50ab4f..eda1b14` lists 14 commits]. The concrete drift this revision fixes:
+
+- **The strand-balance guard this design spent §4.4, F3, F13, M3 and Q6 on was REMOVED**
+  (`38e5198`, "doesn't seem useful") — not merely capped. F3/F13/M3/Q6 are VOID; see each
+  section below for the replacement text, not a deletion, so a reader who remembers them finds
+  out what happened rather than finding them silently gone.
+- **The real-data tier (R1, R2, R4) described in §2.4/§2.5 and catalogued in §5 was never
+  built.** No `tests/test_count_hexamers_rdf_real.py`, no `tests/conftest.py`, no
+  `tests/data/simulator_real_regions_20.bed` exist at `eda1b14` [Verified: `ls tests/conftest.py`
+  → does not exist; `ls tests/test_count_hexamers_rdf_real.py` → does not exist; `grep -rn
+  "simulator_real_regions\|real_data" tests/` → no matches]. This was proposed design, and it
+  is still only that — marked throughout.
+- **M12, M15, M24 and M25 — this design's own §4.2b, "the four mutations with no test" — were
+  closed in `02f7f39`.** They now have tests, each verified red under its own mutation.
+- `make test`'s default target now collects `tests/` (`dc1df6f`, `aefa71e`), contradicting this
+  design's "Runs where?" bullet, Q3 and the P8 exit criterion as written below.
+- The `propensities()` pairing fix cited at `:838-841` throughout now sits at `:846-852`
+  (`count_hexamers_rdf.py`'s docstring grew).
+- The C/N validity-gate question this design left open as F6/Q2 is now a closed owner
+  decision (`docs/pending/simulator_spec.md`, Settled, 2026-10-08): "not interested in further
+  pursuing this." Not re-opened here.
+
+None of the above required touching module code to discover — it is git history plus grep.
 Rebased on HEAD `0820409` (parents `844f227`, `a409186`) [Verified: `.git` reflog]. The premise
 "the module has zero tests" is **wrong** now: `844f227` added 4 tests
 (`tests/test_simulator_propensity_denominators.py`) and fixed F1. Those pin the pairing only.
@@ -9,6 +38,9 @@ The rest of this design is still needed. v3 adds the F1 status, the propensity t
 addresses round 2's review. HEAD moved underneath it, `0820409` → `b50ab4f`** [Verified:
 `git log -3`], fixing F2/F3/F13/F4/F18/F19 and shifting the module by +26 lines; every cite
 this revision wrote was re-grepped there, but untouched cites may still carry old numbers.
+**v5 (this revision) re-grepped the citations named in the bullets above and in the sections
+they touch; citations elsewhere in this document were NOT individually re-walked line by line
+— see "Least sure of" at the end for exactly what that leaves uncertain.**
 This design has two parts. First, it proposes tests. Second, it reports findings that need
 an owner decision. It does not change module code. Authority: `docs/pending/simulator_spec.md`.
 `attic/` is quarantined and not current. Evidence tags:
@@ -35,15 +67,19 @@ an owner decision. It does not change module code. Authority: `docs/pending/simu
 - **Skips.** Only `real_data` tests may skip, and only on missing EFS data. `-rs` prints the
   reason. `REQUIRE_REAL_DATA=1` turns such a skip into a failure (§2.5). The owner's
   acceptance run uses it and must show 0 skipped. A missing pysam or fragments_h5 fails
-  loudly.
+  loudly. **None of this tier exists at `eda1b14`** [Verified: no `tests/conftest.py`, no
+  `tests/test_count_hexamers_rdf_real.py`, no `tests/data/simulator_real_regions_20.bed`] —
+  read §2.4/§2.5/§9 Q5 as a still-open proposal, not as implemented behaviour.
 - **Tiers.** T0 encoder/frame, T1 strand routing, T2 admission, T3 `count_sample` against a
   brute-force oracle, T4 expectation and propensity, T5 sampler, T6 BED/h5 round trip,
   T7 hygiene, R real data. Every oracle imports nothing from the module. Every test names
   at least one mutation that it must turn red (§4.2).
 - **Finding F1 (fixed in `844f227`, owner-approved).** `propensities()` divided the minus
   tables by swapped denominators. The fix pairs `start_rev` with `N_end[perm]` and `end_rev`
-  with `N_start[perm]` [Verified: `count_hexamers_rdf.py:838-841`]. `t4_null_identity` is the
-  exact regression guard. Mutation M41 restores the old pairing and must turn two rows red.
+  with `N_start[perm]` [Verified: `count_hexamers_rdf.py:846-852`, re-grepped at `eda1b14`;
+  was `:838-841` as of `b50ab4f` — the docstring above the pairing grew]. `t4_null_identity`
+  (test file: `test_null_identity`, parametrized over the four tables) is the exact regression
+  guard. Mutation M41 restores the old pairing and must turn two rows red.
 - **Finding F2 (MEDIUM).** The docstrings say invalid windows carry index 0. They do not.
   `hexamer_indices` reads N as A inside the window [Verified: Research A]. A consumer that
   skips the validity gate miscounts into a *neighbouring* hexamer, not into cell 0.
@@ -53,34 +89,58 @@ an owner decision. It does not change module code. Authority: `docs/pending/simu
   realised per-region strand counts. For real data the unit is the region, and no test
   asserts a real-data plus fraction. The real-data excess is overdispersion. Its mechanism is
   unmeasured (§4.4).
-- **Runs where?** Only under `make test PYTEST_ARGS="tests/ -q"`, with `biomarker_env`
-  first on PATH. Default `make test` does not collect `tests/` [Verified: Makefile:27-29].
-  See Q3 and F16.
+- **Runs where? SUPERSEDED.** This bullet, Q3 and F16 described a real defect that has since
+  been fixed twice over. `dc1df6f` made default `make test` collect `test/ tests/
+  fragmentomics_tools/` together — the Makefile's own comment says the omission "meant 677
+  tests never ran under the default target" — and `aefa71e` fixed the resulting interpreter/PATH
+  trap (pinning `PYTHON` alone took the suite from 2 failed to 54, because `bedtools`/`bgzip`/
+  `tabix` live beside the interpreter, not in it; the target now puts the interpreter's own
+  `bin/` on PATH too) [Verified: `Makefile:1-55`, `:229-268`, read at `eda1b14`]. **Today, plain
+  `make test` is self-contained and collects this module's tests by default.** Q3 is answered
+  and F16 is done; §8's P8 exit criterion below is stale and corrected there.
 
 ## 1. Ground truth
 
 ### 1.1 Baselines (worktree `background-model-work`, `biomarker_env`)
 
-Measured at `a409186`. Re-measure at the implementation HEAD (P0). The four `844f227` tests
-came later. If all pass, `tests/` reads 677 [Inferred].
+**Re-measured this revision, at `eda1b14`, by actually running the command** (not taken from
+a commit message): `make test` with no `PYTEST_ARGS` override.
+
+| Command | Result | Source |
+|---|---|---|
+| `make test` at `eda1b14` (single default target, now `test/ tests/ fragmentomics_tools/`) | **2 failed, 1125 passed, 3 skipped, 208.83 s, make exit 1 (pytest found failures; `make` itself errors on that, which is not a hang — see Makefile's own exit-137 check, which did not fire)** | [Verified: ran in this session, full log in `/tmp/maketest_eda1b14.log`] |
+
+The 2 failures are still the known missing-data cases: `test/test_formats.py::
+test_slice_encode_big_wig` and `test/test_region.py::test_get_one_hot_encoded_sequence`
+[Verified: same run]. This single number **supersedes the two-row table below**, which
+described a split that no longer exists: `dc1df6f` and `aefa71e` made default `make test`
+collect `tests/` (background_model) together with `test/` (library) and
+`fragmentomics_tools/`, self-contained (PYTHON pinned, and the interpreter's own `bin/` put on
+PATH so `bedtools`/`bgzip`/`tabix` resolve regardless of the caller's shell). There is no
+longer a separate `make test PYTEST_ARGS="tests/ -q"` invocation to run; passing that override
+today would just re-run a subset of the same default target.
+
+**History, kept for attribution only — do not run these.** Measured at `a409186`, before the
+split was closed:
 
 | Command | Result | Source |
 |---|---|---|
 | `make test` (default `test/ fragmentomics_tools/`, `--doctest-modules`) | 2 failed, 399 passed, 3 skipped, 92.39 s, exit 2 | [Verified: coordinator log, at `a409186`] |
 | `make test PYTEST_ARGS="tests/ -q"` | 673 passed, no skips reported, 218.63 s, exit 0 | [Verified: coordinator log, at `a409186`] |
-| `make test` under the wrong python (claude-mcp, py3.13) | exit 2, 11 collection errors | [Verified: coordinator log] (F16) |
+| `make test` under the wrong python (claude-mcp, py3.13) | exit 2, 11 collection errors | [Verified: coordinator log] (F16, now fixed — see "Runs where?") |
 
-The 2 failures are the known missing-data cases (`test_slice_encode_big_wig`,
-`test_get_one_hot_encoded_sequence`). The counts match the v1 draft. The worktree
-CLAUDE.md states 4 failed / 386 passed / 3 skipped (2026-09-27). That line is stale against
-these measurements [Verified: research file, decision 7].
+The counts matched the v1 draft at the time. The worktree
+CLAUDE.md states 4 failed / 386 passed / 3 skipped (2026-09-27). That line was already stale
+against those measurements, and is further stale against the `eda1b14` row above.
 
-The Makefile runs bare `python -m pytest` [Verified: Makefile:203-207]. So
-`/home/nathanboley/miniconda3/envs/biomarker_env/bin` must be first on PATH. The Makefile
-also prepends the stale `FLGC_PYTHONPATH` (F15). Default `make test` collects `test/` and
-`fragmentomics_tools/` only, so it never runs `tests/` and never runs the doctests in
-`background_model/`. Run directly, those doctests pass: `2 passed in 5.94 s`
-[Verified: Research A].
+The Makefile today pins the interpreter (`PYTHON ?=
+.../biomarker_env/bin/python`) and puts its `bin/` on PATH rather than running a bare
+`python -m pytest` off the caller's PATH [Verified: `Makefile:229-247`, read at `eda1b14`].
+The `FLGC_PYTHONPATH` prepend (F15) is still present and still named a stale directory-naming
+concern only (`Makefile:220-229`). Default `make test` now DOES collect `tests/`, superseding
+the next sentence, which is history: ~~it never runs `tests/` and never runs the doctests in
+`background_model/`~~. Run directly, those doctests pass: `2 passed in 5.94 s`
+[Verified: Research A] — and now also run as part of the default `--doctest-modules` target.
 
 Environment [Draft measurement]: Python 3.10.19, pysam 0.23.3, h5py 3.15.1. `fragments_h5`
 imports from the editable checkout `/home/nathanboley/src/fragments_h5`. `bgzip`, `tabix`,
@@ -172,7 +232,12 @@ A frame test on such a genome cannot tell some shifts apart.
 
 - `count_hexamers_rdf.py:32` and `:88-94`: say `simulator.precompute` stays the encoder, and
   cite a test `test_encoder_matches_precompute` (`:93`) that does not exist (spec Open 3,
-  `:193-199`) [Verified: grep]. T0 resolves this. The comment should then cite T0.
+  `:193-199`) [Verified: grep, still true at `eda1b14`]. **The real, stronger guard that exists
+  today is `test_encoder_matches_oracle_all_4096`** (`tests/test_count_hexamers_rdf.py:249`),
+  which checks all 4096 hexamers against an independent oracle rather than against the second
+  copy of the encoder — stronger because the two copies could in principle drift in step and a
+  copy-vs-copy check would not see it. If the comment at `:93` is ever touched, it should cite
+  that test by name, not the nonexistent one.
 - `count_hexamers_rdf.py:578`: the docstring says "strand, then start, then length". The
   code draws one binomial per region (`:596`) [Verified: Research A].
 - **Superseded by `b50ab4f`** (F2, F18, F19 done): `hexamer_indices`'s docstring (`:135-142`)
@@ -255,6 +320,18 @@ Local precedents [Verified: Research C]:
   `tests/test_bg_correction.py:41-42` skip on in-repo fixture paths.
 
 ### 2.4 Real-data tier and the fixture split
+
+**NOT IMPLEMENTED at `eda1b14`.** Everything below this line in §2.4 and all of §2.5 describes
+a proposal that was never built: no `tests/test_count_hexamers_rdf_real.py`, no
+`tests/conftest.py` (so no `real_data` marker and no `REQUIRE_REAL_DATA` hook), and no
+`tests/data/simulator_real_regions_20.bed` exist in the worktree [Verified:
+`ls tests/conftest.py tests/test_count_hexamers_rdf_real.py tests/data/simulator_real_regions_20.bed`
+all fail; `grep -rln "real_data\|REQUIRE_REAL_DATA" tests/` has no matches]. R1, R2 and R4
+are therefore not run anywhere, `make test` cannot skip or fail on them, and the acceptance
+criterion "0 skipped under `REQUIRE_REAL_DATA=1`" is unreachable because the env var and the
+tests it would gate do not exist. This is a gap, not a removal — nothing here was built and
+then taken out — so it stays in the document as a design to pick up, not as implemented
+behaviour. Read §5's "R real data" list, §8's P6 and the Q5 open question the same way.
 
 The question per test: what does the test need for a checkable answer?
 
@@ -391,7 +468,21 @@ The routing above matches the module (`:314`, `:320-321`) and spec `:79-80`
 Apply each mutation as a scratch edit at its **site** (module, oracle, or library under
 `fragmentomics_tools/`). Never commit. Run the named tests, confirm each is **red** (a failure or
 an unexpected exception), then revert. The PR table lists mutation, site, test and red/green. A
-test that stays green under its mutation is not done. Line numbers are at HEAD `0820409`.
+test that stays green under its mutation is not done. **Line numbers below are at HEAD
+`0820409`/`b50ab4f` and have NOT been individually re-walked for this revision**, except the
+rows this revision touched directly (M12, M13, M14, M15, M19, M20, M24, M25 — corrected
+below) and the ones named in the header-note bullets. The module gained roughly a dozen lines
+of docstring between `b50ab4f` and `eda1b14` (the F1/F2 prose and the strand-check rewrite in
+`38e5198`), so most untouched numeric cites in this table are likely off by a small,
+non-uniform amount. **Prefer the named function/symbol over the number** — every "module
+`:NNN`" cite below names a function in its own row or the row immediately above it, and `grep
+-n` on that function is one call. The function definitions and their current lines, pinned
+this session: `hexamer_indices` 122, `hexamer_vocabulary` 161, `rc_permutation` 195,
+`cut_site_hexamers` 276, `counts_from_hexamers` 313, `FragmentLengthDist` 336,
+`fl_end_weight` 446, `uniform_hexamer_counts` 470, `sample_region` 577,
+`simulate_fragments_to_bed` 657, `propensities` 801, `count_srdf` 864, `filter_fragments`
+1046, `count_sample` 1071 [Verified: `grep -n '^def \|^class ' count_hexamers_rdf.py` at
+`eda1b14`].
 
 | # | Class | Site | Mutation | Cheapest distinguishing input | Tests that must go red |
 |---|---|---|---|---|---|
@@ -406,20 +497,20 @@ test that stays green under its mutation is not done. Line numbers are at HEAD `
 | M9 | routing | module `:320-321` | omit `perm` on minus | same | `t1_counts_from_hexamers_routing` |
 | M10 | routing | module `:314` | `plus = strand != "+"` (whole swap) | one plus, one minus fragment | `t1_counts_from_hexamers_routing`, `t3_count_sample_matches_bruteforce`, `t6_recount_equals_distinct_pairs`, `r1_…` |
 | M11 | admission | library `fragment_array.py:1751` | MAPQ `>` instead of `≥` | mapq 10 fragment | `t2_mapq_boundary`, `r1_…` |
-| M12 | admission | library `fragment_array.py:1742-1751` | dedup `:1050` moved before MAPQ | A`(s,e,'+')` mapq 5 then B`(s,e,'-')` mapq 30 (L3 split; L7 strand discriminates since hexamers are equal) | `t2_mapq_filter_precedes_dedup` |
-| M13 | admission | module `:1082` | `subset_fragment_lengths(l_min, l_max)` (half-open drops 180) | L=180 | `t2_length_bounds`, `r1_…` |
-| M14 | admission | module `:1083` | `starts_0 <= length` | start at g0+R | **Equivalent mutant (H1): no test can turn this red.** The real reader keeps only `starts < region_stop` (`fragments_h5.py:638-640`), so `starts_0 == fa.length` is unreachable through `from_fragments_h5`; a hand-built RFA with `starts_0 == length` raises `FragmentDoesNotIntersect` inside `filter_fragments` instead (even with `validate_data=False`, since `drop_duplicate_fragments` re-validates). `t2_start_admission_half_open` is kept regardless: it still pins the tile assignment of g0−1, g0, g0+R−1 and g0+R through the real reader. |
-| M15 | admission | module `:1083` | midpoint admission | tile straddler | `t2_straddler_counted_in_start_tile` |
+| M12 | admission | library `fragment_array.py:1742-1751` | dedup `:1050` moved before MAPQ | A`(s,e,'+')` mapq 5 then B`(s,e,'-')` mapq 30 (L3 split; L7 strand discriminates since hexamers are equal) | `t2_mapq_filter_precedes_dedup` — **CLOSED in `02f7f39`**, implemented as `test_mapq_filter_precedes_dedup`, verified red. The design's own caveat ("carries a caveat that must be settled first", §4.2b) was resolved: `_build_h5` uses a stable sort, ties keep fixture order, so this IS testable through `from_fragments_h5` |
+| M13 | admission | module `filter_fragments`, `:1066` at `eda1b14` (was `:1082`) | `subset_fragment_lengths(l_min, l_max)` (half-open drops 180) | L=180 | `t2_length_bounds`, `r1_…` (r1 not implemented, §2.4) |
+| M14 | admission | module `filter_fragments`, admission mask, `:1067` at `eda1b14` (was `:1083`) | `starts_0 <= length` | start at g0+R | **Equivalent mutant (H1): no test can turn this red.** The real reader keeps only `starts < region_stop` (`fragments_h5.py:638-640`), so `starts_0 == fa.length` is unreachable through `from_fragments_h5`; a hand-built RFA with `starts_0 == length` raises `FragmentDoesNotIntersect` inside `filter_fragments` instead (even with `validate_data=False`, since `drop_duplicate_fragments` re-validates). `t2_start_admission_half_open` is kept regardless: it still pins the tile assignment of g0−1, g0, g0+R−1 and g0+R through the real reader. |
+| M15 | admission | module `filter_fragments`, admission mask, `:1067` at `eda1b14` (was `:1083`) | midpoint admission | tile straddler | `t2_straddler_counted_in_start_tile` — **CLOSED in `02f7f39`**, implemented as `test_straddler_counted_in_start_tile` (+3 cases), verified red |
 | M16 | pad | module `:1140` | `right_pad=l_max` | start g0+R−1, L=180 | `t2_max_overhang_fragment_counted` |
 | M17 | expectation | module `:459-461` (docstring formula at `:453`, L4) | `max(min_fl, i-R)` in `fl_end_weight` | R < max_fl, min_fl > 1 | `t4_fl_end_weight_matches_enumeration`, `r2_…` |
 | M18 | expectation | module `:561` (L4: `:516` only trips the `:543-548` guard for the wrong reason; the meaningful site masks `w` to the region) | `N_end` over the region only (no flank) | any region | `t4_end_weight_total_equals_region_length_sum`, `t4_uniform_hexamer_counts_matches_enumeration_toy`, `t4_uniform_hexamer_counts_chr6`, `r2_…` |
-| M19 | propensity | module `:840-848` | return `C` (no division) | skewed fixture, tandem block | `t4_propensities_forward_exact`, `t4_null_identity[start_fwd\|end_fwd\|start_rev\|end_rev]` |
-| M20 | propensity | module `:846` | `d > min_expected` becomes `>=` | N == min_expected cell | `t4_propensities_forward_exact` |
+| M19 | propensity | module `propensities`, divide loop, `:854-860` at `eda1b14` (was `:840-848`) | return `C` (no division) | skewed fixture, tandem block | `t4_propensities_forward_exact`, `t4_null_identity[start_fwd\|end_fwd\|start_rev\|end_rev]` — verified red |
+| M20 | propensity | module `propensities`, `:857` at `eda1b14` (was `:846`) | `d > min_expected` becomes `>=` | N == min_expected cell | `t4_propensities_forward_exact` — verified red |
 | M21 | sampler | module `:608` | minus `s_tab=r['start_rev']` | asymmetric r | `t5_start_probabilities[minus]` |
 | M22 | sampler | module `:607` (L4: the track choice itself, not `:608-609`'s table choice) | minus on `fwd` track | non-palindromic region | `t5_start_probabilities[minus]` |
 | M23 | sampler | module `:608` | drop `valid` on starts | N in region | `t5_start_probabilities[plus]` |
-| M24 | sampler | module `:616` | drop one factor of the length weight: `fl.densities`, the end validity mask, or `r_end` | the matching single-cause construction | `t5_zero_weight_cause[f_zero]`, `[non_acgt]`, `[r_zero]` respectively |
-| M25 | sampler | module `:614-616` | end hex at `i+l-1` | point-mass r_end | `t5_point_mass_exact_output`, `t5_length_probabilities` |
+| M24 | sampler | module `sample_region`, length-weight product, `:627` at `eda1b14` (was `:616`) | drop one factor of the length weight: `fl.densities`, the end validity mask, or `r_end` | the matching single-cause construction | `t5_zero_weight_cause[f_zero]`, `[non_acgt]`, `[r_zero]` respectively — **CLOSED in `02f7f39`**, implemented as `test_zero_weight_cause[f_zero\|r_zero\|non_acgt]`, each verified red against its own factor only |
+| M25 | sampler | module `sample_region`, end lookup, `:626-627` at `eda1b14` (was `:614-616`) | end hex at `i+l-1` | point-mass r_end | **CLOSED in `02f7f39`.** Implemented differently than catalogued: not `t5_point_mass_exact_output` / `t5_length_probabilities` (neither exists under those names), but a single consolidated `test_end_hexamer_offset_is_exact` — point masses on both the start and end hexamer with a real (unstubbed) rng, so the drawn length is forced to one exact value and an off-by-one in the end lookup shifts every draw by 1. Verified red. |
 | M26 | sampler | module `:596` | ignore `p_plus` (always 0.5) | p_plus = 1 | `t5_p_plus_extremes` |
 | M27 | sampler | module `:603-604` | plus uses minus tables (end to end) | planted 20× start_fwd | `t5_planted_propensity_recovered` |
 | M28 | writer | module `:773` | strand column from the wrong field / flipped | read-back | `t6_round_trip_through_real_reader`, `r4_…` |
@@ -435,19 +526,27 @@ test that stays green under its mutation is not done. Line numbers are at HEAD `
 | M38 | fl | module `:391-394` | densify without normalisation, or one bin off | `{25:1, 27:3}` | `t6_fragment_length_dist_guards[densify]` |
 | M39 | guards | module `:349-355`, `:385`, `:390-395`, `:408-415`, `:509-514`, `:707-711`, `:714-717`, `:718-720`, `:738-742`, `:744-751`, `:913-919`, `:995-999`, `:1035-1046`, `:1047-1058` (re-grepped at `b50ab4f`; M4 drops the two tautology sites — see below — and adds `:385`, the `from_dataframe` missing-column raise, used in the catalogue) | delete the `raise` that a parametrised case names | per case | `t3_one_empty_strand_raises`, `t3_strand_balance_guard_fires`, `t3_count_guards`, `t6_writer_guards`, `t6_fragment_length_dist_guards`, `t6_input_guards`. The named case must fail with "DID NOT RAISE" |
 | M40 | hygiene | oracle file; module import lines | oracle imports `background_model`; module imports `simulator.precompute` | AST | `t7_oracle_is_independent`, `t7_no_removed_feature_imports` |
-| M41 | propensity | module `:840-841` | restore the pre-fix pairing: `start_rev` ÷ `N_start[perm]`, `end_rev` ÷ `N_end[perm]` | the tandem block and the null regions | `t4_null_identity[start_rev]`, `t4_null_identity[end_rev]` |
-| M42 | expectation | module `:553`, `:561` | drop `valid` in `uniform_hexamer_counts` | planted N in a start window | `t4_uniform_hexamer_counts_matches_enumeration_toy`, `t4_uniform_hexamer_counts_chr6` |
+| M41 | propensity | module `propensities`, `:851-852` at `eda1b14` (was `:840-841`) | restore the pre-fix pairing: `start_rev` ÷ `N_start[perm]`, `end_rev` ÷ `N_end[perm]` | the tandem block and the null regions | `t4_null_identity[start_rev]`, `t4_null_identity[end_rev]` — verified red |
+| M42 | expectation | module `uniform_hexamer_counts`, `:559` and `:567` at `eda1b14` (was `:553`, `:561`) | drop `valid` in `uniform_hexamer_counts` | planted N in a start window | `t4_uniform_hexamer_counts_matches_enumeration_toy`, `t4_uniform_hexamer_counts_chr6` — verified red |
 
 ### 4.2a Implementation status — read this before trusting the matrix above
 
-**The matrix names a test for nearly every row. That is the DESIGN, not the state
-of the repo.** 18 of 42 mutations have been applied programmatically and verified
-red (commit `45b32ec` + the sweep); the rest are unverified, and four have no
-test at all. Treat an unverified row as unknown, not as covered.
+**UPDATED this revision.** Every row now has a test — the four rows that did not
+(§4.2b below) were closed in `02f7f39`, after this section (and §4.2b) were written in
+`2eb09ac`. §4.2b is kept only as a "closed since" record now; its gap no longer exists.
 
-**Verified red** (sweep at `45b32ec`, re-verified at `d9c6e90`): M1, M2, M3, M4,
-M7, M8, M9, M10, M19, M20, M26, M31, M33, M37, M38, M41, M42. M14 is an
-equivalent mutant by construction and is excluded.
+**The matrix names a test for nearly every row. That was the DESIGN, and is now mostly the
+state of the repo.** **24 of 42 mutations have been applied programmatically and verified
+red** (18 from the `45b32ec` sweep + `d9c6e90`, plus 6 more from `02f7f39`: M12, M15, M24
+×3, M25); the other 18 are unverified — a test exists and passes, but nothing has shown it
+would fail against the defect it targets. Treat an unverified row as unknown, not as covered.
+This 24/18 split matches `docs/pending/simulator_spec.md`'s Open section, written from the
+same facts [Verified: spec, Open, re-read this session].
+
+**Verified red** (sweep at `45b32ec`, re-verified at `d9c6e90`, extended by `02f7f39`): M1,
+M2, M3, M4, M7, M8, M9, M10, M12, M15, M19, M20, M24, M25, M26, M31, M33, M37, M38, M41, M42.
+M14 is an equivalent mutant by construction and is excluded from both the verified-red and the
+unverified counts.
 
 **M7 and M33 were NOT red on the first sweep, and the reason corrects this
 table.** M7 came back with **zero** red tests. The trigger column above says
@@ -463,24 +562,28 @@ and asserted EXACTLY. M7 now 2 red, M33 1 → 3 red.
 **Lesson for the rows below: a test named in this matrix is worth nothing until a
 mutation has been shown to turn it red.**
 
-### 4.2b The four mutations with no test
+### 4.2b The four mutations with no test — CLOSED in `02f7f39`, kept as a record
 
-Scoped out of `45b32ec` deliberately, so this is a known gap. Both pairs sit on
-genuinely silent paths, which is why they are the most valuable remaining work.
+**This section described a real gap when written (`2eb09ac`), and the gap no longer exists.**
+All four were closed one commit later, in `02f7f39`, each verified red under its own mutation
+and reverted. Kept here, rather than deleted, for the same reason the spec keeps a "Closed
+since this section was last accurate" list: this section sat in two different documents
+claiming an open gap for a day after it closed, which is the exact drift this whole exercise
+exists to catch.
 
-| Mutation | Test to write | What it must construct | Why it is worth it |
+| Mutation | Test written | What it constructs | Caveat that had to be resolved first |
 |---|---|---|---|
-| **M12** — dedup moved before MAPQ | `t2_mapq_filter_precedes_dedup` | Two fragments sharing `(start, stop)`: A mapq 5, B mapq 30, on *opposite strands* so the surviving one is identifiable (their hexamers are equal, so only strand discriminates). Correct order keeps B; mutated order dedups to A and then MAPQ drops it, losing the pair entirely. | This is the ONE admission ordering that is load-bearing (spec §3). Everything else commutes. Getting it wrong silently loses real fragments. |
-| **M15** — midpoint instead of start-in-region admission | `t2_straddler_counted_in_start_tile` | A fragment straddling a tile boundary whose START is in tile *k* and whose MIDPOINT is in tile *k+1*. Assert it is counted in *k* and absent from *k+1*. | Midpoint admission is the rule the rewrite REVERSED, and two agents have already read stale docs asserting it. A regression here reintroduces the whole pre-rewrite geometry. |
-| **M24** — drop one factor of the length weight | `t5_zero_weight_cause[f_zero\|non_acgt\|r_zero]` | Three single-cause fixtures, one per factor of `w[l] = f(l)·r_end·valid`: a length with `f(l)=0`, an end window with a non-ACGT base, and an end hexamer with `r_end=0`. Each must change the drawn length set when its factor is removed. | §4 says the code "cannot distinguish the three causes" — it only tests `w.sum() > 0`. These are the only tests that pin each factor independently. |
-| **M25** — end hexamer read at `i+l-1` | `t5_point_mass_exact_output`, `t5_length_probabilities` | A point-mass `r_end` on one hexamer, so the drawn length is deterministic and an off-by-one in the end index shifts it by exactly 1. | A one-position shift in the end lookup leaves every total plausible and every marginal nearly right — the definition of a silent failure. |
+| **M12** — dedup moved before MAPQ | `test_mapq_filter_precedes_dedup` | Two fragments sharing `(start, stop)`: A mapq 5, B mapq 30, on *opposite strands* so the surviving one is identifiable (their hexamers are equal, so only strand discriminates). Correct order keeps B; mutated order dedups to A and then MAPQ drops it, losing the pair entirely. | The h5 ordering for equal `(start, stop)` — flagged below as verified on only one case. **Resolved**: `_build_h5` uses a stable sort on `(contig, start, stop)`, so ties keep fixture order deterministically. M12 did not need a hand-built-array fallback. |
+| **M15** — midpoint instead of start-in-region admission | `test_straddler_counted_in_start_tile` (+3 cases) | A fragment straddling a tile boundary whose START is in tile *k* and whose MIDPOINT is in tile *k+1*. Asserts it is counted in *k* and absent from *k+1*. | None. |
+| **M24** — drop one factor of the length weight | `test_zero_weight_cause[f_zero\|r_zero\|non_acgt]` | Three single-cause fixtures, one per factor of `w[l] = f(l)·r_end·valid`. | A point mass in `start_fwd` pins the HEXAMER, not the position, so collisions with other positions sharing that hexamer are common at small region sizes; both sampler tests had to choose a region-unique hexamer via a `_unique_start` helper. One N invalidates six consecutive cut sites (the window spans `[c, c+6)`), so the `non_acgt` case's control length had to sit 10 away, not 1. |
+| **M25** — end hexamer read at `i+l-1` | `test_end_hexamer_offset_is_exact` | A point-mass `r_end` on one hexamer, so the drawn length is deterministic and an off-by-one in the end index shifts it by exactly 1. Implemented as one consolidated test, not the two (`t5_point_mass_exact_output`, `t5_length_probabilities`) this design originally proposed. | None beyond the hexamer-uniqueness point above. |
 
-**M12 carries a caveat that must be settled first.** It depends on the h5
-returning A before B for equal `(start, stop)`, which the Least-sure-of section
-records as verified on exactly **one** case — "one case is not a law". If the
-ordering turns out to be unspecified, M12 cannot be tested through
-`from_fragments_h5` and needs a direct `filter_fragments` test on a hand-built
-fragment array instead. Settle the ordering before writing the test, not after.
+**One more thing this closure corrected, not caught by the original design:** M12 first came
+back *uncaught* against the fixture's initial site. The mutation had patched
+`min_mapq=min_mapq` inside `from_fname` — which CLAUDE.md documents as dead code — rather than
+the real fetch-time mask (`mapq_vals >= min_mapq`). Re-run at the correct site, M12 was caught.
+A mutation that does not express the defect proves nothing about the test it is supposedly
+checking, and would have been wrongly reported as a coverage gap had that not been noticed.
 
 `r1_…` and `r2_…` abbreviate the full R ids of §2.4.
 
@@ -519,29 +622,49 @@ bound, conditional on the realised per-region `n_plus`, is valid.
 
 **Real data.** The real-data plus fractions 0.3758 (322 fragments, 10 regions), 0.5296 (200)
 and 0.5041 (2000) on RD-56804 give **overdispersion**: 4.5, 5.5 and 2.2 σ at fragment level, in
-opposite directions [Verified: `count_hexamers_rdf.py:995-999`, measured by the owner]. The
+opposite directions [Verified: `count_hexamers_rdf.py:1020-1022` at `eda1b14` — the overdispersion
+numbers are now stated in the "deliberately NO BALANCE CHECK" comment, not in a live guard's
+error message; see the void notice below]. The
 mechanism is **not measured**. Candidates: within-region clustering, coarser structure, and the
 strand-blind dedup that keeps the first h5 row (`fragment_array.py:1050-1052`). Per-region strand
-counts are not stored (`count_srdf`, `:966-977`), so they need RD-56804 [Unverified]. The simulator
-draws strand as an independent binomial per region (`:596`), so the excess is not reproduced
-downstream. The sampler's zero-length drops (`:618-622`) act on simulator output only.
+counts are not stored (`count_srdf`, `:971-982` at `eda1b14`), so they need RD-56804 [Unverified]. The simulator
+draws strand as an independent binomial per region (`sample_region:607`), so the excess is not reproduced
+downstream. The sampler's zero-length drops (`sample_region:630-632`) act on simulator output only.
 
-**Measured false-positive rates** [Verified: Research D scratch simulation, gamma `n_r`
-mean ~37; nominal two-sided 3σ = 0.0027]:
+**VOID as of `38e5198` — there is no "the code's guard" row any more.** The table and the two
+paragraphs below it described the strand-balance check this design spent F3/F13/M3/Q6 on. The
+owner removed it entirely on 2026-10-07 ("doesn't seem useful"), not merely capped it — see the
+status header for the three measured reasons (it could not catch a wholesale swap; it
+false-positived on a legitimate 10-region run; rescaling to fix that made it vacuous below 10
+regions and needed a cap, and "two corrections to stop being either wrong or dead" was the
+owner's own framing for why it was not worth keeping). **Kept below, struck through, as the
+historical record** — not because any of it is still true of the code:
 
-| Rule | R=10 | R=200 | R=2000 |
-|---|---|---|---|
-| fragment-level 3σ, simulator draw | 0.0025 | 0.0025 | 0.0040 |
-| region-level SE 3σ, simulator draw | 0.0060 | 0.0000 | 0.0000 |
-| the code's guard, simulator draw | 0.0000 | 0.0000 | 0.0000 |
-| the code's guard, strand-pure regions, unequal `n_r` | 0.0038 | 0.0141 | 0.0000 |
+~~**Measured false-positive rates** [Verified: Research D scratch simulation, gamma `n_r`
+mean ~37; nominal two-sided 3σ = 0.0027]:~~
 
-The guard bound `1.5/√R` is `3 × 0.5/√R`. It assumes the maximum per-region sd, 0.5, so it
+~~| Rule | R=10 | R=200 | R=2000 |~~
+~~|---|---|---|---|~~
+~~| fragment-level 3σ, simulator draw | 0.0025 | 0.0025 | 0.0040 |~~
+~~| region-level SE 3σ, simulator draw | 0.0060 | 0.0000 | 0.0000 |~~
+~~| the code's guard, simulator draw | 0.0000 | 0.0000 | 0.0000 |~~
+~~| the code's guard, strand-pure regions, unequal `n_r` | 0.0038 | 0.0141 | 0.0000 |~~
+
+~~The guard bound `1.5/√R` is `3 × 0.5/√R`. It assumes the maximum per-region sd, 0.5, so it
 is conservative. For R > 225 it equals the 0.1 floor, about 54 fragment-σ at 73,545 fragments.
-**`b50ab4f` (F3) caps it: `min(0.45, max(strand_tol, 1.5/√R))`, capped at 0.45 for R ≲ 11 where
-the uncapped term would reach/exceed 0.5 and make the check vacuous.** At R=10 the bound is now
-0.45, not the uncapped 0.474 this design previously quoted [Verified: read, `b50ab4f`]. The
-false-positive table above predates the cap and wants re-measurement at small R [Unverified].
+`b50ab4f` (F3) caps it: `min(0.45, max(strand_tol, 1.5/√R))`, capped at 0.45 for R ≲ 11 where
+the uncapped term would reach/exceed 0.5 and make the check vacuous. At R=10 the bound is now
+0.45, not the uncapped 0.474 this design previously quoted.~~ **`38e5198` deleted this bound,
+the `strand_tol` parameter on `count_srdf`/`count_sample`, and the capping logic outright — the
+false-positive table above has no corresponding code at `eda1b14` and should not be
+re-measured against anything.**
+
+**What actually remains, today:** check (1) only — both strand tables non-empty, exact, no
+threshold [Verified: `count_hexamers_rdf.py:999-1007`]. `n_plus`, `n_minus` and `plus_frac` are
+still computed and returned in `stats` (`:978-981`), just never asserted. The code's own
+comment at the deletion site (`:1009-1030`) names the three reasons above and says explicitly:
+"Do not reintroduce a balance assertion without naming a failure mode it detects that (1) does
+not."
 
 **Rules for this suite.**
 - Prefer deterministic tests: `p_plus` 0 and 1, and exact table equality.
@@ -553,15 +676,29 @@ false-positive table above predates the cap and wants re-measurement at small R 
   [Inferred].
 - No test asserts a real-data plus fraction. For real data the region is the unit, and its
   dispersion is unmeasured.
-- Guard tests keep inputs far from the bound, so they do not freeze the 1.5 constant (an
+- ~~Guard tests keep inputs far from the bound, so they do not freeze the 1.5 constant (an
   owner-level choice, F13). At R=200 the bound is max(0.1, 0.106) = 0.106. A 0.80 plus
-  fraction raises and 0.50 passes. A mildly lopsided 0.55 also passes, by design (F3).
+  fraction raises and 0.50 passes. A mildly lopsided 0.55 also passes, by design (F3).~~ **VOID
+  (`38e5198`): there is no bound and no 1.5 constant left to freeze or avoid freezing.** F13 is
+  void outright — it was a conflict between the spec's flat `strand_tol` and the code's capped
+  formula, and both sides of that conflict are gone, so there is nothing left to reconcile. The
+  only surviving guard test is `t3_one_empty_strand_raises` (implemented as
+  `test_one_empty_strand_raises`), which needs no tolerance and so was never affected by this.
 
 ## 5. Test catalogue
 
-Synthetic file `tests/test_count_hexamers_rdf.py`. Real file
-`tests/test_count_hexamers_rdf_real.py` (§2.4). Oracle `tests/cut_site_oracle.py` (not
-named `test_*`). Marker and hook in `tests/conftest.py` (§2.5). Session fixtures:
+Synthetic file `tests/test_count_hexamers_rdf.py` — **this part is built**, 43 test functions
+organised as `TestT0EncoderAndFrame` .. `TestT7Hygiene` classes rather than as bare `t0_`-/
+`t1_`-prefixed functions; a test named `t3_count_sample_matches_bruteforce` below is
+`TestT3CountSample.test_count_sample_matches_bruteforce` in the actual file. This revision did
+not rename every id in this catalogue to match — where a name differs materially (not just the
+missing tier prefix) it is called out in place. Real file
+`tests/test_count_hexamers_rdf_real.py` (§2.4) **does not exist** — R1/R2/R4 below are
+proposal only. Oracle `tests/cut_site_oracle.py` (not
+named `test_*`) is built, 254 lines. Marker and hook in `tests/conftest.py` (§2.5) **do not
+exist** — there is no `tests/conftest.py` in this worktree at `eda1b14`, so the `real_data`
+marker and the `REQUIRE_REAL_DATA` hook described here are unbuilt along with the real-data
+tier itself. Session fixtures:
 `toy_fasta`, `toy_regions`, `skewed_regions`, `admission_h5`, `bruteforce_h5`,
 `roundtrip_out`, `real_inputs` (skips with `real_data` when EFS is absent). Every count path
 uses `n_workers=1`, because CLAUDE.md records a fork deadlock in `parallel_apply`. The fixture
@@ -626,27 +763,27 @@ is serial with no fork [Verified: `fragments_h5.py:1081`, `:1281`, read].
 - `t3_n_window_fragment_dropped_from_tables`: the M7 construction. Also asserts
   `region_counts.sum() − n_counted ==` the number of oracle fragments with an N cut site.
   This is the accepted divergence, asserted as specified.
-- `t3_one_empty_strand_raises`, over **≤ 9 regions**. All-plus fragments raise `AssertionError`,
-  `match="one strand table is EMPTY"` (check (1), `:994-1002`). Check (1) raises unconditionally
-  whenever either table is empty, so check (2) (`:1033-1046`) is never reached here; deleting
-  check (1) (M39) turns this test red. **Converse (M3):** a **balanced** 20 plus / 20 minus
-  split over the same ≤ 9 regions (deviation 0) passes under any reading of the balance bound —
-  spec's flat `strand_tol` or the code's `min(0.45, max(strand_tol, 1.5/√R))` (`:1034`) — so it
-  shows check (1) stays quiet with both strands present, without freezing Q6. Do **not** use a
-  39/1 split: `b50ab4f` capped the tolerance at 0.45 (previously uncapped and vacuous at R ≤ 9),
-  so that 0.475 deviation now also raises via check (2) at R = 9 [Verified: this revision,
-  `guards.py` rerun] — round 2's "does not raise" claim for it no longer holds.
-- `t3_strand_balance_guard_fires` (parametrised, R = 200): plus fraction 0.80 raises with
-  `match="strand fraction .* from 0.5"` (check (2), `:1033-1046`). 0.50 and 0.55 pass (§4.4); the
-  0.45 cap does not bind at R = 200 (`1.5/√200 ≈ 0.106`), so `b50ab4f` leaves this case unchanged.
-  Use a 600-kb toy contig if 200 tiles do not fit the 6,000-bp one; 0.16 s [Verified: review].
-- `t3_count_guards` (parametrised, L2): missing `sequence` column → `ValueError`,
-  `match="has no 'sequence' column"`; missing `fragment_array` column → its own
-  `match="has no 'fragment_array' column"` (both `:913-919` — the two no longer share one
-  match). All-empty admission (any cause) → `ValueError` (`:1047-1058`, reworded by `b50ab4f`/
-  F19 from "MAPQ removed ALL" to "EVERY fragment was removed before counting"); match the short,
-  stable `"EVERY fragment was removed"` rather than the full text (L5/L8: a further rewording
-  means "update the match", not a defect).
+- `t3_one_empty_strand_raises`, over **≤ 9 regions**. Implemented as
+  `test_one_empty_strand_raises`. All-plus fragments raise `AssertionError`,
+  `match="one strand table is EMPTY"` (check (1), `count_srdf:999-1007` at `eda1b14`, was
+  `:994-1002`). This is now the **only** strand-related raise in the function — **VOID
+  (`38e5198`): check (2), the balance bound, no longer exists at any line number, so there is
+  nothing for check (1) to be reached "unconditionally instead of".** M39 (deleting check (1))
+  still turns this test red; that part of the row is unaffected.
+- ~~`t3_strand_balance_guard_fires` (parametrised, R = 200)...~~ **VOID, and not merely stale —
+  this test does not exist and was never written.** `38e5198` removed the balance check before
+  `45b32ec` added the implemented test file, so there was nothing left to test by the time the
+  suite was built: `grep -n "balance_guard\|strand_fraction" tests/test_count_hexamers_rdf.py`
+  has no matches [Verified, this session]. **The converse half of M3**, that a balanced 20/20
+  split passes, is also moot — with no bound, nothing can fail it regardless of balance. Read
+  F3/F13/M3/Q6 in §6 and §9 for the full history.
+- `t3_count_guards`: implemented much narrower than catalogued, as
+  `test_count_guards_missing_sequence` (one case, despite the name) — it tests ONLY the missing
+  `'fragment_array'` column raise (`count_srdf:918-924` at `eda1b14`), not the missing
+  `'sequence'` column case and not the all-empty-admission case
+  (`count_srdf:1031-1042`, "EVERY fragment was removed before counting") that this row and
+  M39's test list both name. **Possible coverage gap, reported in the findings below, not
+  fixed here.**
 - `t3_golden_h5_matches_bruteforce`: `golden.small.chr6.frag.h5` and its chr6 window FASTA,
   against the oracle over raw records from `FragmentsH5.fetch_array` (strands decoded). Always runs.
 
@@ -733,24 +870,30 @@ propensities → simulate → index → build → recount)
 - `t6_recount_equals_distinct_pairs`: recount `region_counts` == distinct `(start,stop)` per
   region, and the four tables == `bruteforce_count` on the written rows. The h5 thus holds
   exactly the fragments written, up to the Settled dedup.
-- `t6_writer_guards` (parametrised). Each case has its own exception type and `match`
-  [Verified: read, `:701-746`]:
-  | case | exception | `match` | line |
-  |---|---|---|---|
-  | `.gz` out_path | `ValueError` | `"write a PLAIN bed"` | `:702` |
-  | `region_counts` shape ≠ rows | `ValueError` | `"region_counts has shape"` | `:709` |
-  | missing column (e.g. `stop`) | `ValueError` | `"has no 'stop' column"` | `:715` |
-  | `fa.length` ≠ stop−start | `AssertionError` | `"fragment_array.length"` | `:733` |
-  | sequence length ≠ R+186 | `AssertionError` | `r"sequence is \d+ b, expected"` | `:739` |
-
-  The `AssertionError` cases are explicit `raise` statements, so `python -O` keeps them.
-- `t6_fragment_length_dist_guards` (parametrised). Each case has `match=` copied from its raise.
-  Cases and lines: non-1D or negative or zero-sum counts (`:345-350`, `match` on "counts");
-  empty frame (`:384`); duplicate lengths (`:386`); missing column (`:380`);
-  `from_srdf` with no `fragment_array` column (`:404`) or no fragments (`:410`). Plus `densify`:
+- `t6_writer_guards`: **implemented much narrower than this row describes.** Only
+  `test_writer_guard_gz_path` exists, covering the first case only. The other four designed
+  cases (`region_counts` shape mismatch, missing column, `fa.length != stop-start`, sequence
+  length mismatch) have no test under any name [Verified, this session:
+  `grep -n "region_counts has shape\|fragment_array.length\|sequence is .* b, expected"
+  tests/test_count_hexamers_rdf.py` — no matches]. **Possible coverage gap, reported below.**
+  Current line numbers for the five raises in `simulate_fragments_to_bed`, re-verified this
+  session: `.gz` out_path `:712-717`; `region_counts` shape `:719-723`; missing column (loops
+  over `contig,start,stop,fragment_array,sequence`) `:724-726`; `fa.length` mismatch
+  `:743-748`; sequence-length mismatch `:749-757` (all were `:702`/`:709`/`:715`/`:733`/`:739`
+  as of `b50ab4f`). The `AssertionError` cases are explicit `raise` statements, so `python -O`
+  keeps them.
+- `t6_fragment_length_dist_guards`: implemented, `test_fragment_length_dist_guards`, all six
+  cases present and matching. Each case has `match=` copied from its raise.
+  Current lines (`FragmentLengthDist` moved to `:336-428` as a class): non-1D/negative/zero-sum
+  counts `:355-361`; `from_dataframe` missing column `:389-391`; empty frame `:394-395`;
+  duplicate lengths `:396-401`; `from_srdf` with no `fragment_array` column `:414-418`; no
+  fragments `:419-421` (were `:345-350`, `:380`, `:384`, `:386`, `:404`, `:410` as of
+  `b50ab4f`). Plus `densify`, a separate test `test_fragment_length_dist_densify`:
   from `{25:1, 27:3}` the densities are 0.25 at 25, 0 at 26 and 0.75 at 27.
-- `t6_input_guards`: `load_sample_dataframe` raises `ValueError`, `match="no samples given"`
-  (`:226`). `uniform_hexamer_counts` raises `ValueError`, `match="WITHOUT fragment arrays"` (`:504`).
+- `t6_input_guards`: implemented, `test_input_guards`. `load_sample_dataframe` raises
+  `ValueError`, `match="no samples given"` (`:231` at `eda1b14`, was `:226`).
+  `uniform_hexamer_counts` raises `ValueError`, `match="WITHOUT fragment arrays"` (`:515-520`
+  at `eda1b14`, was `:504`).
 
 **T7 hygiene**
 - `t7_module_doctests_execute`: `doctest.testmod(module)` asserts `attempted > 0` and
@@ -784,14 +927,21 @@ fixture builder documents it). No test of `n_short_regions` (F14).
 | (6) strand statistics; region is the unit | §4.4. Simulator output is i.i.d. per fragment given `n_r`. No real-data fraction is asserted | Covered by design |
 | (7) U1 vs bytes, half-open bounds, unclipped overhangs | `t1_reader_strand_labels_are_str`, `t2_length_bounds`, `t2_max_overhang_fragment_counted` | Covered |
 | BED round trip | `t6_round_trip_through_real_reader`, `t6_recount_equals_distinct_pairs` | Covered |
-| Input guards | `t6_writer_guards`, `t6_input_guards`, `t3_count_guards` | Covered. Exception types per case |
-| Emptied vs lopsided strand | `t3_one_empty_strand_raises` (≤ 9 regions), `t3_strand_balance_guard_fires` (R = 200) | Covered |
-| 10 real regions → h5 with exactly the fragments written | T6 on the toy (`t6_recount_equals_distinct_pairs`), **and** `r4_real_region_round_trip_chr21` on real `chr21` data | **Pinned** (M2): a `chr21`-restricted build costs ~11 s, not 76 s (§2.2) |
+| Input guards | `t6_writer_guards`, `t6_input_guards`, `t3_count_guards` | **Partially covered.** `t6_input_guards` and `t6_fragment_length_dist_guards` are fully implemented. `t6_writer_guards` and `t3_count_guards` are each implemented for ONE of their several designed cases only — see §5's T6/T3 entries for exactly which. Not every exception type per case exists yet. |
+| Emptied vs lopsided strand | ~~`t3_one_empty_strand_raises` (≤ 9 regions), `t3_strand_balance_guard_fires` (R = 200)`~~ | **"Lopsided" is VOID (`38e5198`) — there is no lopsided-strand check, and no test of that name exists.** Only "emptied" is covered, by `test_one_empty_strand_raises`. |
+| 10 real regions → h5 with exactly the fragments written | T6 on the toy (`t6_recount_equals_distinct_pairs`, implemented as `test_recount_equals_distinct_pairs`) | **NOT pinned on real data.** `r4_real_region_round_trip_chr21` and the whole real-data tier do not exist (§2.4); the `chr21`-restricted claim this row made is unbuilt, not merely unverified. |
 
-**Run** (biomarker_env first on PATH):
-- Synthetic: `make test PYTEST_ARGS="tests/test_count_hexamers_rdf.py -q -rs"`.
-- Real, acceptance: `REQUIRE_REAL_DATA=1 make test PYTEST_ARGS="tests/test_count_hexamers_rdf_real.py -q -rs"`.
-- Full suites before and after: `make test` and `make test PYTEST_ARGS="tests/ -q -rs"`.
+**Run** (biomarker_env first on PATH — but see "Runs where?" in the TL;DR: this is now
+automatic, not something the caller must arrange):
+- Synthetic: `make test PYTEST_ARGS="tests/test_count_hexamers_rdf.py -q -rs"` still works
+  standalone, but default `make test` runs it too, now that `dc1df6f`/`aefa71e` made `tests/`
+  part of the default target.
+- ~~Real, acceptance: `REQUIRE_REAL_DATA=1 make test PYTEST_ARGS="tests/test_count_hexamers_rdf_real.py -q -rs"`.~~
+  **Does not work.** `REQUIRE_REAL_DATA` is read by a hook in `tests/conftest.py`, and
+  `tests/test_count_hexamers_rdf_real.py` is the file it would gate; neither exists (§2.4).
+- Full suite, verified this session: plain **`make test`** — **2 failed, 1125 passed, 3
+  skipped, 208.83 s** (§1.1). There is no separate `tests/`-only invocation left to run; it is
+  inside the default target now.
 
 **Runtime budget**
 
@@ -801,37 +951,46 @@ fixture builder documents it). No test of `n_short_regions` (F14).
 | Toy h5 build, ~4 scenarios + 1 for R=200 | 0.15-0.16 s each | [Verified: Research C] |
 | Toy `count_sample` (~20 calls), chr6 fetches (T4), doctests | 0.04 s, ~5 ms, 5.94 s each | [Draft measurement; doctests Verified: Research A] |
 | T5 recovery at n = 4 × 10⁴ total draws | ~2 s, ~300 MB | [Inferred: scaled from review's 5.26 s, 767 MB at n = 10⁵] |
-| R1: h5 open + FASTA open + `count_sample` (20 regions) | 0.12 + 0.01 + 1.83 s | [Verified: Research C] |
-| R1 oracle: raw fetch + Python brute force | unknown | [Unverified: time it in P6] |
-| R2: `uniform_hexamer_counts` + Python double loop over ~30,720 bp × 156 lengths | 0.03 s + a few s | [Verified / Inferred] |
-| R4: count/sample/simulate pipeline + build (`chr21` only) + recount | ~11 s build [Verified: review, `realbuild/rb.py`] + rest unknown | [Unverified: time the non-build steps in P6] |
-| **Never, except R4:** an h5 build against the unrestricted real FASTA or chr6 | 76.26 s / 26.2 s | [Verified: Research C] / [Draft measurement]. R4's `chr21`-restricted build is the one exception, at ~11 s (M2). |
+| Whole synthetic file + oracle, measured end to end | **included in the 208.83 s full-suite number above** — not separately broken out this session | [Verified: this session, §1.1] |
+| R1, R2, R4 (h5 open, FASTA open, `count_sample`, `uniform_hexamer_counts`, `chr21` build) | **N/A — not implemented**, so there is nothing to time | superseded; see §2.4 |
 
-Budget: **≤ 30 s per file**, measured by the implementer. Above that is a finding.
+The R-row costs below are kept as history only, since they describe a tier that was never
+built; do not plan against them.
+
+~~| R1: h5 open + FASTA open + `count_sample` (20 regions) | 0.12 + 0.01 + 1.83 s | [Verified: Research C] |~~
+~~| R1 oracle: raw fetch + Python brute force | unknown | [Unverified: time it in P6] |~~
+~~| R2: `uniform_hexamer_counts` + Python double loop over ~30,720 bp × 156 lengths | 0.03 s + a few s | [Verified / Inferred] |~~
+~~| R4: count/sample/simulate pipeline + build (`chr21` only) + recount | ~11 s build [Verified: review, `realbuild/rb.py`] + rest unknown | [Unverified: time the non-build steps in P6] |~~
+~~| **Never, except R4:** an h5 build against the unrestricted real FASTA or chr6 | 76.26 s / 26.2 s | [Verified: Research C] / [Draft measurement]. R4's `chr21`-restricted build is the one exception, at ~11 s (M2). |~~
+
+Budget: **≤ 30 s per file**, measured by the implementer. The synthetic file's share of the
+208.83 s full-suite run was not isolated this session; isolating it with `pytest
+tests/test_count_hexamers_rdf.py -q --durations=0` is the way to check this budget still
+holds. Above that is a finding.
 
 ## 6. Findings for the owner (report, do not fix)
 
 | ID | Sev. | Finding | Evidence | Owner approval? |
 |---|---|---|---|---|
-| F1 | FIXED | `propensities()` divided the minus tables by swapped denominators at `a409186`. `counts_from_hexamers` puts `perm[hex(STOP)]` into `start_rev` (`:320-321`), so `E[start_rev] ∝ N_end[perm]`. The fix at `844f227` pairs them that way (`:840-841`, with a comment saying the crossing is on purpose). At `a409186` the real-data effect (800 of 66,649 regions, history) was median 1.2% and max 16% per cell. Found independently by Research B and by the closed loop in the `844f227` message. `t4_null_identity` guards it. M41 restores the old pairing. Spec `:137-138` still does not state the crossed pairing. | [Verified: Research B at `a409186`; `git` reflog; `count_hexamers_rdf.py:838-841`] | Done (owner-approved). Spec wording open |
-| F2 | MED | Docstrings (`:135-137`, `:246-248`) say invalid windows carry index 0. They carry the N-as-A index (`safe = np.where(win==255, 0, win)`, `:150`). Fix the docstring only. | [Verified: Research A] | No (doc only) |
-| F3 | DONE | **Fixed in `b50ab4f`.** The balance check was `tol = max(strand_tol, 1.5/√n_regions)`, vacuous for n_regions ≤ 9 (reaches/exceeds 0.5, and `plus_frac` cannot deviate from 0.5 by more than 0.5). Now `tol = min(0.45, max(strand_tol, 1.5/√n_regions))` (`:1034`), `\|plus_frac−0.5\| > tol` raises (`:1035`): the check can always fire. It is still flat ±0.1 above 225 regions. A whole table swap gives `plus_frac' = 1 − plus_frac` and keeps every total, so no runtime check sees it — that half of the finding stands, by design. | [Verified: read, `b50ab4f`] | Done |
-| F4 | LOW, DONE | `:934-938` (even total) and `:954-960` (pair identities) are tautologies given `counts_from_hexamers`; they cannot fire. **`b50ab4f` corrects the claim in the code's own comment** (it no longer says these "catch broken strand routing", and spells out why, matching this finding) and keeps the checks only as a malformed-`counts` guard (M4). Do not count them as routing protection; M39 drops both sites from its list (M4). | [Verified: read, `b50ab4f`] | Done |
-| F5 | MED | Any strand label other than `'+'` counts as minus (`:314`): `b'+'`, `'.'`, `''`. Check (1) (`:994-1002`) fires if **either** table is empty. So an all-bytes frame is caught loudly, but only if `n_counted > 0`: when both are zero the `if n_counted :=` guard skips the check. A mixture with some `'.'` or bytes silently inflates minus. The raw reader yields bytes (§1.2), so the str contract rests on the RFA layer. | [Verified: Research A] | Yes, if it becomes a raise |
-| F6 | LOW/MED | Validity asymmetry. C needs both cut sites valid (`:294`). `N_start` gates only its own site (`:547-548`, `:556`). On this region set the effect is unmeasurable: 0 invalid cut windows in 1,373,600 (800 regions); 4 of 66,649 regions hold a non-ACGT base (11 of 114,769,578 bases, full scan 22.1 s). It can matter for region sets with gaps near cut sites. | [Verified: Research A/B] | **Yes** (Q2) |
+| F1 | FIXED | `propensities()` divided the minus tables by swapped denominators at `a409186`. `counts_from_hexamers` puts `perm[hex(STOP)]` into `start_rev` (`:331-332` at `eda1b14`, was `:320-321`), so `E[start_rev] ∝ N_end[perm]`. The fix at `844f227` pairs them that way (`:846-852` at `eda1b14`, was `:840-841`, with a comment saying the crossing is on purpose). At `a409186` the real-data effect (800 of 66,649 regions, history) was median 1.2% and max 16% per cell. Found independently by Research B and by the closed loop in the `844f227` message. `t4_null_identity` guards it. M41 restores the old pairing. **Spec wording is no longer open**: `afe3611` added the crossed-pairing table to `simulator_spec.md` ("Which expectation each table divides by") [Verified: spec, read this session, matches the code exactly]. | [Verified: Research B at `a409186`; `git` reflog; `count_hexamers_rdf.py:846-852`] | Done (owner-approved). Spec wording also now done |
+| F2 | **DONE — fixed in `c62f4a2`, not just "doc only" as this row assumed** | Docstrings (`hexamer_indices:135-142`, `_hexamers_at:250-260` at `eda1b14`) used to say invalid windows carry index 0. They carry the N-as-A index (`safe = np.where(win==255, 0, win)`, `:155` at `eda1b14`, was `:150`). **This was fixed in three places, not the one or two this row named** — `c62f4a2`'s own message is titled "it was in three places, not one". `_hexamers_at`'s docstring now states explicitly: "This docstring said 'index 0 / AAAAAA' until 2026-10-07. The sibling claim in `hexamer_indices` was corrected first and this one was missed, so the wrong version survived one round of fixing it" [Verified: read, `eda1b14`]. | [Verified: `count_hexamers_rdf.py:135-142`, `:250-264`, read this session] | Done |
+| F3 | **VOID — superseded by removal, not by the `b50ab4f` fix this row described** | ~~Fixed in `b50ab4f`. The balance check was `tol = max(strand_tol, 1.5/√n_regions)`, vacuous for n_regions ≤ 9. Now `tol = min(0.45, max(strand_tol, 1.5/√n_regions))`, `\|plus_frac−0.5\| > tol` raises: the check can always fire.~~ **`38e5198` (one day after `b50ab4f`, same stream) deleted the whole balance check, `tol` formula included, rather than keeping the capped version this row describes.** The "whole table swap is invisible to this check" half of the finding is now moot by construction: there is no check for it to evade. | [Verified: `git show 38e5198 -- background_model/simulator/count_hexamers_rdf.py`, read this session] | Void — nothing left to approve |
+| F4 | LOW, DONE | `:939-943` (even total) and `:957-963` (pair identities) at `eda1b14` (were `:934-938`, `:954-960`) are tautologies given `counts_from_hexamers`; they cannot fire. **`b50ab4f` corrects the claim in the code's own comment** (it no longer says these "catch broken strand routing", and spells out why, matching this finding) and keeps the checks only as a malformed-`counts` guard (M4). Do not count them as routing protection; M39 drops both sites from its list (M4). Unaffected by the `38e5198` strand-balance removal — these two checks are a different mechanism (fragment-count tautologies, not the 0.5 balance bound) and are still live. | [Verified: read, `eda1b14`] | Done |
+| F5 | MED | Any strand label other than `'+'` counts as minus (`counts_from_hexamers:325` at `eda1b14`, was `:314`): `b'+'`, `'.'`, `''`. Check (1) (`count_srdf:999-1007` at `eda1b14`, was `:994-1002`) fires if **either** table is empty — this is now the ONLY strand check (`38e5198` removed the other one; see F3). So an all-bytes frame is caught loudly, but only if `n_counted > 0`: when both are zero the `if n_counted :=` guard skips the check. A mixture with some `'.'` or bytes silently inflates minus. The raw reader yields bytes (§1.2), so the str contract rests on the RFA layer. | [Verified: Research A, re-grepped this session] | Yes, if it becomes a raise |
+| F6 | **CLOSED — owner ruled 2026-10-08, do not re-open** | Validity asymmetry. C needs both cut sites valid (`cut_site_hexamers:305` at `eda1b14`, was `:294`). `N_start`/`N_end` each gate only their own site (`uniform_hexamer_counts:556-561`, `:567` at `eda1b14`, was `:547-548`, `:556`). On this region set the effect is unmeasurable: 0 invalid cut windows in 1,373,600 (800 regions); 4 of 66,649 regions hold a non-ACGT base. **The owner's ruling, recorded in `simulator_spec.md`'s Settled section: "the simulator gets to define the probability model… not interested in further pursuing this."** `r` is definitional (drawn and scored from the same `C`/`N`), so the gate choice changes what the simulator *is*, not whether it is right — not an approximation error to fix. | [Verified: Research A/B; spec Settled, read this session] | **No — closed, not open.** Q2 below is answered. |
 | F7 | LOW | `propensities()` sets cells with `C>0, N=0` to 0 and raises no error (`:846-848`). | [Verified: grep, 0820409] | Owner, with F1 |
 | F8 | LOW | `_hexamers_at` promises `IndexError` (`:242`, `:279`) but wraps a negative `pos` silently. On the research probe's sequence, `_hexamers_at(seq, np.array([-2]))` returned index 283 with `valid` True. That sequence is not recorded, so 283 is not a constant. On another sequence the wrap gave index 0 with `valid` True [Verified: review]. Only the `starts_0 ≥ 0` gate in `filter_fragments` prevents it, so tests cover the gate (T2), not the helper. | [Verified: Research A probe] | No |
 | F9 | INFO | `rc_permutation()` returns a shared writable cached array (`:189`). A caller that writes to it corrupts later calls. Proposal: `setflags(write=False)` (engineering) plus a test that a write raises. No test lands unless that fix lands, because today it can only be red or re-assert the hazard. | [Verified: Research A] | No (engineering), but confirm |
 | F10 | INFO | Stale comments and docs (§1.4). The module doctests pass but default `make test` never runs them. | [Verified: Research A] | No |
 | F11 | LOW | `FragmentLengthDist` casts counts through int64 (`:343`, `:381-382`), so float counts truncate silently. Not tested: either assertion presumes a decision. | [Verified: Research A] | Yes, if changed |
 | F12 | INFO | **v1 was wrong here.** The writer guards (`:732-746`) are explicit `raise AssertionError` (`:733`, `:739`), so `python -O` keeps them. The only bare `assert`s are `:175-176` in `hexamer_vocabulary`, which `-O` strips. They run once at build of a derived table, so the exposure is small. | [Verified: Research A] | No |
-| F13 | MED | Spec/code conflict, **still open after `b50ab4f`**. Spec `:233-236` says the guard asserts within `strand_tol`. The code now uses `min(0.45, max(strand_tol, 1.5/√n_regions))` (`:1034`) — the F3 cap fixed the vacuous-below-10-regions defect, but did not reconcile the formula with the spec's flat `strand_tol`. Either the spec or the code still needs the owner's wording. Tests avoid the bound (§4.4), via a converse that passes under either reading (M3). | [Verified: read, `b50ab4f`] | **Yes** (Q6) |
-| F14 | LOW | Spec Settled says dropped zero-length starts get "no counter, no test" (owner 2026-10-06). But `simulate_fragments_to_bed` returns `n_short_regions` (`:726`, `:785`): a counter exists. Flagged, not tested. | [Verified: Research D] | Confirm (Q7) |
+| F13 | **VOID** | ~~Spec/code conflict, still open after `b50ab4f`. Spec says the guard asserts within `strand_tol`. The code uses `min(0.45, max(strand_tol, 1.5/√n_regions))` — reconcile the formula with the spec's flat `strand_tol`.~~ **There is no formula left on either side to reconcile.** `38e5198` deleted the code's balance check (and the `strand_tol` parameter entirely, from both `count_srdf` and `count_sample`) in the same stream as this finding's own `b50ab4f` fix, one commit later. The spec was updated in the same commit to match. A conflict between two things needs both things to still exist; neither does. | [Verified: `git show 38e5198`, read this session] | Void — Q6 is answered by deletion, not by a ruling |
+| F14 | LOW | Spec Settled says dropped zero-length starts get "no counter, no test" (owner 2026-10-06). But `simulate_fragments_to_bed` returns `n_short_regions` (`:737`, `:796` at `eda1b14`, was `:726`, `:785`): a counter exists. Flagged, not tested. | [Verified: Research D, re-grepped this session] | Confirm (Q7) |
 | F15 | LOW | Removed-feature code still live: `scripts/run_simulator.py:66` imports `simulator.capture` at module level; `simulator/__init__.py` imports `capture`, `build_predict_lut`, `midpoint_index_arrays`; `Makefile` keeps `FLGC_PYTHONPATH`. Flag as stale; do not fix here. | [Verified: Research D] | Deletion is the owner's call |
 | F16 | LOW | `make test` depends on PATH: it runs bare `python -m pytest`. The wrong python gave exit 2 and 11 collection errors. A fix pins the interpreter in the Makefile (engineering). | [Verified: coordinator log] | No (engineering) |
-| F17 | MED, LIBRARY | A minus-strand region flip has **two** defects (M5; v3 under-described this as one). `_switch_plus_with_minus_and_minus_with_plus` (`fragmentomics_tools/fragment_array/fragment_array.py:123-127`, compare at `:126`) runs on the raw `\|S1` array from `from_fragments_h5` (call at `:1793`): the bytes compare with `"+"` gives all-False, with no error, so labels are **never swapped**. Separately, `starts_0`/`stops_0` (and methyl/gc) are reversed with `[::-1]` to flip coordinate order, but `fragment_strands` is **not reversed**, so after the swap-that-didn't-happen the labels are also **misaligned against the reordered coordinates** — a fix that only decodes bytes (swaps `+`/`-`) without also reversing the label array still mislabels some fragments. Measured on `chrT:500-1000,-` with `(600,700,+)`,`(650,760,+)`,`(800,900,-)`: got `[(100,200,'+'),(240,350,'+'),(300,400,'-')]`, expected `[(100,200,'+'),(240,350,'-'),(300,400,'-')]` — a decode-only fix gives `['-','-','+']`, wrong at 2 of 3. `generate_weights_callback` weights are also not reversed [Inferred]. The `U1` coercion runs later, at `:299`. Reached only by minus-strand regions; the current region BED is strandless, so not reachable now [Inferred]. | [Verified: review `minus.py`; numpy 2.2.6] | **Yes** (Q8). No test until ruled |
-| F18 | LOW, DONE | **Fixed in `b50ab4f`.** The `count_srdf` balance-check message (`:1036-1046`) no longer says "Strand is clustered within regions"; it now states overdispersion, mechanism unmeasured, matching §4.4. | [Verified: read, `b50ab4f`] | Done |
-| F19 | LOW, DONE | **Fixed in `b50ab4f`.** The all-empty-admission error (`:1047-1058`) no longer says "MAPQ removed ALL"; it now names the whole admission chain (MAPQ, dedup, length filter, start-in-region) and keeps MAPQ only as the first thing to check. `t3_count_guards`'s match string must track this wording (L2/L5). | [Verified: read, `b50ab4f`] | Done |
+| F17 | MED, LIBRARY — **HALF FIXED, HALF STILL LIVE, re-verified this session** | A minus-strand region flip has **two** defects. **Defect 1 (bytes-vs-str, FIXED in `aefa71e`):** `_switch_plus_with_minus_and_minus_with_plus` (`fragmentomics_tools/fragment_array/fragment_array.py:123-158` at `eda1b14`) used to compare only against the `str` literals `"+"`/`"-"`, so the raw `\|S1` bytes array from `from_fragments_h5` (call at `:1819`) compared all-False and labels were never swapped. `aefa71e` widened the comparison to accept both `str` and `bytes`; the function's own new docstring documents the before/after. **Defect 2 (order, STILL LIVE, NOT addressed by `aefa71e`):** `starts_0`/`stops_0` (and methyl/gc) are reversed with `[::-1]` to flip coordinate order (`fragment_array.py:1814-1815`), but the call that swaps strand labels (`:1819-1821`) does **not** also reverse the label array's order — so after the bytes fix, the labels are swapped correctly but sit at the wrong POSITIONS relative to the now-reordered coordinates. Reproduced fresh this session with the exact fixture this finding originally used (`chrT:500-1000,-` with `(600,700,+)`,`(650,760,+)`,`(800,900,-)`): the current code gives strands `['-','-','+']` against expected `['+','-','-']` — wrong at 2 of 3, matching this finding's pre-existing prediction exactly [Verified: this session, ran `_switch_plus_with_minus_and_minus_with_plus` and the `[::-1]` reversal by hand against the library's actual `from_fragments_h5` code path at `fragment_array.py:1811-1829`]. **This is a real, currently-live defect**, not a stale finding — report it, do not fix it here. `generate_weights_callback` weights are also not reversed [Inferred]. The `U1` coercion runs later. Reached only by minus-strand regions; the current simulator region BED is strandless, so not reachable from this pipeline [Inferred] — but reachable by `ctcf_pileup_run.py`, per `aefa71e`'s own commit message. | [Verified: `git show aefa71e`; this session's repro against `fragment_array.py` at `eda1b14`] | **Yes** (Q8), for the still-live half. No test until ruled |
+| F18 | LOW, DONE, **superseded by a bigger change in the same spot** | Fixed in `b50ab4f`; the message no longer said "Strand is clustered within regions". **`38e5198` then deleted the balance-check message entirely** (it was the message for the check F3 removed) rather than merely continuing to reword it — the overdispersion numbers now live only in a code comment at `count_srdf:1012-1022`, not in any raised message, since nothing is raised. | [Verified: read, `eda1b14`] | Done (by removal) |
+| F19 | LOW, DONE | Fixed in `b50ab4f`. The all-empty-admission error (`count_srdf:1031-1042` at `eda1b14`, was `:1047-1058`) no longer says "MAPQ removed ALL"; it now names the whole admission chain (MAPQ, dedup, length filter, start-in-region) and keeps MAPQ only as the first thing to check. `t3_count_guards`'s match string must track this wording (L2/L5) — and per §5's T3 entry, no test currently exercises this raise at all, so there is nothing to have tracked yet. | [Verified: read, `eda1b14`] | Done |
 
 **F1 is closed.** The fix is in `844f227`, and the owner approved it. No xfail and no owner
 gate apply. `t4_null_identity` (all four tables, plain assertions) is the regression guard.
@@ -848,76 +1007,134 @@ Mutation M41 checks that the guard still catches the old pairing.
   counter or shortfall test (F14); the dedup key omits strand (asserted only for the T6 invariant).
 - **The accepted divergence** `region_counts.sum() ≥ n_counted`. Not asserted to be equal.
 - **Minus-table values from real data.** The exact check is `t4_null_identity` only.
-- **Minus-strand region input** (F17). No test until the owner rules (Q8).
-- **Any real-data plus fraction** (§4.4). The `1.5` constant itself (F13).
-- **The index value of an invalid window** (F2). The old-generation tests and the CLI h5
+- **Minus-strand region input** (F17). No test until the owner rules (Q8) — and per F17 above,
+  half of this is now a confirmed live defect, not just an untested input.
+- ~~Any real-data plus fraction (§4.4). The `1.5` constant itself (F13).~~ **VOID**: the `1.5`
+  constant does not exist (`38e5198`); there is nothing left to avoid freezing. Real-data plus
+  fraction remains genuinely untested, for the unrelated reason that §4.4 always gave (region
+  is the real-data unit, dispersion unmeasured) — that half of the bullet still stands.
+- **The index value of an invalid window** (F2 — **now DONE**, see Findings; this bullet is
+  about the index VALUE, which is still deliberately untested even though the docstring claim
+  about it is now fixed). The old-generation tests and the CLI h5
   path. F5/F7/F11 behaviour, which a test would freeze.
-- **The even-total and pair-identity checks** (`:934-938`, `:954-960`) are tautologies, not
+- **The even-total and pair-identity checks** (`:939-943`, `:957-963` at `eda1b14`, were
+  `:934-938`, `:954-960`) are tautologies, not
   routing protection (F4, M4) — no test can turn either red, and `b50ab4f`'s own code comment
-  now says so. M39 excludes both sites from its list.
+  now says so. M39 excludes both sites from its list. Unrelated to, and unaffected by, the
+  `38e5198` strand-balance removal (F3).
 - **Pinned `default_rng` draws.** None anywhere.
 
 ## 8. Implementation plan
 
-| Phase | Work | Depends on | Exit criterion |
-|---|---|---|---|
-| P0 | Re-measure both baselines at the implementation HEAD, biomarker_env first on PATH. Re-run the review measurements that P2 and P6 cite | — | Numbers recorded. Last measured at `a409186`: 2F/399P/3S and 673P/0S. Expect `tests/` near 677. |
-| P1 | `tests/conftest.py` (marker, REQUIRE hook). Oracle module and its self-tests (de Bruijn property, palindromes = 64). Confirm the sibling import. T0, T7. | P0 | Green. The hook turns a forced `real_data` skip into a failure under `REQUIRE_REAL_DATA=1`. |
-| P2 | Fixture builders: toy FASTA (asserted properties), BED → tabix → h5 helper, regions. T1, T2, T3. | P1 | T3 exact equality green. The M12 self-check discriminates. |
-| P3 | T4 (§4.3), with M41 run in the same phase | P2 | All four null-identity tables green at HEAD. M41 red on `[start_rev]` and `[end_rev]`. |
-| P4 | Recording rng. T5. Time the recovery test. | P1 | Recovery gap ≥ 12σ under M27, by the T5 arithmetic. |
-| P5 | Closed loop on the toy. T6. | P2-P4 | Distinct-pair invariant holds. |
-| P6 | Commit `tests/data/simulator_real_regions_20.bed` (10 `chr21` rows + the rest elsewhere). Pin the real h5 and FASTA paths. R1, R2, R4. | P1-P5 | `REQUIRE_REAL_DATA=1` run: 0 skipped, real file ≤ 30 s. `tests/data` grows by ~1 KB only. |
-| P7 | Mutation sweep M1-M42 on scratch edits (module or library, never committed), reverted. Run the §4.2 cross-check by script | P1-P6 | Every row red **except the listed equivalent mutants** (M14, H1). Table in the PR, with the site column. |
-| P8 | After-baselines | P7 | See below. |
+| Phase | Work | Depends on | Exit criterion | Status at `eda1b14` |
+|---|---|---|---|---|
+| P0 | Re-measure both baselines at the implementation HEAD, biomarker_env first on PATH. Re-run the review measurements that P2 and P6 cite | — | Numbers recorded. Last measured at `a409186`: 2F/399P/3S and 673P/0S. Expect `tests/` near 677. | **Superseded** — the two-target split this estimated no longer exists; see §1.1 for the single current number (2 failed / 1125 passed / 3 skipped). |
+| P1 | `tests/conftest.py` (marker, REQUIRE hook). Oracle module and its self-tests (de Bruijn property, palindromes = 64). Confirm the sibling import. T0, T7. | P0 | Green. The hook turns a forced `real_data` skip into a failure under `REQUIRE_REAL_DATA=1`. | **Oracle and T0/T7 done.** `tests/conftest.py` (marker + hook) **NOT done** — does not exist. |
+| P2 | Fixture builders: toy FASTA (asserted properties), BED → tabix → h5 helper, regions. T1, T2, T3. | P1 | T3 exact equality green. The M12 self-check discriminates. | Done. |
+| P3 | T4 (§4.3), with M41 run in the same phase | P2 | All four null-identity tables green at HEAD. M41 red on `[start_rev]` and `[end_rev]`. | Done. |
+| P4 | Recording rng. T5. Time the recovery test. | P1 | Recovery gap ≥ 12σ under M27, by the T5 arithmetic. | Done. |
+| P5 | Closed loop on the toy. T6. | P2-P4 | Distinct-pair invariant holds. | Done. |
+| P6 | Commit `tests/data/simulator_real_regions_20.bed` (10 `chr21` rows + the rest elsewhere). Pin the real h5 and FASTA paths. R1, R2, R4. | P1-P5 | `REQUIRE_REAL_DATA=1` run: 0 skipped, real file ≤ 30 s. `tests/data` grows by ~1 KB only. | **NOT done.** No such BED, no real-data test file, nothing real-data-gated in `make test` (§2.4). |
+| P7 | Mutation sweep M1-M42 on scratch edits (module or library, never committed), reverted. Run the §4.2 cross-check by script | P1-P6 | Every row red **except the listed equivalent mutants** (M14, H1). Table in the PR, with the site column. | **24/42 done** (not all) — see §4.2a. 18 rows remain named-but-unverified. |
+| P8 | After-baselines | P7 | See below. | Superseded, see below. |
 
-P8 targets:
-- `make test` unchanged (2 failed / 399 passed / 3 skipped; it does not collect `tests/`).
-- `tests/` with `REQUIRE_REAL_DATA=1`: 673 + 4 (`844f227`) + N_new passed, **0 skipped**.
-- Each new file ≤ 30 s. `tests/data/` gains only the 20-row BED. Nothing staged except the
-  test files, the oracle, `tests/conftest.py` and the BED.
+P8 targets, **as corrected this revision**:
+- ~~`make test` unchanged (2 failed / 399 passed / 3 skipped; it does not collect `tests/`).~~
+  **Superseded.** `make test` now collects `tests/` by default and gives **2 failed / 1125
+  passed / 3 skipped** [Verified: ran this session, §1.1]. There is no "unchanged" baseline to
+  compare against any more, because the thing P8 described (a target that excludes `tests/`)
+  no longer exists.
+- ~~`tests/` with `REQUIRE_REAL_DATA=1`: 673 + 4 (`844f227`) + N_new passed, **0 skipped**.~~
+  **Cannot be run.** `REQUIRE_REAL_DATA` and a dedicated `tests/`-only invocation both
+  presuppose infrastructure (§2.4/§2.5) that does not exist.
+- Each new file ≤ 30 s: not independently re-measured this session (§5's Runtime budget note).
+  `tests/data/` did NOT gain the 20-row BED — P6 was not executed.
 
 ## 9. Open questions for the owner
 
 - **Q1 (propensity tests).** Delete the three partial tests in
   `tests/test_simulator_propensity_denominators.py`? Keep `test_the_rev_tables_are_not_swapped`
   either way (§1.3). The new suite does not depend on the answer.
-- **Q2 (F6).** Should `N` use the same both-sites validity as C? The effect is unmeasurable
-  on the current region set. The tests stay neutral until you rule.
-- **Q3.** Default `make test` does not collect `tests/`, and it depends on PATH (F16).
-  Change the `PYTEST_ARGS` default and pin the interpreter, or document both?
+- ~~**Q2 (F6).** Should `N` use the same both-sites validity as C? The effect is unmeasurable
+  on the current region set. The tests stay neutral until you rule.~~ **ANSWERED, 2026-10-08**:
+  no. Recorded in `simulator_spec.md`'s Settled section: "the simulator gets to define the
+  probability model… not interested in further pursuing this." Do not re-ask this.
+- ~~**Q3.** Default `make test` does not collect `tests/`, and it depends on PATH (F16).
+  Change the `PYTEST_ARGS` default and pin the interpreter, or document both?~~ **ANSWERED by
+  action, not by a ruling.** `dc1df6f` changed the default to collect `tests/`; `aefa71e` fixed
+  the PATH dependency (pins the interpreter AND puts its `bin/` on PATH, after pinning the
+  interpreter alone made things worse — 2 failed became 54 failed on a `bedtools`-off-PATH
+  trap). Both halves of this question are done.
 - **Q4.** Does "dropped zero-length starts: no test" also exclude the *support* assertion in
   `t5_zero_weight_cause`? The design assumes not, because it asserts no shortfall count. If
   you read it otherwise, the row-level variants go and the cell-level variants stay.
 - **Q5.** Real tier: default-on with a visible skip (as designed), or opt-in only? And
   should the acceptance gate `REQUIRE_REAL_DATA=1` also run in CI or the batch container?
-- **Q6 (F13).** Which is authoritative for the balance bound: spec `strand_tol`, or the code's
-  `min(0.45, max(strand_tol, 1.5/√n_regions))`? `b50ab4f` fixed the formula's vacuous-below-10
-  defect (F3) but did not pick between spec and code, so this question is unchanged in kind.
+  **Still fully open** — unlike Q2/Q3/Q6, nothing has happened here at all; the whole tier is
+  unbuilt (§2.4).
+- ~~**Q6 (F13).** Which is authoritative for the balance bound: spec `strand_tol`, or the
+  code's `min(0.45, max(strand_tol, 1.5/√n_regions))`?~~ **VOID, answered by deletion.**
+  `38e5198` removed the balance check from the code, and the spec was updated in the same
+  commit. There is no bound left on either side for one to be authoritative over.
 - **Q7 (F14).** Keep `n_short_regions` (and amend the Settled line), or remove it?
-- **Q8 (F17).** Is a minus-strand region a supported input? If yes, rule the label defect —
-  bytes not swapped, **and** order not reversed, so a decode-only fix still mislabels some
-  fragments (M5). Then choose: fix both parts of the flip, or make `count_sample` refuse
-  minus-strand regions. If no, no test is written.
+- **Q8 (F17).** Is a minus-strand region a supported input? **Partially acted on without being
+  answered**: `aefa71e` fixed the bytes-vs-str half of the label defect, for the unrelated
+  reason that it also sits on the `ctcf_pileup_run.py` path, but did not address, and did not
+  claim to address, the order-reversal half — `fragment_strands` still is not run through
+  `[::-1]` alongside `starts_0`/`stops_0`, confirmed live this session (F17). The question
+  itself is therefore MORE urgent than when written, not less: a half-fix that doesn't mislabel
+  byte-strand input as loudly as before could read as "handled" to someone who does not check
+  the order. Still rule: fix both parts of the flip, or make `count_sample` (and any other
+  minus-strand caller) refuse minus-strand regions. If no, no test is written.
 
 ## Least sure of
 
-- **h5 order for equal `(start,stop)`** [Verified: review, one case]. M12 relies on it. A
-  second case in P2 settles it. If the h5 always puts B first, M12 needs a direct
-  `filter_fragments` test on a hand-built array.
-- **Minus-strand regions** (F17). No test feeds a minus-strand region, so the flip trap is not
-  covered. The owner rules first (Q8).
-- **Runtimes and paths.** R1 and R2 runtimes are unmeasured; R4's build step is pinned at
-  ~11 s but the rest of its pipeline is not. The T5 cost is scaled. The real h5 path is absent
-  from the research record. P4, P6 measure and pin these.
-- **Cites not touched by this revision** may still carry pre-`b50ab4f` line numbers; P0's
-  baseline re-measurement is the right place to re-walk them exhaustively.
-- **Sibling import of the oracle** [Inferred]. P1 confirms it. **Cell barcode read-back:** the
-  reader attribute is unnamed.
-- **Reviewer measurements are not re-run.** No Python ran in this revision. Cites tagged
-  `[Verified: review]` come from the review scratch files. P0 and P2 re-measure them.
-- **Resolved in this revision:** the `fetch_array` filters (§1.2), the M2 doctest question
-  (review: the doctests do not expose endianness), and the M34 site (`region.py:854-865`).
-- **Guard tests (T3 strand guards, `t3_count_guards`, T6 guards).** These are the closest to
-  re-assertion. Each turns a silent downstream failure into a loud one, and the requester
-  listed them as lost evidence. They are still the first candidates to cut.
+**This section itself is now partly stale, same lesson as always — updated in place rather
+than pretending it was always accurate.**
+
+- ~~**h5 order for equal `(start,stop)`** [Verified: review, one case]. M12 relies on it. A
+  second case in P2 settles it.~~ **RESOLVED, `02f7f39`.** Measured directly: `_build_h5` uses
+  a stable sort on `(contig, start, stop)`, so ties deterministically keep fixture order. M12
+  did not need the hand-built-array fallback this bullet anticipated.
+- **Minus-strand regions** (F17). Still true that no test feeds one through
+  `count_hexamers_rdf.py` or `count_sample` — the flip trap is uncovered by a test either way.
+  **But no longer true that the trap is fully unaddressed**: `aefa71e` fixed half of it
+  (bytes-vs-str) for an unrelated caller, and this session's repro confirms the other half
+  (order) is still live. The owner still rules first (Q8), but "rules first" now means ruling
+  on a half-fixed defect, not an untouched one.
+- **Runtimes and paths.** Unchanged — still true. R1 and R2 runtimes are unmeasured because
+  R1/R2 do not exist (§2.4), not merely because nobody timed them; R4 likewise. The real h5
+  path is still absent from the research record.
+- **Cites not touched by this revision may still carry pre-`b50ab4f` line numbers** — true of
+  the v4 revision, and now compounded: cites not touched by THIS (v5) revision may carry
+  pre-`eda1b14` numbers from anywhere between `b50ab4f` and `eda1b14`, a 14-commit, multi-hundred-line gap.
+  This revision re-walked the citations named in the status-header bullets, the strand-balance
+  material (§4.4, F3/F4/F5/F13, the T3/T6 guard rows), F1/F2/F6/F14/F17/F18/F19, and the M12/
+  M13/M14/M15/M19/M20/M24/M25/M41/M42 mutation rows, plus every top-level function's current
+  definition line (listed in §4.2's header note). **Numeric line cites inside mutation rows
+  M1-M11, M16-M18, M21-M23, M26-M40 were NOT individually re-walked this session** — the module
+  shifted by roughly a dozen lines across that range (mostly docstring growth before line
+  ~470, consistent +11-ish after it, per the samples checked); treat any number in those rows
+  as approximate and grep the named symbol instead of trusting it.
+- **Sibling import of the oracle** [Inferred]. Resolved implicitly — `tests/test_count_hexamers_rdf.py`
+  exists and imports `cut_site_oracle` (per its own `test_oracle_is_independent`), so the
+  sibling-import mechanism this bullet worried about evidently works. **Cell barcode
+  read-back:** still unresolved; the reader attribute is still unnamed.
+- **Reviewer measurements are not re-run.** Still true for anything not explicitly re-verified
+  in this revision (see the cites bullet above). This revision DID run Python directly for: the
+  full `make test` baseline (§1.1), the F17 minus-strand repro (findings table), and several
+  `grep -n`/`ls` existence checks (§2.4, §5).
+- **Resolved in earlier revisions:** the `fetch_array` filters (§1.2), the M2 doctest question,
+  the M34 site.
+- **Guard tests (T3 strand guards, `t3_count_guards`, T6 guards).** This bullet called these
+  "the first candidates to cut" — and in practice, most of them WERE effectively cut: only one
+  case of `t3_count_guards` and one of five `t6_writer_guards` cases actually got implemented
+  (§5), and the strand-balance guard test (`t3_strand_balance_guard_fires`) was never written
+  at all once its target was removed. Whether that's the right amount of coverage is a question
+  for the owner, not settled by this revision — flagged as a possible gap in the findings
+  below, not fixed.
+- **NEW this revision.** Whether the synthetic suite still meets the "≤ 30 s per file" budget
+  (§5's Runtime budget note) was not isolated from the 208.83 s combined `make test` run.
+  Whether `t6_writer_guards`'/`t3_count_guards`'s narrower-than-designed coverage (§5) is an
+  accepted scope cut or an oversight is unasked — add as a question if the owner wants it
+  raised formally.
