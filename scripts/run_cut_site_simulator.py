@@ -154,17 +154,18 @@ def _stage(name, seconds):
 
 
 def main(argv=None):
-    # Line-buffered even when redirected to a file, for two reasons. A
-    # block-buffered log sits empty through a long stage and looks frozen.
-    # And every parallel stage forks: a worker inherits any unflushed buffer
-    # and flushes its own copy on exit, so buffered lines can be printed
-    # once per worker.
+    # Line-buffered even when redirected to a file: a block-buffered log sits
+    # empty through a long stage and looks frozen.
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
 
     args = parse_args(argv)
     os.makedirs(args.out_dir, exist_ok=True)
     stem = os.path.join(args.out_dir, args.sample_id)
+    # The count actually used, for run.json and the h5 build. None means every
+    # CPU, which is how parallel_apply resolves it in each parallel stage.
+    n_workers = (args.n_workers if args.n_workers is not None
+                 else multiprocessing.cpu_count())
     t0 = time.time()
     seconds = {}
 
@@ -223,7 +224,7 @@ def main(argv=None):
         # Seeds before decision 166 used one shared stream, so the same seed
         # gives different fragments across that change; this records which.
         rng_scheme="default_rng([seed, region_index])",
-        n_workers=args.n_workers, n_regions=len(rdf),
+        n_workers=n_workers, n_regions=len(rdf),
         region_bed=os.path.abspath(args.region_bed),
         fasta=os.path.abspath(args.fasta),
         fragments_h5=os.path.abspath(args.fragments_h5),
@@ -241,12 +242,10 @@ def main(argv=None):
         out_h5 = f"{stem}.fragments.h5"
         if os.path.exists(out_h5):
             os.remove(out_h5)
-        n_proc = (args.n_workers if args.n_workers is not None
-                  else multiprocessing.cpu_count())
-        print(f"[h5]      building with {n_proc} process(es)")
+        print(f"[h5]      building with {n_workers} process(es)")
         with _stage("h5", seconds):
             build_fragments_h5(gz, out_h5, fasta_filename=args.fasta,
-                               num_processes=n_proc)
+                               num_processes=n_workers)
 
         with FragmentsH5(out_h5) as f:
             total = int(f.fragment_length_counts.sum())

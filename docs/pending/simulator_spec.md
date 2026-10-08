@@ -364,8 +364,23 @@ layout changed; the draw in §4 is untouched.
   cross join with one sample keeps every row and `attach_sequence` is a left
   join — but carrying the label means a filtered or reordered frame still
   draws the same fragments for the regions it keeps.  There is no positional
-  fallback; a frame without the column raises.  Duplicate values raise, so a
-  multi-sample frame is out of contract.
+  fallback.  Duplicate values raise, so a multi-sample frame is out of
+  contract.
+- **Where `simulate_fragments_to_bed` gets the indices.**  It takes an
+  explicit `region_index=` argument, one value per row of `srdf` in row
+  order.  When given, the argument wins and the frame's column is not read,
+  even if present.  When omitted (`None`), the frame's `region_index` column
+  is used, and a frame without the column raises `ValueError`.  Either way,
+  a wrong length raises, every value must be an int in `[0, 2**32)`
+  (a non-int raises `TypeError`, an out-of-range value `ValueError`), and a
+  duplicate raises.
+- **`count_sample` keeps an existing `region_index` column.**  If `rdf`
+  already carries one, it passes through unchanged, and `rdf`'s index is
+  neither read nor checked.  Only when the column is absent does
+  `count_sample` build it from the index labels; then the index must be a
+  unique integer index, or it raises `ValueError`.  A caller who has
+  reindexed `rdf` can therefore pin each region's stream by supplying the
+  column.
 - **`seed` and `region_index` must each lie in `[0, 2**32)`.**
   `SeedSequence` flattens the list into 32-bit words before hashing, so a
   wider seed spills into the region slot: measured, `[7 + 3·2**32, 0]` and

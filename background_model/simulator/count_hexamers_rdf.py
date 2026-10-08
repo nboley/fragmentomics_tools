@@ -1093,8 +1093,7 @@ def simulate_fragments_to_bed(
         meta_parts = [f"seed={seed}"]
         if sample_id is not None:
             meta_parts.append(f"sample={sample_id}")
-        if meta_parts:
-            f.write(f"# {' '.join(meta_parts)}\n")
+        f.write(f"# {' '.join(meta_parts)}\n")
         f.write("contig\tstart\tstop\tstrand\tp\n")
         for row in bed.itertuples(index=False):
             f.write(
