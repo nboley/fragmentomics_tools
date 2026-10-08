@@ -38,6 +38,7 @@ from background_model.simulator.count_hexamers_rdf import (
     hexamer_indices,
     hexamer_vocabulary,
     load_sample_dataframe,
+    oracle_nll,
     propensities,
     rc_permutation,
     sample_region,
@@ -753,21 +754,6 @@ class TestT3CountSample:
             f"sites are being miscounted into neighbouring hexamers."
         )
 
-    def test_one_empty_strand_raises(self, toy_dir, toy_genome):
-        """M39 (delete check 1)."""
-        g0, g1 = 3, 503
-        frags = [("chrT", g0 + i * 30, g0 + i * 30 + 50, "+", 30, 30)
-                 for i in range(9)]
-        h5 = _build_h5(frags, toy_dir["fasta"], toy_dir["dir"], name="empty_strand")
-        rdf = RegionDataFrame(pd.DataFrame({
-            "contig": ["chrT"] * 5,
-            "start": list(range(g0, g0 + 500, 100)),
-            "stop": list(range(g0 + 100, g0 + 600, 100)),
-        }), ref="hg38")
-        with pytest.raises(AssertionError, match="one strand table is EMPTY"):
-            count_sample(rdf, "test", h5, toy_dir["fasta"],
-                         n_workers=1, verbose=False)
-
     def test_count_guards_missing_sequence(self, toy_dir, toy_regions):
         """M39 (delete raise for missing column)."""
         g0, g1 = toy_regions[0]
@@ -1064,7 +1050,7 @@ class TestT5Sampler:
             verbose=False,
         )
         seq = srdf["sequence"].iloc[0]
-        n = 5
+        n = 1
 
         # For the minus case, plant an N inside the region so valid[] is not
         # all-True. Without it, dropping ``* valid[pos]`` (M23) has no effect
@@ -1110,8 +1096,8 @@ class TestT5Sampler:
                 f"rc track within region [0, {R})"
             )
 
-        dummy_starts = np.array([100] * n)
-        dummy_u = np.full((n, 1), 0.5)
+        dummy_starts = np.array([100])
+        dummy_u = np.full((1, 1), 0.5)
 
         if strand == "plus":
             rng_n_plus = [n]
@@ -1159,18 +1145,18 @@ class TestT5Sampler:
         seq = srdf["sequence"].iloc[0]
 
         rng = np.random.default_rng(42)
-        starts, lengths, is_plus = sample_region(
+        starts, lengths, is_plus, _probs = sample_region(
             seq, R, 200, r=r, fl=simple_fl, p_plus=1.0, rng=rng,
         )
         assert is_plus.all(), "p_plus=1.0 should give all plus"
 
         rng = np.random.default_rng(42)
-        starts, lengths, is_plus = sample_region(
+        starts, lengths, is_plus, _probs = sample_region(
             seq, R, 200, r=r, fl=simple_fl, p_plus=0.0, rng=rng,
         )
         assert not is_plus.any(), "p_plus=0.0 should give all minus"
 
-    def test_planted_propensity_recovered(self, toy_dir, toy_genome, simple_fl):
+    def test_planted_propensity_recovered(self, toy_dir, toy_genome):
         """M27 (plus uses minus tables). Statistical, 6σ bound."""
         g0, g1 = 3, 4003
         R = g1 - g0
@@ -1193,10 +1179,12 @@ class TestT5Sampler:
         )
         seq = srdf["sequence"].iloc[0]
 
+        fl_uniform = FragmentLengthDist(
+            np.ones(N_LENGTHS, dtype=np.int64), L_MIN)
         n_total = 40_000
         rng = np.random.default_rng(12345)
-        starts, lengths, is_plus = sample_region(
-            seq, R, n_total, r=r, fl=simple_fl, p_plus=0.5, rng=rng,
+        starts, lengths, is_plus, _probs = sample_region(
+            seq, R, n_total, r=r, fl=fl_uniform, p_plus=0.5, rng=rng,
         )
 
         # Count plus-strand starts at the planted hexamer
@@ -1309,10 +1297,19 @@ class TestT5Sampler:
             assert not valid[START + BLOCKED], "planted N did not invalidate"
             assert valid[START + CONTROL], "planted N also hit the control"
 
-        starts, lengths, is_plus = sample_region(
-            # .encode(): sample_region calls bytes(sequence), which rejects str.
-            # hexamer_indices above accepts str, so the tracks stay readable.
-            seq.encode(), R, 4000, r=r, fl=fl, p_plus=1.0,
+        # Count valid (start, length) pairs. With a point-mass start and
+        # dedup, n cannot exceed this count.
+        n_valid = 0
+        for l_idx, L_val in enumerate(range(fl.min_fl, fl.max_fl + 1)):
+            end_pos = START + L_val
+            if (fl.densities[l_idx] > 0
+                    and valid[end_pos]
+                    and r["end_fwd"][int(fwd[end_pos])] > 0):
+                n_valid += 1
+        assert n_valid >= 2, "need at least BLOCKED and CONTROL valid"
+
+        starts, lengths, is_plus, _probs = sample_region(
+            seq.encode(), R, n_valid, r=r, fl=fl, p_plus=1.0,
             rng=np.random.default_rng(99),
         )
         assert is_plus.all(), "p_plus=1.0 must give plus-strand draws only"
@@ -1365,8 +1362,8 @@ class TestT5Sampler:
         fl = FragmentLengthDist(
             np.ones(L_MAX - L_MIN + 1, dtype=np.int64), L_MIN)
 
-        starts, lengths, _ = sample_region(
-            seq.encode(), R, 500, r=r, fl=fl, p_plus=1.0,
+        starts, lengths, _, _probs = sample_region(
+            seq.encode(), R, 1, r=r, fl=fl, p_plus=1.0,
             rng=np.random.default_rng(3),
         )
         assert set(starts.tolist()) == {START}
@@ -1396,6 +1393,110 @@ class TestT5Sampler:
         fl = FragmentLengthDist.from_srdf(srdf)
         assert fl.min_fl >= L_MIN
         assert fl.max_fl <= L_MAX
+
+    def test_p_sums_to_one(self, toy_dir, toy_genome, simple_fl):
+        """Sum of p over all live cells equals 1."""
+        g0, g1 = 3, 1003
+        R = g1 - g0
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("dummy", toy_dir["fasta"])])
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        seq = srdf["sequence"].iloc[0]
+
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][oracle.IDX("AACGTC")] = 10.0
+
+        p_plus = 0.5
+        Ls = np.arange(simple_fl.min_fl, simple_fl.max_fl + 1)
+        seq_arr = np.frombuffer(bytes(seq).upper(), dtype=np.uint8)
+        fwd, rc_arr, valid = hexamer_indices(seq_arr)
+        pos = np.arange(R)
+        ends_all = pos[:, None] + Ls[None, :]
+
+        total = np.float64(0.0)
+        for is_plus in (True, False):
+            track = fwd if is_plus else rc_arr
+            s_tab = r["start_fwd"] if is_plus else r["end_rev"]
+            e_tab = r["end_fwd"] if is_plus else r["start_rev"]
+            p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
+
+            W_s = e_tab[track[ends_all]] * valid[ends_all] * simple_fl.densities[None, :]
+            t_s = W_s.sum(axis=1, dtype=np.float64)
+            live = t_s > 0
+            a_s = s_tab[track[pos]] * valid[pos]
+            a_s_live = a_s * live
+            tot = a_s_live.sum(dtype=np.float64)
+            if tot <= 0:
+                continue
+            start_probs = a_s_live / tot
+
+            for i in range(R):
+                if start_probs[i] <= 0:
+                    continue
+                for l_idx in range(len(Ls)):
+                    if W_s[i, l_idx] > 0:
+                        p_L = W_s[i, l_idx] / t_s[i]
+                        total += p_strand * start_probs[i] * p_L
+
+        np.testing.assert_allclose(float(total), 1.0, rtol=1e-12)
+
+    def test_dedup_feasibility_precheck(self):
+        """Requesting more fragments than distinct live pairs raises."""
+        R = 400
+        seq = self._single_start_seq(region_len=R)
+        fwd, _rc, valid = hexamer_indices(seq)
+        START = self._unique_start(fwd, R, near=100)
+
+        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][int(fwd[START])] = 1.0
+        r["end_fwd"][:] = 1.0
+
+        counts = np.zeros(N_LENGTHS, dtype=np.int64)
+        counts[0] = 1
+        counts[25] = 1
+        counts[75] = 1
+        counts[155] = 1
+        fl = FragmentLengthDist(counts, L_MIN)
+
+        with pytest.raises(ValueError, match="distinct.*pairs"):
+            sample_region(
+                seq.encode(), R, 5, r=r, fl=fl, p_plus=1.0,
+                rng=np.random.default_rng(0),
+            )
+
+    def test_no_duplicate_fragments(self, toy_dir, toy_genome, simple_fl):
+        """Every drawn (start, stop) pair is unique."""
+        g0, g1 = 3, 1003
+        R = g1 - g0
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        sdf = load_sample_dataframe([("dummy", toy_dir["fasta"])])
+        from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
+        srdf = SampleAndRegionDataFrame.init_from_rdf_and_sdf(rdf, sdf)
+        srdf = srdf.attach_sequence(
+            toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
+            verbose=False,
+        )
+        seq = srdf["sequence"].iloc[0]
+
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        rng = np.random.default_rng(42)
+        starts, lengths, is_plus, probs = sample_region(
+            seq, R, 200, r=r, fl=simple_fl, p_plus=0.5, rng=rng,
+        )
+        pairs = set()
+        for s, L in zip(starts.tolist(), lengths.tolist()):
+            key = (s, s + L)
+            assert key not in pairs, f"duplicate (start, stop) = {key}"
+            pairs.add(key)
 
 
 # ── T6: Writer and round trip ───────────────────────────────────────────
@@ -1550,7 +1651,7 @@ class TestT6WriterAndRoundTrip:
         seq = srdf["sequence"].iloc[0]
         n = int(region_counts[0])
         rng_sim = np.random.default_rng(42)
-        starts_0, lengths, is_plus = sample_region(
+        starts_0, lengths, is_plus, _probs = sample_region(
             seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
         )
         assert len(starts_0) > 0, "no fragments drawn"
@@ -1631,7 +1732,7 @@ class TestT6WriterAndRoundTrip:
         seq = srdf["sequence"].iloc[0]
         n = int(region_counts[0])
         rng_sim = np.random.default_rng(77)
-        starts_0, lengths, is_plus = sample_region(
+        starts_0, lengths, is_plus, _probs = sample_region(
             seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
         )
         assert len(starts_0) > 0

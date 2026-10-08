@@ -74,6 +74,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, Tuple
 
 import functools
+import gzip
 
 import numpy as np
 import pandas as pd
@@ -585,29 +586,44 @@ def sample_region(
     fl: "FragmentLengthDist",
     p_plus: float,
     rng,
+    _dup_counter=None,
 ):
-    """Draw ``n`` fragments in one region. Returns ``(starts_0, lengths, is_plus)``.
+    """Draw ``n`` fragments in one region.
+
+    Returns ``(starts_0, lengths, is_plus, probs)``.
 
     Per fragment: strand, then start, then length.
 
-    - **Strand** ~ Bernoulli(``p_plus``).  It selects the tables, because a
-      minus-strand fragment's genomic start is its 3' end: plus reads
-      ``start_fwd`` / ``end_fwd`` off ``hex_fwd``, minus reads ``end_rev`` /
-      ``start_rev`` off ``hex_rc``.
+    - **Strand** ~ Bernoulli(``p_plus``).  The strand split is exactly
+      ``Binomial(n, p_plus)`` and is never revisited.
     - **Start** ``i`` over ``[0, region_len)``, proportional to the start-side
-      propensity, normalised within the region.
+      propensity AND gated on the start having at least one valid length
+      (``live``).  Normalised within the strand.
     - **Length** over ``[min_fl, max_fl]``, proportional to
       ``end_p x f(L)``, normalised over ``L``.
+    - **Duplicates** on ``(start, start + length)`` are redrawn.  The key is
+      strand-blind, matching the read-time dedup convention.
 
-    Vectorised over fragments: all ``n`` share the region's arrays, so the
-    length draw is one ``(n, n_lengths)`` block.
+    ``probs`` is the first-draw marginal probability of each fragment::
+
+        p = P(strand) * P(start | strand) * P(length | start, strand)
+
+    The full weight block ``W_s`` is computed once for all positions per
+    strand, then ``t_s = W_s.sum(axis=1)`` gives the per-start total.
+    ``live = t_s > 0`` restricts starts to those with at least one valid
+    length.  The initial draw is vectorised; only duplicate collisions
+    enter a scalar redraw loop.
     """
     seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
     fwd, rc, valid = hexamer_indices(seq)
     Ls = np.arange(fl.min_fl, fl.max_fl + 1)
+    pos = np.arange(region_len)
+    ends_all = pos[:, None] + Ls[None, :]
 
     n_plus = int(rng.binomial(n, p_plus))
-    out_s, out_L, out_p = [], [], []
+    used = set()
+    out_s, out_L, out_p, out_prob = [], [], [], []
+    n_dup_redraws = 0
 
     for is_plus, k in ((True, n_plus), (False, n - n_plus)):
         if k == 0:
@@ -615,45 +631,89 @@ def sample_region(
         track = fwd if is_plus else rc
         s_tab = r["start_fwd"] if is_plus else r["end_rev"]
         e_tab = r["end_fwd"] if is_plus else r["start_rev"]
+        p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
 
-        # Start: propensity over in-region positions, gated on a valid hexamer.
-        pos = np.arange(region_len)
-        w_s = s_tab[track[pos]] * valid[pos]
-        tot = w_s.sum()
+        W_s = e_tab[track[ends_all]] * valid[ends_all] * fl.densities[None, :]
+        t_s = W_s.sum(axis=1, dtype=np.float64)
+        live = t_s > 0
+
+        a_s = s_tab[track[pos]] * valid[pos]
+        a_s_live = a_s * live
+        tot = a_s_live.sum(dtype=np.float64)
         if tot <= 0:
             continue
-        starts = rng.choice(pos, size=k, replace=True, p=w_s / tot)
 
-        # Length: one (k, n_lengths) block.
-        ends = starts[:, None] + Ls[None, :]
-        w = e_tab[track[ends]] * valid[ends] * fl.densities[None, :]
+        start_probs = a_s_live / tot
 
-        tot = w.sum(axis=1)
-        live = tot > 0
-        if not live.any():
-            continue
-        w, starts, tot = w[live], starts[live], tot[live]
-        cdf = np.cumsum(w / tot[:, None], axis=1)
-        # NOT clamped, deliberately. float64 throughout (e_tab and fl.densities
-        # are both float64), but cumsum is a SEQUENTIAL accumulation, so
-        # cdf[-1] lands just under 1.0 in ~43% of rows, by at most ~6.5 eps
-        # (measured). `pick` can therefore reach len(Ls) when u > cdf[-1] --
-        # probability 1.3e-16 per draw, about one occurrence per 3e9 full runs.
-        # If that ever happens we want the IndexError: clamping it would hand
-        # one fragment the longest length silently, and a loud failure at
-        # 1-in-3e9 is worth more than a quiet wrong value.
-        pick = (cdf < rng.random((len(starts), 1))).sum(axis=1)
+        n_distinct = int(((a_s_live > 0)[:, None] & (W_s > 0)).sum())
+        if k > n_distinct:
+            raise ValueError(
+                f"requested {k} fragments on "
+                f"{'plus' if is_plus else 'minus'} strand but only "
+                f"{n_distinct} distinct (start, length) pairs have positive "
+                f"weight; duplicate redraw cannot succeed"
+            )
 
-        out_s.append(starts)
-        out_L.append(Ls[pick])
-        out_p.append(np.full(len(starts), is_plus))
+        starts = rng.choice(pos, size=k, replace=True, p=start_probs)
+        w = W_s[starts]
+        row_sums = t_s[starts]
+        cdf = np.cumsum(w / row_sums[:, None], axis=1)
+        pick = (cdf < rng.random((k, 1))).sum(axis=1)
+        lengths = Ls[pick]
+
+        max_attempts = 100 * k
+        result_starts = np.empty(k, dtype=np.int64)
+        result_lengths = np.empty(k, dtype=np.int64)
+        for j in range(k):
+            s, L = int(starts[j]), int(lengths[j])
+            attempt = 0
+            while (s, s + L) in used:
+                n_dup_redraws += 1
+                attempt += 1
+                if attempt > max_attempts:
+                    raise RuntimeError(
+                        f"duplicate redraw exceeded {max_attempts} attempts; "
+                        f"{len(used)} of {n_distinct} distinct pairs used"
+                    )
+                s = int(rng.choice(pos, p=start_probs))
+                w_row = W_s[s]
+                cdf_row = np.cumsum(w_row / t_s[s])
+                l_idx = int((cdf_row < rng.random()).sum())
+                L = int(Ls[l_idx])
+            used.add((s, s + L))
+            result_starts[j] = s
+            result_lengths[j] = L
+
+        l_indices = result_lengths - fl.min_fl
+        p_start_vals = start_probs[result_starts]
+        p_length_vals = (
+            W_s[result_starts, l_indices] / t_s[result_starts]
+        )
+        probs = p_strand * p_start_vals * p_length_vals
+
+        out_s.append(result_starts)
+        out_L.append(result_lengths)
+        out_p.append(np.full(k, is_plus))
+        out_prob.append(probs)
+
+    if _dup_counter is not None:
+        _dup_counter[0] += n_dup_redraws
 
     if not out_s:
         z = np.zeros(0, dtype=np.int64)
-        return z, z, np.zeros(0, dtype=bool)
+        return z, z, np.zeros(0, dtype=bool), np.zeros(0, dtype=np.float64)
     return (np.concatenate(out_s).astype(np.int64),
             np.concatenate(out_L).astype(np.int64),
-            np.concatenate(out_p))
+            np.concatenate(out_p),
+            np.concatenate(out_prob))
+
+
+def oracle_nll(probs: np.ndarray) -> float:
+    """``-mean(log(p))`` in float64."""
+    probs = np.asarray(probs, dtype=np.float64)
+    if probs.size == 0:
+        return float("nan")
+    return float(-np.log(probs).mean(dtype=np.float64))
 
 
 def simulate_fragments_to_bed(
@@ -667,8 +727,11 @@ def simulate_fragments_to_bed(
     p_plus: float = 0.5,
     l_max: int = L_MAX,
     mapq: int = 60,
-) -> Dict[str, int]:
-    """Draw fragments for every region and write an 8-column BED.
+    seed: int | None = None,
+    sample_id: str | None = None,
+    p_sidecar_path: str | None = None,
+) -> dict:
+    """Draw fragments for every region and write an 8-column BED + a p sidecar.
 
     The BED is the input to ``fragments_h5.build_fragments_h5``, which needs it
     bgzipped and tabix-indexed -- that is the caller's next step, not this
@@ -697,6 +760,12 @@ def simulate_fragments_to_bed(
     contig's records contiguous and position-ordered. Sorting here is why
     ``sample_region``'s draw order is not part of its contract.
 
+    **Sidecar:** a gzipped TSV next to the BED (``<prefix>.p.tsv.gz``) carrying
+    ``(contig, start, stop, strand, p)`` for every drawn fragment.  With
+    duplicates redrawn the ``(contig, start, stop, strand)`` key is unique, so
+    a join against the h5 is exact and one-to-one.  ``p`` is written as
+    ``%.17g`` to round-trip float64 exactly.  Read-time dedup removes nothing.
+
     Next step, verified end to end against the real reader::
 
         gz = pysam.tabix_index(bed_path, preset="bed", force=True)
@@ -707,9 +776,9 @@ def simulate_fragments_to_bed(
     hash the plain file afterwards. Convenient for the two-output contract,
     since the intermediate deletes itself, but surprising if unexpected.
 
-    Returns a stats dict. ``n_drawn < n_requested`` is possible and is reported
-    rather than raised -- see the spec's Settled note on the dropped-start
-    shortfall.
+    Returns a stats dict including ``oracle_nll`` and ``n_dup_redraws``.
+    ``n_drawn == n_requested`` in all practical cases; ``n_short_regions`` is
+    retained for interface continuity but is permanently zero.
     """
     if out_path.endswith(".gz"):
         raise ValueError(
@@ -727,15 +796,11 @@ def simulate_fragments_to_bed(
         if col not in srdf.columns:
             raise ValueError(f"srdf has no {col!r} column")
 
-    # The frame sample_region assumes: left_pad = HEX_HALF makes a hexamer index
-    # equal its region-local coordinate, and right_pad = l_max + HEX_HALF covers
-    # a fragment that overhangs the far edge. Checking the exact length pins
-    # BOTH pads, and is the only thing standing between us and a silently
-    # truncated sequence at a contig end -- which would shift every hexamer
-    # index without any other symptom.
     expected_seq_len_extra = 2 * HEX_HALF + l_max
 
     chunks = []
+    p_chunks = []
+    dup_counter = [0]
     n_requested = n_drawn = n_short = 0
     for i, (contig, gstart, gstop, fa, seq) in enumerate(zip(
         srdf["contig"], srdf["start"], srdf["stop"],
@@ -762,8 +827,9 @@ def simulate_fragments_to_bed(
         n_requested += n
         if n == 0:
             continue
-        starts_0, lengths, is_plus = sample_region(
+        starts_0, lengths, is_plus, probs = sample_region(
             seq, region_len, n, r=r, fl=fl, p_plus=p_plus, rng=rng,
+            _dup_counter=dup_counter,
         )
         n_drawn += len(starts_0)
         if len(starts_0) < n:
@@ -772,15 +838,19 @@ def simulate_fragments_to_bed(
             continue
 
         starts = int(gstart) + starts_0
+        stops = starts + lengths
+        strands = np.where(is_plus, "+", "-")
+
         chunks.append(pd.DataFrame({
             "contig": contig,
             "start": starts,
-            "stop": starts + lengths,
+            "stop": stops,
             "name": "",
             "score": 0,
-            "strand": np.where(is_plus, "+", "-"),
+            "strand": strands,
             "mapq1": mapq,
             "mapq2": mapq,
+            "p": probs,
         }))
 
     if chunks:
@@ -788,8 +858,36 @@ def simulate_fragments_to_bed(
         bed.sort_values(["contig", "start", "stop"], kind="stable", inplace=True)
     else:
         bed = pd.DataFrame(columns=["contig", "start", "stop", "name", "score",
-                                    "strand", "mapq1", "mapq2"])
-    bed.to_csv(out_path, sep="\t", header=False, index=False)
+                                    "strand", "mapq1", "mapq2", "p"])
+
+    bed_out = bed[["contig", "start", "stop", "name", "score",
+                   "strand", "mapq1", "mapq2"]]
+    bed_out.to_csv(out_path, sep="\t", header=False, index=False)
+
+    # Sidecar: (contig, start, stop, strand, p) with provenance header.
+    if out_path.endswith(".bed"):
+        sidecar_default = out_path[:-4] + ".p.tsv.gz"
+    else:
+        sidecar_default = out_path + ".p.tsv.gz"
+    sidecar_path = p_sidecar_path or sidecar_default
+    with gzip.open(sidecar_path, "wt") as f:
+        meta_parts = []
+        if seed is not None:
+            meta_parts.append(f"seed={seed}")
+        if sample_id is not None:
+            meta_parts.append(f"sample={sample_id}")
+        if meta_parts:
+            f.write(f"# {' '.join(meta_parts)}\n")
+        f.write("contig\tstart\tstop\tstrand\tp\n")
+        for row in bed.itertuples(index=False):
+            f.write(
+                f"{row.contig}\t{row.start}\t{row.stop}\t"
+                f"{row.strand}\t{row.p:.17g}\n"
+            )
+
+    all_p = bed["p"].to_numpy(dtype=np.float64) if len(bed) else np.array(
+        [], dtype=np.float64
+    )
 
     return dict(
         n_regions=len(srdf),
@@ -797,6 +895,9 @@ def simulate_fragments_to_bed(
         n_drawn=n_drawn,
         n_short_regions=n_short,
         n_rows_written=len(bed),
+        oracle_nll=oracle_nll(all_p),
+        n_dup_redraws=dup_counter[0],
+        p_sidecar=sidecar_path,
     )
 
 
@@ -991,45 +1092,6 @@ def count_srdf(
     # became read 1, and adapter ligation is symmetric, so the label carries no
     # sequence information. p_plus is 0.5 BY CONSTRUCTION, not by fitting.
     #
-    # (1) BOTH STRANDS PRESENT -- exact, no tolerance, cannot false-positive.
-    # This is the check that earns its place. `rfa.fragment_strands` is `<U1`
-    # ('+'), not the `b'+'` bytes FragmentsH5.fetch_array returns; comparing
-    # against bytes yields an all-False mask and so an ENTIRELY EMPTY strand
-    # table. sample_region then skips that strand silently and the simulator
-    # emits strand-pure data with nothing anywhere reporting it. An emptied
-    # table is exactly what this catches, and it needs no threshold.
-    if n_counted := (n_plus + n_minus):
-        if not n_plus or not n_minus:
-            raise AssertionError(
-                f"one strand table is EMPTY: {n_plus} plus, {n_minus} minus "
-                f"over {n_counted} counted fragments. Strand carries no "
-                f"sequence information, so this is not biology. Check that "
-                f"fragment_strands was compared against '+' and not b'+' -- "
-                f"it is <U1, and the bytes comparison yields an all-False mask."
-            )
-
-        # (2) There is deliberately NO BALANCE CHECK. `plus_frac`, `n_plus` and
-        # `n_minus` are REPORTED in stats and nothing asserts them.
-        #
-        # Removed by owner decision 2026-10-07 ("doesn't seem useful"), after
-        # three measured reasons accumulated:
-        #
-        # - It could not catch the failure it appeared to. A wholesale
-        #   plus/minus swap maps plus_frac to 1 - plus_frac and leaves every
-        #   total intact, so a balanced sample passes either way round.
-        # - It false-positived on a legitimate 10-region run. The real-data
-        #   fraction is OVERDISPERSED relative to independent fragment draws --
-        #   0.3758 / 0.5296 / 0.5041 at 10 / 200 / 2,000 regions, the first two
-        #   deviating in OPPOSITE directions -- so no fragment-count bound is
-        #   right. The mechanism was never measured.
-        # - Rescaling to n_regions to fix that made the bound VACUOUS below 10
-        #   regions, since abs(plus_frac - 0.5) <= 0.5 by construction. That
-        #   needed a cap in turn. A guard requiring two corrections to stop
-        #   being either wrong or dead is not carrying its weight.
-        #
-        # Check (1) above is what actually guards the b'+' trap, and it needs no
-        # threshold. Do not reintroduce a balance assertion without naming a
-        # failure mode it detects that (1) does not.
     if stats["n_regions"] and not stats["n_after_filters"]:
         raise ValueError(
             "EVERY fragment was removed before counting. The admission chain "

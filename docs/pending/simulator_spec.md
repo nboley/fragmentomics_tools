@@ -97,17 +97,31 @@ because a minus-strand fragment's genomic start is its 3′ end:
 | minus | `r_end_rev(hex_rc(i))` | `r_start_rev(hex_rc(i+L))` |
 
 **1. Start** — genomic start `i` over `[gstart, gstop)`, weighted by the left
-column and normalised **within the region**:
+column AND gated on the start having at least one valid length (`live`).
+Normalised **within the strand**:
 
-    p[i] = r_start(hex(i))        for i in [gstart, gstop), 0 if hex(i) invalid
-    P(i) = p[i] / p.sum()
+    W_s[i, l] = r_end(hex(i + l)) · valid(i + l) · f(l)      full weight block
+    t_s[i]    = sum_l W_s[i, l]                                per-start total
+    live[i]   = t_s[i] > 0
+    a_s[i]    = r_start(hex(i)) · valid(i) · live[i]
+    P(i | s)  = a_s[i] / sum_j a_s[j]
 
-**2. Stop** — given `i`, build the weight vector over lengths and normalise it
-over the **valid** entries only:
+**2. Stop** — given `i`, the length distribution is read from the pre-computed
+`W_s` row and normalised over `L`:
 
-    w[l] = f(l) · r_end(hex(i + l))     for every l in f's support,
-                                        0 unless the fragment is VALID
-    P(l | i) = w[l] / w.sum()
+    P(L | i, s) = W_s[i, L - min_fl] / t_s[i]
+
+**3. Duplicates** — the `(start, start + L)` pair is checked against a set of
+pairs already drawn in this region.  Strand is NOT in the key, matching the
+read-time dedup convention.  On collision, both start and length are redrawn
+from the same distribution.  A feasibility precheck counts distinct live
+`(i, L)` pairs; if the requested count exceeds this, the draw raises
+`ValueError` rather than spinning forever.  An attempt bound of `100 * k` per
+strand prevents near-capacity draws from crawling silently.
+
+With duplicates redrawn, no duplicate `(start, stop)` ever reaches the BED, so
+read-time `drop_duplicate_fragments` removes **nothing**.  Emitted rows map
+1:1 to h5 rows.
 
 The support is `f`'s own, `[fl.min_fl, fl.max_fl]`, and it is bounded by
 `[L_MIN, L_MAX]` **because §3 admission produced it** — not because the sampler
@@ -269,14 +283,15 @@ numpy, pandas, `fragmentomics_tools.dataframe`.
 | `filter_fragments` | dedup, length filter, admission. All filtering |
 | `cut_site_hexamers` | per region → `start_hex`, `stop_hex`, `strand` |
 | `counts_from_hexamers` | genomic start/stop + strand → the four tables |
-| `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. Asserts only that BOTH strand tables are non-empty — there is no balance check, see Settled |
+| `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
 | `count_sample` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
-| `simulate_fragments_to_bed` | draws for every region → the 8-column BED that `build_fragments_h5` consumes. Sorts its output; `n_drawn < n_requested` is reported, not raised |
+| `simulate_fragments_to_bed` | draws for every region → 8-column BED + `.p.tsv.gz` sidecar. Stats include `oracle_nll` and `n_dup_redraws` |
+| `oracle_nll` | `-mean(log(p))` in float64 |
 | `FragmentLengthDist` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
 | `uniform_hexamer_counts` | → `N(h)` |
 | `fl_end_weight` | `w(i)` above |
 | `propensities` | `C / N` |
-| `sample_region` | draw `n` fragments → `starts_0`, `lengths`, `is_plus` |
+| `sample_region` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
 | `rc_permutation` | RC as a 4096 permutation, derived from the encoder |
 
@@ -291,8 +306,34 @@ numpy, pandas, `fragmentomics_tools.dataframe`.
 which delegates to it. Its three arrays are read-only, since an in-place edit
 would leave the cached CDF stale.
 
-`sample_region` is vectorised over fragments: all `n` in a region share its
-arrays, so the length draw is one `(n, n_lengths)` block.
+`sample_region` precomputes the full weight block `W_s` for all positions per
+strand, then draws the initial batch vectorised.  Only duplicate collisions
+enter a scalar redraw loop.
+
+## 7. Sidecar and oracle
+
+`simulate_fragments_to_bed` writes a **`.p.tsv.gz` sidecar** next to the BED.
+Path derived from the BED path (`<prefix>.p.tsv.gz`), with an optional explicit
+override.  Deriving it means no change to the driver is needed.
+
+Columns: `contig  start  stop  strand  p`.  `p` is the first-draw marginal
+probability, written as `%.17g` (round-trips float64 exactly).  A header
+comment carries the seed and sample id when supplied.
+
+Join key: `(contig, start, stop, strand)`.  With duplicates redrawn this key is
+unique, so the join against the h5 is exact and one-to-one.  The h5 stores
+fragments sorted by position; the sidecar is sorted identically (same
+`sort_values` as the BED), so a positional join is also possible.
+
+**Oracle NLL:** `oracle_nll(probs) = -mean(log(p))` in float64.  Reported in
+the stats dict alongside `n_drawn` and `n_dup_redraws`.
+
+**Correction (not edited, out of scope):** the driver comment at
+`scripts/run_cut_site_simulator.py` claiming "the ingest dedups on (start, stop)
+with strand excluded" is **false** — there is no dedup in the ingest path.
+Read-time dedup is `drop_duplicate_fragments`, which runs at *fetch* inside
+`filter_fragments`, not at ingest.  With duplicates now redrawn, it removes
+nothing.
 
 ## Open
 
@@ -406,13 +447,11 @@ looks like a defect, read the reason before changing it.
   the strand label records which of its two ends became read 1, and adapter
   ligation is symmetric, so the label is a fair coin independent of sequence.
   There is nothing to measure and no producer is needed.
-  `count_srdf` **asserts only that BOTH strand tables are non-empty**, and
-  reports `n_plus` / `n_minus` / `plus_frac` without asserting them. That one
-  check needs no threshold and catches the silent failure that matters:
-  `fragment_strands` is `<U1`, so comparing it against `b'+'` yields an
-  all-False mask and an *entirely empty* strand table, after which
-  `sample_region` skips that strand without error and the simulator emits
-  strand-pure data.
+  `count_srdf` reports `n_plus` / `n_minus` / `plus_frac` without asserting
+  them.  The one-empty-strand guard was removed by owner decision 2026-10-08
+  ("a guard for a hypothetical problem"); `sample_region` skips a strand with
+  no live starts and the shortfall, if any, is reported in the stats.
+  `test_one_empty_strand_raises` and mutation M39 are both void.
 
   **There is no balance check. Removed by owner decision 2026-10-07; do not
   reintroduce one without naming a failure mode the non-empty check misses.**
@@ -443,52 +482,38 @@ looks like a defect, read the reason before changing it.
   a stored artifact. Not reachable from this pipeline; worth knowing if the model
   agent ever loads stored tables and calls `sample_region` directly.
 
-- **Starts are drawn WITH replacement, and the resulting dedup is correct**
-  (owner, 2026-10-07). The real assay has no UMIs, so a genuine duplicate
-  coordinate pair is indistinguishable from a resampled one there too. The
-  simulator reproducing that is faithful, not a defect. Measured cost of the
-  collisions is ~0.0075% at the 1536 tile; see the dedup note in the
-  coordination file.
+- **Duplicates are redrawn** (owner, 2026-10-08, reversing the previous
+  "starts drawn WITH replacement" Settled item).  The initial batch is drawn
+  with replacement for speed; collisions are redrawn from the same distribution
+  in a scalar loop.  The `(start, stop)` dedup key is strand-blind, matching
+  the read-time convention.  With duplicates gone, read-time
+  `drop_duplicate_fragments` is a no-op and emitted rows map 1:1 to h5 rows.
+
+  A feasibility precheck counts distinct live `(i, L)` pairs per strand.  If
+  the requested count exceeds the available distinct pairs, `ValueError` is
+  raised rather than hanging.  An attempt bound of `100 * k` prevents
+  near-capacity draws from crawling silently.
+
+  The marginal probability `p` stored in the sidecar is the first-draw
+  probability, not the conditional given the draw history.  Duplicate-redrawing
+  samples without replacement, so draws are dependent: once a cell is taken the
+  remaining mass renormalises upward, giving later fragments slightly higher
+  true probability than the first-draw marginal.  Using the marginal therefore
+  overstates `-log p` and puts the oracle slightly too high.  The marginal is
+  still the right thing to store, because a model scores each fragment
+  independently and a chain-rule-exact history-dependent oracle would not be
+  comparable.  **The magnitude of this bias has not yet been measured on a real
+  run.**  Collision rate is ~0.0075% at the 1536 tile so it is expected
+  negligible against a gap of order 0.1 nats.
 
 - **Draw order is not part of the contract.** `sample_region` returns the plus
   block then the minus block, unsorted within each. Output goes straight into
   fragment-h5 construction, which sorts before `bgzip`/`tabix` regardless.
 
-- **A start with no valid length is dropped**, so that region yields fewer than
-  `n` fragments. `P(start)` does not condition on a valid fragment existing.
-
-  **OBSERVED, on the first real run — this said "not observed" until
-  2026-10-07.** A 10-region run requested 322 and drew 320, one region short.
-  The earlier 38,637-for-38,637 over ~1000 regions also stands; both are true,
-  and the difference is the useful part:
-
-  **The shortfall rate tracks how sparsely `r(h)` is estimated, not the
-  sequence.** At 10 regions only 108-151 of 4096 cells were nonzero, so most end
-  hexamers carried `r = 0` and whole length sets vanished — the `r_end` factor
-  in §4, not the `valid` factor. It therefore shrinks as the region set grows,
-  and **a shortfall on a small run is expected rather than a defect.** Do not
-  chase one without first checking how many `r` cells are populated.
-
-  **DEFERRED by owner, 2026-10-06: documented only. No counter, no test.**
-  Recorded so the next reader does not re-open it as an oversight.
-
-  The region frame is **not** the cause, which is the first thing everyone
-  asks. `right_pad = L_MAX + HEX_HALF = 183` is exactly sufficient: the
-  furthest end hexamer a drawn start needs sits at region-local
-  `region_len - 1 + L_MAX` and reads through `region_len + 182`, which the
-  flank provides. There is no truncation and no out-of-range read. The start
-  side is independently safe — starts are gated on `valid`, so a start whose
-  own hexamer is invalid has weight 0 and is never drawn.
-
-  A drop therefore needs **every length in `f`'s support zeroed at once** — see
-  §4, "When a length weight is zero", for the three factors. On repeats-removed
-  quiet tiles that needs a ≥183 bp N-run immediately downstream, or that many
-  consecutive hexamers all unobserved in the sample. Hence the clean 38,637.
-
-  **The partial case is the larger exposure, and it is not a defect.** A start
-  that loses *most* of its lengths does not drop; it reshapes `P(l | i)`, which
-  §4 licenses. Nothing reports it. A shallow sample with many `C(h) = 0` cells
-  therefore samples lengths from a quietly narrowed support, and the only
-  symptom is that the length marginal drifts from `f(L)`. If a future
-  length-marginal check fails without an obvious cause, measure the reachable
-  fraction of `f(L)` per start before looking anywhere else.
+- **REVERSED (owner, 2026-10-08): starts with no valid length are now
+  RESTRICTED, not dropped.**  The previous Settled item said "P(start) does not
+  condition on a valid fragment existing" — the redraw now conditions on
+  exactly that.  Starts are gated on `live[i] = t_s[i] > 0` and renormalised
+  within the strand.  The strand split stays exactly `Binomial(n, p_plus)`.
+  `n_drawn == n_requested` in all practical cases; `n_short_regions` in the
+  stats dict is retained for interface continuity but is permanently zero.
