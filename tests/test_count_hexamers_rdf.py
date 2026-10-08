@@ -1261,12 +1261,13 @@ class TestT5Sampler:
         §4 says the code "cannot distinguish the three causes" -- it only tests
         ``w.sum() > 0``. These are the only tests that pin each factor
         independently: each construction zeroes the weight of ONE length by ONE
-        factor and asserts that length is never drawn, while a control length
-        adjacent to it still is.
+        factor and asserts that length has zero probability, while a control
+        length 10 away carries positive probability.
 
         All starts are pinned to a single position by a point-mass
-        ``start_fwd``, so the length draw is the only free variable and the
-        assertion is about ``P(l | i)`` alone.
+        ``start_fwd``, so the assertion is about ``P(l | i)`` alone.
+        A scripted RNG forces the inverse-CDF draw onto the control quantile,
+        making the result deterministic rather than probabilistic.
         """
         R = 400
         seq0 = self._single_start_seq(region_len=400)
@@ -1310,35 +1311,52 @@ class TestT5Sampler:
             assert not valid[START + BLOCKED], "planted N did not invalidate"
             assert valid[START + CONTROL], "planted N also hit the control"
 
-        # Count valid (start, length) pairs. With a point-mass start and
-        # dedup, n cannot exceed this count.
-        n_valid = 0
-        for l_idx, L_val in enumerate(range(fl.min_fl, fl.max_fl + 1)):
-            end_pos = START + L_val
-            if (fl.densities[l_idx] > 0
-                    and valid[end_pos]
-                    and r["end_fwd"][int(fwd[end_pos])] > 0):
-                n_valid += 1
-        assert n_valid >= 2, "need at least BLOCKED and CONTROL valid"
+        # ── Assert on P(l | i) directly ──────────────────────────────────
+        Ls = np.arange(fl.min_fl, fl.max_fl + 1)
+        w_at_start = np.array([
+            r["end_fwd"][int(fwd[START + L_val])]
+            * float(valid[START + L_val])
+            * fl.densities[l_idx]
+            for l_idx, L_val in enumerate(Ls)
+        ], dtype=np.float64)
 
+        blocked_idx = BLOCKED - fl.min_fl
+        control_idx = CONTROL - fl.min_fl
+        assert w_at_start[blocked_idx] == 0.0, (
+            f"BLOCKED length {BLOCKED} has nonzero weight "
+            f"{w_at_start[blocked_idx]} under cause {cause!r}"
+        )
+        assert w_at_start[control_idx] > 0.0, (
+            f"CONTROL length {CONTROL} has zero weight — something other "
+            f"than {cause!r} is suppressing it"
+        )
+
+        # No quantile can land on BLOCKED: the CDF is flat at that index.
+        cdf = np.cumsum(w_at_start / w_at_start.sum())
+        prev_cdf = cdf[blocked_idx - 1] if blocked_idx > 0 else 0.0
+        assert cdf[blocked_idx] == prev_cdf, (
+            "CDF is not flat at BLOCKED — its weight should be zero"
+        )
+
+        # Script a deterministic draw onto the CONTROL quantile.
+        u_lo = cdf[control_idx - 1] if control_idx > 0 else 0.0
+        u_control = (u_lo + cdf[control_idx]) / 2.0
+
+        rng = _RecordingRng(
+            n_plus_values=[1],
+            choice_returns=[[START]],
+            random_values=[u_control],
+        )
         starts, lengths, is_plus, _probs = sample_region(
-            seq.encode(), R, n_valid, r=r, fl=fl, p_plus=1.0,
-            rng=np.random.default_rng(99),
+            seq.encode(), R, 1, r=r, fl=fl, p_plus=1.0, rng=rng,
         )
         assert is_plus.all(), "p_plus=1.0 must give plus-strand draws only"
-        assert set(starts.tolist()) == {START}, (
-            f"point-mass start_fwd should pin every start to {START}, got "
-            f"{sorted(set(starts.tolist()))[:5]}"
+        assert starts[0] == START, (
+            f"point-mass start_fwd should pin start to {START}"
         )
-        drawn = set(lengths.tolist())
-        assert BLOCKED not in drawn, (
-            f"length {BLOCKED} was drawn despite its weight being zeroed via "
-            f"{cause!r}. That factor is not being applied, so a zero in it "
-            f"cannot keep a length out of the draw."
-        )
-        assert CONTROL in drawn, (
-            f"control length {CONTROL} was never drawn, so the test is not "
-            f"discriminating -- something other than {cause!r} suppressed it"
+        assert lengths[0] == CONTROL, (
+            f"scripted quantile should select CONTROL length {CONTROL}, "
+            f"got {lengths[0]}"
         )
 
     def test_end_hexamer_offset_is_exact(self):
@@ -1477,6 +1495,76 @@ class TestT5Sampler:
             seq.encode(), R, R, r=r, fl=fl, p_plus=0.5,
             rng=np.random.default_rng(1),
         )
+
+    def test_2n_bound_fires(self):
+        """The 2N redraw bound fires when the live space is exhausted.
+
+        A point-mass start with only M=5 admissible lengths gives 5
+        distinct (start, length) pairs.  Requesting n=7 forces the dedup
+        loop to spin past the 2N budget.
+        """
+        R = 400
+        seq = self._single_start_seq(region_len=R, seed=7)
+        fwd, _rc, valid = hexamer_indices(seq)
+        START = self._unique_start(fwd, R, near=100)
+
+        M = 5
+        counts = np.zeros(L_MAX - L_MIN + 1, dtype=np.int64)
+        n_allowed = 0
+        for l_idx in range(len(counts)):
+            end_pos = START + L_MIN + l_idx
+            if valid[end_pos] and n_allowed < M:
+                counts[l_idx] = 1
+                n_allowed += 1
+        assert n_allowed == M, f"need {M} valid lengths, found {n_allowed}"
+        fl = FragmentLengthDist(counts, L_MIN)
+
+        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][int(fwd[START])] = 1.0
+        r["end_fwd"][:] = 1.0
+
+        n = M + 2
+        with pytest.raises(
+            RuntimeError,
+            match=rf"exceeded n={n}.*more than 2n={2 * n}",
+        ):
+            sample_region(
+                seq.encode(), R, n, r=r, fl=fl, p_plus=1.0,
+                rng=np.random.default_rng(42),
+            )
+
+    def test_2n_bound_comfortable_ratio(self):
+        """A comfortable n/M ratio does NOT trigger the 2N bound.
+
+        Same point-mass construction as ``test_2n_bound_fires`` but with
+        M=10 admissible lengths and n=3 requests, giving n/M = 0.3.
+        """
+        R = 400
+        seq = self._single_start_seq(region_len=R, seed=7)
+        fwd, _rc, valid = hexamer_indices(seq)
+        START = self._unique_start(fwd, R, near=100)
+
+        M = 10
+        counts = np.zeros(L_MAX - L_MIN + 1, dtype=np.int64)
+        n_allowed = 0
+        for l_idx in range(len(counts)):
+            end_pos = START + L_MIN + l_idx
+            if valid[end_pos] and n_allowed < M:
+                counts[l_idx] = 1
+                n_allowed += 1
+        assert n_allowed == M, f"need {M} valid lengths, found {n_allowed}"
+        fl = FragmentLengthDist(counts, L_MIN)
+
+        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][int(fwd[START])] = 1.0
+        r["end_fwd"][:] = 1.0
+
+        n = 3
+        starts, lengths, _, _ = sample_region(
+            seq.encode(), R, n, r=r, fl=fl, p_plus=1.0,
+            rng=np.random.default_rng(42),
+        )
+        assert len(starts) == n
 
     def test_no_duplicate_fragments(self, toy_dir, toy_genome, simple_fl):
         """Every drawn (start, stop) pair is unique."""

@@ -660,19 +660,32 @@ def sample_region(
         pick = (cdf < rng.random((k, 1))).sum(axis=1)
         lengths = Ls[pick]
 
-        max_attempts = 100 * k
         result_starts = np.empty(k, dtype=np.int64)
         result_lengths = np.empty(k, dtype=np.int64)
         for j in range(k):
             s, L = int(starts[j]), int(lengths[j])
-            attempt = 0
             while (s, s + L) in used:
                 n_dup_redraws += 1
-                attempt += 1
-                if attempt > max_attempts:
+                # Total draw attempts for the region are n + n_dup_redraws.
+                # Cap them at 2n, so the raise fires once redraws exceed n.
+                # The counter is region-scoped (initialised before the strand
+                # loop), so this is a budget for the whole region rather than
+                # per fragment or per strand.
+                #
+                # Why 2n does not false-positive: n <= region_len is already
+                # enforced above, and each start admits ~len(Ls) lengths, so
+                # the live (start, L) space is ~len(Ls) times larger than n
+                # and expected redraws are well under 1% of n.  Exceeding n
+                # redraws means the live space is pathologically small -- not
+                # that collisions were unlucky -- so failing loudly beats
+                # spinning.  Do not loosen this without redoing that
+                # arithmetic.
+                if n_dup_redraws > n:
                     raise RuntimeError(
-                        f"duplicate redraw exceeded {max_attempts} attempts; "
-                        f"{len(used)} of {n_distinct} distinct pairs used"
+                        f"duplicate redraws ({n_dup_redraws}) exceeded n={n}, "
+                        f"i.e. more than 2n={2 * n} total draw attempts for "
+                        f"this region; {len(used)} of {n_distinct} distinct "
+                        f"(start, stop) pairs used in this strand block"
                     )
                 s = int(rng.choice(pos, p=start_probs))
                 w_row = W_s[s]
