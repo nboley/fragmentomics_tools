@@ -2424,6 +2424,167 @@ class TestT8SeedingAndParallelDeterminism:
         )
         assert srdf["region_index"].tolist() == [1, 0]
 
+    def test_explicit_region_index_overrides_frame_column(
+        self, draw_setup, tmp_path
+    ):
+        """The ``region_index=`` argument overrides the frame's own column.
+
+        Guards a mutation that ignores the explicit argument and reads the
+        frame's column regardless.
+        """
+        s = draw_setup
+        frame = s["frame"]  # region_index column is arange(16)
+        offset_idx = (np.arange(len(frame)) + 100).astype(np.int64)
+
+        out_override = tmp_path / "override.bed"
+        st_override = simulate_fragments_to_bed(
+            frame, str(out_override), r=s["r"], fl=s["fl"],
+            region_counts=s["counts"], seed=self.SEED, p_plus=0.5,
+            region_index=offset_idx, n_workers=1,
+        )
+
+        # A frame whose COLUMN holds the same offset values, no override.
+        frame_with_col = frame.assign(region_index=offset_idx)
+        out_col = tmp_path / "col.bed"
+        st_col = self._simulate(
+            s, frame_with_col, s["counts"], out_col,
+        )
+
+        bed_override, side_override = _read_outputs(out_override, st_override)
+        bed_col, side_col = _read_outputs(out_col, st_col)
+        assert bed_override == bed_col, (
+            "overriding region_index did not match a frame whose column "
+            "holds the same values"
+        )
+        assert side_override == side_col
+
+        # Guard the guard: the override must actually have taken effect,
+        # i.e. differ from what the ORIGINAL (unoverridden) column would draw.
+        out_plain = tmp_path / "plain.bed"
+        st_plain = self._simulate(s, frame, s["counts"], out_plain)
+        bed_plain, _ = _read_outputs(out_plain, st_plain)
+        assert bed_override != bed_plain, (
+            "region_index= had no effect -- the frame's own column "
+            "(arange(16)) was used instead of the explicit argument"
+        )
+
+    def test_region_index_out_of_range_and_wrong_dtype(
+        self, draw_setup, tmp_path
+    ):
+        """-1 and 2**32 raise ValueError('outside'); a float value raises
+        TypeError -- region_index shares _as_seed_word with seed."""
+        s = draw_setup
+        frame, counts = s["frame"], s["counts"]
+        out = tmp_path / "bad_region_index.bed"
+        n = len(frame)
+
+        for bad in (-1, 2 ** 32):
+            bad_idx = np.arange(n, dtype=np.int64)
+            bad_idx[0] = bad
+            with pytest.raises(ValueError, match="outside"):
+                simulate_fragments_to_bed(
+                    frame, str(out), r=s["r"], fl=s["fl"],
+                    region_counts=counts, seed=self.SEED, p_plus=0.5,
+                    region_index=bad_idx, n_workers=1,
+                )
+
+        float_idx = np.arange(n, dtype=np.float64)
+        float_idx[0] = 1.5
+        with pytest.raises(TypeError, match="must be an int"):
+            simulate_fragments_to_bed(
+                frame, str(out), r=s["r"], fl=s["fl"],
+                region_counts=counts, seed=self.SEED, p_plus=0.5,
+                region_index=float_idx, n_workers=1,
+            )
+
+    def test_region_index_wrong_shape_raises(self, draw_setup, tmp_path):
+        """``region_index`` with len != len(srdf) raises ValueError('shape')."""
+        s = draw_setup
+        frame, counts = s["frame"], s["counts"]
+        out = tmp_path / "shape.bed"
+        short_idx = np.arange(len(frame) - 1, dtype=np.int64)
+        with pytest.raises(ValueError, match="shape"):
+            simulate_fragments_to_bed(
+                frame, str(out), r=s["r"], fl=s["fl"], region_counts=counts,
+                seed=self.SEED, p_plus=0.5, region_index=short_idx,
+                n_workers=1,
+            )
+
+    def test_seed_bool_rejected(self, draw_setup, tmp_path):
+        """``seed=True`` raises TypeError -- bools are deliberately rejected
+        even though ``bool`` is an ``int`` subclass."""
+        s = draw_setup
+        frame, counts = s["frame"], s["counts"]
+        out = tmp_path / "bool_seed.bed"
+        with pytest.raises(TypeError, match="must be an int"):
+            simulate_fragments_to_bed(
+                frame, str(out), r=s["r"], fl=s["fl"], region_counts=counts,
+                seed=True, p_plus=0.5, n_workers=1,
+            )
+
+    def test_uniform_hexamer_counts_block_size_and_empty_rdf(
+        self, toy_dir, toy_rdf, simple_fl, monkeypatch
+    ):
+        """``block_size=0`` raises; an empty rdf returns all-zero tables with
+        ``n_regions == 0``, without ever forking."""
+        with pytest.raises(ValueError, match="block_size"):
+            uniform_hexamer_counts(
+                toy_rdf, toy_dir["fasta"], simple_fl, block_size=0,
+                verbose=False,
+            )
+
+        empty_rdf = RegionDataFrame(pd.DataFrame({
+            "contig": pd.Series([], dtype=object),
+            "start": pd.Series([], dtype=np.int64),
+            "stop": pd.Series([], dtype=np.int64),
+        }), ref="hg38")
+
+        from fragmentomics_tools.dataframe import DataFrameBase
+
+        def _forbid_parallel_apply(self, *a, **k):
+            raise AssertionError(
+                "parallel_apply was called on an empty region set -- the "
+                "empty case must return before forking"
+            )
+        monkeypatch.setattr(DataFrameBase, "parallel_apply", _forbid_parallel_apply)
+
+        N, meta = uniform_hexamer_counts(
+            empty_rdf, toy_dir["fasta"], simple_fl, n_workers=None,
+            verbose=False,
+        )
+        assert meta["n_regions"] == 0
+        np.testing.assert_array_equal(N["start"], np.zeros(NHEX, dtype=np.int64))
+        np.testing.assert_array_equal(N["end"], np.zeros(NHEX, dtype=np.float64))
+
+    def test_count_sample_index_guard_and_region_index_passthrough(
+        self, admission_h5, toy_dir, toy_rdf
+    ):
+        """A non-integer index with no ``region_index`` column raises; an
+        EXISTING ``region_index`` column passes through rather than being
+        overwritten from the frame's (positional) index labels."""
+        bad = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT", "chrT"],
+            "start": [int(toy_rdf["start"].iloc[0]), int(toy_rdf["start"].iloc[1])],
+            "stop": [int(toy_rdf["stop"].iloc[0]), int(toy_rdf["stop"].iloc[1])],
+        }, index=["a", "b"]), ref="hg38")
+        with pytest.raises(ValueError, match="unique integer index"):
+            count_sample(
+                bad, "test", admission_h5, toy_dir["fasta"],
+                n_workers=1, verbose=False,
+            )
+
+        # Index labels here are [1, 0]; the explicit column is [7, 3] --
+        # different values, so a passthrough and an index-derived column are
+        # distinguishable.
+        with_idx = toy_rdf.iloc[[1, 0]].assign(
+            region_index=np.array([7, 3], dtype=np.int64)
+        )
+        _, _, _, srdf = count_sample(
+            with_idx, "test", admission_h5, toy_dir["fasta"],
+            n_workers=1, verbose=False,
+        )
+        assert srdf["region_index"].tolist() == [7, 3]
+
 
 # ── T7: Hygiene ─────────────────────────────────────────────────────────
 
