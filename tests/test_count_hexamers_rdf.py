@@ -1157,18 +1157,23 @@ class TestT5Sampler:
         assert not is_plus.any(), "p_plus=0.0 should give all minus"
 
     def test_planted_propensity_recovered(self, toy_dir, toy_genome):
-        """M27 (plus uses minus tables). Statistical, 6σ bound."""
-        g0, g1 = 3, 4003
-        R = g1 - g0
+        """M27 (plus uses minus tables). Statistical, 6σ bound.
+
+        Draws are spread across five 1000-bp regions rather than one large
+        region, because ``n > region_len`` now raises.  The region containing
+        the tandem AACGTC block dominates the expected count.
+        """
         planted_hex = "AACGTC"
         planted_idx = oracle.IDX(planted_hex)
-        planted_rc_idx = oracle.IDX(oracle.RC(planted_hex))
 
         r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
         r["start_fwd"][planted_idx] = 20.0
 
+        regions = [(3 + i * 1000, 3 + (i + 1) * 1000) for i in range(5)]
         rdf = RegionDataFrame(pd.DataFrame({
-            "contig": ["chrT"], "start": [g0], "stop": [g1],
+            "contig": "chrT",
+            "start": [s for s, _ in regions],
+            "stop": [e for _, e in regions],
         }), ref="hg38")
         sdf = load_sample_dataframe([("dummy", toy_dir["fasta"])])
         from fragmentomics_tools.dataframe import SampleAndRegionDataFrame
@@ -1177,37 +1182,45 @@ class TestT5Sampler:
             toy_dir["fasta"], left_pad=HEX_HALF, right_pad=L_MAX + HEX_HALF,
             verbose=False,
         )
-        seq = srdf["sequence"].iloc[0]
 
         fl_uniform = FragmentLengthDist(
             np.ones(N_LENGTHS, dtype=np.int64), L_MIN)
-        n_total = 40_000
+        n_per_region = 800
         rng = np.random.default_rng(12345)
-        starts, lengths, is_plus, _probs = sample_region(
-            seq, R, n_total, r=r, fl=fl_uniform, p_plus=0.5, rng=rng,
-        )
 
-        # Count plus-strand starts at the planted hexamer
-        seq_upper = bytes(seq).upper().decode()
-        fwd, _rc, valid = hexamer_indices(seq_upper)
-        plus_starts = starts[is_plus]
         plus_hex_counts = np.zeros(NHEX, dtype=np.int64)
-        for s in plus_starts:
-            if valid[s]:
-                plus_hex_counts[int(fwd[s])] += 1
+        expected_count = np.float64(0.0)
+        n_plus_total = 0
 
-        # Compute expected count under the planted propensity
-        n_plus_actual = int(is_plus.sum())
-        pos_weights = np.zeros(R, dtype=np.float64)
-        for i in range(R):
-            if valid[i]:
-                pos_weights[i] = r["start_fwd"][int(fwd[i])]
-        total_w = pos_weights.sum()
-        p_planted = pos_weights[fwd[:R] == planted_idx].sum() / total_w
-        expected_count = n_plus_actual * p_planted
+        for idx, (g0, g1) in enumerate(regions):
+            R = g1 - g0
+            seq = srdf["sequence"].iloc[idx]
+            starts, lengths, is_plus, _probs = sample_region(
+                seq, R, n_per_region, r=r, fl=fl_uniform, p_plus=0.5, rng=rng,
+            )
+            seq_upper = bytes(seq).upper().decode()
+            fwd, _rc, valid = hexamer_indices(seq_upper)
+            plus_starts = starts[is_plus]
+            n_plus_region = len(plus_starts)
+            n_plus_total += n_plus_region
+            for s in plus_starts:
+                if valid[s]:
+                    plus_hex_counts[int(fwd[s])] += 1
+
+            pos_weights = np.zeros(R, dtype=np.float64)
+            for i in range(R):
+                if valid[i]:
+                    pos_weights[i] = r["start_fwd"][int(fwd[i])]
+            total_w = pos_weights.sum()
+            if total_w > 0:
+                p_planted_region = (
+                    pos_weights[fwd[:R] == planted_idx].sum() / total_w
+                )
+                expected_count += n_plus_region * p_planted_region
+
         observed_count = plus_hex_counts[planted_idx]
-
-        sigma = np.sqrt(n_plus_actual * p_planted * (1 - p_planted))
+        p_agg = expected_count / n_plus_total if n_plus_total else 0
+        sigma = np.sqrt(n_plus_total * p_agg * (1 - p_agg))
         assert sigma > 0
         z = abs(observed_count - expected_count) / sigma
         assert z < 6, f"planted hex recovery z={z:.1f} > 6σ"
@@ -1447,29 +1460,23 @@ class TestT5Sampler:
 
         np.testing.assert_allclose(float(total), 1.0, rtol=1e-12)
 
-    def test_dedup_feasibility_precheck(self):
-        """Requesting more fragments than distinct live pairs raises."""
-        R = 400
+    def test_n_exceeds_region_len_raises(self):
+        """Requesting more fragments than positions raises."""
+        R = 100
         seq = self._single_start_seq(region_len=R)
-        fwd, _rc, valid = hexamer_indices(seq)
-        START = self._unique_start(fwd, R, near=100)
+        r = {k: np.ones(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        fl = FragmentLengthDist(np.ones(N_LENGTHS, dtype=np.int64), L_MIN)
 
-        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
-        r["start_fwd"][int(fwd[START])] = 1.0
-        r["end_fwd"][:] = 1.0
-
-        counts = np.zeros(N_LENGTHS, dtype=np.int64)
-        counts[0] = 1
-        counts[25] = 1
-        counts[75] = 1
-        counts[155] = 1
-        fl = FragmentLengthDist(counts, L_MIN)
-
-        with pytest.raises(ValueError, match="distinct.*pairs"):
+        with pytest.raises(ValueError, match=r"requested n=101.*region has only 100"):
             sample_region(
-                seq.encode(), R, 5, r=r, fl=fl, p_plus=1.0,
+                seq.encode(), R, R + 1, r=r, fl=fl, p_plus=0.5,
                 rng=np.random.default_rng(0),
             )
+        # n == region_len must NOT raise
+        sample_region(
+            seq.encode(), R, R, r=r, fl=fl, p_plus=0.5,
+            rng=np.random.default_rng(1),
+        )
 
     def test_no_duplicate_fragments(self, toy_dir, toy_genome, simple_fl):
         """Every drawn (start, stop) pair is unique."""
@@ -1986,6 +1993,103 @@ class TestT6WriterAndRoundTrip:
                 region_counts=np.array([10]),
                 rng=np.random.default_rng(0),
             )
+
+
+# ── T6b: Functional chain over multiple regions ────────────────────────
+
+class TestT6bFunctionalChain:
+    """End-to-end: count → fl → N → r → simulate → tabix → build_h5 → read back.
+
+    Runs the REAL writer chain over ~10 regions.  Asserts the three properties
+    the redraw work exists to guarantee: exact draw count, no duplicate
+    ``(start, stop)``, and sidecar 1:1 correspondence.
+    """
+
+    def test_full_chain_multi_region(self, toy_dir, toy_genome):
+        from fragments_h5 import FragmentsH5
+
+        regions = [(3 + i * 500, 3 + (i + 1) * 500) for i in range(10)]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": "chrT",
+            "start": [s for s, _ in regions],
+            "stop": [e for _, e in regions],
+        }), ref="hg38")
+
+        rng_fix = np.random.RandomState(42)
+        frags = []
+        for g0, g1 in regions:
+            for _ in range(50):
+                s = g0 + rng_fix.randint(0, g1 - g0)
+                L = rng_fix.randint(L_MIN, L_MAX + 1)
+                strand = "+" if rng_fix.random() < 0.5 else "-"
+                frags.append(("chrT", s, s + L, strand, 30, 30))
+        source_h5 = _build_h5(
+            frags, toy_dir["fasta"], toy_dir["dir"], name="func_src",
+        )
+
+        counts, region_counts, stats, srdf = count_sample(
+            rdf, "src", source_h5, toy_dir["fasta"],
+            n_workers=1, verbose=False,
+        )
+        fl = FragmentLengthDist.from_srdf(srdf)
+        N, _ = uniform_hexamer_counts(rdf, toy_dir["fasta"], fl, verbose=False)
+        r = propensities(counts, N)
+
+        sim_bed = os.path.join(toy_dir["dir"], "func_chain.bed")
+        rng_sim = np.random.default_rng(777)
+        sim_stats = simulate_fragments_to_bed(
+            srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
+            rng=rng_sim, p_plus=0.5, seed=777,
+        )
+
+        # ── Assert 1: n_drawn == n_requested ──
+        assert sim_stats["n_drawn"] == sim_stats["n_requested"], (
+            f"n_drawn={sim_stats['n_drawn']} != "
+            f"n_requested={sim_stats['n_requested']}"
+        )
+
+        # ── tabix + build h5 ──
+        gz = pysam.tabix_index(sim_bed, preset="bed", force=True)
+        sim_h5 = os.path.join(toy_dir["dir"], "func_chain.frag.h5")
+        subprocess.run(
+            ["build-fragments-h5", gz, sim_h5,
+             "--fasta", toy_dir["fasta"], "--quiet"],
+            check=True, capture_output=True,
+        )
+
+        fh5 = FragmentsH5(sim_h5)
+        h5_starts, h5_stops, extras = fh5.fetch_array(
+            "chrT", 0, len(toy_genome), return_strand=True,
+        )
+        fh5.close()
+
+        # ── Assert 2: no duplicate (start, stop) ──
+        pairs = set()
+        for s, e in zip(h5_starts.tolist(), h5_stops.tolist()):
+            assert (s, e) not in pairs, f"duplicate (start, stop) = ({s}, {e})"
+            pairs.add((s, e))
+
+        # ── Assert 3: sidecar rows map 1:1 to h5 rows ──
+        sidecar_path = sim_bed.replace(".bed", ".p.tsv.gz")
+        sidecar = pd.read_csv(sidecar_path, sep="\t", comment="#")
+        assert len(sidecar) == len(h5_starts), (
+            f"sidecar has {len(sidecar)} rows, h5 has {len(h5_starts)}"
+        )
+
+        h5_strands = np.array([s.decode() for s in extras["strand"]])
+        h5_keys = set(zip(
+            h5_starts.tolist(), h5_stops.tolist(), h5_strands.tolist(),
+        ))
+        sidecar_keys = set(zip(
+            sidecar["start"].tolist(),
+            sidecar["stop"].tolist(),
+            sidecar["strand"].tolist(),
+        ))
+        assert h5_keys == sidecar_keys, (
+            f"sidecar keys do not match h5 keys; "
+            f"in sidecar not h5: {sidecar_keys - h5_keys}, "
+            f"in h5 not sidecar: {h5_keys - sidecar_keys}"
+        )
 
 
 # ── T7: Hygiene ─────────────────────────────────────────────────────────

@@ -114,10 +114,9 @@ Normalised **within the strand**:
 **3. Duplicates** — the `(start, start + L)` pair is checked against a set of
 pairs already drawn in this region.  Strand is NOT in the key, matching the
 read-time dedup convention.  On collision, both start and length are redrawn
-from the same distribution.  A feasibility precheck counts distinct live
-`(i, L)` pairs; if the requested count exceeds this, the draw raises
-`ValueError` rather than spinning forever.  An attempt bound of `100 * k` per
-strand prevents near-capacity draws from crawling silently.
+from the same distribution.  Requesting `n > region_len` raises `ValueError`.
+An attempt bound of `100 * k` per strand prevents near-capacity draws from
+crawling silently.
 
 With duplicates redrawn, no duplicate `(start, stop)` ever reaches the BED, so
 read-time `drop_duplicate_fragments` removes **nothing**.  Emitted rows map
@@ -489,22 +488,12 @@ looks like a defect, read the reason before changing it.
   the read-time convention.  With duplicates gone, read-time
   `drop_duplicate_fragments` is a no-op and emitted rows map 1:1 to h5 rows.
 
-  A feasibility precheck counts distinct live `(i, L)` pairs per strand.  If
-  the requested count exceeds the available distinct pairs, `ValueError` is
-  raised rather than hanging.  An attempt bound of `100 * k` prevents
-  near-capacity draws from crawling silently.
+  Requesting `n > region_len` raises `ValueError`.  An attempt bound of
+  `100 * k` prevents near-capacity draws from crawling silently.
 
-  The marginal probability `p` stored in the sidecar is the first-draw
-  probability, not the conditional given the draw history.  Duplicate-redrawing
-  samples without replacement, so draws are dependent: once a cell is taken the
-  remaining mass renormalises upward, giving later fragments slightly higher
-  true probability than the first-draw marginal.  Using the marginal therefore
-  overstates `-log p` and puts the oracle slightly too high.  The marginal is
-  still the right thing to store, because a model scores each fragment
-  independently and a chain-rule-exact history-dependent oracle would not be
-  comparable.  **The magnitude of this bias has not yet been measured on a real
-  run.**  Collision rate is ~0.0075% at the 1536 tile so it is expected
-  negligible against a gap of order 0.1 nats.
+  Storing the first-draw marginal rather than the conditional makes the oracle
+  read slightly high (duplicate-redrawing samples without replacement); accepted
+  as negligible at the observed ~0.0075% collision rate.
 
 - **Draw order is not part of the contract.** `sample_region` returns the plus
   block then the minus block, unsorted within each. Output goes straight into

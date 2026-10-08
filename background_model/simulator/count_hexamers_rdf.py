@@ -603,6 +603,7 @@ def sample_region(
       ``end_p x f(L)``, normalised over ``L``.
     - **Duplicates** on ``(start, start + length)`` are redrawn.  The key is
       strand-blind, matching the read-time dedup convention.
+    - **Feasibility**: ``n > region_len`` raises ``ValueError``.
 
     ``probs`` is the first-draw marginal probability of each fragment::
 
@@ -614,6 +615,11 @@ def sample_region(
     length.  The initial draw is vectorised; only duplicate collisions
     enter a scalar redraw loop.
     """
+    if n > region_len:
+        raise ValueError(
+            f"requested n={n} fragments but region has only "
+            f"{region_len} positions"
+        )
     seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
     fwd, rc, valid = hexamer_indices(seq)
     Ls = np.arange(fl.min_fl, fl.max_fl + 1)
@@ -646,13 +652,6 @@ def sample_region(
         start_probs = a_s_live / tot
 
         n_distinct = int(((a_s_live > 0)[:, None] & (W_s > 0)).sum())
-        if k > n_distinct:
-            raise ValueError(
-                f"requested {k} fragments on "
-                f"{'plus' if is_plus else 'minus'} strand but only "
-                f"{n_distinct} distinct (start, length) pairs have positive "
-                f"weight; duplicate redraw cannot succeed"
-            )
 
         starts = rng.choice(pos, size=k, replace=True, p=start_probs)
         w = W_s[starts]
