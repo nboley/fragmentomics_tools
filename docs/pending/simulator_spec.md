@@ -302,14 +302,6 @@ Needs action. Nothing here has been decided.
   but admission order and the length draw are both places a silent error would
   live, so it is the most valuable remaining test work.
 
-- **`tests/conftest.py` cannot exist.** Its module name collides with
-  `test/fragment_array/conftest.py` under pytest's `prepend` import mode, so the
-  implementing agent deleted it and registered markers inline. That is a
-  workaround: the collision returns the moment anyone re-adds the file, which is
-  an ordinary thing to want. The fix is `importmode = "importlib"` in
-  `pyproject.toml`, which changes pytest behaviour repo-wide and so needs its
-  own validation run.
-
 - **`C` and `N` disagree on the validity gate** (§5). `C` needs both cut sites
   valid, `N_start` only its own. Unmeasurable on this region set; an owner
   decision either way is still open.
@@ -334,6 +326,15 @@ true, and a reader who saw it mid-day would have acted on stale information.
 - ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
   `test_contig_ends_raise` and `test_frame_through_attach_sequence` pin it: it
   raises, and the padded length is asserted exactly, which pins both pads.
+- ~~**`tests/conftest.py` cannot exist.**~~ It can; `2eb09ac`. The collision was
+  real but narrow: `--doctest-modules` makes pytest COLLECT conftest files, and
+  with no `__init__.py` each is imported under the bare name `conftest`.
+  `--ignore=tests/conftest.py` in `PYTEST_ARGS` stops the collection while
+  pytest still loads the file as a plugin — verified by a `pytest_report_header`
+  hook firing. `importmode = "importlib"` was NOT needed, and would have broken
+  `import cut_site_oracle`, which relies on prepend mode putting `tests/` on
+  `sys.path`. This item sat here stale for an hour after being fixed, which is
+  the same drift the rest of this section exists to catch.
 
 ---
 

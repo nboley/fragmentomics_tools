@@ -466,6 +466,102 @@ class TestT2Admission:
         # inclusive, so this is the case an `>` instead of `>=` would break.
         assert 150 in starts, "MAPQ=10 fragment dropped (should keep)"
 
+    def test_mapq_filter_precedes_dedup(self, admission_h5, toy_dir, toy_regions):
+        """M12: dedup moved before the MAPQ filter.
+
+        This is the ONE admission ordering that is load-bearing (spec §3);
+        everything else commutes. The fixture plants two fragments sharing
+        ``(start, stop)`` at g0+300, differing only in strand and MAPQ, with the
+        LOW-mapq one written first:
+
+            (g0+300, g0+400, '+',  5,  5)   <- first
+            (g0+300, g0+400, '-', 30, 30)
+
+        Correct order: MAPQ is applied at fetch, so the '+' fragment is gone
+        before dedup ever runs; dedup is then a no-op and '-' survives.
+
+        Under M12: dedup runs first and keeps the FIRST occurrence -- the '+'
+        fragment -- and the MAPQ filter then drops it, so the pair vanishes
+        entirely and the position yields nothing.
+
+        Order is deterministic and fixture-controlled, which had to be settled
+        before this test could exist: ``_build_h5`` uses a STABLE sort on
+        ``(contig, start, stop)``, so ties keep fixture order, and the h5
+        preserves it. Measured both ways round -- reversing the two rows
+        reverses which strand survives dedup -- so this is a property of the
+        fixture, not luck.
+        """
+        g0, g1 = toy_regions[0]
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT"], "start": [g0], "stop": [g1],
+        }), ref="hg38")
+        _, _, _, srdf = count_sample(
+            rdf, "test", admission_h5, toy_dir["fasta"],
+            n_workers=1, verbose=False,
+        )
+        fa = srdf["fragment_array"].iloc[0]
+        at_300 = np.flatnonzero(fa.starts_0 == 300)
+
+        assert len(at_300) == 1, (
+            f"expected exactly 1 surviving fragment at offset 300, got "
+            f"{len(at_300)}. Zero means dedup ran BEFORE the MAPQ filter: it "
+            f"kept the first occurrence (mapq 5) and MAPQ then dropped it, "
+            f"losing the pair."
+        )
+        strand = str(np.asarray(fa.fragment_strands)[at_300[0]])
+        assert strand == "-", (
+            f"the surviving fragment at offset 300 is on strand {strand!r}, "
+            f"expected '-'. The '+' one carries mapq 5 and must be removed at "
+            f"fetch, before dedup can prefer it for being first."
+        )
+
+    def test_straddler_counted_in_start_tile(self, admission_h5, toy_dir,
+                                             toy_regions):
+        """M15: midpoint admission instead of start-in-region.
+
+        Midpoint is the rule the rewrite REVERSED, and two agents have already
+        drawn wrong conclusions from stale docs still asserting it, so a
+        regression here reintroduces the whole pre-rewrite geometry.
+
+        The fixture plants a straddler at (g0+R-1, g0+R+79): its START is the
+        last position of tile 0, while its MIDPOINT falls inside tile 1. Under
+        start-in-region it belongs to tile 0 and nowhere else. Under midpoint
+        admission it moves to tile 1, so BOTH assertions below flip.
+        """
+        (g0, g1), (g1b, g2) = toy_regions[0], toy_regions[1]
+        assert g1 == g1b, "tiles 0 and 1 must be contiguous for this test"
+        R = g1 - g0
+        straddler_start = g0 + R - 1          # last position of tile 0
+        straddler_stop = g0 + R + 79
+        midpoint = (straddler_start + straddler_stop) // 2
+        # Guard the guard: if the fixture drifts so the midpoint no longer
+        # lands in the next tile, the two assertions below stop discriminating.
+        assert straddler_start < g1 <= midpoint, (
+            f"fixture no longer straddles: start {straddler_start}, midpoint "
+            f"{midpoint}, boundary {g1}. This test cannot tell start-in-region "
+            f"from midpoint admission unless they disagree."
+        )
+
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": ["chrT", "chrT"], "start": [g0, g1b], "stop": [g1, g2],
+        }), ref="hg38")
+        _, _, _, srdf = count_sample(
+            rdf, "test", admission_h5, toy_dir["fasta"],
+            n_workers=1, verbose=False,
+        )
+        fa0, fa1 = srdf["fragment_array"].iloc[0], srdf["fragment_array"].iloc[1]
+
+        assert (straddler_start - g0) in set(fa0.starts_0.tolist()), (
+            f"the straddler starting at {straddler_start} is absent from tile 0 "
+            f"({g0}-{g1}), which contains its START. Under midpoint admission "
+            f"it would have moved to tile 1 instead."
+        )
+        assert (straddler_start - g1b) not in set(fa1.starts_0.tolist()), (
+            f"the straddler appears in tile 1 ({g1b}-{g2}), which contains only "
+            f"its MIDPOINT. Admission is start-in-region; counting it here "
+            f"double-counts it across the region set."
+        )
+
     def test_length_bounds(self, admission_h5, toy_dir, toy_regions):
         """M13 (half-open drops 180), M36 (skip length filter)."""
         g0, g1 = toy_regions[0]
@@ -1077,6 +1173,157 @@ class TestT5Sampler:
         z = abs(observed_count - expected_count) / sigma
         assert z < 6, f"planted hex recovery z={z:.1f} > 6σ"
         assert observed_count > 50, "planted hex count too low for meaningful test"
+
+    @staticmethod
+    def _single_start_seq(region_len=400, seed=7):
+        """Random ACGT sequence in the real frame.
+
+        Length is exactly ``region_len + 2*HEX_HALF + L_MAX``, matching what
+        ``attach_sequence`` produces, so a hexamer index equals its
+        region-local coordinate.
+        """
+        rng = np.random.RandomState(seed)
+        return "".join("ACGT"[b] for b in
+                       rng.randint(0, 4, region_len + 2 * HEX_HALF + L_MAX))
+
+    @staticmethod
+    def _unique_start(fwd, region_len, near):
+        """A region-local start whose hexamer occurs exactly ONCE in the region.
+
+        A point mass in ``start_fwd`` pins the HEXAMER, not the position --
+        `w_s = s_tab[track[pos]]`, so every position carrying that hexamer
+        shares the weight. With 400 positions drawn from 4096 hexamers,
+        collisions are common (measured: position 100 repeated at 335), and a
+        non-unique choice silently gives two admissible starts.
+        """
+        in_region = fwd[:region_len]
+        counts = np.bincount(in_region, minlength=NHEX)
+        unique = np.flatnonzero(counts[in_region] == 1)
+        assert unique.size, "no region-unique hexamer; raise region_len or reseed"
+        return int(unique[np.argmin(np.abs(unique - near))])
+
+    @pytest.mark.parametrize("cause", ["f_zero", "r_zero", "non_acgt"])
+    def test_zero_weight_cause(self, cause):
+        """M24: drop one factor of ``w[l] = f(l) * r_end * valid``.
+
+        §4 says the code "cannot distinguish the three causes" -- it only tests
+        ``w.sum() > 0``. These are the only tests that pin each factor
+        independently: each construction zeroes the weight of ONE length by ONE
+        factor and asserts that length is never drawn, while a control length
+        adjacent to it still is.
+
+        All starts are pinned to a single position by a point-mass
+        ``start_fwd``, so the length draw is the only free variable and the
+        assertion is about ``P(l | i)`` alone.
+        """
+        R = 400
+        seq0 = self._single_start_seq(region_len=400)
+        START = self._unique_start(hexamer_indices(seq0)[0], 400, near=100)
+        # CONTROL is 10 away, not adjacent: one N invalidates SIX consecutive
+        # cut sites, since the window for c spans seq offsets [c, c+KMER). An
+        # adjacent control is hit by the same N and the test fails for the
+        # wrong reason (measured).
+        BLOCKED, CONTROL = 50, 60
+        seq = seq0
+
+        if cause == "non_acgt":
+            # Put an N inside the end window for L=BLOCKED only. The window for
+            # a cut site at c is seq[c-HEX_HALF : c+HEX_HALF] in region-local
+            # coords, i.e. seq offsets [c, c+KMER) in the padded frame.
+            c = START + BLOCKED
+            seq = seq[:c + HEX_HALF] + "N" + seq[c + HEX_HALF + 1:]
+
+        fwd, _rc, valid = hexamer_indices(seq)
+        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][int(fwd[START])] = 1.0      # point mass -> one start
+        r["end_fwd"][:] = 1.0                      # flat end propensity
+
+        counts = np.ones(L_MAX - L_MIN + 1, dtype=np.int64)
+        if cause == "f_zero":
+            counts[BLOCKED - L_MIN] = 0            # f(BLOCKED) = 0
+        fl = FragmentLengthDist(counts, L_MIN)
+
+        if cause == "r_zero":
+            r["end_fwd"][int(fwd[START + BLOCKED])] = 0.0
+
+        # Guard the guard: the construction only discriminates if the blocked
+        # and control end hexamers are DIFFERENT, otherwise zeroing r_end for
+        # one zeroes both and the control assertion fails for the wrong reason.
+        if cause == "r_zero":
+            assert int(fwd[START + BLOCKED]) != int(fwd[START + CONTROL]), (
+                "blocked and control lengths share an end hexamer; pick "
+                "different offsets or this test cannot separate them"
+            )
+        if cause == "non_acgt":
+            assert not valid[START + BLOCKED], "planted N did not invalidate"
+            assert valid[START + CONTROL], "planted N also hit the control"
+
+        starts, lengths, is_plus = sample_region(
+            # .encode(): sample_region calls bytes(sequence), which rejects str.
+            # hexamer_indices above accepts str, so the tracks stay readable.
+            seq.encode(), R, 4000, r=r, fl=fl, p_plus=1.0,
+            rng=np.random.default_rng(99),
+        )
+        assert is_plus.all(), "p_plus=1.0 must give plus-strand draws only"
+        assert set(starts.tolist()) == {START}, (
+            f"point-mass start_fwd should pin every start to {START}, got "
+            f"{sorted(set(starts.tolist()))[:5]}"
+        )
+        drawn = set(lengths.tolist())
+        assert BLOCKED not in drawn, (
+            f"length {BLOCKED} was drawn despite its weight being zeroed via "
+            f"{cause!r}. That factor is not being applied, so a zero in it "
+            f"cannot keep a length out of the draw."
+        )
+        assert CONTROL in drawn, (
+            f"control length {CONTROL} was never drawn, so the test is not "
+            f"discriminating -- something other than {cause!r} suppressed it"
+        )
+
+    def test_end_hexamer_offset_is_exact(self):
+        """M25: end hexamer read at ``i + l - 1`` instead of ``i + l``.
+
+        A one-position shift in the end lookup leaves every total plausible and
+        every marginal nearly right, which is the definition of a silent
+        failure. Point masses on BOTH sides make the draw deterministic: one
+        admissible start, one admissible end position, so the drawn length can
+        only be their difference. An off-by-one shifts every draw by exactly 1.
+        """
+        R = 400
+        seq = self._single_start_seq(region_len=R, seed=11)
+        fwd, _rc, valid = hexamer_indices(seq)
+        # Both point masses pin a HEXAMER, so both positions must be unique.
+        START = self._unique_start(fwd, R, near=100)
+        END = START + 80
+        expected_len = END - START
+        assert L_MIN <= expected_len <= L_MAX
+
+        start_hex, end_hex = int(fwd[START]), int(fwd[END])
+        # The end hexamer must be UNIQUE over the reachable window, or several
+        # lengths satisfy the point mass and the draw stops being deterministic.
+        reachable = fwd[START + L_MIN:START + L_MAX + 1]
+        assert (reachable == end_hex).sum() == 1, (
+            "the planted end hexamer is not unique over the reachable range, "
+            "so more than one length carries the point mass"
+        )
+        assert start_hex != end_hex, "start and end point masses must differ"
+
+        r = {k: np.zeros(NHEX, dtype=np.float64) for k in TABLE_NAMES}
+        r["start_fwd"][start_hex] = 1.0
+        r["end_fwd"][end_hex] = 1.0
+        fl = FragmentLengthDist(
+            np.ones(L_MAX - L_MIN + 1, dtype=np.int64), L_MIN)
+
+        starts, lengths, _ = sample_region(
+            seq.encode(), R, 500, r=r, fl=fl, p_plus=1.0,
+            rng=np.random.default_rng(3),
+        )
+        assert set(starts.tolist()) == {START}
+        assert set(lengths.tolist()) == {expected_len}, (
+            f"drew lengths {sorted(set(lengths.tolist()))}, expected exactly "
+            f"[{expected_len}]. A single off-by-one value means the end hexamer "
+            f"is being read at i+l-1 or i+l+1 rather than i+l."
+        )
 
     def test_fl_from_filtered_frame_within_bounds(self, toy_dir, toy_genome, toy_regions):
         """M36 (skip length filter)."""
