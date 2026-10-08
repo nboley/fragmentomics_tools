@@ -135,9 +135,17 @@ forward.
 - **`Region(strand=".")` normalizes `.strand` to `None`.** Asserting
   `strand == "."` therefore fails on the ordinary strandless path. Accept
   `{None, ".", "+"}`.
-- **Minus-strand regions arrive flipped.** `from_fragments_h5` reverses
-  coordinates and swaps strands for minus-strand regions (`is_flipped`). The
-  correction applier deliberately *refuses* flipped/minus input: query
+- **Minus-strand regions arrive flipped.** `from_fragments_h5` delegates to
+  `reverse_strand()` for minus-strand regions — there is exactly one
+  implementation of the flip (coordinates mirrored, all per-fragment arrays
+  reversed, strand labels swapped, `is_flipped=True`). This replaced a
+  hand-rolled block that omitted the reversal of `weights` and
+  `fragment_strands`, a latent defect that was silent only because every
+  caller queries strandless. **An order-invariant check (counts, sums, sets,
+  sorted values) cannot gate an ordering fix** — the gating test
+  (`test_minus_strand_flip_per_fragment_correspondence`) asserts per-element
+  array equality against positionally distinct weights.
+  The correction applier deliberately *refuses* flipped/minus input: query
   strandless, then orient at the aggregation layer (reverse the position axis
   and permute tracks). Getting this wrong silently destroys strand asymmetry.
 - **`SparseIntVector` is a misnomer** — only `coords` are ints; `data` keeps

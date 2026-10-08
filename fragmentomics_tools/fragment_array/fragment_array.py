@@ -1717,14 +1717,24 @@ class RegionFragmentArray(FragmentArray):
         min_mapq: int = None,
         return_gc: bool = None,
     ) -> "RegionFragmentArray":
-        """
-        :param flip_data_to_match_region_strand: If True, the data is placed on the strand matching the region strand (if set).
-            If False, strand is ignored in the region and the data is always on the default reference strand.
-        :param include_fragment_strand: If true, include a vector of strands for each fragment.
-        :param in_fragments_h5: fragment h5
-        :param region: region to query
-        :param min_mapq: mapq filter
-        :param max_frag_len: max frag len filter
+        """Load fragments from an H5 file for the given region.
+
+        When ``region`` is on the minus strand, the returned array has its
+        data flipped to the 5'→3' orientation of that strand (coordinates
+        mirrored, per-fragment arrays reversed, strand labels swapped) via
+        :meth:`reverse_strand`, and ``is_flipped`` is ``True``.  To query
+        without flipping, pass a strandless region (``strand='.'``).
+
+        :param in_fragments_h5: path or open :class:`FragmentsH5` handle.
+        :param region: genomic region to query.  Strand controls flipping.
+        :param max_frag_len: maximum fragment length filter.
+        :param generate_weights_callback: ``f(starts, stops, supp_data) → weights``.
+            Called on the *unflipped* genomic-order arrays.
+        :param fetch_array_kwargs: extra kwargs forwarded to
+            :meth:`FragmentsH5.fetch_array`.
+        :param min_mapq: minimum mapping-quality filter.
+        :param return_gc: whether to fetch per-fragment GC content.
+            Defaults to ``fragments_h5.has_gc`` when a callback is supplied.
         """
         if isinstance(in_fragments_h5, str):
             fragments_h5 = FragmentsH5(in_fragments_h5, cache_pointers=False)
@@ -1805,28 +1815,6 @@ class RegionFragmentArray(FragmentArray):
         starts_0 = (starts - region.start)
         stops_0 = (stops - region.start)
 
-        # if the region is on the minus strand then flip the data to be in the
-        # correct orientation. (if we *dont* want this to happen, then just pass
-        # '.' in as the region's strand)
-        if region.is_minus_strand():
-            ## TODO -- move this into reverse strand
-            # Store into temp variables so we can swap. One depends on other.
-            _starts_0 = (region.length - stops_0)[::-1]
-            _stops_0 = (region.length - starts_0)[::-1]
-            starts_0 = _starts_0
-            stops_0 = _stops_0
-            if fragment_strands is not None:
-                fragment_strands = _switch_plus_with_minus_and_minus_with_plus(
-                    fragment_strands
-                )
-            if return_methyl:
-                num_cpgs = num_cpgs[::-1]
-                num_converted_cpgs = num_converted_cpgs[::-1]
-                num_cytosines = num_cytosines[::-1]
-                num_converted_cytosines = num_converted_cytosines[::-1]
-            if return_gc:
-                gc = gc[::-1]
-
         if do_close:
             fragments_h5.close()
 
@@ -1842,9 +1830,14 @@ class RegionFragmentArray(FragmentArray):
             num_cytosines=num_cytosines,
             num_converted_cytosines=num_converted_cytosines,
             weights=weights,
-            is_flipped=region.is_minus_strand(),
+            is_flipped=False,
             gc=gc,
         )
+
+        if region.is_minus_strand():
+            # Uses FragmentArray.reverse_strand (not rfa.reverse_strand) to
+            # flip fragment data without also flipping the region's strand.
+            rfa = FragmentArray.reverse_strand(rfa)
 
         return rfa
 
