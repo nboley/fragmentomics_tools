@@ -8,7 +8,14 @@ Two artifacts, with different lifetimes:
   built is the only place that count exists; see ``count_srdf`` for the
   distinction between those and the hexamer-valid totals.
 - ``N(h)`` -- EXPECTED hexamer counts under a uniform start/end null.
-  ``uniform_hexamer_counts``.  Serial.
+  ``uniform_hexamer_counts``.  Parallel over fixed-size region blocks.
+
+The draw, ``simulate_fragments_to_bed``, is parallel over regions too, and
+both parallel stages are **byte-identical across worker counts** (owner
+decision 166): each region draws from its own stream
+``default_rng([seed, region_index])``, and every reduction is grouped
+independently of ``n_workers``.  See ``region_rng`` and
+``UNIFORM_BLOCK_SIZE``.
 
 ``propensities(C, N)`` divides them into the per-site rate ``r(h) = C(h)/N(h)``,
 which is what the sampler needs.  Counts alone are ``r(h)·N(h)``, so feeding
@@ -80,6 +87,7 @@ import numpy as np
 import pandas as pd
 
 from fragmentomics_tools.dataframe import (
+    DataFrameBase,
     SampleAndRegionDataFrame,
     SampleDataFrame,
 )
@@ -120,6 +128,17 @@ for _code, _base in enumerate("ACGT"):
 _POW = (4 ** np.arange(KMER - 1, -1, -1)).astype(np.int64)
 
 TABLE_NAMES = ("start_fwd", "end_fwd", "start_rev", "end_rev")
+
+# Regions per task in uniform_hexamer_counts.  A property of the REDUCTION, not
+# of the execution: N_end is a float64 sum, so its last bits depend on how the
+# per-region terms are grouped, and r(h) -- hence every draw -- inherits them.
+# Fixing the grouping here, rather than deriving it from n_workers, is what
+# makes N(h) identical for any worker count.  Changing it changes N_end's last
+# bits.
+UNIFORM_BLOCK_SIZE: int = 256
+
+# Seeds and region indices are each ONE 32-bit word; see region_rng.
+_SEED_WORD_MAX: int = 2 ** 32
 
 
 def hexamer_indices(seq):
@@ -470,11 +489,72 @@ def fl_end_weight(n_hex: int, region_len: int, fl: "FragmentLengthDist"):
     )
 
 
+def _uniform_block(contigs, starts, stops, lo: int, hi: int,
+                   fasta_path: str, fl: "FragmentLengthDist") -> dict:
+    """``N(h)`` partial tables for regions ``[lo, hi)``.  Runs in a worker.
+
+    Regions are accumulated in row order, so the partial depends only on
+    ``(lo, hi)`` and never on which process ran it.
+    """
+    import pysam
+
+    # Starts need only HEX_HALF of left context. An end's hexamer window
+    # reaches gstop-1 + max_fl + HEX_HALF, so the RIGHT flank must cover that
+    # -- asymmetric. left_flank = HEX_HALF makes a hexamer index equal its
+    # region-local coordinate, which is why it is not widened for symmetry.
+    left_flank = HEX_HALF
+    right_flank = fl.max_fl + HEX_HALF
+
+    N_start = np.zeros(NHEX, dtype=np.int64)
+    N_end = np.zeros(NHEX, dtype=np.float64)
+    n_start_positions = n_start_invalid = 0
+    end_weight_total = 0.0
+
+    # Opened HERE, inside the worker, and closed before returning: a pysam
+    # handle must never be held across a fork.
+    with pysam.FastaFile(fasta_path) as fasta:
+        for k in range(lo, hi):
+            contig, gstart, gstop = contigs[k], int(starts[k]), int(stops[k])
+            region_len = gstop - gstart
+            seq = fasta.fetch(contig, gstart - left_flank, gstop + right_flank)
+            fwd, _rc, valid = hexamer_indices(seq)
+            n_hex = len(fwd)
+            if n_hex < region_len + fl.max_fl:
+                raise ValueError(
+                    f"{contig}:{gstart}-{gstop}: {n_hex} hexamer windows, "
+                    f"need at least {region_len + fl.max_fl} -- the FASTA "
+                    f"fetch was truncated, which happens within "
+                    f"{right_flank}bp of a contig end."
+                )
+
+            # Starts: uniform, one unit per position in [gstart, gstop).
+            s_idx = slice(0, region_len)
+            s_valid = valid[s_idx]
+            N_start += np.bincount(fwd[s_idx][s_valid], minlength=NHEX)
+            n_start_positions += region_len
+            n_start_invalid += int((~s_valid).sum())
+
+            # Ends: FL-weighted. The validity gate must match the fragment
+            # pass, or N is inflated at exactly the repeat-rich and
+            # gap-adjacent positions where r would then be depressed.
+            w = fl_end_weight(n_hex, region_len, fl)
+            m = valid & (w > 0)
+            N_end += np.bincount(fwd[m], weights=w[m], minlength=NHEX)
+            end_weight_total += float(w[m].sum(dtype=np.float64))
+
+    return dict(N_start=N_start, N_end=N_end, n_regions=hi - lo,
+                n_start_positions=n_start_positions,
+                n_start_invalid=n_start_invalid,
+                end_weight_total=end_weight_total)
+
+
 def uniform_hexamer_counts(
     rdf,
     fasta_path: str,
     fl: "FragmentLengthDist",
     *,
+    n_workers: int | None = None,
+    block_size: int = UNIFORM_BLOCK_SIZE,
     verbose: bool = True,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """``N(h)``: EXPECTED hexamer counts under a uniform start/end null.
@@ -503,17 +583,29 @@ def uniform_hexamer_counts(
     keyed to ``(region set, reference, FL)``.  Note ``f`` only reaches the
     edge ramp: interior positions carry weight 1 under any normalised ``f``.
 
-    Serial by design: returning per-region tables through ``parallel_apply``
-    would move gigabytes to reduce 32 KB, the mirror image of the fragment
-    counting where the payload is tiny and parallelism wins.
+    **Parallel over fixed blocks of ``block_size`` regions, not over
+    regions.**  Returning a dense per-region table through ``parallel_apply``
+    would move ~4.4 GB (66,649 regions x two 32 KB tables) to reduce 64 KB.
+    Each task instead walks a block of regions and returns ONE partial pair,
+    so the transfer is ``ceil(n_regions / block_size)`` pairs -- 261 x 64 KB,
+    about 17 MB, at the default block size.  The blocks are rows of a small
+    frame handed to ``parallel_apply``, so the fork, main-thread and tqdm
+    monitor guards are the library's rather than a second pool.
+
+    **Byte-identical for every ``n_workers``.**  ``N_end`` is a float64 sum,
+    and a reduction grouped by worker would change its last bits with the
+    worker count, then r(h), then every draw.  Here the grouping is fixed by
+    ``block_size`` alone: each block accumulates its regions in row order,
+    and the parent adds the block partials in block order.  ``n_workers=1``
+    runs the same blocks in-process.  ``block_size`` is therefore part of the
+    result -- changing it moves ``N_end`` in the last bits -- which is why it
+    is a module constant and not derived from the worker count.
 
     Only the FORWARD tables are returned.  The minus-strand expectation is the
     forward table permuted -- ``N_rc == N_fwd[rc_permutation()]`` -- because a
     reverse-complement hexamer at a position is a relabelling, not a different
     position.
     """
-    import pysam
-
     if "fragment_array" in getattr(rdf, "columns", ()):
         raise ValueError(
             "pass a region frame WITHOUT fragment arrays: the uniform counts are "
@@ -521,58 +613,42 @@ def uniform_hexamer_counts(
             "first blocks the padded sequence fetch (expand_regions refuses a "
             "frame that already carries them)"
         )
+    block_size = int(block_size)
+    if block_size < 1:
+        raise ValueError(f"block_size must be >= 1, got {block_size}")
 
-    # Starts need only HEX_HALF of left context. An end's hexamer window
-    # reaches gstop-1 + max_fl + HEX_HALF, so the RIGHT flank must cover that
-    # -- asymmetric. left_flank = HEX_HALF makes a hexamer index equal its
-    # region-local coordinate, which is why it is not widened for symmetry.
-    left_flank = HEX_HALF
-    right_flank = fl.max_fl + HEX_HALF
+    # Plain arrays, built before the fork and inherited by the workers.
+    contigs = rdf["contig"].to_numpy()
+    starts = rdf["start"].to_numpy(dtype=np.int64)
+    stops = rdf["stop"].to_numpy(dtype=np.int64)
+    n = len(contigs)
+    los = np.arange(0, n, block_size, dtype=np.int64)
+    blocks = DataFrameBase(pd.DataFrame({
+        "lo": los, "hi": np.minimum(los + block_size, n),
+    }))
 
     N_start = np.zeros(NHEX, dtype=np.int64)
     N_end = np.zeros(NHEX, dtype=np.float64)
     meta = dict(n_regions=0, n_start_positions=0, n_start_invalid=0,
                 end_weight_total=0.0)
+    if not len(blocks):
+        return {"start": N_start, "end": N_end}, meta
 
-    fasta = pysam.FastaFile(fasta_path)
-    try:
-        rows = rdf.itertuples()
-        if verbose:
-            from tqdm import tqdm
-            rows = tqdm(rows, total=len(rdf), desc="uniform counts")
-        for row in rows:
-            gstart, gstop = int(row.start), int(row.stop)
-            region_len = gstop - gstart
-            seq = fasta.fetch(
-                row.contig, gstart - left_flank, gstop + right_flank
-            )
-            fwd, _rc, valid = hexamer_indices(seq)
-            n_hex = len(fwd)
-            if n_hex < region_len + fl.max_fl:
-                raise ValueError(
-                    f"{row.contig}:{gstart}-{gstop}: {n_hex} hexamer windows, "
-                    f"need at least {region_len + fl.max_fl} -- the FASTA "
-                    f"fetch was truncated, which happens within "
-                    f"{right_flank}bp of a contig end."
-                )
-
-            # Starts: uniform, one unit per position in [gstart, gstop).
-            s_idx = slice(0, region_len)
-            s_valid = valid[s_idx]
-            N_start += np.bincount(fwd[s_idx][s_valid], minlength=NHEX)
-            meta["n_start_positions"] += region_len
-            meta["n_start_invalid"] += int((~s_valid).sum())
-
-            # Ends: FL-weighted. The validity gate must match the fragment
-            # pass, or N is inflated at exactly the repeat-rich and
-            # gap-adjacent positions where r would then be depressed.
-            w = fl_end_weight(n_hex, region_len, fl)
-            m = valid & (w > 0)
-            N_end += np.bincount(fwd[m], weights=w[m], minlength=NHEX)
-            meta["end_weight_total"] += float(w[m].sum())
-            meta["n_regions"] += 1
-    finally:
-        fasta.close()
+    res = blocks.parallel_apply(
+        lambda row: _uniform_block(contigs, starts, stops, int(row["lo"]),
+                                   int(row["hi"]), fasta_path, fl),
+        n_workers=n_workers,
+        verbose=verbose,
+    )
+    # parallel_apply returns the records in ROW order, so this sequential
+    # loop adds the partials in block order whatever process produced them.
+    for part in res.itertuples(index=False):
+        N_start += part.N_start
+        N_end += part.N_end
+        meta["n_regions"] += int(part.n_regions)
+        meta["n_start_positions"] += int(part.n_start_positions)
+        meta["n_start_invalid"] += int(part.n_start_invalid)
+        meta["end_weight_total"] += float(part.end_weight_total)
 
     return {"start": N_start, "end": N_end}, meta
 
@@ -728,6 +804,66 @@ def oracle_nll(probs: np.ndarray) -> float:
     return float(-np.log(probs).mean(dtype=np.float64))
 
 
+def _as_seed_word(value, name: str) -> int:
+    """``value`` as a Python int in ``[0, 2**32)``, or raise."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, np.integer)
+    ):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    value = int(value)
+    if not 0 <= value < _SEED_WORD_MAX:
+        raise ValueError(
+            f"{name}={value} is outside [0, 2**32); see region_rng for why "
+            f"a wider value would let two different (seed, region) pairs "
+            f"share a stream"
+        )
+    return value
+
+
+def region_rng(seed: int, region_index: int) -> np.random.Generator:
+    """The draw stream for one region: ``default_rng([seed, region_index])``.
+
+    Owner decision 166.  Each region's draw depends on ``(seed,
+    region_index)`` and nothing else -- not on the worker count, not on which
+    other regions are drawn, not on the order they run in.
+
+    **The PAIR, not ``seed + region_index``.**  With a sum, region 1 of seed
+    ``s`` and region 0 of seed ``s + 1`` share a stream, so replicates under
+    neighbouring seeds would be correlated.
+
+    **Both values must be ONE 32-bit word, so both are bounded to
+    ``[0, 2**32)``.**  ``SeedSequence`` flattens the list into 32-bit words
+    before hashing, so a wider seed spills into the region slot: measured,
+    ``[7 + 3 * 2**32, 0]`` and ``[7, 3]`` give the SAME stream.  With both
+    values one word wide the mapping from pair to stream is one-to-one.  (A
+    related quirk is harmless: ``[s, 0]`` equals ``default_rng(s)``, because
+    the entropy pool zero-pads.)
+    """
+    return np.random.default_rng([_as_seed_word(seed, "seed"),
+                                  _as_seed_word(region_index, "region_index")])
+
+
+def _draw_one_region(sequence, region_len: int, n: int, region_index: int,
+                     *, seed: int, r, fl, p_plus: float) -> dict:
+    """One region's draw on its own stream.  Runs in a worker.
+
+    The duplicate-redraw count travels back in the RETURN value: a counter
+    mutated inside a forked worker is the worker's copy and never reaches the
+    parent.
+    """
+    if n == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return dict(starts_0=z, lengths=z, is_plus=np.zeros(0, dtype=bool),
+                    probs=np.zeros(0, dtype=np.float64), n_dup_redraws=0)
+    dup_counter = [0]
+    starts_0, lengths, is_plus, probs = sample_region(
+        sequence, region_len, n, r=r, fl=fl, p_plus=p_plus,
+        rng=region_rng(seed, region_index), _dup_counter=dup_counter,
+    )
+    return dict(starts_0=starts_0, lengths=lengths, is_plus=is_plus,
+                probs=probs, n_dup_redraws=dup_counter[0])
+
+
 def simulate_fragments_to_bed(
     srdf,
     out_path: str,
@@ -735,13 +871,15 @@ def simulate_fragments_to_bed(
     r: Dict[str, np.ndarray],
     fl: "FragmentLengthDist",
     region_counts,
-    rng,
+    seed: int,
+    region_index=None,
     p_plus: float = 0.5,
     l_max: int = L_MAX,
     mapq: int = 60,
-    seed: int | None = None,
     sample_id: str | None = None,
     p_sidecar_path: str | None = None,
+    n_workers: int | None = None,
+    verbose: bool = False,
 ) -> dict:
     """Draw fragments for every region and write an 8-column BED + a p sidecar.
 
@@ -750,8 +888,25 @@ def simulate_fragments_to_bed(
     function's.
 
     ``region_counts`` is the per-row ``n``, as returned by ``count_srdf``.
-    ``rng`` is required rather than defaulted: an unseeded run cannot be
+    ``seed`` is required rather than defaulted: an unseeded run cannot be
     reproduced, and the seed is this artifact's only provenance.
+
+    **Seeding (owner decision 166).**  Row ``k`` draws from
+    ``region_rng(seed, region_index[k])`` -- its own stream, shared with no
+    other region.  ``region_index`` is the region's position in the INPUT
+    region set, a property of the region rather than of this frame, so a
+    filtered or reordered ``srdf`` draws exactly the same fragments for the
+    regions it keeps.  It is taken from the argument if given, else from the
+    frame's ``region_index`` column, which ``count_sample`` attaches.  There
+    is no positional fallback: ``arange(len(srdf))`` would silently re-key
+    every region of a filtered frame.  Values must be unique.
+
+    **Parallel, and byte-identical for every ``n_workers``.**  Regions are
+    drawn through ``parallel_apply`` (``None`` = every CPU, ``1`` =
+    in-process); the results come back in row order and are assembled exactly
+    as a serial loop would, and ``n_dup_redraws`` is summed from per-region
+    return values.  The BED, the sidecar and the stats are therefore
+    identical whatever the worker count.
 
     Column layout, verified against ``fragments_h5.fragment.tsv_to_fragments``:
 
@@ -807,18 +962,19 @@ def simulate_fragments_to_bed(
     for col in ("contig", "start", "stop", "fragment_array", "sequence"):
         if col not in srdf.columns:
             raise ValueError(f"srdf has no {col!r} column")
+    seed = _as_seed_word(seed, "seed")
 
     expected_seq_len_extra = 2 * HEX_HALF + l_max
 
-    chunks = []
-    p_chunks = []
-    dup_counter = [0]
-    n_requested = n_drawn = n_short = 0
+    # Validate every row in the parent, before anything forks, so a bad frame
+    # fails with its row number rather than from inside a worker.
+    region_lens = np.empty(len(srdf), dtype=np.int64)
     for i, (contig, gstart, gstop, fa, seq) in enumerate(zip(
         srdf["contig"], srdf["start"], srdf["stop"],
         srdf["fragment_array"], srdf["sequence"],
     )):
         region_len = int(gstop) - int(gstart)
+        region_lens[i] = region_len
         if fa.length != region_len:
             raise AssertionError(
                 f"row {i}: fragment_array.length {fa.length} != stop-start "
@@ -835,14 +991,65 @@ def simulate_fragments_to_bed(
                 f"end cannot supply it -- and every hexamer index would shift."
             )
 
+    if region_index is None:
+        if "region_index" not in srdf.columns:
+            raise ValueError(
+                "srdf has no 'region_index' column and none was passed. Each "
+                "region's stream is keyed on its position in the INPUT region "
+                "set (count_sample attaches it); a positional default would "
+                "silently re-key every region of a filtered frame."
+            )
+        region_index = srdf["region_index"]
+    region_index = np.asarray(region_index)
+    if region_index.shape != (len(srdf),):
+        raise ValueError(
+            f"region_index has shape {region_index.shape}, expected "
+            f"({len(srdf)},) -- one entry per row of srdf, in row order"
+        )
+    region_index = np.array([_as_seed_word(v, "region_index")
+                             for v in region_index.tolist()], dtype=np.int64)
+    if np.unique(region_index).size != region_index.size:
+        raise ValueError(
+            "region_index has duplicate values, so two rows would draw from "
+            "the same stream. A frame with several samples per region has "
+            "one row per (sample, region) pair and is not supported here."
+        )
+
+    chunks = []
+    n_requested = n_drawn = n_short = n_dup_redraws = 0
+    if len(srdf):
+        work = DataFrameBase(pd.DataFrame({
+            "sequence": srdf["sequence"].to_numpy(),
+            "region_len": region_lens,
+            "n": region_counts.astype(np.int64),
+            "region_index": region_index,
+        }))
+        draws = work.parallel_apply(
+            lambda row: _draw_one_region(
+                row["sequence"], int(row["region_len"]), int(row["n"]),
+                int(row["region_index"]),
+                seed=seed, r=r, fl=fl, p_plus=p_plus,
+            ),
+            n_workers=n_workers,
+            verbose=verbose,
+        )
+        # Records come back in ROW order whatever process drew them, so
+        # everything below is the serial assembly.
+        draws = draws.itertuples(index=False)
+    else:
+        draws = iter(())
+
+    for i, (contig, gstart, d) in enumerate(zip(
+        srdf["contig"], srdf["start"], draws,
+    )):
         n = int(region_counts[i])
         n_requested += n
+        n_dup_redraws += int(d.n_dup_redraws)
+        starts_0, lengths, is_plus, probs = (
+            d.starts_0, d.lengths, d.is_plus, d.probs
+        )
         if n == 0:
             continue
-        starts_0, lengths, is_plus, probs = sample_region(
-            seq, region_len, n, r=r, fl=fl, p_plus=p_plus, rng=rng,
-            _dup_counter=dup_counter,
-        )
         n_drawn += len(starts_0)
         if len(starts_0) < n:
             n_short += 1
@@ -883,9 +1090,7 @@ def simulate_fragments_to_bed(
         sidecar_default = out_path + ".p.tsv.gz"
     sidecar_path = p_sidecar_path or sidecar_default
     with gzip.open(sidecar_path, "wt") as f:
-        meta_parts = []
-        if seed is not None:
-            meta_parts.append(f"seed={seed}")
+        meta_parts = [f"seed={seed}"]
         if sample_id is not None:
             meta_parts.append(f"sample={sample_id}")
         if meta_parts:
@@ -908,7 +1113,7 @@ def simulate_fragments_to_bed(
         n_short_regions=n_short,
         n_rows_written=len(bed),
         oracle_nll=oracle_nll(all_p),
-        n_dup_redraws=dup_counter[0],
+        n_dup_redraws=n_dup_redraws,
         p_sidecar=sidecar_path,
     )
 
@@ -1175,6 +1380,9 @@ def count_sample(
       the asymmetric frame.
     - the **region coordinates**, needed to lift a region-local draw to a
       genomic one.
+    - a ``region_index`` column -- each region's position in ``rdf``'s
+      region set, taken from ``rdf``'s index labels -- which keys the
+      region's draw stream in ``simulate_fragments_to_bed``.
 
     Rebuilding it would cost a second fetch and a second serial FASTA walk.
     Note ``uniform_hexamer_counts`` takes the ``rdf``, NOT this frame -- it
@@ -1197,6 +1405,23 @@ def count_sample(
     # cut_site_hexamers. It also matches uniform_hexamer_counts's frame, so one
     # attached sequence column serves both passes.
     left_flank, right_flank = HEX_HALF, l_max + HEX_HALF
+    # region_index keys each region's draw stream (owner decision 166), so it
+    # must be the region's position in the INPUT region set, not its row here.
+    # The cross join below discards rdf's index, so it is carried as a column.
+    # from_bed gives a RangeIndex over the BED's rows and row subsetting
+    # (iloc, a mask) keeps the labels, so the label IS that position. No row
+    # is dropped between here and the draw -- the cross join with one sample
+    # keeps every row, and attach_sequence is a left join -- but carrying the
+    # label means a caller who filters rdf first still gets stable streams.
+    if "region_index" not in rdf.columns:
+        if not (pd.api.types.is_integer_dtype(rdf.index)
+                and rdf.index.is_unique):
+            raise ValueError(
+                "rdf needs a unique integer index (from_bed's RangeIndex, "
+                "or a subset of it) or an explicit 'region_index' column: "
+                "it keys each region's draw stream"
+            )
+        rdf = rdf.assign(region_index=np.asarray(rdf.index, dtype=np.int64))
     srdf = (
         SampleAndRegionDataFrame
         .init_from_rdf_and_sdf(rdf, load_sample_dataframe([(sample_id, h5_path)]))

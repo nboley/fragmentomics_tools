@@ -48,6 +48,17 @@ Costs worth knowing before running at scale
 - ``pysam.tabix_index`` CONSUMES the plain BED. After it returns, only
   ``.bed.gz`` and ``.bed.gz.tbi`` remain. Do not plan to re-read or hash the
   plain file afterwards.
+- ``--n-workers`` reaches every parallel stage: the fragment pass, N(h), the
+  draw and the h5 build. The first full run (66,649 regions, 905 s) spent
+  ~11.5 min in N(h) and the draw while both were still single-process (owner
+  decision 166 parallelised them). Per-stage wall-clock times are printed and
+  recorded in ``run.json`` under ``stage_seconds``.
+- **The worker count does not change the output.** Same seed, any
+  ``--n-workers``: byte-identical BED, sidecar and stats. Each region draws
+  from ``default_rng([seed, region_index])`` and every reduction is grouped
+  independently of the worker count; see ``region_rng``. What DOES change the
+  draw is ``--n-regions``: r(h) and f(L) are re-estimated from the regions
+  kept, so a k-region run is not a subset of the full run.
 
 
 Conventions this script does not get to choose
@@ -57,9 +68,9 @@ Conventions this script does not get to choose
   records which of its two ends became read 1, and adapter ligation is
   symmetric. There is nothing to measure. Exposed as a flag only so a
   deliberate sensitivity check is possible.
-- ``--seed`` is REQUIRED. The seed is the output's only provenance, and an
-  unseeded run cannot be reproduced. ``simulate_fragments_to_bed`` likewise
-  refuses to default its rng.
+- ``--seed`` is REQUIRED, and must lie in ``[0, 2**32)``. The seed is the
+  output's only provenance, and an unseeded run cannot be reproduced.
+  ``simulate_fragments_to_bed`` likewise refuses to run without one.
 - Write output to ``/efs``, not ``/home``. ``/home`` writability in the batch
   container is disputed and the standing practice is to treat it as read-only.
 """
@@ -67,6 +78,7 @@ Conventions this script does not get to choose
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import multiprocessing
 import os
@@ -118,41 +130,72 @@ def parse_args(argv=None):
     p.add_argument("--p-plus", type=float, default=0.5,
                    help="0.5 by construction; see the module docstring before "
                         "changing it")
-    p.add_argument("--n-workers", type=int, default=None)
+    p.add_argument("--n-workers", type=int, default=None,
+                   help="processes for every parallel stage; default every "
+                        "CPU, 1 runs in-process. Does not change the output")
     p.add_argument("--skip-h5", action="store_true",
                    help="stop after the BED. Useful because build_fragments_h5 "
                         "walks the whole contig and dominates a small run")
     return p.parse_args(argv)
 
 
+@contextlib.contextmanager
+def _stage(name, seconds):
+    """Announce a stage, then record its wall-clock time in ``seconds``.
+
+    The start line is the point: a long stage otherwise leaves the log silent
+    for minutes, indistinguishable from a hang.
+    """
+    print(f"[{name}] start")
+    t = time.perf_counter()
+    yield
+    seconds[name] = round(time.perf_counter() - t, 2)
+    print(f"[{name}] {seconds[name]} s")
+
+
 def main(argv=None):
+    # Line-buffered even when redirected to a file, for two reasons. A
+    # block-buffered log sits empty through a long stage and looks frozen.
+    # And every parallel stage forks: a worker inherits any unflushed buffer
+    # and flushes its own copy on exit, so buffered lines can be printed
+    # once per worker.
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
     args = parse_args(argv)
     os.makedirs(args.out_dir, exist_ok=True)
     stem = os.path.join(args.out_dir, args.sample_id)
     t0 = time.time()
+    seconds = {}
 
-    rdf = RegionDataFrame.from_bed(args.region_bed, ref=args.ref)
-    if args.n_regions is not None:
-        rdf = rdf.iloc[: args.n_regions]
+    with _stage("regions", seconds):
+        rdf = RegionDataFrame.from_bed(args.region_bed, ref=args.ref)
+        if args.n_regions is not None:
+            rdf = rdf.iloc[: args.n_regions]
     print(f"[regions] {len(rdf)} from {os.path.basename(args.region_bed)}")
 
     # Stages 1, 2 and 4 -- one pass. The frame is returned, not discarded,
     # because f(L), the padded sequences and the region coordinates all live on
     # it and rebuilding it costs a second fetch plus a second FASTA walk.
-    C, region_counts, stats, srdf = count_sample(
-        rdf, args.sample_id, args.fragments_h5, args.fasta,
-        min_mapq=args.min_mapq, n_workers=args.n_workers, verbose=False,
-    )
+    with _stage("count_sample", seconds):
+        C, region_counts, stats, srdf = count_sample(
+            rdf, args.sample_id, args.fragments_h5, args.fasta,
+            min_mapq=args.min_mapq, n_workers=args.n_workers, verbose=False,
+        )
     print(f"[C(h)]    {stats}")
     print(f"[counts]  per-region min/median/max = "
           f"{region_counts.min()}/{int(np.median(region_counts))}/{region_counts.max()}")
 
-    fl = FragmentLengthDist.from_srdf(srdf)
+    with _stage("f(L)", seconds):
+        fl = FragmentLengthDist.from_srdf(srdf)
     print(f"[f(L)]    support [{fl.min_fl}, {fl.max_fl}], "
           f"n={int(fl.counts.sum())}")
 
     # Stage 3. Takes the RDF, not the srdf, and needs f(L) to already exist.
-    N, n_meta = uniform_hexamer_counts(rdf, args.fasta, fl, verbose=False)
+    with _stage("N(h)", seconds):
+        N, n_meta = uniform_hexamer_counts(
+            rdf, args.fasta, fl, n_workers=args.n_workers, verbose=False,
+        )
     print(f"[N(h)]    {n_meta}")
 
     r = propensities(C, N)
@@ -164,18 +207,23 @@ def main(argv=None):
     # seed and sample_id go into the p sidecar's header: the seed is the
     # output's only provenance, so a sidecar separated from run.json must still
     # say which run produced it.
-    emit = simulate_fragments_to_bed(
-        srdf, bed_path, r=r, fl=fl, region_counts=region_counts,
-        rng=np.random.default_rng(args.seed), p_plus=args.p_plus,
-        seed=args.seed, sample_id=args.sample_id,
-    )
+    with _stage("draw", seconds):
+        emit = simulate_fragments_to_bed(
+            srdf, bed_path, r=r, fl=fl, region_counts=region_counts,
+            seed=args.seed, p_plus=args.p_plus, sample_id=args.sample_id,
+            n_workers=args.n_workers,
+        )
     print(f"[emit]    {emit}")
     # No short-draw branch: dead starts and duplicates are redrawn, and an
     # infeasible request raises inside sample_region, so n_drawn == n_requested
     # whenever this line is reached.
 
     run = dict(
-        sample_id=args.sample_id, seed=args.seed, n_regions=len(rdf),
+        sample_id=args.sample_id, seed=args.seed,
+        # Seeds before decision 166 used one shared stream, so the same seed
+        # gives different fragments across that change; this records which.
+        rng_scheme="default_rng([seed, region_index])",
+        n_workers=args.n_workers, n_regions=len(rdf),
         region_bed=os.path.abspath(args.region_bed),
         fasta=os.path.abspath(args.fasta),
         fragments_h5=os.path.abspath(args.fragments_h5),
@@ -196,8 +244,9 @@ def main(argv=None):
         n_proc = (args.n_workers if args.n_workers is not None
                   else multiprocessing.cpu_count())
         print(f"[h5]      building with {n_proc} process(es)")
-        build_fragments_h5(gz, out_h5, fasta_filename=args.fasta,
-                           num_processes=n_proc)
+        with _stage("h5", seconds):
+            build_fragments_h5(gz, out_h5, fasta_filename=args.fasta,
+                               num_processes=n_proc)
 
         with FragmentsH5(out_h5) as f:
             total = int(f.fragment_length_counts.sum())
@@ -213,10 +262,12 @@ def main(argv=None):
                   f"rows were written -- unexpected; duplicates are redrawn at "
                   f"emission and the ingest does not dedup")
 
+    run["stage_seconds"] = seconds
     run["elapsed_s"] = round(time.time() - t0, 1)
     meta_path = f"{stem}.run.json"
     with open(meta_path, "w") as fh:
         json.dump(run, fh, indent=2, default=str)
+    print(f"[stages]  {seconds}")
     print(f"[done]    {run['elapsed_s']}s, metadata -> {meta_path}")
     return 0
 

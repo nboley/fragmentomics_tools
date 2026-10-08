@@ -1626,10 +1626,9 @@ class TestT6WriterAndRoundTrip:
 
         # Simulate
         sim_bed = os.path.join(toy_dir["dir"], "sim_roundtrip.bed")
-        rng_sim = np.random.default_rng(999)
         sim_stats = simulate_fragments_to_bed(
             srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
-            rng=rng_sim, p_plus=0.5,
+            seed=999, p_plus=0.5,
         )
 
         # Build h5 from simulated BED
@@ -1742,10 +1741,11 @@ class TestT6WriterAndRoundTrip:
         N, _ = uniform_hexamer_counts(rdf, toy_dir["fasta"], fl, verbose=False)
         r = propensities(counts, N)
 
-        # Run sample_region directly to capture the raw draws.
+        # Run sample_region directly to capture the raw draws, on the stream
+        # the writer gives region 0 under seed 42 (owner decision 166).
         seq = srdf["sequence"].iloc[0]
         n = int(region_counts[0])
-        rng_sim = np.random.default_rng(42)
+        rng_sim = np.random.default_rng([42, 0])
         starts_0, lengths, is_plus, _probs = sample_region(
             seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
         )
@@ -1758,10 +1758,9 @@ class TestT6WriterAndRoundTrip:
 
         # Write through the real chain.
         sim_bed = os.path.join(toy_dir["dir"], "abs_coord.bed")
-        rng_sim2 = np.random.default_rng(42)
         simulate_fragments_to_bed(
             srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
-            rng=rng_sim2, p_plus=0.5,
+            seed=42, p_plus=0.5,
         )
         gz = pysam.tabix_index(sim_bed, preset="bed", force=True)
         sim_h5 = os.path.join(toy_dir["dir"], "abs_coord.frag.h5")
@@ -1826,7 +1825,7 @@ class TestT6WriterAndRoundTrip:
 
         seq = srdf["sequence"].iloc[0]
         n = int(region_counts[0])
-        rng_sim = np.random.default_rng(77)
+        rng_sim = np.random.default_rng([77, 0])
         starts_0, lengths, is_plus, _probs = sample_region(
             seq, R, n, r=r, fl=fl, p_plus=0.5, rng=rng_sim,
         )
@@ -1837,10 +1836,9 @@ class TestT6WriterAndRoundTrip:
         expected_strands = np.where(is_plus, "+", "-")
 
         sim_bed = os.path.join(toy_dir["dir"], "strand_rt.bed")
-        rng_sim2 = np.random.default_rng(77)
         simulate_fragments_to_bed(
             srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
-            rng=rng_sim2, p_plus=0.5,
+            seed=77, p_plus=0.5,
         )
         gz = pysam.tabix_index(sim_bed, preset="bed", force=True)
         sim_h5 = os.path.join(toy_dir["dir"], "strand_rt.frag.h5")
@@ -1894,7 +1892,7 @@ class TestT6WriterAndRoundTrip:
                 r={k: np.ones(NHEX) for k in TABLE_NAMES},
                 fl=FragmentLengthDist(np.ones(10, dtype=np.int64), 25),
                 region_counts=np.array([]),
-                rng=np.random.default_rng(0),
+                seed=0,
             )
 
     def test_fragment_length_dist_densify(self):
@@ -2002,7 +2000,7 @@ class TestT6WriterAndRoundTrip:
                 srdf, str(tmp_path / "test.bed"),
                 r=r, fl=simple_fl,
                 region_counts=np.array([10, 20]),
-                rng=np.random.default_rng(0),
+                seed=0,
             )
 
     def test_simulate_guard_missing_column(self, simple_fl, tmp_path):
@@ -2017,7 +2015,7 @@ class TestT6WriterAndRoundTrip:
                 srdf_no_seq, str(tmp_path / "test.bed"),
                 r=r, fl=simple_fl,
                 region_counts=np.array([10]),
-                rng=np.random.default_rng(0),
+                seed=0,
             )
 
     def test_simulate_guard_fa_length_mismatch(self, admission_h5, toy_dir, toy_regions, simple_fl, tmp_path):
@@ -2049,7 +2047,7 @@ class TestT6WriterAndRoundTrip:
                 srdf, str(tmp_path / "test.bed"),
                 r=r, fl=simple_fl,
                 region_counts=np.array([10]),
-                rng=np.random.default_rng(0),
+                seed=0,
             )
 
     def test_simulate_guard_sequence_length_mismatch(self, admission_h5, toy_dir, toy_regions, simple_fl, tmp_path):
@@ -2079,7 +2077,7 @@ class TestT6WriterAndRoundTrip:
                 srdf, str(tmp_path / "test.bed"),
                 r=r, fl=simple_fl,
                 region_counts=np.array([10]),
-                rng=np.random.default_rng(0),
+                seed=0,
             )
 
 
@@ -2124,10 +2122,9 @@ class TestT6bFunctionalChain:
         r = propensities(counts, N)
 
         sim_bed = os.path.join(toy_dir["dir"], "func_chain.bed")
-        rng_sim = np.random.default_rng(777)
         sim_stats = simulate_fragments_to_bed(
             srdf, sim_bed, r=r, fl=fl, region_counts=region_counts,
-            rng=rng_sim, p_plus=0.5, seed=777,
+            p_plus=0.5, seed=777,
         )
 
         # ── Assert 1: n_drawn == n_requested ──
@@ -2178,6 +2175,254 @@ class TestT6bFunctionalChain:
             f"in sidecar not h5: {sidecar_keys - h5_keys}, "
             f"in h5 not sidecar: {h5_keys - sidecar_keys}"
         )
+
+
+# ── T8: Seeding and parallel determinism (owner decision 166) ──────────
+
+def _draw_frame(genome, regions, *, contigs=None, region_index=None):
+    """A frame ``simulate_fragments_to_bed`` accepts, built without an h5.
+
+    The writer reads only coordinates, ``fragment_array.length`` and the
+    padded ``sequence``, so empty fragment arrays suffice.  ``contig`` is a
+    LABEL to the writer -- the draw reads ``sequence`` only -- which lets two
+    rows carry identical sequence yet stay distinguishable in the output.
+    """
+    from fragmentomics_tools import RegionFragmentArray
+    from fragmentomics_tools.region import Region
+
+    return pd.DataFrame({
+        "contig": contigs if contigs is not None else ["chrT"] * len(regions),
+        "start": [g0 for g0, _ in regions],
+        "stop": [g1 for _, g1 in regions],
+        "fragment_array": [
+            RegionFragmentArray([], [], Region("chrT", g0, g1), L_MAX)
+            for g0, g1 in regions
+        ],
+        "sequence": [
+            genome[g0 - HEX_HALF:g1 + L_MAX + HEX_HALF].encode()
+            for g0, g1 in regions
+        ],
+        "region_index": (np.arange(len(regions)) if region_index is None
+                         else np.asarray(region_index)),
+    })
+
+
+def _read_outputs(bed_path, stats):
+    """``(bed_lines, sidecar_lines)`` -- the sidecar decompressed, since the
+    gzip header carries an mtime."""
+    import gzip
+    with open(bed_path) as f:
+        bed = f.read().splitlines()
+    with gzip.open(stats["p_sidecar"], "rt") as f:
+        side = f.read().splitlines()
+    return bed, side
+
+
+class TestT8SeedingAndParallelDeterminism:
+    """Owner decision 166: per-region streams ``default_rng([seed, i])``,
+    parallel draw and N(h), byte-identical across worker counts.
+
+    Nothing here pins a ``Generator`` draw: every assertion compares two runs.
+    """
+
+    SEED = 20261008
+
+    @pytest.fixture(scope="class")
+    def draw_setup(self, toy_genome):
+        # 16 contiguous 300 bp tiles. A narrow 3-length f(L) and 120 fragments
+        # per tile make the live (start, L) space ~900, so duplicate redraws
+        # are frequent -- the n_dup_redraws assertions need them nonzero.
+        regions = [(3 + 300 * i, 3 + 300 * (i + 1)) for i in range(16)]
+        assert regions[-1][1] + L_MAX + HEX_HALF <= len(toy_genome)
+        rs = np.random.RandomState(166)
+        r = {k: rs.uniform(0.5, 2.0, NHEX) for k in TABLE_NAMES}
+        fl = FragmentLengthDist(np.array([1, 2, 1], dtype=np.int64), 60)
+        counts = np.full(len(regions), 120, dtype=np.int64)
+        counts[3] = 0   # an empty region must not shift anyone's stream
+        return dict(regions=regions, r=r, fl=fl, counts=counts,
+                    frame=_draw_frame(toy_genome, regions))
+
+    def _simulate(self, setup, frame, counts, out, *, seed=None, n_workers=1):
+        return simulate_fragments_to_bed(
+            frame, str(out), r=setup["r"], fl=setup["fl"],
+            region_counts=counts, seed=self.SEED if seed is None else seed,
+            p_plus=0.5, n_workers=n_workers,
+        )
+
+    def test_draw_identical_across_worker_counts(self, draw_setup, tmp_path):
+        """D2 (shared rng), D4 (dup counts lost in workers), D4b (dropped)."""
+        s = draw_setup
+        st1 = self._simulate(s, s["frame"], s["counts"],
+                             tmp_path / "w1.bed", n_workers=1)
+        st3 = self._simulate(s, s["frame"], s["counts"],
+                             tmp_path / "w3.bed", n_workers=3)
+
+        assert st1["n_dup_redraws"] > 0, (
+            "fixture produced no duplicate redraws, so the dup-count "
+            "assertions below would be vacuous"
+        )
+        bed1, side1 = _read_outputs(tmp_path / "w1.bed", st1)
+        bed3, side3 = _read_outputs(tmp_path / "w3.bed", st3)
+        assert bed1 == bed3, "BED differs between n_workers=1 and 3"
+        assert side1 == side3, "p sidecar differs between n_workers=1 and 3"
+        drop = lambda st: {k: v for k, v in st.items() if k != "p_sidecar"}
+        assert drop(st1) == drop(st3), (
+            f"stats differ between n_workers=1 and 3: {drop(st1)} vs {drop(st3)}"
+        )
+
+        # n_dup_redraws against an INDEPENDENT count: each region redrawn on
+        # its own stream, counted in this process. Catches a count dropped on
+        # every path, which the cross-worker equality alone cannot.
+        expected = 0
+        for k, ((g0, g1), n) in enumerate(zip(s["regions"], s["counts"])):
+            if n == 0:
+                continue
+            ctr = [0]
+            sample_region(
+                s["frame"]["sequence"].iloc[k], g1 - g0, int(n), r=s["r"],
+                fl=s["fl"], p_plus=0.5,
+                rng=np.random.default_rng([self.SEED, k]), _dup_counter=ctr,
+            )
+            expected += ctr[0]
+        assert st1["n_dup_redraws"] == expected
+
+    def test_uniform_counts_identical_across_worker_counts(
+        self, toy_dir, toy_genome
+    ):
+        """D3 (reduction grouping follows n_workers)."""
+        regions = [(3 + 300 * i, 3 + 300 * (i + 1)) for i in range(18)]
+        assert regions[-1][1] + L_MAX + HEX_HALF <= len(toy_genome)
+        rdf = RegionDataFrame(pd.DataFrame({
+            "contig": "chrT",
+            "start": [g0 for g0, _ in regions],
+            "stop": [g1 for _, g1 in regions],
+        }), ref="hg38")
+        # Every length populated with irregular counts, so the end-weight
+        # ramps are non-dyadic and a regrouped float64 sum moves last bits.
+        fl = FragmentLengthDist(
+            np.random.RandomState(7).randint(1, 50, N_LENGTHS), L_MIN,
+        )
+        runs = {
+            w: uniform_hexamer_counts(rdf, toy_dir["fasta"], fl, n_workers=w,
+                                      block_size=4, verbose=False)
+            for w in (1, 3, 5)
+        }
+        N1, meta1 = runs[1]
+        for w in (3, 5):
+            Nw, metaw = runs[w]
+            assert N1["start"].tobytes() == Nw["start"].tobytes(), w
+            assert N1["end"].tobytes() == Nw["end"].tobytes(), (
+                f"N_end differs in its bits between n_workers=1 and {w}"
+            )
+            assert meta1 == metaw, w
+        # Regrouping may move only the last bits, never the value.
+        N_one_block, _ = uniform_hexamer_counts(
+            rdf, toy_dir["fasta"], fl, n_workers=1, block_size=len(regions),
+            verbose=False,
+        )
+        np.testing.assert_array_equal(N1["start"], N_one_block["start"])
+        np.testing.assert_allclose(N1["end"], N_one_block["end"], rtol=1e-12)
+
+    def test_subset_draws_the_same_fragments(self, draw_setup, tmp_path):
+        """D2 (shared rng). Function level, identical (r, f, counts).
+
+        NOT a driver-level claim: a ``--n-regions k`` run re-estimates r(h)
+        and f(L) from k regions, so its draws legitimately differ.
+        """
+        s = draw_setup
+        st_full = self._simulate(s, s["frame"], s["counts"],
+                                 tmp_path / "full.bed")
+        # Kept rows given OUT of order: the stream follows region_index, not
+        # the row position.
+        keep = [10, 4, 1, 3, 7]
+        st_sub = self._simulate(
+            s, s["frame"].iloc[keep].reset_index(drop=True),
+            s["counts"][keep], tmp_path / "sub.bed",
+        )
+        bed_full, side_full = _read_outputs(tmp_path / "full.bed", st_full)
+        bed_sub, side_sub = _read_outputs(tmp_path / "sub.bed", st_sub)
+
+        spans = [s["regions"][k] for k in keep]
+        in_keep = lambda start: any(g0 <= start < g1 for g0, g1 in spans)
+        want_bed = [l for l in bed_full if in_keep(int(l.split("\t")[1]))]
+        want_side = [l for l in side_full[2:]
+                     if in_keep(int(l.split("\t")[1]))]
+        assert len(want_bed) == int(s["counts"][keep].sum()) > 0
+        assert bed_sub == want_bed
+        assert side_sub[2:] == want_side
+
+    def test_stream_is_keyed_on_the_seed_pair(self, draw_setup, toy_genome,
+                                              tmp_path):
+        """D1 (seed + i), D2 (shared rng)."""
+        s = draw_setup
+        g0, g1 = s["regions"][0]
+        n = 120
+        # Two rows with IDENTICAL sequence and n, so any difference between
+        # their draws comes from the stream alone.
+        frame = _draw_frame(toy_genome, [(g0, g1), (g0, g1)],
+                            contigs=["chrA", "chrB"], region_index=[0, 1])
+        counts = np.array([n, n])
+
+        def by_contig(seed, tag):
+            out = tmp_path / f"{tag}.bed"
+            self._simulate(s, frame, counts, out, seed=seed)
+            rows = {"chrA": [], "chrB": []}
+            for line in open(out).read().splitlines():
+                f = line.split("\t")
+                rows[f[0]].append((int(f[1]), int(f[2]), f[5]))
+            return rows
+
+        a = by_contig(self.SEED, "seed_s")
+        b = by_contig(self.SEED + 1, "seed_s1")
+        assert a["chrA"] != a["chrB"], "regions 0 and 1 share a stream"
+        assert a["chrA"] != b["chrA"], "seed does not reach the stream"
+        # The seed+i collision: region 1 of seed s vs region 0 of seed s+1.
+        assert a["chrB"] != b["chrA"], (
+            "region 1 under seed s drew exactly what region 0 drew under "
+            "seed s+1 -- the stream is keyed on seed + i, not the pair"
+        )
+
+        # And the stream IS default_rng([seed, region_index]): the writer's
+        # draw for each row equals sample_region on that stream.
+        seq = frame["sequence"].iloc[0]
+        for contig, idx in (("chrA", 0), ("chrB", 1)):
+            st, L, plus, _ = sample_region(
+                seq, g1 - g0, n, r=s["r"], fl=s["fl"], p_plus=0.5,
+                rng=np.random.default_rng([self.SEED, idx]),
+            )
+            want = sorted(zip((g0 + st).tolist(), (g0 + st + L).tolist(),
+                              np.where(plus, "+", "-").tolist()))
+            assert a[contig] == want, contig
+
+    def test_seed_and_index_guards(self, draw_setup, tmp_path):
+        s = draw_setup
+        frame, counts = s["frame"], s["counts"]
+        out = tmp_path / "guard.bed"
+        with pytest.raises(TypeError, match="seed must be an int"):
+            self._simulate(s, frame, counts, out, seed=1.5)
+        with pytest.raises(TypeError, match="seed must be an int"):
+            simulate_fragments_to_bed(
+                frame, str(out), r=s["r"], fl=s["fl"], region_counts=counts,
+                seed=None,
+            )
+        for bad in (-1, 2 ** 32):
+            with pytest.raises(ValueError, match="outside"):
+                self._simulate(s, frame, counts, out, seed=bad)
+        with pytest.raises(ValueError, match="no 'region_index' column"):
+            self._simulate(s, frame.drop(columns="region_index"), counts, out)
+        dup = frame.assign(region_index=np.zeros(len(frame), dtype=np.int64))
+        with pytest.raises(ValueError, match="duplicate"):
+            self._simulate(s, dup, counts, out)
+
+    def test_count_sample_carries_index_labels(self, admission_h5, toy_dir,
+                                               toy_rdf):
+        """D5 (region_index taken from row position, not the index label)."""
+        sub = toy_rdf.iloc[[1, 0]]
+        _, _, _, srdf = count_sample(
+            sub, "test", admission_h5, toy_dir["fasta"],
+            n_workers=1, verbose=False,
+        )
+        assert srdf["region_index"].tolist() == [1, 0]
 
 
 # ── T7: Hygiene ─────────────────────────────────────────────────────────

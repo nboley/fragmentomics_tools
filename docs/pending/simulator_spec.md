@@ -289,10 +289,11 @@ numpy, pandas, `fragmentomics_tools.dataframe`.
 | `counts_from_hexamers` | genomic start/stop + strand → the four tables |
 | `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
 | `count_sample` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
-| `simulate_fragments_to_bed` | draws for every region → 8-column BED + `.p.tsv.gz` sidecar. Stats include `oracle_nll` and `n_dup_redraws` |
+| `simulate_fragments_to_bed` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
+| `region_rng` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `-mean(log(p))` in float64 |
 | `FragmentLengthDist` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
-| `uniform_hexamer_counts` | → `N(h)` |
+| `uniform_hexamer_counts` | → `N(h)`, in parallel over fixed region blocks. See §8 |
 | `fl_end_weight` | `w(i)` above |
 | `propensities` | `C / N` |
 | `sample_region` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
@@ -303,7 +304,11 @@ numpy, pandas, `fragmentomics_tools.dataframe`.
 `attach_sequence` → one `parallel_apply` of `cut_site_hexamers` → four
 `bincount`s.
 
-`N(h)`: serial sequence walk.
+`N(h)`: a sequence walk, one `parallel_apply` task per block of
+`UNIFORM_BLOCK_SIZE` regions, partials added in block order.
+
+The draw: one `parallel_apply` task per region, each on its own stream,
+assembled in row order.
 
 `FragmentLengthDist` is built by `from_dataframe` (columns
 `fragment_length`, `count`; absent lengths densify to zero) or `from_srdf`,
@@ -322,7 +327,7 @@ override.  Deriving it means no change to the driver is needed.
 
 Columns: `contig  start  stop  strand  p`.  `p` is the first-draw marginal
 probability, written as `%.17g` (round-trips float64 exactly).  A header
-comment carries the seed and sample id when supplied.
+comment carries the seed, always, and the sample id when supplied.
 
 Join key: `(contig, start, stop, strand)`.  With duplicates redrawn this key is
 unique, so the join against the h5 is exact and one-to-one.  The h5 stores
@@ -338,6 +343,65 @@ with strand excluded" is **false** — there is no dedup in the ingest path.
 Read-time dedup is `drop_duplicate_fragments`, which runs at *fetch* inside
 `filter_fragments`, not at ingest.  With duplicates now redrawn, it removes
 nothing.
+
+## 8. Seeding and parallel execution
+
+Owner decision 166 (2026-10-08).  Only the RNG seeding and the execution
+layout changed; the draw in §4 is untouched.
+
+### Seeding contract
+
+    region k draws from  default_rng([seed, region_index[k]])
+
+- **One stream per region, keyed on the PAIR.**  Not `seed + i`: with a sum,
+  region 1 of seed `s` and region 0 of seed `s + 1` share a stream, so
+  replicates under neighbouring seeds would be correlated.
+- **`region_index` is the region's position in the INPUT region set**, a
+  property of the region, not its row in whatever frame reaches the draw.
+  `count_sample` carries `rdf`'s index labels into a `region_index` column:
+  `from_bed` gives a RangeIndex over the BED's rows, and row subsetting keeps
+  the labels.  No row is dropped between the BED and the draw today — the
+  cross join with one sample keeps every row and `attach_sequence` is a left
+  join — but carrying the label means a filtered or reordered frame still
+  draws the same fragments for the regions it keeps.  There is no positional
+  fallback; a frame without the column raises.  Duplicate values raise, so a
+  multi-sample frame is out of contract.
+- **`seed` and `region_index` must each lie in `[0, 2**32)`.**
+  `SeedSequence` flattens the list into 32-bit words before hashing, so a
+  wider seed spills into the region slot: measured, `[7 + 3·2**32, 0]` and
+  `[7, 3]` give the SAME stream.  One word each makes pair→stream
+  one-to-one.  (`[s, 0]` equals `default_rng(s)` because the entropy pool
+  zero-pads; harmless.)
+- `simulate_fragments_to_bed` takes the integer `seed` and refuses to run
+  without one, as before.  This changed seed→output once: a pre-166 run and
+  a post-166 run with the same seed draw different fragments.  The driver
+  records `rng_scheme` in `run.json`.
+
+### Parallel execution, and the determinism guarantee
+
+**Same seed, any `n_workers`: byte-identical BED, sidecar and stats**,
+`oracle_nll` and `n_dup_redraws` included.  Both stages use `parallel_apply`
+(`None` = every CPU, `1` = in-process), so the fork, main-thread and
+tqdm-monitor guards are the library's.
+
+| stage | task | why it is worker-count-independent |
+|---|---|---|
+| draw | one region | each region's stream depends on `(seed, region_index)` only; results come back in row order; `n_dup_redraws` is summed from per-region RETURN values (a counter mutated in a forked worker never reaches the parent) |
+| `N(h)` | a block of `UNIFORM_BLOCK_SIZE = 256` regions | `N_end` is a float64 sum, so its last bits depend on grouping, and r(h) and every draw inherit them; the grouping is fixed by the block size alone — regions in row order within a block, blocks in order in the parent |
+
+Why blocks for `N(h)` and not regions: a dense per-region table pair through
+`parallel_apply` would move ~4.4 GB over 66,649 regions to reduce 64 KB.
+Blocks move one partial pair each, ~17 MB in total.  The block size is part
+of the result — changing it moves `N_end` in the last bits — so it is a
+constant, never derived from the worker count.  Moving from the old serial
+walk to blocks changed `N_end`'s last bits once, alongside the seeding
+change.
+
+**Subset property, at function level only.**  With identical `r`, `f` and
+counts, drawing a subset of regions yields exactly those regions' fragments
+from the full draw.  It does NOT hold at driver level: `--n-regions k`
+re-estimates `r(h)` and `f(L)` from `k` regions, so its draws legitimately
+differ from the full run's.
 
 ## Open
 
@@ -503,6 +567,13 @@ looks like a defect, read the reason before changing it.
   by the owner, 2026-10-08, regardless of the rate -- so no rate is quoted here.
   (An earlier version cited ~0.0075%; that figure was never measured under this
   draw, and a 10-region run measured 3.4%, from too small a sample to settle it.)
+
+- **Per-region streams and parallel stages** (owner decision 166,
+  2026-10-08).  Each region draws from `default_rng([seed, region_index])`;
+  the draw and `N(h)` run in parallel; output is byte-identical across worker
+  counts.  The contract and its traps are §8.  Do not "simplify" the pair to
+  `seed + i`, derive the `N(h)` block size from the worker count, or default
+  `region_index` to the row position — each breaks a stated guarantee.
 
 - **Draw order is not part of the contract.** `sample_region` returns the plus
   block then the minus block, unsorted within each. Output goes straight into
