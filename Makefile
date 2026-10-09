@@ -8,7 +8,19 @@ IMAGE_NAME := karius-$(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
 IMAGE_LATEST := $(ECR_REGISTRY)/$(IMAGE_NAME):latest
 
-.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test
+.PHONY: all login conda-login docker-login tag conda conda-build conda-publish docker docker-build docker-push clean help test test-realdata
+
+# Pin the interpreter so `make test` uses the correct conda env. Override with
+# `make test PYTHON=/path/to/other/python`.
+PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
+
+# Pinning the interpreter is not sufficient on its own: `test_formats.py`
+# drives the `bedToBigBed`, `tabix` and `bedtools` BINARIES, which live in the
+# same env's bin/ and are not found via the interpreter. Without them on PATH
+# about 40 test_formats tests fail and none of it is a regression. Putting
+# $(PYTHON)'s own bin/ first makes `make test` self-contained rather than
+# PATH-dependent.
+export PATH := $(dir $(PYTHON)):$(PATH)
 
 # Wall-clock bound on a test run. This is a hang detector, not a perf budget:
 # the library suite finishes in well under a minute. Override for slow hosts
@@ -217,13 +229,6 @@ docker-push:
 # `pytest -q | tail` never reaches EOF when the process never exits.
 # SIGKILL rather than SIGTERM: a process stuck in an uninterruptible futex
 # wait will not act on a catchable signal.
-# `flgc` lives outside this repo and is not pip installed, so it is importable
-# only when PYTHONPATH points at the biomarker checkout. Its one consumer was
-# background_model/simulator/capture.py, tested by TestFitAndBuild. Both moved to
-# attic/pre_rewrite_simulator/ on 2026-10-09 (decision 171), and attic/ is not
-# collected. NO LIVE CODE OR TEST IMPORTS flgc NOW, so this path is dead config.
-# It stays until the owner decides whether to delete it.
-FLGC_PYTHONPATH ?= /home/nathanboley/src/biomarker
 
 # The interpreter is PINNED, not taken from PATH. A bare `python` resolves to
 # whatever the caller's shell has, and in an agent/MCP shell that was
@@ -251,8 +256,7 @@ test:
 		echo "   Override with: make test PYTHON=/path/to/python"; \
 		exit 2; \
 	fi
-	@PYTHONPATH="$(FLGC_PYTHONPATH):$$PYTHONPATH" \
-	PATH="$(PYTHON_BIN):$$PATH" \
+	@PATH="$(PYTHON_BIN):$$PATH" \
 	timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
@@ -261,6 +265,30 @@ test:
 		echo "   A hang is a finding, not a flake. To find out where:"; \
 		echo "     py-spy dump --pid <the pytest pid>"; \
 		echo "   Check child processes too; a stuck fork child shows 0s CPU."; \
+	fi; \
+	exit $$rc
+
+# Real-data orientation check. An ordinary `make test` SKIPS it when the EFS
+# h5 inputs are absent, so an off-EFS checkout still has a usable suite. This
+# target passes --realdata, which turns absent inputs into a failure.
+#
+# That distinction is the whole point. On the version_2 branch a committed
+# interval manifest went unread by any test for a whole phase, and two real
+# regressions lived in the repo as a result: a 592-interval `merge` movement
+# recorded as "deliberate", and cross-process non-determinism no in-process
+# test could observe. A regression net that can silently skip is how both
+# survived.
+#
+# Only the orientation test is wired here. The interval and bedtools
+# equivalence suites live on version_2 and do not exist on this branch.
+test-realdata:
+	@timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest \
+		test/test_orientation_real_data.py -v --realdata; \
+	rc=$$?; \
+	if [ $$rc -eq 137 ]; then \
+		echo ""; \
+		echo "❌ KILLED after $(TEST_TIMEOUT)s. It HUNG -- it did not fail."; \
+		exit 137; \
 	fi; \
 	exit $$rc
 

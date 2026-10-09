@@ -17,28 +17,22 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   A kill shows as exit 137 and means it HUNG — that is a finding to diagnose
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
-  (the `make test` default) and `tests/` is `background_model`.
-  Baselines as of the last update: `make test` **4 failed / 386 passed /
-  3 skipped**, measured 2026-09-27. Two of the four are missing data, not defects:
-  `test_slice_encode_big_wig` needs an ENCODE bigwig,
-  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
-  the 3 skips are Region doctests needing the optional `fbio`).
-  **The other two are an OPEN FINDING, not flakes**:
-  `test_parallel_apply.py::test_monitor_thread_is_gone_after_the_call` and
-  `::test_monitor_on_a_tqdm_SUBCLASS_is_also_stopped`. Both assert the
-  subclass's own `__dict__` holds `monitor`, but tqdm 4.67.1 appears to assign
-  one to a subclass only when no live base-class monitor already exists — so the
-  precondition depends on process state and test ordering rather than on the
-  production code the tests guard, which came from af84b76 "Stop tqdm monitors
-  on subclasses too". **The guard for a real fork-deadlock fix may therefore be
-  silently void.** Reproduced deterministically in isolation; the mechanism is a
-  reading of tqdm's `__new__` and is NOT verified against its source. Do not
-  "fix" these by relaxing the assertion. Two separate agents have now
-  misdiagnosed them as regressions they had caused, which is why the count above
-  is stated rather than left at the old 2/388.
-  `tests/` **558 passed, 0 skipped** (measured 2026-09-27, after the FL_BANDS
-  widening), where a few `self.log()`-without-Trainer warnings are expected and
-  harmless.
+  and `tests/` is `background_model`. **The default `make test` collects
+  both** (`PYTEST_ARGS` is `test/ tests/ fragmentomics_tools/`), plus the
+  `fragmentomics_tools/` doctests.
+  Last measured baselines, both PRE-DATING the 2026-10-09 merge of main into
+  the simulator branch, so re-measure: `test/ fragmentomics_tools/` alone gave
+  **2 failed / 398 passed / 3 skipped / 0 xfailed**, total 403 (2026-10-07, at
+  the autoflip-removal commit); the default target on the simulator branch gave
+  **2 failed / 1009 passed / 3 skipped** (2026-10-09, before the merge).
+  **Reconcile the TOTAL first** when two measurements disagree: it is
+  invariant under environment, so a matching total means you are looking at an
+  environment difference while a differing total means tests went uncollected.
+  Both failures are missing data, not defects: `test_slice_encode_big_wig`
+  needs an ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the
+  in-package GRCh38 reference; the 3 skips are Region doctests needing the
+  optional `fbio`. A few `self.log()`-without-Trainer warnings in `tests/`
+  are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself
   before and after your change** rather than quoting this line — the `tests/`
   figure sat at 196 long enough that the gap to reality reached 298 tests,
@@ -135,19 +129,18 @@ forward.
 - **`Region(strand=".")` normalizes `.strand` to `None`.** Asserting
   `strand == "."` therefore fails on the ordinary strandless path. Accept
   `{None, ".", "+"}`.
-- **Minus-strand regions arrive flipped.** `from_fragments_h5` delegates to
-  `reverse_strand()` for minus-strand regions — there is exactly one
-  implementation of the flip (coordinates mirrored, all per-fragment arrays
-  reversed, strand labels swapped, `is_flipped=True`). This replaced a
-  hand-rolled block that omitted the reversal of `weights` and
-  `fragment_strands`, a latent defect that was silent only because every
-  caller queries strandless. **An order-invariant check (counts, sums, sets,
-  sorted values) cannot gate an ordering fix** — the gating test
-  (`test_minus_strand_flip_per_fragment_correspondence`) asserts per-element
-  array equality against positionally distinct weights.
-  The correction applier deliberately *refuses* flipped/minus input: query
-  strandless, then orient at the aggregation layer (reverse the position axis
-  and permute tracks). Getting this wrong silently destroys strand asymmetry.
+- **Minus-strand regions are NOT flipped on construction.** `from_fragments_h5`
+  always returns data in genomic order with `is_flipped=False`, regardless of
+  the region's strand. Orientation is deferred to the consumer layer via
+  `reverse_strand()` or `make_data_direction_match_strand()`. The correction
+  applier requires unflipped input — query strandless or plus-strand, then
+  orient at the aggregation layer.
+- **`_switch_plus_with_minus_and_minus_with_plus` compares `str` against
+  `|S1` bytes.** The `from_fragments_h5` call site that used it was removed
+  (autoflip removal), but the function survives for `reverse_strand()` and
+  `strand_bias.py`. Those callers receive `dtype="U1"` arrays (normalised by
+  `__init__`), so the string comparison works. If you add a new caller that
+  passes raw h5 byte data, the comparison will silently match nothing.
 - **`SparseIntVector` is a misnomer** — only `coords` are ints; `data` keeps
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight

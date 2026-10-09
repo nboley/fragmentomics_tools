@@ -121,36 +121,10 @@ def add_at_intervals_inplace(arr, starts, stops, amount):
 
 
 def _switch_plus_with_minus_and_minus_with_plus(fragment_strands):
-    """Swap ``+`` and ``-``; leave anything else (e.g. ``.``) alone.
-
-    **Must accept BOTH dtypes.** This is called from ``from_fragments_h5`` on
-    ``supp_data["strand"]``, which is the raw ``|S1`` BYTES array, and the
-    ``U1`` coercion in ``RegionFragmentArray.__init__`` happens afterwards. A
-    str-only comparison against a bytes array yields an all-False mask, so both
-    masks come out empty and this returns an unchanged copy with no error.
-
-    That was the live behaviour until 2026-10-07: for a minus-strand region the
-    coordinates were mirrored but the strand labels were not swapped, so the two
-    halves of the flipped frame disagreed. Measured on one real region queried
-    twice -- strandless vs minus -- the strand counts came back identical
-    (57 plus / 62 minus both ways) where the minus query should have reported
-    62/57.
-
-    Why that matters: flipping exists so plus- and minus-strand features can be
-    aggregated in a common 5'->3' frame. The coordinate mirror makes "position
-    20" mean the same thing for both; the label swap makes "plus" mean "same
-    orientation as the feature" rather than "genomic plus". With only the first
-    half working, strand-resolved aggregation over mixed-strand features inverts
-    the asymmetry on the minus half and averages it toward zero.
-
-    The two widened comparisons below were present but COMMENTED OUT from the
-    function's first commit (`ebc0be4`), never live, with no reason recorded --
-    most likely written on the assumption that the ``U1`` coercion ran first.
-    Widening rather than coercing preserves the caller's dtype; coercing would
-    hand ``S1`` callers back ``U1``.
-    """
-    plus_mask = (fragment_strands == "+") | (fragment_strands == b"+")
-    minus_mask = (fragment_strands == "-") | (fragment_strands == b"-")
+    # plus_mask = ((fragment_strands == '+') | (fragment_strands == b'+'))
+    # minus_mask = ((fragment_strands == '-') | (fragment_strands == b'-'))
+    plus_mask = fragment_strands == "+"
+    minus_mask = fragment_strands == "-"
     fragment_strands = fragment_strands.copy()
     fragment_strands[plus_mask] = "-"
     fragment_strands[minus_mask] = "+"
@@ -1717,24 +1691,34 @@ class RegionFragmentArray(FragmentArray):
         min_mapq: int = None,
         return_gc: bool = None,
     ) -> "RegionFragmentArray":
-        """Load fragments from an H5 file for the given region.
+        """Load the fragments overlapping `region`, in genomic order.
 
-        When ``region`` is on the minus strand, the returned array has its
-        data flipped to the 5'→3' orientation of that strand (coordinates
-        mirrored, per-fragment arrays reversed, strand labels swapped) via
-        :meth:`reverse_strand`, and ``is_flipped`` is ``True``.  To query
-        without flipping, pass a strandless region (``strand='.'``).
+        **Never flips.** The returned array is always in forward genomic
+        orientation with `is_flipped=False`, whatever the region's strand. A
+        minus-strand region therefore gives the same fragment data as a
+        strandless one; only `region.strand` differs. Orientation belongs to
+        the consumer: call `reverse_strand()` or
+        `make_data_direction_match_strand()` when you want it.
 
-        :param in_fragments_h5: path or open :class:`FragmentsH5` handle.
-        :param region: genomic region to query.  Strand controls flipping.
-        :param max_frag_len: maximum fragment length filter.
-        :param generate_weights_callback: ``f(starts, stops, supp_data) → weights``.
-            Called on the *unflipped* genomic-order arrays.
-        :param fetch_array_kwargs: extra kwargs forwarded to
-            :meth:`FragmentsH5.fetch_array`.
-        :param min_mapq: minimum mapping-quality filter.
-        :param return_gc: whether to fetch per-fragment GC content.
-            Defaults to ``fragments_h5.has_gc`` when a callback is supplied.
+        This used to auto-flip on a minus-strand region, and two defects lived
+        in that block — `fragment_strands` was neither reordered nor actually
+        swapped, and `weights` was never reversed at all. The block
+        hand-duplicated `reverse_strand()` and the copy had drifted field by
+        field. Removing it deleted both defects rather than patching them.
+
+        :param in_fragments_h5: fragments h5, as a path or an open handle. A
+            path is opened and closed here; a handle is left open for the
+            caller.
+        :param region: region to query
+        :param max_frag_len: max fragment length filter
+        :param generate_weights_callback: optional
+            `(starts, stops, supp_data) -> weights`. Called with fragments in
+            genomic order, which is also the order they are stored in.
+        :param fetch_array_kwargs: passed through to the h5 fetch
+        :param min_mapq: mapq filter
+        :param return_gc: include per-fragment GC. Defaults to the h5's
+            `has_gc` when available, else to whether a weights callback was
+            supplied.
         """
         if isinstance(in_fragments_h5, str):
             fragments_h5 = FragmentsH5(in_fragments_h5, cache_pointers=False)
@@ -1833,11 +1817,6 @@ class RegionFragmentArray(FragmentArray):
             is_flipped=False,
             gc=gc,
         )
-
-        if region.is_minus_strand():
-            # Uses FragmentArray.reverse_strand (not rfa.reverse_strand) to
-            # flip fragment data without also flipping the region's strand.
-            rfa = FragmentArray.reverse_strand(rfa)
 
         return rfa
 
