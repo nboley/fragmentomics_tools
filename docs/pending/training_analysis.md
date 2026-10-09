@@ -1545,8 +1545,9 @@ The hexamer prior was refit on this sample's train split alone — no tables fro
 any other sample were reused.
 
 Geometry `tile_size=1024, jitter=256`, so `l_target=1536` matches the supplied
-regions exactly and `|D| = 1024*156*2 = 319,488`, identical to the real-data
-pipeline. Lengths [25, 180] inclusive. Split: random over regions, seed 42,
+regions exactly, and the scored domain is 1024 x 156 x 2 = 319,488 cells,
+identical to the real-data pipeline. Lengths [25, 180] inclusive.
+Split: random over regions, seed 42,
 **5333 / 666 / 666** tiles; `min_N=10` leaves 5210 / 655 / 647 scored.
 
 Training: 20 epochs, batch 32, lr 1e-3, bf16-mixed, multinomial objective only,
