@@ -24,8 +24,7 @@ from scripts.build_hexamer_prior import (
     estimate_dirichlet_alpha0,
 )
 from scripts.count_cut_site_hexamers import TABLE_NAMES
-
-NHEX = 4096
+from background_model.constants import NHEX
 
 
 def _make_synthetic_data(

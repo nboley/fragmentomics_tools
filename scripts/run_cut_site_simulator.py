@@ -22,7 +22,7 @@ Stages 1, 2 and 4 of the spec share ONE pass over the h5, which is why
 ``count_sample`` returns the frame it built rather than discarding it:
 
     srdf ---> count_srdf            ---> C(h), region_counts   (stages 1, 4)
-         \--> FragmentLengthDist.from_srdf ---> f(L)           (stage 2)
+         \\--> FragmentLengthDist.from_srdf ---> f(L)           (stage 2)
                              f(L) ---> uniform_hexamer_counts ---> N(h)  (stage 3)
                          C(h), N(h) ---> propensities ---> r(h)
 

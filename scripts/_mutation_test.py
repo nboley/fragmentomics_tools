@@ -366,6 +366,11 @@ MUTATIONS = [
      "background_model/cut_site_stats.py",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
      "from background_model.constants import HEX_HALF, L_MIN, NHEX\nL_MAX: int = 180\n"),
+
+    ("C3", "cut_site_stats restates L_MIN, L_MAX as a tuple (same values)",
+     "background_model/cut_site_stats.py",
+     "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
+     "from background_model.constants import HEX_HALF, NHEX\nL_MIN, L_MAX = 25, 180\n"),
 ]
 
 # Mutations whose target code was REMOVED on purpose, id -> reason.  Their

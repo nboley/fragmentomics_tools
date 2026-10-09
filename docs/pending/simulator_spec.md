@@ -289,8 +289,14 @@ directly as well as `cut_site_stats`:
    `L_MIN`/`L_MAX` are derived from the locked `tracks.FL_BANDS` (lowest `lo`,
    highest `hi`), not restated, so there is one source; values 25 / 180 / 156.
    It is shared with the cut-site store/model stream. Every importer takes
-   these names from `constants` directly; no other module defines them
-   (`test_constants_single_source`). Simulator-internal values
+   these names from `constants` directly. No other module under
+   `background_model/` and no script under `scripts/` binds any of them
+   (`test_constants_single_source`), with one named exception:
+   `scripts/bench_fragment_logit_sweep.py` binds `L_MIN, L_MAX = 25, 256`, a
+   self-contained GPU cost skeleton whose length range is deliberately not the
+   cut-site one. The tests import them from `constants` too, except
+   `tests/cut_site_oracle.py`, which restates `KMER`/`NHEX` on purpose: it is
+   the independent oracle and imports nothing from the repo. Simulator-internal values
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.

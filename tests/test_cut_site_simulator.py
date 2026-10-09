@@ -13,11 +13,11 @@ Mutations each test must catch are documented in-line as comments.
 
 import ast
 import doctest
+import glob
 import os
 import subprocess
 import sys
 import tempfile
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -2784,13 +2784,11 @@ class TestT7Hygiene:
         """Owner decisions 174-177: the shared cut-site definitions live ONLY
         in ``background_model/constants.py``, and the length bounds are
         derived from the locked ``tracks.FL_BANDS`` rather than restated.
-        Guards mutations C1 (``L_MAX`` off by one) and C2 (a module restates
-        ``L_MAX`` locally -- same value, so only the AST check can see it).
+        Guards mutations C1 (``L_MAX`` off by one), C2 (a module restates
+        ``L_MAX`` locally -- same value, so only the AST check can see it) and
+        C3 (the same restatement in tuple form, ``L_MIN, L_MAX = 25, 180``).
         """
         import background_model.constants as const_mod
-        import background_model.cut_site_stats as stats_mod
-        import background_model.hexamers as hex_mod
-        import background_model.simulator.draw as draw_mod
         from background_model.tracks import FL_BANDS
 
         # The values the owner fixed, and their derivation from FL_BANDS.
@@ -2800,35 +2798,74 @@ class TestT7Hygiene:
         assert L_MAX == max(hi for _lo, hi in FL_BANDS)  # INCLUSIVE
 
         shared = {"L_MIN", "L_MAX", "N_LENGTHS", "KMER", "HEX_HALF", "NHEX"}
+
+        def bound_names(tree):
+            """Every name a module binds, at any depth and in any form:
+            a Store-context Name covers plain, tuple, starred, augmented and
+            annotated assignment, ``for``/``with`` targets, comprehensions
+            and the walrus; parameters, ``import ... as`` and
+            ``except ... as`` bind without a Name node, so take them too."""
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                    yield node.id, node.lineno
+                elif isinstance(node, ast.arg):
+                    yield node.arg, node.lineno
+                elif isinstance(node, ast.alias) and node.asname:
+                    yield node.asname, 0
+                elif isinstance(node, ast.ExceptHandler) and node.name:
+                    yield node.name, node.lineno
+
+        # Non-vacuity of the walker itself: every binding form must be seen.
+        probe = ast.parse(
+            "L_MIN, (L_MAX, *N_LENGTHS) = 1, (2, 3)\nKMER += 1\nHEX_HALF: int = 3\n"
+            "for NHEX in (): pass\nwith f() as KMER: pass\n(HEX_HALF := 3)\n"
+            "def g(L_MAX): pass\nimport x as NHEX\n"
+        )
+        assert {n for n, _ in bound_names(probe)} == shared
+
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        paths = [m.__file__ for m in (hex_mod, stats_mod, draw_mod)] + [
-            os.path.join(repo_root, "scripts", s)
-            for s in ("count_cut_site_hexamers.py", "run_cut_site_simulator.py")
+        excluded = {
+            # The one home: scanned below for non-vacuity, not as a restatement.
+            const_mod.__file__,
+            # A self-contained GPU cost skeleton; its L range (25..256) is
+            # deliberately not the cut-site one and never meets the store.
+            os.path.join(repo_root, "scripts", "bench_fragment_logit_sweep.py"),
+        }
+        paths = sorted(
+            p for p in (
+                glob.glob(os.path.join(repo_root, "background_model", "**", "*.py"),
+                          recursive=True)
+                + glob.glob(os.path.join(repo_root, "scripts", "*.py"))
+            )
+            # attic/ is superseded code kept for reference, not maintained.
+            if p not in excluded and "attic" not in p.split(os.sep)
+        )
+        # Non-vacuity of the glob: the known importers must be in the scan.
+        rel = {os.path.relpath(p, repo_root) for p in paths}
+        for known in ("background_model/hexamers.py",
+                      "background_model/cut_site_stats.py",
+                      "background_model/simulator/draw.py",
+                      "scripts/count_cut_site_hexamers.py",
+                      "scripts/run_cut_site_simulator.py",
+                      "scripts/fit_hexamer_dispersion.py"):
+            assert known in rel, known
+
+        def parse(path):
+            with open(path) as f:
+                return ast.parse(f.read(), path)
+
+        offenders = [
+            f"{os.path.relpath(path, repo_root)}:{line} binds {name}"
+            for path in paths
+            for name, line in bound_names(parse(path))
+            if name in shared
         ]
-        seen_in_constants = set()
-        for path in [const_mod.__file__] + paths:
-            with open(path) as f, warnings.catch_warnings():
-                # run_cut_site_simulator.py's module docstring holds a "\-"
-                # in its ASCII diagram, which the compiler reports as an
-                # invalid escape. Not this test's concern.
-                warnings.simplefilter("ignore", DeprecationWarning)
-                warnings.simplefilter("ignore", SyntaxWarning)
-                tree = ast.parse(f.read())
-            for node in tree.body:
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AnnAssign):
-                    targets = [node.target]
-                else:
-                    continue
-                for t in targets:
-                    if isinstance(t, ast.Name) and t.id in shared:
-                        if path == const_mod.__file__:
-                            seen_in_constants.add(t.id)
-                        else:
-                            raise AssertionError(
-                                f"{os.path.basename(path)} defines {t.id}; "
-                                f"it must import it from background_model.constants"
-                            )
+        assert not offenders, (
+            "these must import from background_model.constants instead:\n"
+            + "\n".join(offenders)
+        )
         # Non-vacuity: the walker must find the real definitions.
+        seen_in_constants = {
+            n for n, _ in bound_names(parse(const_mod.__file__)) if n in shared
+        }
         assert seen_in_constants == shared, shared - seen_in_constants

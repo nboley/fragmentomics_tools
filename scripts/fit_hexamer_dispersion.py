@@ -30,10 +30,13 @@ from datetime import datetime, timezone
 import numpy as np
 import zarr
 
-# ── constants ────────────────────────────────────────────────────────────
-NHEX = 4096
-KMER = 6
+# Pin THIS FILE's repo root so ``background_model`` resolves to this checkout
+# rather than whatever CWD or PYTHONPATH supplies; see count_cut_site_hexamers.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from background_model.constants import KMER, NHEX  # noqa: E402
+
+# ── constants ────────────────────────────────────────────────────────────
 DEFAULT_STORE = (
     "/efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr"
 )

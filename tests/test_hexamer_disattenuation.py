@@ -18,8 +18,7 @@ from scripts.measure_hexamer_disattenuation import (
 )
 from scripts.build_hexamer_prior import build_prior_and_posteriors
 from scripts.count_cut_site_hexamers import TABLE_NAMES
-
-NHEX = 4096
+from background_model.constants import NHEX
 
 
 def _make_artifact_and_obs(
