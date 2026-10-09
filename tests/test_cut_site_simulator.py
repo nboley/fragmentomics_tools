@@ -15,6 +15,7 @@ import ast
 import doctest
 import os
 import subprocess
+import sys
 import tempfile
 
 import numpy as np
@@ -2657,3 +2658,63 @@ class TestT7Hygiene:
                             f"{mod.__name__} imports removed feature: "
                             f"{node.module}"
                         )
+
+    def test_layering_holds(self):
+        """Owner decision 169 split one module into three layers, each
+        importing only from layers above it: ``hexamers.py`` (numpy + stdlib
+        only) <- ``cut_site_stats.py`` (adds pandas, fragmentomics_tools) <-
+        ``simulator/draw.py``. Guards mutations L1 (hexamers imports pandas)
+        and L2 (cut_site_stats imports upward from simulator).
+        """
+        import background_model.cut_site_stats as stats_mod
+        import background_model.hexamers as hex_mod
+
+        allowed_hex_modules = set(sys.stdlib_module_names) | {"__future__", "numpy"}
+        with open(hex_mod.__file__) as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    assert top in allowed_hex_modules, (
+                        f"hexamers.py imports {alias.name}, outside the "
+                        f"numpy+stdlib layer"
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                top = node.module.split(".")[0]
+                assert top in allowed_hex_modules, (
+                    f"hexamers.py imports from {node.module}, outside the "
+                    f"numpy+stdlib layer"
+                )
+
+        with open(stats_mod.__file__) as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith("background_model.simulator"), (
+                    f"cut_site_stats.py imports upward from {node.module}"
+                )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert not alias.name.startswith("background_model.simulator"), (
+                        f"cut_site_stats.py imports upward from {alias.name}"
+                    )
+
+        # Importing only the bottom layer must not pull in pandas, torch or
+        # fragmentomics_tools. background_model/__init__.py imports
+        # background_model.config, which imports only stdlib and
+        # background_model.tracks (stdlib only). That is why this holds; the
+        # subprocess checks it rather than assuming it.
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import background_model.hexamers, sys\n"
+             "banned = [m for m in sys.modules if m == 'pandas' or m == 'torch' "
+             "or m.startswith('fragmentomics_tools')]\n"
+             "assert not banned, banned\n"],
+            capture_output=True, text=True, cwd=repo_root,
+        )
+        assert r.returncode == 0, (
+            f"importing background_model.hexamers alone pulled in a "
+            f"forbidden module:\n{r.stdout}\n{r.stderr}"
+        )

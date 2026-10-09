@@ -37,8 +37,14 @@ A JSON file containing:
 - ``diagnostics``: CV, zero counts, attenuation metrics
 - ``provenance``: region set, sample list, parameters
 
-The artifact is designed to be consumed by the simulator as HexamerTables:
-each sample's posterior weights can be loaded via ``emit.dataframe_to_hex_table``.
+The artifact was designed for the previous-generation simulator, which took
+``HexamerTables`` (its loader, ``emit.dataframe_to_hex_table``, is now in
+``attic/pre_rewrite_simulator/``).  ``artifact_to_hex_tables`` below still
+returns a local ``HexamerTables``.  The live simulator does not read this
+artifact: it takes ``r(h)`` from ``cut_site_stats.propensities``.  The
+artifact's own ``description`` string still says "The simulator consumes these
+as HexamerTables"; it is left as is because changing it changes the artifact
+bytes.
 """
 from __future__ import annotations
 

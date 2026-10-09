@@ -55,7 +55,7 @@ equal its region-local coordinate, so no pad term appears in the lookup at all.
 ``uniform_hexamer_counts`` uses the same frame, so one attached ``sequence`` column
 serves both.
 
-Two library details that bite if assumed rather than checked:
+Three library details that bite if assumed rather than checked:
 
 - ``rfa.fragment_strands`` is ``<U1`` (``'+'``), NOT the ``b'+'`` bytes
   ``FragmentsH5.fetch_array`` returns.  Comparing against bytes silently

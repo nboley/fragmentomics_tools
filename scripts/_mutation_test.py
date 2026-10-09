@@ -13,7 +13,12 @@ text was found, the replacement changed the file, and at least one test went
 red.  A search text that matches nothing used to be recorded as "skip" and
 the run still looked green -- which is how M6 and M40b went silently void
 when unrelated edits moved their anchor text.  Now a skip, a mutation no test
-catches, a timeout or an error all exit 1.
+catches, a timeout or an error all exit 1.  A mutation whose test run fails to
+COLLECT (a ``SyntaxError`` or ``ImportError`` in the mutated module) is also an
+error, not a catch: pytest reports every baseline test as absent, which used
+to read as "every test went red" and exit 0.  Collection failure is detected
+from pytest's own return code and summary text, never inferred from which
+tests are missing.
 
 VOID entries are listed in ``VOID`` with the reason.  A VOID mutation is
 expected NOT to match; if its text reappears the run fails too, since the
@@ -31,9 +36,14 @@ import sys
 import tempfile
 
 # MUTATION_WORKTREE points the harness at a copy, so a mutation never touches a
-# tree that other agents are running tests or code from.
-WORKTREE = os.environ.get(
-    "MUTATION_WORKTREE",
+# tree that other agents are running tests or code from.  No default: see the
+# guard at the top of main(), which refuses to run at all unless the env var
+# is set AND differs from FORBIDDEN_WORKTREE below.
+WORKTREE = os.environ.get("MUTATION_WORKTREE")
+
+# The shared worktree this harness must NEVER run mutations against. Kept only
+# as the forbidden path to check against, not as a default.
+FORBIDDEN_WORKTREE = (
     "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/background-model-work")
 TEST_FILE = "tests/test_cut_site_simulator.py"
 PROP_TEST_FILE = "tests/test_simulator_propensity_denominators.py"
@@ -316,6 +326,18 @@ MUTATIONS = [
      # 3895d08 added DataFrameBase to this import, which had made it a SKIP.
      "from fragmentomics_tools.dataframe import (\n    DataFrameBase,\n    SampleAndRegionDataFrame,\n    SampleDataFrame,\n)",
      "from fragmentomics_tools.dataframe import (\n    DataFrameBase,\n    SampleAndRegionDataFrame,\n    SampleDataFrame,\n)\nif False:\n    from background_model.simulator.precompute import hexamer_indices as _unused"),
+
+    # ── Owner decision 169: layer split (hexamers <- cut_site_stats <- draw) ──
+
+    ("L1", "hexamers imports pandas",
+     "background_model/hexamers.py",
+     "import numpy as np\n",
+     "import numpy as np\nimport pandas as _pd  # noqa: F401\n"),
+
+    ("L2", "cut_site_stats imports upward from simulator",
+     "background_model/cut_site_stats.py",
+     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    _hexamers_at,\n    hexamer_indices,\n    rc_permutation,\n)",
+     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    _hexamers_at,\n    hexamer_indices,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
 ]
 
 # Mutations whose target code was REMOVED on purpose, id -> reason.  Their
@@ -361,7 +383,15 @@ def check_clean():
 
 
 def run_tests():
-    """Run the test files, return dict of test_name -> 'passed'/'failed'/'error'."""
+    """Run the test files.
+
+    Returns ``(results, returncode, collection_failed)`` where ``results`` is
+    a dict of ``test_name -> 'passed'/'failed'/'error'`` parsed from ``-v``
+    output.  ``collection_failed`` is True when pytest aborted before running
+    anything -- a ``SyntaxError`` or ``ImportError`` in the mutated module --
+    in which case every baseline test is simply ABSENT from ``results``,
+    which looks identical to "every test failed" unless checked separately.
+    """
     r = subprocess.run(
         [PYTHON, "-m", "pytest",
          os.path.join(WORKTREE, TEST_FILE),
@@ -390,10 +420,30 @@ def run_tests():
                 status = status_word.lower()
                 results[name] = status
                 break
-    return results
+
+    lowered = r.stdout.lower()
+    collection_failed = (
+        r.returncode in (2, 3, 4)
+        or "during collection" in lowered
+        or "error collecting" in lowered
+    )
+    return results, r.returncode, collection_failed
 
 
 def main():
+    # Refuse to run at all against the shared worktree -- touches no file.
+    if not WORKTREE:
+        print("ERROR: MUTATION_WORKTREE is not set. There is no default; this "
+              "harness mutates files in place and must never run against the "
+              "shared worktree. Point it at a disposable copy, e.g. "
+              "MUTATION_WORKTREE=/tmp/revreorg/copy2.", file=sys.stderr)
+        return 2
+    if os.path.realpath(WORKTREE) == os.path.realpath(FORBIDDEN_WORKTREE):
+        print(f"ERROR: MUTATION_WORKTREE resolves to the shared worktree "
+              f"({FORBIDDEN_WORKTREE}). Refusing to run mutations against it "
+              f"-- point it at a disposable copy instead.", file=sys.stderr)
+        return 2
+
     selected = set(sys.argv[1:]) if len(sys.argv) > 1 else None
     mutations = [m for m in MUTATIONS if m[0] in selected] if selected else MUTATIONS
 
@@ -405,7 +455,11 @@ def main():
 
     # Run baseline
     print("Running baseline tests...")
-    baseline = run_tests()
+    baseline, baseline_rc, baseline_collection_failed = run_tests()
+    if baseline_collection_failed:
+        print(f"ERROR: baseline failed to collect (pytest rc={baseline_rc}). "
+              f"Cannot compute a red/green matrix against a broken baseline.")
+        return 1
     n_baseline_pass = sum(1 for v in baseline.values() if v == "passed")
     print(f"Baseline: {n_baseline_pass} passed, {len(baseline) - n_baseline_pass} other")
 
@@ -443,32 +497,58 @@ def main():
 
         try:
             print(f"  {mid} ({desc}): running tests...", end="", flush=True)
-            mut_results = run_tests()
+            mut_results, mut_rc, mut_collection_failed = run_tests()
 
-            # Find tests that went red (were passing in baseline, now failing)
-            red_tests = []
-            for tname, bstatus in baseline.items():
-                if bstatus == "passed":
-                    mstatus = mut_results.get(tname, "missing")
-                    if mstatus != "passed":
-                        red_tests.append(tname)
+            missing_baseline_tests = [
+                tname for tname, bstatus in baseline.items()
+                if bstatus == "passed" and tname not in mut_results
+            ]
 
-            # Also find tests that went from failing to passing (unexpected)
-            green_tests = []
-            for tname, bstatus in baseline.items():
-                if bstatus != "passed":
-                    mstatus = mut_results.get(tname, "missing")
-                    if mstatus == "passed":
-                        green_tests.append(tname)
+            if mut_collection_failed or missing_baseline_tests:
+                # Collection failure means pytest ran nothing, so every
+                # baseline-passing test is ABSENT from mut_results -- that
+                # used to be parsed as "status != passed" and counted as RED,
+                # which is how a SyntaxError or ImportError in the mutated
+                # module exited 0. Neither case is a catch; both are a
+                # broken run.
+                note_parts = []
+                if mut_collection_failed:
+                    note_parts.append(f"collection failed (pytest rc={mut_rc})")
+                if missing_baseline_tests:
+                    note_parts.append(
+                        f"{len(missing_baseline_tests)} baseline test(s) "
+                        f"absent from mutated results")
+                note = "; ".join(note_parts)
+                results[mid] = {"desc": desc, "status": "error", "red_tests": [],
+                                "note": note}
+                print(f" ERROR: {note}")
+            else:
+                # Find tests that went red (were passing in baseline, now
+                # failing or erroring -- legitimately, since collection
+                # succeeded and every baseline test is present).
+                red_tests = []
+                for tname, bstatus in baseline.items():
+                    if bstatus == "passed":
+                        mstatus = mut_results.get(tname, "missing")
+                        if mstatus != "passed":
+                            red_tests.append(tname)
 
-            results[mid] = {
-                "desc": desc,
-                "status": "done",
-                "red_tests": red_tests,
-                "green_tests": green_tests,
-                "n_red": len(red_tests),
-            }
-            print(f" {len(red_tests)} red")
+                # Also find tests that went from failing to passing (unexpected)
+                green_tests = []
+                for tname, bstatus in baseline.items():
+                    if bstatus != "passed":
+                        mstatus = mut_results.get(tname, "missing")
+                        if mstatus == "passed":
+                            green_tests.append(tname)
+
+                results[mid] = {
+                    "desc": desc,
+                    "status": "done",
+                    "red_tests": red_tests,
+                    "green_tests": green_tests,
+                    "n_red": len(red_tests),
+                }
+                print(f" {len(red_tests)} red")
         except subprocess.TimeoutExpired:
             print(f" TIMEOUT")
             results[mid] = {"desc": desc, "status": "timeout", "red_tests": []}

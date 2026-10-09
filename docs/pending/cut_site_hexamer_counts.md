@@ -167,8 +167,12 @@ Enrichment = `observed / background` per hexamer, summed across all 16 FL
 bands before dividing (count-weighted collapse). Normalised within each table
 to mean 1 so that enrichment is a relative quantity. The synthetic comparison
 uses `build_hexamer_tables(seed, dynamic_range=4.0)` from
-`scripts/run_simulator.py` — the function and default the **current** simulator
-uses. It draws four tables in sequence from one generator, untied by design.
+`scripts/run_simulator.py` — the function and default the simulator used **when
+this comparison was made**. That is the previous-generation simulator, now in
+`attic/pre_rewrite_simulator/scripts/run_simulator.py` (decision 171). The live
+simulator draws no synthetic tables: it takes `r(h)` measured from real data
+(`docs/pending/simulator_spec.md`), so "simulator" in this section means the
+retired one. It draws four tables in sequence from one generator, untied by design.
 (`scripts/sim_fragments.py::build_w6` is the retired sampler's equivalent and
 is *not* what runs; it is unimportable anyway, since `scripts/` is not a package
 and importing it drags in the whole old simulator.)
@@ -246,8 +250,9 @@ than it is between the 5' and 3' cuts. The across-end correlations are nearly
 identical regardless of strand pairing (same-strand ~0.64, cross-strand ~0.64),
 so the 5'/3' distinction is the real axis of variation, not strand.
 
-**The simulator sits at the opposite extreme.** `build_hexamer_tables` in
-`scripts/run_simulator.py` draws four tables in sequence from one generator —
+**The (previous-generation) simulator sits at the opposite extreme.**
+`build_hexamer_tables` in `scripts/run_simulator.py` (now under
+`attic/pre_rewrite_simulator/`) draws four tables in sequence from one generator —
 untied by design — so they are mutually **independent**: measured mean |r|
 **0.011** (seed 42) and **0.013** (seed 1337) across all six pairs, i.e. zero
 within noise.
