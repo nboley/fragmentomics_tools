@@ -47,6 +47,7 @@ import numpy as np
 import torch
 import zarr
 
+from background_model.constants import L_MAX, L_MIN
 from background_model.tracks import FL_BANDS, TRACK_INDEX
 from background_model_core import (
     BackgroundModel,
@@ -68,14 +69,13 @@ MODEL_CLASSES = {
 _SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
 _ROLE_CODES = {"train": 0, "heldout": 1, "dropped_low_depth": 2}
 
-# Derived once from FL_BANDS.  DELIBERATELY NOT background_model.constants.
-# That module defines L_MAX = max(hi) = 180 INCLUSIVE.  This script is the
-# 12-track bridge, and a 12-track model cannot score L = 180 at all: band
-# (110, 180) is half-open, so length 180 falls in no band and has no track.
-# The bridge therefore needs 179, and the names are prefixed so they cannot be
-# mistaken for -- or silently unified with -- the shared constants.
-_EVAL_L_MIN = min(lo for lo, hi in FL_BANDS)
-_EVAL_L_MAX = max(hi for lo, hi in FL_BANDS) - 1  # half-open upper bound
+# L_MIN / L_MAX are the shared inclusive bounds from background_model.constants
+# (owner decision 185; this script used the half-open max(hi) - 1 = 179 before).
+# L_MAX = 180 is admitted by the cut-site store and model but lies in NO
+# half-open FL band, so a 12-track model has no track to score it with.  How
+# such a fragment should be scored is an open owner decision; until it is made,
+# _eval_region refuses any admitted fragment that falls in no band rather than
+# score it with uninitialised memory.
 
 
 def _build_endpoint_map():
@@ -96,15 +96,15 @@ ENDPOINT_MAP = _build_endpoint_map()
 
 def _compute_global_p_marginal(index, n_tiles, mem_frag_indptr, mem_frag_length):
     """Compute global empirical p(L) from all indexed fragments."""
-    counts = np.zeros(_EVAL_L_MAX - _EVAL_L_MIN + 1, dtype=np.float64)
+    counts = np.zeros(L_MAX - L_MIN + 1, dtype=np.float64)
     for s, t in index:
         u = s * n_tiles + t
         flo = int(mem_frag_indptr[u])
         fhi = int(mem_frag_indptr[u + 1])
         lengths = mem_frag_length[flo:fhi].astype(np.int64)
-        valid = (lengths >= _EVAL_L_MIN) & (lengths <= _EVAL_L_MAX)
+        valid = (lengths >= L_MIN) & (lengths <= L_MAX)
         if valid.any():
-            np.add.at(counts, lengths[valid] - _EVAL_L_MIN, 1)
+            np.add.at(counts, lengths[valid] - L_MIN, 1)
     total = counts.sum()
     if total == 0:
         return np.ones_like(counts) / len(counts)
@@ -123,8 +123,8 @@ def _compute_log_Z(probs, p_marginal, P):
             p_first = probs[first_t]  # (P,)
             p_last = probs[last_t]
 
-            for L in range(max(_EVAL_L_MIN, lo), min(_EVAL_L_MAX + 1, hi)):
-                pm = p_marginal[L - _EVAL_L_MIN]
+            for L in range(max(L_MIN, lo), min(L_MAX + 1, hi)):
+                pm = p_marginal[L - L_MIN]
                 if pm <= 0:
                     continue
                 max_start = P - L  # inclusive upper bound on start p
@@ -174,8 +174,8 @@ def _eval_region(
     keep = (
         (frag_m >= 0)
         & (frag_m < P)
-        & (frag_L >= _EVAL_L_MIN)
-        & (frag_L <= _EVAL_L_MAX)
+        & (frag_L >= L_MIN)
+        & (frag_L <= L_MAX)
         & (frag_p >= 0)
         & (frag_end < P)
     )
@@ -199,6 +199,17 @@ def _eval_region(
     for bi, (lo, hi) in enumerate(FL_BANDS):
         band_idx[(frag_L >= lo) & (frag_L < hi)] = bi
 
+    # log_frag_p is np.empty below and only band members are written, so an
+    # admitted fragment in no band would contribute uninitialised memory.
+    unbanded = band_idx < 0
+    if unbanded.any():
+        raise ValueError(
+            f"{int(unbanded.sum())} admitted fragment(s) fall in no FL band "
+            f"(lengths {sorted(set(frag_L[unbanded].tolist()))}; bands "
+            f"{FL_BANDS} are half-open, L_MAX={L_MAX} is inclusive).  Scoring "
+            f"them needs an owner decision; see the note at L_MIN / L_MAX."
+        )
+
     # Vectorised per-(strand, band) group
     log_frag_p = np.empty(n_frag, dtype=np.float64)
     for s_idx in (0, 1):
@@ -219,7 +230,7 @@ def _eval_region(
                 f_pos = end_sel
                 l_pos = p_sel
 
-            L_idx = L_sel - _EVAL_L_MIN
+            L_idx = L_sel - L_MIN
             log_p_L = np.log(np.maximum(p_marginal[L_idx], 1e-30))
 
             log_frag_p[sel] = (
