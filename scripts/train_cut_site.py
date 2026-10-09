@@ -102,6 +102,13 @@ def main():
                    help="Freeze hex lookup tables (don't update during training)")
     p.add_argument("--limit-batches", type=float, default=1.0,
                    help="Fraction of train batches per epoch (0.1 = 10%%)")
+    p.add_argument("--val-check-interval", type=float, default=1.0,
+                   help="Validate this often, in epochs. <1.0 gives sub-epoch "
+                        "checks. Needed when one epoch is large: on the 10%% sim "
+                        "the optimum fell at epoch 6 of 5,210 train regions "
+                        "(~31k tile-visits), which on a 53,320-region set is "
+                        "epoch 0.58 -- i.e. BEFORE the first per-epoch "
+                        "validation. Costs ~3.8%% of an epoch per extra check.")
     p.add_argument("--validate-only", action="store_true",
                    help="Run validation only, no training. On a freshly built "
                         "model this measures the model AT INIT.")
@@ -176,6 +183,7 @@ def main():
         enable_checkpointing=True,
         default_root_dir=args.run_dir,
         log_every_n_steps=10,
+        val_check_interval=args.val_check_interval,
         limit_train_batches=args.limit_batches,
         callbacks=[
             GPUStatsCallback(),
@@ -193,7 +201,10 @@ def main():
                 mode="min",
                 save_top_k=1,
                 save_last=True,
-                filename="best-{epoch:02d}-{val_mult_nll:.6f}",
+                # step is in the name because sub-epoch validation
+                # (--val-check-interval < 1) produces several candidates per
+                # epoch, and {epoch} alone would not distinguish them.
+                filename="best-{epoch:02d}-{step:06d}-{val_mult_nll:.6f}",
             ),
         ],
     )
