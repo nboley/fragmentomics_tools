@@ -151,7 +151,7 @@ def rc_permutation() -> np.ndarray:
     return perm
 
 
-def _hexamers_at(seq: np.ndarray, pos: np.ndarray):
+def hexamers_at(seq: np.ndarray, pos: np.ndarray):
     """``(index, valid)`` for the 6-mer at each cut site in ``pos``.
 
     ``pos`` is region-local.  With ``left_pad == HEX_HALF`` the window covering

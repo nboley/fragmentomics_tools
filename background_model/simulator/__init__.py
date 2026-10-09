@@ -4,7 +4,8 @@
 Start there.
 
 It is three modules, split along their dependency layers (owner decision 169),
-each importing only from the one above:
+each importing only from layers above it (``draw`` imports ``hexamers``
+directly as well as ``cut_site_stats``):
 
 1. ``background_model/hexamers.py`` — hexamer encoding, numpy only.
 2. ``background_model/cut_site_stats.py`` — measurement on real data:

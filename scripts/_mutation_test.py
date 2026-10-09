@@ -20,6 +20,13 @@ to read as "every test went red" and exit 0.  Collection failure is detected
 from pytest's own return code and summary text, never inferred from which
 tests are missing.
 
+**Every non-VOID anchor is checked before anything runs** (``check_anchor``):
+its search text must occur exactly once in the target file, and that
+occurrence must lie in code, not wholly inside a string, docstring or
+comment.  A failing anchor exits 1 before the baseline.  Without it, an
+anchor duplicated by a later edit mutates whichever copy comes first, and one
+that only survives in a docstring mutates text that never executes.
+
 VOID entries are listed in ``VOID`` with the reason.  A VOID mutation is
 expected NOT to match; if its text reappears the run fails too, since the
 entry then needs re-examining rather than ignoring.
@@ -28,12 +35,14 @@ NEVER commits. Verifies the tree is clean before and after.  Run it against
 a copy (``MUTATION_WORKTREE``), never a tree other agents are using.
 """
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import tokenize
 
 # MUTATION_WORKTREE points the harness at a copy, so a mutation never touches a
 # tree that other agents are running tests or code from.  No default: see the
@@ -248,8 +257,8 @@ MUTATIONS = [
     # M32: clip stops_0 to the region before the hexamer lookup
     ("M32", "clip stops_0 to region before hexamer lookup",
      "background_model/cut_site_stats.py",
-     "    e_hex, e_ok = _hexamers_at(sequence, rfa.stops_0)",
-     "    e_hex, e_ok = _hexamers_at(sequence, np.minimum(rfa.stops_0, rfa.length - 1))"),
+     "    e_hex, e_ok = hexamers_at(sequence, rfa.stops_0)",
+     "    e_hex, e_ok = hexamers_at(sequence, np.minimum(rfa.stops_0, rfa.length - 1))"),
 
     # M34: pad a truncated contig-end fetch with N instead of raising (library)
     ("M34", "pad truncated contig-end fetch with N instead of raising (library)",
@@ -336,8 +345,8 @@ MUTATIONS = [
 
     ("L2", "cut_site_stats imports upward from simulator",
      "background_model/cut_site_stats.py",
-     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    _hexamers_at,\n    hexamer_indices,\n    rc_permutation,\n)",
-     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    _hexamers_at,\n    hexamer_indices,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
+     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)",
+     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
 ]
 
 # Mutations whose target code was REMOVED on purpose, id -> reason.  Their
@@ -360,6 +369,47 @@ def read_file(path):
 def write_file(path, content):
     with open(path, "w") as f:
         f.write(content)
+
+
+# Tokens that are not code for the anchor check: text inside them can be
+# matched by a search string without the mutation touching behaviour.
+_NON_CODE_TOKENS = {tokenize.STRING, tokenize.COMMENT, tokenize.NL,
+                    tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
+                    tokenize.ENDMARKER}
+
+
+def check_anchor(source, old_text):
+    """``None`` if ``old_text`` is a sound anchor in ``source``, else why not.
+
+    Sound means it occurs EXACTLY ONCE, and that occurrence overlaps at least
+    one code token -- a name, operator or number -- rather than lying wholly
+    inside a string, docstring or comment.  ``str.replace(..., 1)`` mutates
+    the FIRST occurrence, so a second copy makes the target ambiguous; and a
+    copy inside a docstring or comment mutates text that never runs, which
+    reads as an uncaught mutation, or worse as a catch by a doctest.
+    """
+    n = source.count(old_text)
+    if n != 1:
+        return f"search text occurs {n} times, expected exactly 1"
+    start = source.index(old_text)
+    end = start + len(old_text)
+    # tokenize reports (row, col) with col in characters, so map rows to
+    # absolute offsets.
+    line_starts = [0]
+    for line in source.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line))
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, SyntaxError) as e:
+        return f"target does not tokenize: {e}"
+    for tok in tokens:
+        if tok.type in _NON_CODE_TOKENS:
+            continue
+        t0 = line_starts[tok.start[0] - 1] + tok.start[1]
+        t1 = line_starts[tok.end[0] - 1] + tok.end[1]
+        if t0 < end and start < t1:
+            return None
+    return "search text lies only inside strings, docstrings or comments"
 
 
 def clean_pycache():
@@ -386,8 +436,12 @@ def run_tests():
     """Run the test files.
 
     Returns ``(results, returncode, collection_failed)`` where ``results`` is
-    a dict of ``test_name -> 'passed'/'failed'/'error'`` parsed from ``-v``
-    output.  ``collection_failed`` is True when pytest aborted before running
+    a dict of pytest node id (``tests/file.py::Class::test_name[param]``) ->
+    ``'passed'/'failed'/'error'``, parsed from ``-v`` output.  Keyed by the
+    full node id, not the bare test name: two tests sharing a name in
+    different classes or files would otherwise overwrite each other, and one
+    going red could be masked by the other passing.
+    ``collection_failed`` is True when pytest aborted before running
     anything -- a ``SyntaxError`` or ``ImportError`` in the mutated module --
     in which case every baseline test is simply ABSENT from ``results``,
     which looks identical to "every test failed" unless checked separately.
@@ -412,13 +466,13 @@ def run_tests():
         line = line.strip()
         for status_word in ("PASSED", "FAILED", "ERROR"):
             if f" {status_word}" in line and "::" in line:
-                # Extract test id: everything before the status word
+                # Node id: everything before the status word.
                 # Format: tests/file.py::Class::test_name PASSED [ xx%]
                 test_id = line.split(f" {status_word}")[0].strip()
-                # Get just the last :: part (the test function name, possibly with params)
-                name = test_id.split("::")[-1]
-                status = status_word.lower()
-                results[name] = status
+                # A teardown error prints a second line for the same id
+                # (PASSED, then ERROR); never let a later PASSED hide it.
+                if results.get(test_id, "passed") == "passed":
+                    results[test_id] = status_word.lower()
                 break
 
     lowered = r.stdout.lower()
@@ -445,7 +499,29 @@ def main():
         return 2
 
     selected = set(sys.argv[1:]) if len(sys.argv) > 1 else None
+    if selected and selected - set(_ids):
+        # Otherwise a typo selects nothing, runs nothing and exits 0.
+        print(f"ERROR: unknown mutation id(s): "
+              f"{', '.join(sorted(selected - set(_ids)))}", file=sys.stderr)
+        return 2
     mutations = [m for m in MUTATIONS if m[0] in selected] if selected else MUTATIONS
+
+    # Anchor check, before the baseline: cheap, and a bad anchor makes every
+    # later verdict about that mutation meaningless.
+    bad_anchors = []
+    for mid, _desc, relpath, old_text, _new in mutations:
+        if mid in VOID:
+            continue
+        why = check_anchor(read_file(os.path.join(WORKTREE, relpath)), old_text)
+        if why:
+            bad_anchors.append(mid)
+            print(f"ERROR: {mid} anchor in {relpath}: {why}")
+    if bad_anchors:
+        print(f"ANCHOR CHECK FAILED for {len(bad_anchors)} mutation(s): "
+              f"{', '.join(bad_anchors)}. Nothing was run.")
+        return 1
+    n_checked = sum(1 for m in mutations if m[0] not in VOID)
+    print(f"Anchor check: {n_checked} anchor(s), each exactly once and in code.")
 
     # Clean pycache and verify clean tree
     clean_pycache()

@@ -11,9 +11,9 @@ stream ``default_rng([seed, region_index])``, and every reduction is grouped
 independently of ``n_workers``.  See ``region_rng``, and ``UNIFORM_BLOCK_SIZE``
 in ``cut_site_stats`` for the same guarantee on ``N(h)``.
 
-The sampler takes the per-site RATE ``r(h)`` from ``propensities``, not raw
-counts: it re-enumerates candidate positions itself, so counts would apply
-hexamer abundance twice.
+The sampler takes the per-site RATE ``r(h)`` from
+``cut_site_stats.propensities``, not raw counts: it re-enumerates candidate
+positions itself, so counts would apply hexamer abundance twice.
 """
 
 from __future__ import annotations
@@ -268,7 +268,8 @@ def simulate_fragments_to_bed(
     bgzipped and tabix-indexed -- that is the caller's next step, not this
     function's.
 
-    ``region_counts`` is the per-row ``n``, as returned by ``count_srdf``.
+    ``region_counts`` is the per-row ``n``, as returned by
+    ``cut_site_stats.count_srdf``.
     ``seed`` is required rather than defaulted: an unseeded run cannot be
     reproduced, and the seed is this artifact's only provenance.
 
@@ -278,9 +279,9 @@ def simulate_fragments_to_bed(
     region set, a property of the region rather than of this frame, so a
     filtered or reordered ``srdf`` draws exactly the same fragments for the
     regions it keeps.  It is taken from the argument if given, else from the
-    frame's ``region_index`` column, which ``count_sample`` attaches.  There
-    is no positional fallback: ``arange(len(srdf))`` would silently re-key
-    every region of a filtered frame.  Values must be unique.
+    frame's ``region_index`` column, which ``cut_site_stats.count_sample``
+    attaches.  There is no positional fallback: ``arange(len(srdf))`` would
+    silently re-key every region of a filtered frame.  Values must be unique.
 
     **Parallel, and byte-identical for every ``n_workers``.**  Regions are
     drawn through ``parallel_apply`` (``None`` = every CPU, ``1`` =

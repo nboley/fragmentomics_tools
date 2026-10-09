@@ -2031,8 +2031,7 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         # forking path `get_fa` only ever runs in a worker, so the parent's
         # copy is still empty when ProcessPoolExecutor forks. The pid in the
         # key is a second barrier -- a child cannot reuse or close an entry
-        # that is not its own -- and matches
-        # background_model/simulator/count_hexamers.py.
+        # that is not its own.
         open_h5s = {}
 
         def resolve_h5(frag_h5):

@@ -2665,9 +2665,62 @@ class TestT7Hygiene:
         only) <- ``cut_site_stats.py`` (adds pandas, fragmentomics_tools) <-
         ``simulator/draw.py``. Guards mutations L1 (hexamers imports pandas)
         and L2 (cut_site_stats imports upward from simulator).
+
+        "Above", not "the one above": ``draw`` importing ``hexamers`` directly
+        is allowed, so this checks each import against the importer's own
+        layer rather than demanding it come from the adjacent one.
         """
         import background_model.cut_site_stats as stats_mod
         import background_model.hexamers as hex_mod
+        import background_model.simulator.draw as draw_mod
+
+        # Upstream first: a module may import only from a LOWER index here,
+        # i.e. from a layer above it. Anything under background_model.simulator
+        # is the draw's layer, so importing the package counts as importing it.
+        layers = ["background_model.hexamers", "background_model.cut_site_stats",
+                  "background_model.simulator"]
+
+        def layer_of(name):
+            for i, prefix in enumerate(layers):
+                if name == prefix or name.startswith(prefix + "."):
+                    return i
+            return None
+
+        def imported_names(mod):
+            # Relative imports resolve against the module's own package.
+            package = mod.__name__.rsplit(".", 1)[0]
+            with open(mod.__file__) as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        yield alias.name
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level:
+                        parts = package.split(".")
+                        parts = parts[:len(parts) - (node.level - 1)]
+                        base = ".".join(parts + ([base] if base else []))
+                    yield base
+                    # `from background_model import simulator` names the
+                    # layer in the alias, not in the module.
+                    for alias in node.names:
+                        yield f"{base}.{alias.name}"
+
+        for own, mod in enumerate((hex_mod, stats_mod, draw_mod)):
+            cross = set()
+            for name in imported_names(mod):
+                other = layer_of(name)
+                if other is None or other == own:
+                    continue
+                assert other < own, (
+                    f"{mod.__name__} imports {name} from a layer below it"
+                )
+                cross.add(other)
+            if own:
+                # Non-vacuity: the walker must see the real imports these
+                # modules make, or the assertion above checks nothing.
+                assert cross, f"{mod.__name__}: no cross-layer import seen"
 
         allowed_hex_modules = set(sys.stdlib_module_names) | {"__future__", "numpy"}
         with open(hex_mod.__file__) as f:
@@ -2687,20 +2740,7 @@ class TestT7Hygiene:
                     f"numpy+stdlib layer"
                 )
 
-        with open(stats_mod.__file__) as f:
-            tree = ast.parse(f.read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                assert not node.module.startswith("background_model.simulator"), (
-                    f"cut_site_stats.py imports upward from {node.module}"
-                )
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert not alias.name.startswith("background_model.simulator"), (
-                        f"cut_site_stats.py imports upward from {alias.name}"
-                    )
-
-        # Importing only the bottom layer must not pull in pandas, torch or
+        # Importing only hexamers must not pull in pandas, torch or
         # fragmentomics_tools. background_model/__init__.py imports
         # background_model.config, which imports only stdlib and
         # background_model.tracks (stdlib only). That is why this holds; the

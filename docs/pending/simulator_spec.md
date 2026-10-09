@@ -280,7 +280,8 @@ which is a relabelling of the same position.
 ## 6. Code
 
 Three modules, split along their dependency layers (owner decision 169). Each
-imports only from the one above it:
+imports only from layers above it, so `draw` imports `hexamers` directly as
+well as `cut_site_stats`:
 
 1. `background_model/hexamers.py` — encoding. numpy only.
 2. `background_model/cut_site_stats.py` — measurement on real data (`C(h)`,
@@ -307,6 +308,7 @@ code without changing it. The previous-generation simulator (`capture`,
 | `propensities` | `cut_site_stats` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
+| `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
 
 `C(h)`: `attach_fragment_arrays(callback=filter_fragments)` →
@@ -452,9 +454,14 @@ Needs action. Nothing here has been decided.
 Kept briefly because the Open list claimed all three for longer than they were
 true, and a reader who saw it mid-day would have acted on stale information.
 
-- ~~**No tests.**~~ 47 now reference `count_hexamers_rdf` (`844f227`, `45b32ec`,
-  `d9c6e90`) — 43 plus an independent oracle, plus 4 propensity tests. Mutation
-  tested: 18 mutations applied programmatically, all now caught.
+- ~~**No tests.**~~ Closed by `844f227`, `45b32ec` and `d9c6e90`, against the
+  pre-split `count_hexamers_rdf.py`. As of 2026-10-09 the three modules are
+  covered by `tests/test_cut_site_simulator.py` (75 tests, including an
+  independent encoder oracle in `tests/cut_site_oracle.py`) and
+  `tests/test_simulator_propensity_denominators.py` (4). Mutation tested:
+  `scripts/_mutation_test.py` carries 47 mutations, 1 of them VOID, and exits
+  non-zero unless every non-VOID one matches its anchor exactly once in code
+  and turns at least one test red.
 - ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
   `test_contig_ends_raise` and `test_frame_through_attach_sequence` pin it: it
   raises, and the padded length is asserted exactly, which pins both pads.
@@ -559,7 +566,7 @@ looks like a defect, read the reason before changing it.
   **tautologies**, not routing protection — measured: feeding
   `counts_from_hexamers` a start/stop swap leaves both true, because each sum is
   just that strand's row count however the hexamers are routed. They stay only
-  to catch a malformed `counts` dict from outside this module.
+  to catch a malformed `counts` dict from outside `cut_site_stats`.
 
   Scope of that guard, so it is not mistaken for more than it is.
   `sample_region` skips a whole strand block on `if tot <= 0: continue`, with no

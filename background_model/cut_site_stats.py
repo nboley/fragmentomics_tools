@@ -18,9 +18,9 @@ Two artifacts, with different lifetimes:
   ``n_workers``.
 
 ``propensities(C, N)`` divides them into the per-site rate ``r(h) = C(h)/N(h)``,
-which is what the sampler needs.  Counts alone are ``r(h)·N(h)``, so feeding
-them to a sampler that re-enumerates candidate positions applies hexamer
-abundance twice.  The spread in ``N`` across hexamers is large, so this is not
+which is what the sampler (``simulator.draw.sample_region``) needs.  Counts
+alone are ``r(h)·N(h)``, so feeding them to a sampler that re-enumerates
+candidate positions applies hexamer abundance twice.  The spread in ``N`` across hexamers is large, so this is not
 a small correction.
 
 The ``C(h)`` path is three chained passes over a ``SampleAndRegionDataFrame``:
@@ -90,8 +90,8 @@ from fragmentomics_tools.dataframe import (
 from background_model.hexamers import (
     HEX_HALF,
     NHEX,
-    _hexamers_at,
     hexamer_indices,
+    hexamers_at,
     rc_permutation,
 )
 
@@ -161,8 +161,8 @@ def cut_site_hexamers(rfa, sequence) -> "pd.DataFrame":
         return pd.DataFrame({"start_hex": np.empty(0, np.int32),
                              "stop_hex": np.empty(0, np.int32),
                              "strand": np.empty(0, "<U1")})
-    s_hex, s_ok = _hexamers_at(sequence, rfa.starts_0)
-    e_hex, e_ok = _hexamers_at(sequence, rfa.stops_0)
+    s_hex, s_ok = hexamers_at(sequence, rfa.starts_0)
+    e_hex, e_ok = hexamers_at(sequence, rfa.stops_0)
     ok = s_ok & e_ok
     return pd.DataFrame({
         "start_hex": s_hex[ok].astype(np.int32),
@@ -280,7 +280,7 @@ class FragmentLengthDist:
         fas = [fa for fa in srdf["fragment_array"] if fa.n_frags]
         if not fas:
             raise ValueError("no fragments in any region")
-        hi = max(int(fa.lengths.max()) for fas_ in (fas,) for fa in fas_)
+        hi = max(int(fa.lengths.max()) for fa in fas)
         counts = np.zeros(hi + 1, dtype=np.int64)
         for fa in fas:
             counts += np.bincount(fa.lengths, minlength=hi + 1)
@@ -507,9 +507,9 @@ def propensities(
     must be POSITION-relative.** ``start``/``end`` name the molecule's 5' and
     3' cut site, but a minus-strand fragment's 5' cut site sits at its GENOMIC
     STOP.  ``counts_from_hexamers`` therefore tallies genomic stops into
-    ``start_rev`` and genomic starts into ``end_rev``, and ``sample_region``
-    applies them that way round too.  The null expectation has to match the
-    positions actually tallied, so:
+    ``start_rev`` and genomic starts into ``end_rev``, and
+    ``simulator.draw.sample_region`` applies them that way round too.  The
+    null expectation has to match the positions actually tallied, so:
 
         start_fwd <- genomic starts -> N_start
         end_fwd   <- genomic stops  -> N_end
@@ -756,7 +756,7 @@ def count_sample(
       genomic one.
     - a ``region_index`` column -- each region's position in ``rdf``'s
       region set, taken from ``rdf``'s index labels -- which keys the
-      region's draw stream in ``simulate_fragments_to_bed``.
+      region's draw stream in ``simulator.draw.simulate_fragments_to_bed``.
 
     Rebuilding it would cost a second fetch and a second serial FASTA walk.
     Note ``uniform_hexamer_counts`` takes the ``rdf``, NOT this frame -- it
