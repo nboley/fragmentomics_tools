@@ -94,13 +94,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
-from background_model.simulator.count_hexamers_rdf import (  # noqa: E402
+from background_model.cut_site_stats import (  # noqa: E402
     FragmentLengthDist,
     TABLE_NAMES,
     count_sample,
     propensities,
-    simulate_fragments_to_bed,
     uniform_hexamer_counts,
+)
+from background_model.simulator.draw import (  # noqa: E402
+    simulate_fragments_to_bed,
 )
 
 

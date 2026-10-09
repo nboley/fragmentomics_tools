@@ -1,4 +1,9 @@
-"""Tests for ``background_model/simulator/count_hexamers_rdf.py``.
+"""Tests for the cut-site simulator: ``background_model/hexamers.py``,
+``background_model/cut_site_stats.py`` and ``background_model/simulator/draw.py``.
+
+These three were one module, ``count_hexamers_rdf.py``, until owner decision
+169 split it along its dependency layers; the tests were kept together because
+most of them exercise the chain end to end.
 
 Every oracle imports NOTHING from the module under test.  The AST check
 ``t7_oracle_is_independent`` enforces this.
@@ -19,13 +24,18 @@ import pytest
 
 import cut_site_oracle as oracle
 
-from background_model.simulator.count_hexamers_rdf import (
-    FragmentLengthDist,
+from background_model.hexamers import (
     HEX_HALF,
     KMER,
+    NHEX,
+    hexamer_indices,
+    hexamer_vocabulary,
+    rc_permutation,
+)
+from background_model.cut_site_stats import (
+    FragmentLengthDist,
     L_MAX,
     L_MIN,
-    NHEX,
     N_LENGTHS,
     TABLE_NAMES,
     count_sample,
@@ -35,15 +45,14 @@ from background_model.simulator.count_hexamers_rdf import (
     empty_counts,
     filter_fragments,
     fl_end_weight,
-    hexamer_indices,
-    hexamer_vocabulary,
     load_sample_dataframe,
-    oracle_nll,
     propensities,
-    rc_permutation,
+    uniform_hexamer_counts,
+)
+from background_model.simulator.draw import (
+    oracle_nll,
     sample_region,
     simulate_fragments_to_bed,
-    uniform_hexamer_counts,
 )
 from fragmentomics_tools.dataframe import RegionDataFrame
 
@@ -2592,11 +2601,25 @@ class TestT7Hygiene:
     """Module-level checks."""
 
     def test_module_doctests_execute(self):
-        """M3 (lowercase in doctest)."""
-        import background_model.simulator.count_hexamers_rdf as mod
-        results = doctest.testmod(mod, verbose=False)
-        assert results.attempted > 0, "no doctests found"
-        assert results.failed == 0, f"{results.failed} doctest(s) failed"
+        """M3 (lowercase in doctest).
+
+        ``make test`` does not collect ``background_model/``, so this is the
+        ONLY place these modules' doctests run.  It covers all three modules
+        of the split.  ``hexamers`` carries every example today; the other
+        two must still pass if one is added, and an example vanishing from
+        ``hexamers`` fails here rather than silently dropping out.
+        """
+        import background_model.cut_site_stats as stats_mod
+        import background_model.hexamers as hex_mod
+        import background_model.simulator.draw as draw_mod
+        for mod, must_have_examples in ((hex_mod, True), (stats_mod, False),
+                                        (draw_mod, False)):
+            results = doctest.testmod(mod, verbose=False)
+            if must_have_examples:
+                assert results.attempted > 0, f"no doctests found in {mod.__name__}"
+            assert results.failed == 0, (
+                f"{results.failed} doctest(s) failed in {mod.__name__}"
+            )
 
     def test_oracle_is_independent(self):
         """M40 (oracle imports background_model)."""
@@ -2619,15 +2642,18 @@ class TestT7Hygiene:
 
     def test_no_removed_feature_imports(self):
         """M40 (module imports simulator.precompute)."""
-        import background_model.simulator.count_hexamers_rdf as mod
-        mod_path = mod.__file__
-        with open(mod_path) as f:
-            tree = ast.parse(f.read())
+        import background_model.cut_site_stats as stats_mod
+        import background_model.hexamers as hex_mod
+        import background_model.simulator.draw as draw_mod
         banned = {"flgc", "simulator.capture", "simulator.precompute",
                    "simulator.weights", "simulator.sampler", "simulator.emit"}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                for b in banned:
-                    assert b not in node.module, (
-                        f"module imports removed feature: {node.module}"
-                    )
+        for mod in (hex_mod, stats_mod, draw_mod):
+            with open(mod.__file__) as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    for b in banned:
+                        assert b not in node.module, (
+                            f"{mod.__name__} imports removed feature: "
+                            f"{node.module}"
+                        )

@@ -7,8 +7,8 @@ here from an *independent* encoder (plain Python string arithmetic, no import of
 the production LUT) and every strand/parity case asserts both that the expected
 bin is hot and that the bin a plausible bug would have hit is cold.
 
-All synthetic -- no FASTA and no h5 except the one test that cross-checks
-``region_hexamers`` against ``simulator.precompute.precompute_region``.
+All synthetic -- no h5, and no FASTA except the tiny one written by the test
+that checks ``region_hexamers``' fetch window.
 """
 
 import importlib.util
@@ -452,14 +452,18 @@ def test_observed_is_a_subset_of_the_background_support():
 # ── the shared primitive really is shared ────────────────────────────────
 
 def test_region_hexamers_matches_precompute_region_exactly(tmp_path):
-    """``region_hexamers`` must not have drifted from the simulator's version.
+    """``region_hexamers`` must read the right window at every cut site.
 
-    It exists only to avoid re-opening the 3 GB FASTA per region; if it ever
-    disagrees with ``precompute_region`` the observed tables silently stop
-    matching the tracks they parameterise.
+    Its comparator used to be ``precompute_region``, the previous-generation
+    simulator's version of the same fetch.  That simulator was retired to
+    ``attic/pre_rewrite_simulator/`` (decision 171), so the expected arrays are
+    now built from THIS file's independent string encoder instead -- a
+    stronger check, since it shares no code with production.  An invalid
+    window carries its N-as-A reading in production, so the expectation reads
+    N as A too, and every element is compared, valid or not.  The test name
+    is kept so the count and history stay traceable.
     """
     pysam = pytest.importorskip("pysam")
-    from background_model.simulator.precompute import precompute_region
 
     fa_path = tmp_path / "tiny.fa"
     seq = GENOME[:60] + "N" * 4 + GENOME[64:]
@@ -470,7 +474,10 @@ def test_region_hexamers_matches_precompute_region_exactly(tmp_path):
     pysam.faidx(str(fa_path))
 
     gstart, gstop = 20, 180
-    want = precompute_region("chrT", gstart, gstop, str(fa_path), pad=0)
+    sixes = [hexamer_at(seq, c) for c in range(gstart, gstop + 1)]
+    want_valid = np.array(["N" not in s for s in sixes])
+    want_fwd = np.array([hidx(s.replace("N", "A")) for s in sixes])
+    want_rc = np.array([hidx(rc(s.replace("N", "A"))) for s in sixes])
 
     fa = pysam.FastaFile(str(fa_path))
     try:
@@ -478,9 +485,9 @@ def test_region_hexamers_matches_precompute_region_exactly(tmp_path):
     finally:
         fa.close()
 
-    np.testing.assert_array_equal(hex_fwd, want.hex_fwd)
-    np.testing.assert_array_equal(hex_rc, want.hex_rc)
-    np.testing.assert_array_equal(valid, want.valid)
+    np.testing.assert_array_equal(hex_fwd, want_fwd)
+    np.testing.assert_array_equal(hex_rc, want_rc)
+    np.testing.assert_array_equal(valid, want_valid)
     assert len(hex_fwd) == gstop - gstart + 1
     assert not valid.all(), "test setup: the N run should invalidate windows"
 

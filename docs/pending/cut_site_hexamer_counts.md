@@ -84,8 +84,8 @@ the code's filter pipeline.
    rate is recorded as a diagnostic.
 3. **Containment:** `gstart <= start` and `stop <= gstop` -- fully contained.
    A fragment straddling a tile boundary falls out of both tiles.
-4. **Length range:** `[25, 180]` inclusive (from `simulator.weights.L_MIN`,
-   `L_MAX`).
+4. **Length range:** `[25, 180]` inclusive (from `cut_site_stats.L_MIN`,
+   `L_MAX`; originally `simulator.weights`, now in `attic/pre_rewrite_simulator/`).
 5. **Valid cut sites:** both the 5' and 3' hexamer windows must be fully ACGT.
 
 ### Cut-site geometry
@@ -124,11 +124,12 @@ convention mismatch fails to *join* instead of silently misaligning.
 
 ### Single vocabulary source
 
-`hexamer_vocabulary()` is defined in exactly one place
-(`background_model/simulator/precompute.py`) and imported by both the
-simulator's `emit.py` and this script. A second ordering would silently
-invalidate every comparison. Verified by grep: no other file defines this
-function.
+`hexamer_vocabulary()` is defined in exactly one live place
+(`background_model/hexamers.py`, since 2026-10-09) and imported by this script.
+A second ordering would silently invalidate every comparison. Until that date
+there were two copies, in `simulator/precompute.py` and
+`simulator/count_hexamers_rdf.py`. They were verified identical. The first is
+now in `attic/pre_rewrite_simulator/`, and the second became `hexamers.py`.
 
 ## Sample selection — reproducible, but only against a pinned sheet
 

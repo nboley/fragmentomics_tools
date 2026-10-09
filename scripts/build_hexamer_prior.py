@@ -48,6 +48,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -469,14 +470,28 @@ def load_artifact(path: str):
     return artifact
 
 
+class HexamerTables(NamedTuple):
+    """The four cut-site tables, one ``(4096,)`` array each.
+
+    A plain container, local to this script.  It used to be imported from the
+    previous-generation simulator's ``weights.py`` (now in
+    ``attic/pre_rewrite_simulator/``), where it also carried that sampler's
+    strand semantics.  The live simulator passes tables as a dict keyed by
+    ``TABLE_NAMES`` and has no container type, so there was nothing live to
+    import it from.
+    """
+    start_fwd: np.ndarray
+    end_fwd: np.ndarray
+    start_rev: np.ndarray
+    end_rev: np.ndarray
+
+
 def artifact_to_hex_tables(artifact: dict, sample_name: str | None = None):
     """Extract HexamerTables from the artifact.
 
     If sample_name is None, returns the pooled prior weights.
     Otherwise, returns the per-sample posterior weights.
     """
-    from background_model.simulator.weights import HexamerTables
-
     hex_order = artifact["hex_order"]
 
     if sample_name is None:

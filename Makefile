@@ -46,7 +46,7 @@ TEST_TIMEOUT ?= 3600
 #
 # Rejected alternatives: importmode=importlib and adding __init__.py both fix
 # the collision but break `import cut_site_oracle` in
-# tests/test_count_hexamers_rdf.py, which relies on prepend mode putting
+# tests/test_cut_site_simulator.py, which relies on prepend mode putting
 # tests/ on sys.path. Moving test/fragment_array/conftest.py to the root
 # breaks its DATA_DIR, which is built from __file__.
 PYTEST_ARGS ?= test/ tests/ fragmentomics_tools/ -q --doctest-modules \

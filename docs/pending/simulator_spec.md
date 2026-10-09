@@ -279,26 +279,35 @@ which is a relabelling of the same position.
 
 ## 6. Code
 
-`background_model/simulator/count_hexamers_rdf.py`. Self-contained: stdlib,
-numpy, pandas, `fragmentomics_tools.dataframe`.
+Three modules, split along their dependency layers (owner decision 169). Each
+imports only from the one above it:
 
-| Function | Does |
-|---|---|
-| `filter_fragments` | dedup, length filter, admission. All filtering |
-| `cut_site_hexamers` | per region → `start_hex`, `stop_hex`, `strand` |
-| `counts_from_hexamers` | genomic start/stop + strand → the four tables |
-| `count_srdf` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
-| `count_sample` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
-| `simulate_fragments_to_bed` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
-| `region_rng` | one region's stream, `default_rng([seed, region_index])`. See §8 |
-| `oracle_nll` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
-| `uniform_hexamer_counts` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `w(i)` above |
-| `propensities` | `C / N` |
-| `sample_region` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
-| `hexamer_indices` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
-| `rc_permutation` | RC as a 4096 permutation, derived from the encoder |
+1. `background_model/hexamers.py` — encoding. numpy only.
+2. `background_model/cut_site_stats.py` — measurement on real data (`C(h)`,
+   `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
+3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
+
+They were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split moved
+code without changing it. The previous-generation simulator (`capture`,
+`emit`, `precompute`, `sampler`, `weights`) is in `attic/pre_rewrite_simulator/`.
+
+| Function | Module | Does |
+|---|---|---|
+| `filter_fragments` | `cut_site_stats` | dedup, length filter, admission. All filtering |
+| `cut_site_hexamers` | `cut_site_stats` | per region → `start_hex`, `stop_hex`, `strand` |
+| `counts_from_hexamers` | `cut_site_stats` | genomic start/stop + strand → the four tables |
+| `count_srdf` | `cut_site_stats` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
+| `count_sample` | `cut_site_stats` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
+| `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
+| `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
+| `FragmentLengthDist` | `cut_site_stats` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `uniform_hexamer_counts` | `cut_site_stats` | → `N(h)`, in parallel over fixed region blocks. See §8 |
+| `fl_end_weight` | `cut_site_stats` | `w(i)` above |
+| `propensities` | `cut_site_stats` | `C / N` |
+| `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
+| `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
+| `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
 
 `C(h)`: `attach_fragment_arrays(callback=filter_fragments)` →
 `attach_sequence` → one `parallel_apply` of `cut_site_hexamers` → four
@@ -430,14 +439,13 @@ Needs action. Nothing here has been decided.
   passed for weeks while catching nothing, because its fixture planted no
   N-window fragment at all.
 
-- **Second copy of the encoder** in `simulator/precompute.py`, kept until the
-  old simulator is deleted (deferred: ~8 files still import it, some belonging
-  to another stream). The drift is now actually guarded —
-  `test_encoder_matches_oracle_all_4096` checks all 4096 against an INDEPENDENT
-  oracle, which is stronger than checking the two copies against each other
-  since those could drift in step. Measured 2026-10-07: they agree exactly.
-  **What remains is a naming lie**: `count_hexamers_rdf.py` still cites
-  `test_encoder_matches_precompute`, which does not exist. Delete that citation.
+- ~~**Second copy of the encoder** in `simulator/precompute.py`.~~ Retired to
+  `attic/pre_rewrite_simulator/` with the rest of the old simulator
+  (2026-10-09, decision 171). `background_model/hexamers.py` is the only live
+  encoder. `scripts/count_cut_site_hexamers.py` was rewired to it; the old copy
+  did not fold case, but that script upper-cases before it encodes, so its
+  output does not change. `test_encoder_matches_oracle_all_4096` still checks
+  all 4096 against an INDEPENDENT oracle.
 
 ### Closed since this section was last accurate
 

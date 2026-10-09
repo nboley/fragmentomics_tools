@@ -27,10 +27,12 @@ output.
 
 Geometry -- this is the part that fails silently if wrong
 ---------------------------------------------------------
-The conventions are taken verbatim from the simulator
-(``background_model/simulator/weights.py``, Appendix D of the design doc) and
-the hexamer indexing is *imported*, not reimplemented, from
-``background_model/simulator/precompute.py::hexamer_indices``:
+The conventions were taken verbatim from the previous-generation simulator
+(``weights.py``, now in ``attic/pre_rewrite_simulator/``; Appendix D of the
+design doc) and the hexamer indexing is *imported*, not reimplemented, from
+``background_model/hexamers.py::hexamer_indices``.  That encoder folds case;
+``region_hexamers`` upper-cases first anyway, which is what the old,
+uppercase-only encoder needed, so the output is the same under either:
 
 * **Cut sites, not bases.**  A fragment occupying bases ``[p, p+L)`` has
   endpoint *bases* ``p`` and ``p+L-1`` but cut *sites* ``p`` and ``p+L``.
@@ -179,8 +181,8 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from background_model.config import PlumbingConfig  # noqa: E402
-from background_model.simulator.precompute import HEX_HALF, KMER, NHEX, hexamer_indices, hexamer_vocabulary  # noqa: E402
-from background_model.simulator.weights import L_MAX, L_MIN  # noqa: E402
+from background_model.cut_site_stats import L_MAX, L_MIN  # noqa: E402
+from background_model.hexamers import HEX_HALF, KMER, NHEX, hexamer_indices, hexamer_vocabulary  # noqa: E402
 from fragments_h5 import FragmentsH5  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -247,16 +249,18 @@ def region_hexamers(fasta, contig: str, gstart: int, gstop: int):
     Each array has length ``gstop - gstart + 1`` -- one entry per cut site,
     positions ``0..region_len`` inclusive.
 
-    This duplicates the sequence-fetch half of
-    ``simulator.precompute.precompute_region`` (same ``HEX_HALF`` flanking, same
-    ``hexamer_indices`` call) but takes an already-open ``pysam.FastaFile``
-    instead of opening one per call.  ``precompute_region`` opens and closes the
-    3 GB hg38 FASTA on every invocation, which measured **20x slower** on EFS
-    (13.6 ms vs 0.66 ms per region; 157 s vs 7.6 s over the 11,505-tile region
-    set).  The part that would fail silently if it diverged -- the hexamer
-    indexing itself -- is imported, not copied, and
-    ``test_region_hexamers_matches_precompute_region_exactly`` asserts the two
-    agree exactly.  ``cum_gc`` is not computed because nothing here uses GC.
+    This duplicated the sequence-fetch half of the previous-generation
+    ``precompute_region`` (now in ``attic/pre_rewrite_simulator/``; same
+    ``HEX_HALF`` flanking, same ``hexamer_indices`` call) but takes an
+    already-open ``pysam.FastaFile`` instead of opening one per call.
+    ``precompute_region`` opened and closed the 3 GB hg38 FASTA on every
+    invocation, which measured **20x slower** on EFS (13.6 ms vs 0.66 ms per
+    region; 157 s vs 7.6 s over the 11,505-tile region set).  The part that
+    would fail silently if it diverged -- the hexamer indexing itself -- is
+    imported, not copied, and
+    ``test_region_hexamers_matches_precompute_region_exactly`` checks every cut
+    site against an independent string encoder.  ``cum_gc`` is not computed
+    because nothing here uses GC.
     """
     region_len = gstop - gstart
     seq = fasta.fetch(contig, gstart - HEX_HALF, gstop + HEX_HALF).upper()
@@ -676,7 +680,7 @@ def main():
     )
     parser.add_argument("--l-min", type=int, default=L_MIN)
     parser.add_argument("--l-max", type=int, default=L_MAX,
-                        help="INCLUSIVE, matching simulator.weights.L_MAX.")
+                        help="INCLUSIVE, matching cut_site_stats.L_MAX.")
     parser.add_argument("--band-width", type=int, default=DEFAULT_BAND_WIDTH)
     parser.add_argument(
         "--no-background", action="store_true",

@@ -20,12 +20,8 @@ Scoped narrowly on purpose: it asserts the PAIRING, not the numerics of
 import numpy as np
 import pytest
 
-from background_model.simulator.count_hexamers_rdf import (
-    NHEX,
-    TABLE_NAMES,
-    propensities,
-    rc_permutation,
-)
+from background_model.cut_site_stats import TABLE_NAMES, propensities
+from background_model.hexamers import NHEX, rc_permutation
 
 
 @pytest.fixture
