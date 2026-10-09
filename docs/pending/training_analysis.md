@@ -1647,10 +1647,21 @@ value (difference 0.0e+00).
 
 ### Caveats
 
-1. **A third of fragments carry no score.** 160,951 of 241,078 have their
-   leftmost endpoint inside the centred 1024 crop; 80,127 do not and are
-   emitted as NaN. A consequence of `tile_size=1024` against 1536 bp regions,
-   not a defect of the fit.
+1. **A third of fragments carry no score — because the outer third is jitter
+   headroom, not data being discarded.** `l_target = tile_size + 2*jitter`, so
+   a 1536 bp region is 1024 bp of scorable tile plus 512 bp of room for the
+   crop to slide. In training the crop moves over `j` in [-256, +256] and the
+   union of its positions is the full [0, 1536), so every base is used. At eval
+   `j = 0` is forced, pinning the crop to [256, 1280), so 80,127 of 241,078
+   fragments never receive a score and are emitted as NaN. Exclude them from
+   any aggregate.
+   **This is equally true of the real pipeline** — same tile, same jitter, same
+   1536 bp region set, measured unscored fraction 33.31%. It surfaced here only
+   because this is the first deliverable to ask for a row per fragment rather
+   than an aggregate over the eval set. The centre is not density-biased
+   relative to the flanks (measured crop mass 0.666932 against the geometric
+   0.666667). Full coverage requires `tile 1536 / jitter 0`, which also aligns
+   the model's domain with the oracle's, at the cost of augmentation.
 2. **Training is not exactly reproducible.** No global seed, unseeded shuffle,
    and the jitter RNG is seeded partly on `os.getpid()`. Two runs of identical
    code differed by ~0.002 nats on best-epoch val. Do not read a third-decimal
