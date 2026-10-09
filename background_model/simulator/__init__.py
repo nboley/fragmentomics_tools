@@ -5,17 +5,24 @@ Start there.
 
 It is four modules, split along their dependency layers (owner decisions 169
 and 174-177), each importing only from layers above it (``draw`` imports
-``hexamers`` directly as well as ``cut_site_stats``):
+``hexamers`` directly as well as ``measure``):
 
 0. ``background_model/constants.py`` — the shared cut-site definitions
    (length bounds from ``tracks.FL_BANDS``, k-mer geometry), stdlib only.
 1. ``background_model/hexamers.py`` — hexamer encoding, numpy plus
    ``constants``.
-2. ``background_model/cut_site_stats.py`` — measurement on real data:
+2. ``background_model/simulator/measure.py`` — measurement on real data:
    ``C(h)``, ``N(h)``, ``f(L)`` and ``r(h)``.
-3. ``background_model/simulator/draw.py`` — the draw, in this package.
+3. ``background_model/simulator/draw.py`` — the draw.
 
-The driver is ``scripts/run_cut_site_simulator.py``.
+``measure`` was ``background_model/cut_site_stats.py`` until owner decision
+187 moved it into this package, since only simulator code imports it.
+``constants`` and ``hexamers`` stay outside: neither needs the simulator's
+dependencies, and ``constants`` is shared with the cut-site store/model.
+
+The driver is ``scripts/run_cut_site_simulator.py``. ``scripts/measure_cut_site_hexamers.py``
+runs only the measure step for one sample and writes ``C(h)``, ``N(h)``, ``r(h)`` and
+``f(L)`` to disk (owner decision 189).
 
 The previous generation (``capture``, ``emit``, ``precompute``, ``sampler``,
 ``weights``) is in ``attic/pre_rewrite_simulator/``. It was written around

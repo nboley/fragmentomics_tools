@@ -281,7 +281,7 @@ which is a relabelling of the same position.
 
 Four modules, split along their dependency layers (owner decisions 169 and
 174-177). Each imports only from layers above it, so `draw` imports `hexamers`
-directly as well as `cut_site_stats`:
+directly as well as `simulator.measure`:
 
 0. `background_model/constants.py` — the shared cut-site DEFINITIONS, and
    nothing else: `L_MIN`, `L_MAX` (inclusive), `N_LENGTHS`, `KMER`,
@@ -300,9 +300,18 @@ directly as well as `cut_site_stats`:
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
-2. `background_model/cut_site_stats.py` — measurement on real data (`C(h)`,
+2. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
+   It was `background_model/cut_site_stats.py` until owner decision 187
+   (2026-10-09) moved it into the simulator package, since only simulator code
+   imports it. A pure move: no computed output changed.
 3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
+
+**Model code never imports `simulator/`:** no module under `background_model/`
+outside `background_model/simulator/`, nor `background_model_core.py`, imports
+`background_model.simulator` in any form, because `simulator/` is the on-disk
+blindness boundary for evaluating the cut-site model on simulated data (owner
+decision 187, enforced by `test_model_code_never_imports_simulator`).
 
 Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
 moved code without changing it, and so did moving the definitions into
@@ -311,22 +320,30 @@ moved code without changing it, and so did moving the definitions into
 
 | Function | Module | Does |
 |---|---|---|
-| `filter_fragments` | `cut_site_stats` | dedup, length filter, admission. All filtering |
-| `cut_site_hexamers` | `cut_site_stats` | per region → `start_hex`, `stop_hex`, `strand` |
-| `counts_from_hexamers` | `cut_site_stats` | genomic start/stop + strand → the four tables |
-| `count_srdf` | `cut_site_stats` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
-| `count_sample` | `cut_site_stats` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `filter_fragments` | `simulator.measure` | dedup, length filter, admission. All filtering |
+| `cut_site_hexamers` | `simulator.measure` | per region → `start_hex`, `stop_hex`, `strand` |
+| `counts_from_hexamers` | `simulator.measure` | genomic start/stop + strand → the four tables |
+| `count_srdf` | `simulator.measure` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
+| `count_sample` | `simulator.measure` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `measure_sample` | `simulator.measure` | the whole measure step: `count_sample` → `f(L)` → `N(h)` → `r(h)`, as a `SampleMeasurement`. Both scripts call it |
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `cut_site_stats` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
-| `uniform_hexamer_counts` | `cut_site_stats` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `cut_site_stats` | `w(i)` above |
-| `propensities` | `cut_site_stats` | `C / N` |
+| `FragmentLengthDist` | `simulator.measure` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `uniform_hexamer_counts` | `simulator.measure` | → `N(h)`, in parallel over fixed region blocks. See §8 |
+| `fl_end_weight` | `simulator.measure` | `w(i)` above |
+| `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
+
+Two scripts call these. `scripts/run_cut_site_simulator.py` runs measure and
+draw end to end. `scripts/measure_cut_site_hexamers.py` (owner decision 189)
+runs only the measure step for one sample, through the same `measure_sample`
+call, and writes `C(h)`, `N(h)`, `r(h)`, `f(L)` and the per-region counts to an
+`.npz` plus a provenance `.json`. It replaced the containment counter now in
+`attic/hexamer_prior_pipeline/`.
 
 `C(h)`: `attach_fragment_arrays(callback=filter_fragments)` →
 `attach_sequence` → one `parallel_apply` of `cut_site_hexamers` → four
@@ -463,8 +480,11 @@ Needs action. Nothing here has been decided.
   (2026-10-09, decision 171). `background_model/hexamers.py` is the only live
   encoder. `scripts/count_cut_site_hexamers.py` was rewired to it; the old copy
   did not fold case, but that script upper-cases before it encodes, so its
-  output does not change. `test_encoder_matches_oracle_all_4096` still checks
-  all 4096 against an INDEPENDENT oracle.
+  output does not change. That script was itself retired to
+  `attic/hexamer_prior_pipeline/` by owner decision 189, replaced by
+  `scripts/measure_cut_site_hexamers.py`, which calls `simulator.measure`.
+  `test_encoder_matches_oracle_all_4096` still checks all 4096 against an
+  INDEPENDENT oracle.
 
 ### Closed since this section was last accurate
 
@@ -472,11 +492,16 @@ Kept briefly because the Open list claimed all three for longer than they were
 true, and a reader who saw it mid-day would have acted on stale information.
 
 - ~~**No tests.**~~ Closed by `844f227`, `45b32ec` and `d9c6e90`, against the
-  pre-split `count_hexamers_rdf.py`. As of 2026-10-09 the three modules are
-  covered by `tests/test_cut_site_simulator.py` (75 tests, including an
-  independent encoder oracle in `tests/cut_site_oracle.py`) and
+  pre-split `count_hexamers_rdf.py`. As of 2026-10-09 the four modules are
+  covered by 76 tests split by module (owner decision 188; one file,
+  `tests/test_cut_site_simulator.py`, until then): `tests/test_hexamers.py`
+  (encoder and constants, 6), `tests/test_simulator_measure.py` (34),
+  `tests/test_simulator_draw.py` (32) and `tests/test_cut_site_hygiene.py`
+  (layering, doctests, oracle independence, 4). Shared fixtures are in
+  `tests/conftest.py`, shared helpers in `tests/cut_site_helpers.py`, and the
+  independent encoder oracle in `tests/cut_site_oracle.py`. Plus
   `tests/test_simulator_propensity_denominators.py` (4). Mutation tested:
-  `scripts/_mutation_test.py` carries 47 mutations, 1 of them VOID, and exits
+  `scripts/_mutation_test.py` carries 52 mutations, 1 of them VOID, and exits
   non-zero unless every non-VOID one matches its anchor exactly once in code
   and turns at least one test red.
 - ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
@@ -583,7 +608,7 @@ looks like a defect, read the reason before changing it.
   **tautologies**, not routing protection — measured: feeding
   `counts_from_hexamers` a start/stop swap leaves both true, because each sum is
   just that strand's row count however the hexamers are routed. They stay only
-  to catch a malformed `counts` dict from outside `cut_site_stats`.
+  to catch a malformed `counts` dict from outside `simulator.measure`.
 
   Scope of that guard, so it is not mistaken for more than it is.
   `sample_region` skips a whole strand block on `if tot <= 0: continue`, with no

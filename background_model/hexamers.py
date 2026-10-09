@@ -4,7 +4,7 @@ numpy plus ``background_model.constants`` (stdlib only), so anything that
 needs hexamer indices can import it without pulling in the fragment library,
 pandas or the simulator.  ``KMER``, ``HEX_HALF`` and ``NHEX`` are defined in
 ``constants`` and imported here.  Measurement on real
-data is ``background_model.cut_site_stats``; the draw is
+data is ``background_model.simulator.measure``; the draw is
 ``background_model.simulator.draw``.  Authority: ``docs/pending/simulator_spec.md``.
 
 The hexamer at cut site ``c`` spans genomic ``[c - HEX_HALF, c + HEX_HALF)``

@@ -1,5 +1,12 @@
 # Cut-Site Hexamer Counts
 
+> **Retired code (owner decision 189, 2026-10-09).** The scripts and tests this
+> document names are in `attic/hexamer_prior_pipeline/` and no longer run. The
+> findings below stand as a record of the 92-sample containment-admission
+> tables. The live per-sample counter is `scripts/measure_cut_site_hexamers.py`,
+> which uses the simulator's start-in-region admission, so its counts are not
+> comparable with these. See that directory's README.
+
 `scripts/count_cut_site_hexamers.py` counts de-duplicated cut-site hexamer
 frequencies from real fragment h5 files. It is a counting tool, not analysis:
 it emits observed counts and matching background (all-candidate) counts, and
@@ -185,7 +192,8 @@ have no band structure, so this is the only like-for-like comparison possible.
 Fig 7 shows that the enrichment distribution is stable across representative FL
 bands, so the collapse is not masking a major effect.
 
-Script: `scripts/analyze_hexamer_distributions.py`. Figures:
+Script: `attic/hexamer_prior_pipeline/scripts/analyze_hexamer_distributions.py`
+(retired with the counter; it reads the counter's Parquet). Figures:
 `docs/pending/cut_site_hexamer_plots/`.
 
 ### 1. Spread

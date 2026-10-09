@@ -8,7 +8,8 @@ paths no longer exist. They were moved rather than deleted so the design stays
 readable next to its successor.
 
 The live simulator is `background_model/hexamers.py`,
-`background_model/cut_site_stats.py` and `background_model/simulator/draw.py`.
+`background_model/simulator/measure.py` (`background_model/cut_site_stats.py`
+until owner decision 187) and `background_model/simulator/draw.py`.
 Its authority is `docs/pending/simulator_spec.md`. The design documents for
 this generation are in `attic/pre_rewrite_simulator_docs/`.
 
@@ -43,7 +44,9 @@ suite. They could not stay live: every one imports the retired modules.
 
 ## What stayed live, and why
 
-Importers that needed only shared pieces were rewired, not moved:
+Importers that needed only shared pieces were rewired, not moved. (The
+counter, the prior builder and the counter's test below were later retired to
+`attic/hexamer_prior_pipeline/` by owner decision 189.)
 
 - `scripts/count_cut_site_hexamers.py` used `precompute`'s encoder and
   `weights`' `L_MIN`/`L_MAX`. It now uses `hexamers` and `cut_site_stats`. The

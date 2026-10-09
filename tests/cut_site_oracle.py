@@ -2,7 +2,8 @@
 
 Imports NOTHING from ``background_model`` or ``fragmentomics_tools``.
 Every function is plain Python (or numpy for array results).  The AST
-check in ``t7_oracle_is_independent`` enforces this.
+check ``test_oracle_is_independent`` (``tests/test_cut_site_hygiene.py``)
+enforces this.
 
 The oracle provides a second derivation of every quantity the module
 computes. A test that compares the module's output to the oracle's is
