@@ -1580,18 +1580,22 @@ has a sign.
 
 ### Results, region-weighted, all on the model's domain
 
+Oracle normalised **per region**.
+
 | split | regions | oracle (ceiling) | prior | model | captured |
 |---|---|---|---|---|---|
-| train | 5210 | 11.980869 | 12.095545 | 11.956233 | 103.6% |
-| val | 655 | 11.984081 | 12.203930 | 12.084561 | 85.4% |
-| **test** | **647** | **11.999074** | **12.214898** | **12.105756** | **84.2%** |
+| train | 5210 | 11.972525 | 12.095545 | 11.956233 | 102.3% |
+| val | 655 | 11.979271 | 12.203930 | 12.084561 | 84.9% |
+| **test** | **647** | **11.987397** | **12.214898** | **12.105756** | **82.8%** |
 
 uniform = ln(319,488) = 12.674475.
 `captured = (uniform - model) / (uniform - oracle)`.
 
-**On held-out test the model captures 84.2% of the achievable bias.** The
-zero-parameter analytical prior alone captures 68.0%; the neural correction
-adds 16.2 percentage points. The residual gap to the oracle is 0.1067 nats.
+**On held-out test the model captures 82.8% of the achievable bias.** The
+zero-parameter analytical prior alone captures 66.9%; the neural correction
+adds 15.9 percentage points. The residual gap to the oracle is 0.1184 nats.
+Under a pooled normaliser the figures are 84.2% / 68.0% — the choice moves the
+headline by ~1.4 points and no conclusion depends on it.
 
 Val is *not* held out — the epoch was selected on it, which makes it optimistic
 by 0.021 nats relative to test. Quote test.
@@ -1618,17 +1622,24 @@ The domain difference alone is ln(479,232) − ln(319,488) = **0.405465 nats**.
 Conditioning the oracle on "the start lands in the crop" gives
 `p_cond = p / Z_r`, i.e. `-log p_cond = -log p + log Z_r`. `Z_r` is not in the
 sidecar, which carries `p` only for drawn fragments, so it must be estimated
-from the draws. A per-region estimate from ~36 draws carries ~0.12 nats of
-noise on `log Z` — larger than the 0.107-nat effect being measured — and
-reuses the same draws for estimation and evaluation, so the pooled estimate is
-used instead:
+from the draws. **`Z_r` is estimated per region**, as that region's own
+fraction of draws landing in the crop.
 
-    Z = 160,951 / 241,078 = 0.667630     log Z = -0.404021  (SE 0.00144)
-    geometric 1024/1536   = 0.666667     excess +0.000964
+Two measured caveats. A per-region estimate from ~36 draws carries a Jensen
+bias on `log Z` of about **-0.0069 nats**, which does not average away; the
+pooled alternative avoids it but discards real between-region variation in
+`Z_r` (sd 0.0150). And the degenerate `Z_hat = 1` case, which would set
+`log Z = 0`, affects **zero val and test regions** here (1 of 5,210 train).
 
-The 0.1% agreement with the pure length ratio is an independent check: the
-oracle's positional density is near-uniform at the 512 bp scale, as a bp-scale
-hexamer propensity should be.
+    pooled reference: Z = 160,951/241,078 = 0.667630, geometric 1024/1536 = 0.666667
+
+That the pooled crop mass sits 0.1% from the pure length ratio says something
+narrower than it first appears: the hexamer propensity has **no large-scale
+positional gradient** within a region, so block sums over 1024 vs 512
+contiguous bases are near-proportional to block width. It does *not* mean
+fragmentation is uniform in position — per-base hexamer bias spans a 216.7x
+max/min range in this sample, and `Z_r` varies between regions. Only the
+across-region average is near 2/3.
 
 Reproduction check before any of this: recomputing `-mean(log p)` over all
 241,078 sidecar rows returns 12.384644985938586, **identical** to the published
