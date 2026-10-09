@@ -15,20 +15,21 @@ from background_model.tracks import (
 )
 
 
-# Golden mapping — the exact TRACK_INDEX that all existing stores use.
+# Golden mapping — the exact TRACK_INDEX under the current band layout
+# (owner decision 14, 2026-09-27: bands ((25,110),(110,180))).
 GOLDEN_TRACK_INDEX = {
-    ("+", (40, 65), "first"): 0,
-    ("+", (40, 65), "last"): 1,
-    ("+", (40, 65), "midpoint"): 2,
-    ("+", (120, 175), "first"): 3,
-    ("+", (120, 175), "last"): 4,
-    ("+", (120, 175), "midpoint"): 5,
-    ("-", (40, 65), "first"): 6,
-    ("-", (40, 65), "last"): 7,
-    ("-", (40, 65), "midpoint"): 8,
-    ("-", (120, 175), "first"): 9,
-    ("-", (120, 175), "last"): 10,
-    ("-", (120, 175), "midpoint"): 11,
+    ("+", (25, 110), "first"): 0,
+    ("+", (25, 110), "last"): 1,
+    ("+", (25, 110), "midpoint"): 2,
+    ("+", (110, 180), "first"): 3,
+    ("+", (110, 180), "last"): 4,
+    ("+", (110, 180), "midpoint"): 5,
+    ("-", (25, 110), "first"): 6,
+    ("-", (25, 110), "last"): 7,
+    ("-", (25, 110), "midpoint"): 8,
+    ("-", (110, 180), "first"): 9,
+    ("-", (110, 180), "last"): 10,
+    ("-", (110, 180), "midpoint"): 11,
 }
 
 
@@ -46,7 +47,7 @@ def test_strands():
 
 
 def test_fl_bands():
-    assert FL_BANDS == ((40, 65), (120, 175))
+    assert FL_BANDS == ((25, 110), (110, 180))
 
 
 def test_coverage_types():
@@ -54,12 +55,18 @@ def test_coverage_types():
 
 
 def test_config_hash_unchanged():
-    """PlumbingConfig.config_hash must not change when track constants move."""
+    """PlumbingConfig.config_hash is pinned to the current band layout.
+
+    fl_bands IS part of the config hash, so this value tracks the band layout:
+    it was updated when the bands changed to ((25,110),(110,180)) (owner
+    decision 14, 2026-09-27).  A drift NOT explained by an intentional layout
+    change is a finding.
+    """
     from background_model.config import PlumbingConfig
 
     cfg = PlumbingConfig(sample_sheet="dummy.tsv")
     h = cfg.config_hash(with_content_hashes=False)
-    assert h == "717951cdf810ff0ae602613ba12efff50edcd4e2cb4df95175b1ac4b63a63905"
+    assert h == "9e56ac6b0c6127768ae591cbde7582a69b2dfc3b8b55a6c60059e08bb484f38b"
 
 
 def test_all_consumers_use_canonical_tracks():

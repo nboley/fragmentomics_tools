@@ -56,7 +56,7 @@ def track_indices(tracks):
     idx = {}
     for i, t in enumerate(tracks):
         t = str(t)
-        band = "short" if "40_65" in t else ("mono" if "120_175" in t else None)
+        band = "short" if "25_110" in t else ("mono" if "110_180" in t else None)
         cov = "first" if t.endswith("first") else ("last" if t.endswith("last") else None)
         strand = "+" if "strand_+" in t else "-"
         if band and cov:

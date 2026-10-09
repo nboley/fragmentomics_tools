@@ -210,7 +210,7 @@ class TestS1Lock:
             m, fasta, _CONTIG, _START, _STOP,
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        b0, b1 = (40, 65), (120, 175)
+        b0, b1 = (25, 110), (110, 180)
         # (a) +band0: weight from the (+, band0, midpoint) track.
         # midpoint of 100-150 is 125
         ref_a = _reference_weight(rp, "+", b0, "midpoint", 125)
@@ -236,9 +236,11 @@ class TestS1Lock:
         assert new.n_fragments == 1
         np.testing.assert_allclose(new.weights, [1.0], atol=1e-6)
 
-    @pytest.mark.parametrize("length", [39, 65, 100, 119, 175])
+    @pytest.mark.parametrize("length", [10, 24, 180, 200, 300])
     def test_band_membership_no_track_lengths(self, length):
-        # below band0 / band0 open-upper / inter-band gap / gap / band1 open-upper.
+        # Out-of-band for the contiguous ((25,110),(110,180)) layout: well below /
+        # band0 open-lower-1 / band1 open-upper (exclusive) / above / well above.
+        # (The bands are contiguous, so there is no inter-band gap to test.)
         m = _uniform_model()
         rfa = _rfa([100], [100 + length], ["+"])
         new = apply_fragment_weights(
@@ -247,9 +249,10 @@ class TestS1Lock:
         )
         assert new.weights[0] == 0.0
 
-    @pytest.mark.parametrize("length", [40, 64, 120, 174])
+    @pytest.mark.parametrize("length", [25, 109, 110, 179])
     def test_band_membership_in_band_lengths(self, length):
-        # band0 lo, band0 hi-1, band1 lo, band1 hi-1 → nonzero (uniform ⇒ 1).
+        # band0 lo, band0 hi-1, band1 lo (shared edge 110), band1 hi-1 → nonzero
+        # (uniform ⇒ 1).  110 lands in band1 only (half-open lower-inclusive).
         m = _uniform_model()
         rfa = _rfa([100], [100 + length], ["+"])
         new = apply_fragment_weights(
@@ -372,7 +375,7 @@ class TestReciprocalParity:
             m, fasta, _CONTIG, _START, _STOP,
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
-        b0 = (40, 65)
+        b0 = (25, 110)
         # midpoint offsets for fragments: (100+150)//2=125, (130+194)//2=162, (300+350)//2=325
         for f, mid_off in enumerate([125, 162, 325]):
             ref = _reference_weight(rp, "+", b0, "midpoint", mid_off)
@@ -595,7 +598,7 @@ class TestLossIndependence:
             contig_len=_CONTIG_LEN, tile_size=_TILE,
         )
         cov = new.build_coverage_counts(
-            fl_bands=[(40, 65), (120, 175)], split_strand=True,
+            fl_bands=[(25, 110), (110, 180)], split_strand=True,
             return_sparse=False,
         )
         for vec in cov:

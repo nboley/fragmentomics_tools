@@ -3,7 +3,7 @@
 Consumes pileups.npz + run_meta.json (from ctcf_pileup_run.py) and emits PNGs
 and a markdown report under the pileup dir.  CPU-only; regenerable without GPU.
 
-Track order (DEFAULT_OUTPUT_TRACKS): strand{+,-} x band{(40,65),(120,175)} x
+Track order (DEFAULT_OUTPUT_TRACKS): strand{+,-} x band{(25,110),(110,180)} x
 coverage{first,last,midpoint}.  Index map:
   0 +short-first  1 +short-last  2 +short-mid
   3 +mono-first   4 +mono-last   5 +mono-mid
@@ -20,6 +20,17 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
+# Band bounds are DERIVED, never written out as literals.  Two spots in the
+# emitted report used to carry hardcoded "(40-65 bp)" / "(120-175 bp)" and went
+# stale the moment FL_BANDS widened -- a review caught them still printing the
+# old ranges into a report whose figures came from the new ones.  `tracks` is
+# deliberately stdlib-only (see its module docstring), so importing it here does
+# not cost this CPU-only script its "regenerable without GPU" property.
+from background_model.tracks import FL_BANDS  # noqa: E402
+
+_SHORT_BP = f"{FL_BANDS[0][0]}-{FL_BANDS[0][1]} bp"
+_MONO_BP = f"{FL_BANDS[1][0]}-{FL_BANDS[1][1]} bp"
 
 # probe tracks: short-band & mono-band x first/last, both strands
 PROBES = {
@@ -277,9 +288,9 @@ def write_markdown(meta, out):
       "direction is right, not an artifact.")
     A("")
     A("**The biology is clearly recovered.** The uncorrected pileups already "
-      "show the textbook CTCF signature: a sharp short-band (40-65 bp) endpoint "
+      f"show the textbook CTCF signature: a sharp short-band ({_SHORT_BP}) endpoint "
       "spike right at the motif center (the TF footprint) and a ~190 bp phased-"
-      "nucleosome array in the mono band (120-175 bp), symmetric about the motif "
+      f"nucleosome array in the mono band ({_MONO_BP}), symmetric about the motif "
       "and resolved in both first/last coverage and both strands.")
     A("")
     A("**The learned sequence bias is sharp and motif-local.** The expected "

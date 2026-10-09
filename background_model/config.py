@@ -183,6 +183,31 @@ def _tuple_to_list(val):
     return val
 
 
+def check_fl_bands(recorded) -> None:
+    """Fail loudly unless ``recorded`` fl_bands match the code's FL_BANDS.
+
+    Called at store construction/consumption (BackgroundTileDataset,
+    scripts/sim_build_store) so that a store built under a *different* band
+    layout can never be silently reinterpreted.  The track COUNT alone does not
+    protect against this: two different 2-band layouts both yield C=12, so the
+    only C-based check would pass while every track was mis-indexed.  A store
+    built under the old bands becoming unreadable here is the INTENDED outcome
+    — there is deliberately no migration/compat path; rebuild the store.
+
+    ``recorded`` may be None (store predates fl_bands recording) or a
+    nested list/tuple; both are normalized before comparison.
+    """
+    norm = None if recorded is None else tuple(tuple(b) for b in recorded)
+    if norm != FL_BANDS:
+        raise ValueError(
+            f"fl_bands mismatch: store/config recorded {norm} but this code's "
+            f"FL_BANDS is {FL_BANDS}. This store was built under a different "
+            f"fragment-length band layout and cannot be read by this code "
+            f"(bands are baked into the track index). Rebuild the store — "
+            f"there is no migration path."
+        )
+
+
 def verify_config_drift(store_path: str, config: PlumbingConfig) -> None:
     """Verify that a store's config matches the given config.
 

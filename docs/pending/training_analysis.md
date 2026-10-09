@@ -909,6 +909,19 @@ the hybrid's % by ~0.46pp. Recorded in the artifact's `models._note` as open.
 
 Ordered by what most reduces uncertainty in the result above.
 
+- **TODO — next step for simulator complexity: a REGION-DEPENDENT fragment-length
+  distribution.** Owner-directed 2026-09-27, and accepted as a *known limitation of
+  this version of the sim* rather than a blocker. Every sim to date draws lengths from
+  a **global** empirical PMF: `len_p_per_sample` rows are all identical (verified when
+  removing regime B), so simulated length structure varies by region only through the
+  `gc_bias(L, GC)` term. The owner's position is that in real data "the fragment length
+  distribution is very region dependent", which is why the new cut-site fragment model
+  (decisions 22-28) is specified to *learn* the length distribution rather than receive
+  `len_p[L]` as a fixed offset. **Consequence to state with any result: this simulator
+  cannot exercise that capability**, so a sim comparison tests the endpoint and GC terms
+  only, and evidence for region-dependent length preference has to come from real data
+  until the simulator grows a per-region length model.
+
 - **Rerun the hybrid on v3nb with more recovery budget or a lower LR (§7.10).**
   Highest-value open question in the NB results: the hybrid's 53.78% comes from
   a run that diverged to NaN twice and was rewound twice, while the KEN run it

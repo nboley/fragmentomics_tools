@@ -36,9 +36,35 @@ TEST_TIMEOUT ?= 3600
 # The two ignored packages import optional dependencies (datamanifest, fbio)
 # that are absent from the test environment, so their modules cannot even be
 # collected. That is an environment gap, not a code defect.
-PYTEST_ARGS ?= test/ fragmentomics_tools/ -q --doctest-modules \
+# `tests/` (background_model) IS collected, alongside `test/` (library). It was
+# omitted until 2026-10-07, which meant 677 tests never ran under the default
+# target -- including a module whose only coverage had just been added. A suite
+# that does not run by default is close to no suite.
+# The two suites are easy to confuse: `test/` is the library, `tests/` is
+# background_model. Both are here on purpose.
+# `--ignore=tests/conftest.py` is NOT about skipping tests. It exists so that
+# a `tests/conftest.py` CAN exist at all.
+#
+# --doctest-modules makes pytest COLLECT conftest.py files as modules to scan
+# for doctests. With no __init__.py in these directories, prepend import mode
+# imports every one under the bare name `conftest`, so the second collection
+# fails with "import file mismatch" against test/fragment_array/conftest.py.
+# An agent hit this, diagnosed it correctly and then deleted its conftest,
+# which is the wrong lever.
+#
+# --ignore stops the COLLECTION only; pytest still loads the file as a plugin,
+# so fixtures, markers and hooks all work. Verified by a pytest_report_header
+# hook firing under this exact invocation.
+#
+# Rejected alternatives: importmode=importlib and adding __init__.py both fix
+# the collision but break `import cut_site_oracle` in
+# tests/test_cut_site_simulator.py, which relies on prepend mode putting
+# tests/ on sys.path. Moving test/fragment_array/conftest.py to the root
+# breaks its DATA_DIR, which is built from __file__.
+PYTEST_ARGS ?= test/ tests/ fragmentomics_tools/ -q --doctest-modules \
 	--ignore=fragmentomics_tools/bias_correction \
-	--ignore=fragmentomics_tools/public_data_resources
+	--ignore=fragmentomics_tools/public_data_resources \
+	--ignore=tests/conftest.py
 
 help:
 	@echo "Usage: make [target]"
@@ -203,8 +229,35 @@ docker-push:
 # `pytest -q | tail` never reaches EOF when the process never exits.
 # SIGKILL rather than SIGTERM: a process stuck in an uninterruptible futex
 # wait will not act on a catchable signal.
+
+# The interpreter is PINNED, not taken from PATH. A bare `python` resolves to
+# whatever the caller's shell has, and in an agent/MCP shell that was
+# /opt/conda/envs/claude-mcp/bin/python -- no pybedtools, no torch. The run then
+# died with 12 COLLECTION ERRORS that look exactly like broken tests. That cost
+# two people time independently on 2026-10-07, each initially reading it as repo
+# breakage rather than a wrong interpreter.
+# Override for a different env: make test PYTHON=/path/to/python
+PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
+
+# The interpreter's own bin/ goes on PATH too, and pinning PYTHON alone is NOT
+# enough. Several tests reach BINARIES that live beside it, not python modules:
+# `bedtools` (via pybedtools -- CLAUDE.md flags this specifically), plus `bgzip`
+# and `tabix`. Pinning only the interpreter took the suite from 2 failed to
+# **54 failed**, every one of them "intersectBed does not appear to be installed
+# or on the path". The failures look like broken interval logic, not a missing
+# binary, which is what makes it worth spelling out here.
+PYTHON_BIN := $(dir $(PYTHON))
+
 test:
-	@timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
+	@if [ ! -x "$(PYTHON)" ]; then \
+		echo "❌ interpreter not found: $(PYTHON)"; \
+		echo "   This target pins the interpreter on purpose -- a bare 'python'"; \
+		echo "   picks up whatever is on PATH and fails as collection errors."; \
+		echo "   Override with: make test PYTHON=/path/to/python"; \
+		exit 2; \
+	fi
+	@PATH="$(PYTHON_BIN):$$PATH" \
+	timeout --signal=KILL $(TEST_TIMEOUT) $(PYTHON) -m pytest $(PYTEST_ARGS); \
 	rc=$$?; \
 	if [ $$rc -eq 137 ]; then \
 		echo ""; \

@@ -17,24 +17,22 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   A kill shows as exit 137 and means it HUNG — that is a finding to diagnose
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
-  (the `make test` default) and `tests/` is `background_model`.
-  Baseline on this branch, measured 2026-10-07 at the autoflip-removal commit:
-  `make test` **2 failed / 398 passed / 3 skipped / 0 xfailed**, total 403.
-  Its parent gave **2 failed / 396 passed / 3 skipped / 2 xfailed** — same
-  total 403, because removing the autoflip turned the two pinned-defect xfails
-  into passes and moved nothing else. **Reconcile the TOTAL first** when two
-  measurements disagree: it is invariant under environment, so a matching
-  total means you are looking at an environment difference while a differing
-  total means tests went uncollected. Both failures are missing data, not
-  defects: `test_slice_encode_big_wig` needs an ENCODE bigwig,
-  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference;
-  the 3 skips are Region doctests needing the optional `fbio`.
-  **`make test` does NOT cover `tests/`** — `PYTEST_ARGS` is
-  `test/ fragmentomics_tools/`, so any change under `fragment_array/` needs an
-  explicit `make test PYTEST_ARGS="tests/ -q"` run or a `background_model`
-  regression ships unseen. That suite is **494 passed** at this commit.
-  `tests/` **494 passed, 0 skipped** (measured 2026-09-25), where a few
-  `self.log()`-without-Trainer warnings are expected and harmless.
+  and `tests/` is `background_model`. **The default `make test` collects
+  both** (`PYTEST_ARGS` is `test/ tests/ fragmentomics_tools/`), plus the
+  `fragmentomics_tools/` doctests.
+  Last measured baselines, both PRE-DATING the 2026-10-09 merge of main into
+  the simulator branch, so re-measure: `test/ fragmentomics_tools/` alone gave
+  **2 failed / 398 passed / 3 skipped / 0 xfailed**, total 403 (2026-10-07, at
+  the autoflip-removal commit); the default target on the simulator branch gave
+  **2 failed / 1009 passed / 3 skipped** (2026-10-09, before the merge).
+  **Reconcile the TOTAL first** when two measurements disagree: it is
+  invariant under environment, so a matching total means you are looking at an
+  environment difference while a differing total means tests went uncollected.
+  Both failures are missing data, not defects: `test_slice_encode_big_wig`
+  needs an ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the
+  in-package GRCh38 reference; the 3 skips are Region doctests needing the
+  optional `fbio`. A few `self.log()`-without-Trainer warnings in `tests/`
+  are expected and harmless.
   These numbers move with almost every commit, so **measure them yourself
   before and after your change** rather than quoting this line — the `tests/`
   figure sat at 196 long enough that the gap to reality reached 298 tests,
@@ -147,6 +145,9 @@ forward.
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight
   < 1 to zero and make corrected pileups quietly wrong. See its docstring.
+- **`reverse_complement_track_permutation` is NOT dead code** — `ctcf_pileup_run.py`
+  uses it to orient minus-strand CTCF sites, so do not delete it when refactoring
+  the track models.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.
 - **Never identify tqdm's monitor thread by name.** `TMonitor` is named
   `tqdm_monitor` only from tqdm **4.69.0**; the pinned env has 4.67.1, where it

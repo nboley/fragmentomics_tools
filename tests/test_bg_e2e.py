@@ -430,7 +430,7 @@ class _FakeFragmentsH5:
 def _synthetic_fragments(h5, region, max_frag_len):
     """Deterministic synthetic fragments for (h5, region).
 
-    Length 150 → falls in fl_band (120, 175) only. Deterministic via an md5
+    Length 150 → falls in fl_band (110, 180) only. Deterministic via an md5
     seed so the Phase A worker and the test's independent recount agree.
     """
     import hashlib
@@ -654,9 +654,9 @@ class TestNegativeStartTile:
         pos0 = shard["pos"][lo:hi]
         track0 = shard["track"][lo:hi]
 
-        first_t = TRACK_INDEX[("+", (120, 175), "first")]
-        last_t = TRACK_INDEX[("+", (120, 175), "last")]
-        mid_t = TRACK_INDEX[("+", (120, 175), "midpoint")]
+        first_t = TRACK_INDEX[("+", (110, 180), "first")]
+        last_t = TRACK_INDEX[("+", (110, 180), "last")]
+        mid_t = TRACK_INDEX[("+", (110, 180), "midpoint")]
 
         # first covered base 50, last 199, midpoint 125 → +left_pad in L_TARGET frame
         assert list(pos0[track0 == first_t]) == [50 + left_pad]
@@ -913,7 +913,7 @@ class TestBlacklistSpanningFragmentModelE2E:
 
         def frag_fn(h5, region, max_frag_len):
             # region-relative (== L_TARGET-frame) fragments, all length 150 ->
-            # fl_band (120,175), strand '+'. First is the blacklist-spanning one.
+            # fl_band (110,180), strand '+'. First is the blacklist-spanning one.
             starts = np.array([120, 220, 228, 236], dtype=np.int64)
             stops = starts + 150
             strands = np.array(["+", "+", "+", "+"])
@@ -942,7 +942,7 @@ class TestBlacklistSpanningFragmentModelE2E:
         dense0 = densify_counts(
             *csr_slice(root, 0, 0, 1), C, cfg.l_target
         )
-        mid_t = TRACK_INDEX[("+", (120, 175), "midpoint")]
+        mid_t = TRACK_INDEX[("+", (110, 180), "midpoint")]
         assert dense0[mid_t, 195] == 1, "raw store must retain the masked-pos count"
 
         # ── Dataset -> model _step on the chosen loss (CPU, deterministic) ──
@@ -969,3 +969,74 @@ class TestBlacklistSpanningFragmentModelE2E:
             log_disp = model._pooled_log_dispersion(dispersion_bp, mask3)
             l = model.loss_fn(shape_logits, log_disp, y, mask3)
         assert torch.isfinite(l), f"{loss} loss not finite"
+
+
+class TestFlBandsGuard:
+    """The fl_bands guard must reject a store built under a DIFFERENT band layout
+    even though the track count is unchanged (C=12).  Both guarded call sites —
+    BackgroundTileDataset (read) and scripts/sim_build_store.build_store (write)
+    — must fail loudly, naming both the recorded and the code's band tuples.
+
+    A store built under the old bands becoming unreadable is the INTENDED
+    behaviour (owner decision 14, 2026-09-27); there is no migration path.
+    """
+
+    _OLD = "((40, 65), (120, 175))"
+    _NEW = "((25, 110), (110, 180))"
+
+    def test_dataset_rejects_mismatched_fl_bands(self, tmp_dir, monkeypatch):
+        cfg = _make_synth_config(
+            tmp_dir, n_samples=2, n_train=1, n_heldout=1,
+            region=(3072, 3072 + 2 * SMALL_TILE),
+        )
+        _patch_phase_a(monkeypatch, _synthetic_fragments)
+        sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
+        drawn = draw_samples(sheet, cfg)
+        tiles = build_tiles(
+            cfg.region_beds, cfg.tile_size, cfg.jitter, cfg.rf_budget, "hg38"
+        )
+        shard_dir = os.path.join(tmp_dir, "shards")
+        run_phase_a(cfg, drawn, tiles, shard_dir, "hg38", n_workers=1)
+        out = os.path.join(tmp_dir, "out")
+        os.makedirs(out)
+        store_path = run_phase_b(cfg, drawn, tiles, shard_dir, out, "hg38")
+
+        # Rewrite ONLY the recorded fl_bands to the old layout; C stays 12 so the
+        # count-based check still passes and only the band guard can catch it.
+        import zarr
+        root = zarr.open_group(store_path, mode="a")
+        d = json.loads(root.attrs["config_json"])
+        assert len(d["fl_bands"]) == 2  # sanity: still a 2-band (C=12) store
+        d["fl_bands"] = [[40, 65], [120, 175]]
+        root.attrs["config_json"] = json.dumps(d)
+
+        from background_model.dataset import BackgroundTileDataset
+
+        with pytest.raises(ValueError) as ei:
+            BackgroundTileDataset(
+                store_path=store_path, model_input_size=SMALL_TILE,
+                split="train", sample_role="train", min_N=0,
+                train_mode=False, preload=False,
+            )
+        msg = str(ei.value)
+        assert self._OLD in msg and self._NEW in msg, msg
+
+    def test_sim_build_store_rejects_mismatched_fl_bands(self, tmp_dir, monkeypatch):
+        import importlib.util
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "..", "attic", "v3_simulator", "sim_build_store.py")
+        spec = importlib.util.spec_from_file_location("sim_build_store", path)
+        sbs = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sbs)
+
+        # Patch the script's canonical bands to the OLD layout; the write-side
+        # guard runs first (before any sim I/O) and must reject it.
+        monkeypatch.setattr(sbs, "FL_BANDS", ((40, 65), (120, 175)))
+        with pytest.raises(ValueError) as ei:
+            sbs.build_store(
+                sim_dir=os.path.join(tmp_dir, "does_not_exist"),
+                out_path=os.path.join(tmp_dir, "x.zarr"),
+            )
+        msg = str(ei.value)
+        assert self._OLD in msg and self._NEW in msg, msg
