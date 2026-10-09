@@ -12,7 +12,9 @@ dependencies:
   - numpy >=1.26
   - pandas
   # Parquet I/O, used by fragmentomics_tools/checkpoint_hooks.py. Declared for
-  # scripts/count_cut_site_hexamers.py (now attic/hexamer_prior_pipeline/). Was
+  # scripts/count_cut_site_hexamers.py and read by
+  # scripts/analyze_hexamer_distributions.py (both now in
+  # attic/hexamer_prior_pipeline/). Was
   # already present in the dev env as a transitive dep, but undeclared -- which
   # would have failed at import time in a Batch container built from this file.
   - pyarrow

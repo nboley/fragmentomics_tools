@@ -38,7 +38,9 @@ directory imported them at the time of the move — that is why the move was saf
 - **`analyze_hexamer_distributions.py`** — contains a copy of `build_w6` marked
   "copied from sim_fragments.py (DO NOT MODIFY)". It is self-contained (no import),
   so it still runs, but it carries a snapshot of retired code. If it outlives the
-  rewrite, that copy is the next thing to mislead someone.
+  rewrite, that copy is the next thing to mislead someone. *(Since moved to
+  `attic/hexamer_prior_pipeline/scripts/` with the counter whose Parquet it
+  reads, owner decision 189.)*
 
 ## Still-live files that narrate the retired rule
 

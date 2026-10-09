@@ -192,7 +192,8 @@ have no band structure, so this is the only like-for-like comparison possible.
 Fig 7 shows that the enrichment distribution is stable across representative FL
 bands, so the collapse is not masking a major effect.
 
-Script: `scripts/analyze_hexamer_distributions.py`. Figures:
+Script: `attic/hexamer_prior_pipeline/scripts/analyze_hexamer_distributions.py`
+(retired with the counter; it reads the counter's Parquet). Figures:
 `docs/pending/cut_site_hexamer_plots/`.
 
 ### 1. Spread

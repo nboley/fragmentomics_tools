@@ -42,6 +42,7 @@ not a baseline for the replacement:
 | `scripts/fit_hexamer_dispersion.py` | Per-hexamer NB2 dispersion from the production zarr store |
 | `scripts/measure_hexamer_disattenuation.py` | Disattenuated per-sample vs pool correlation; reads `build_hexamer_prior`'s artifact |
 | `scripts/_hexamer_corr_heatmap.py` | Correlation-structure figures for the disattenuation report; imports `build_hexamer_prior` |
+| `scripts/analyze_hexamer_distributions.py` | Real vs synthetic enrichment figures for `cut_site_hexamer_counts.md`; reads the counter's Parquet and carries a pasted copy of the retired `build_w6` |
 | `tests/test_count_cut_site_hexamers.py` | Tests of the counter (36) |
 | `tests/test_hexamer_disattenuation.py` | Tests of the disattenuation estimator (11); imports `build_hexamer_prior` |
 | `tests/test_hexamer_prior_attenuation.py` | Tests of the prior's shrinkage (8) |
@@ -57,6 +58,7 @@ rewired or removed.
 |---|---|---|
 | `scripts/measure_hexamer_disattenuation.py` | moved | Consumes `build_hexamer_prior`'s artifact and imports it |
 | `scripts/_hexamer_corr_heatmap.py` | moved | Imports `build_hexamer_prior`'s loaders |
+| `scripts/analyze_hexamer_distributions.py` | moved (missed by the first pass, caught in review) | Reads only the counter's Parquet output, and its `build_w6` is a pasted snapshot of retired simulator code. It imports nothing from the other scripts, which is why the import-based search missed it. Its `REPO`/`PLOT_DIR` are `__file__`-relative, so from here they no longer point at `docs/pending/` |
 | `tests/test_hexamer_disattenuation.py` | moved | Tests a moved script; imports `build_hexamer_prior` and the counter |
 | `tests/test_hexamer_prior_attenuation.py` | moved | Tests `build_hexamer_prior` |
 | `tests/test_provenance_guard.py` | moved | Tests the provenance guard inside `build_hexamer_prior` and the disattenuation script |
