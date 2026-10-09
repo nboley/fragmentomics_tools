@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lightning as L
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
 from background_model.cut_site_model import CutSiteFragmentModel
@@ -176,7 +177,25 @@ def main():
         default_root_dir=args.run_dir,
         log_every_n_steps=10,
         limit_train_batches=args.limit_batches,
-        callbacks=[GPUStatsCallback()],
+        callbacks=[
+            GPUStatsCallback(),
+            # Keep the BEST epoch by validation multinomial NLL, not just the
+            # last one.  Lightning's default ModelCheckpoint monitors nothing
+            # and so persists only the final epoch; on the sim sample
+            # (5,333 train tiles) val_mult_nll bottomed at epoch 5 and then
+            # rose monotonically to epoch 19, so the only saved checkpoint was
+            # 0.0182 nats WORSE than the best.  That went unnoticed until a
+            # consumer needed to score fragments FROM the best model rather
+            # than just report its NLL out of metrics.csv.
+            # save_last keeps the final epoch too, so nothing is lost.
+            ModelCheckpoint(
+                monitor="val_mult_nll",
+                mode="min",
+                save_top_k=1,
+                save_last=True,
+                filename="best-{epoch:02d}-{val_mult_nll:.6f}",
+            ),
+        ],
     )
     if args.validate_only:
         trainer.validate(model, val_dl)
