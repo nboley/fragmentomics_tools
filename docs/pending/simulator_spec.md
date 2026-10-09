@@ -331,6 +331,13 @@ moved code without changing it, and so did moving the definitions into
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
 
+Two scripts call these. `scripts/run_cut_site_simulator.py` runs measure and
+draw end to end. `scripts/measure_cut_site_hexamers.py` (owner decision 189)
+runs only the measure step for one sample, with the same calls and arguments,
+and writes `C(h)`, `N(h)`, `r(h)`, `f(L)` and the per-region counts to an
+`.npz` plus a provenance `.json`. It replaced the containment counter now in
+`attic/hexamer_prior_pipeline/`.
+
 `C(h)`: `attach_fragment_arrays(callback=filter_fragments)` →
 `attach_sequence` → one `parallel_apply` of `cut_site_hexamers` → four
 `bincount`s.
