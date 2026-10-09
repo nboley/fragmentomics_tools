@@ -14,7 +14,7 @@ the wrong configuration is worse than no profile -- it gets optimised against.
 Example
 -------
     python scripts/gpu_benchmark.py \
-        --store /efs/.../quiet_tile1536_v2.zarr \
+        --store /efs/.../quiet_tile1536_v2.zarr --tile-size 1536 \
         --hex-tables /efs/.../stage1_hex_tables_v3_offset3.npz
 """
 import argparse, os, sys, time
@@ -57,9 +57,10 @@ def main():
     p.add_argument("--hex-tables", default=None,
                    help="include the Stage-2 log_p0 path, as production does")
     p.add_argument("--batch-size", type=int, default=32)
-    # Read from the store, as the dataset does; --tile-size is only a cross-check.
-    p.add_argument("--tile-size", type=int, default=None,
-                   help="optional; must equal the store's tile_size")
+    # No default (owner decision 176).  The dataset reads the tile size from
+    # the store, so --tile-size is required AND must match the store.
+    p.add_argument("--tile-size", type=int, required=True,
+                   help="required; must equal the store's tile_size")
     p.add_argument("--L-min", type=int, default=L_MIN)
     p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--min-N", type=int, default=10)
@@ -73,10 +74,9 @@ def main():
 
     store_cfg = CutSiteStoreConfig.from_json(
         zarr.open_group(args.store, mode="r").attrs["config_json"])
-    if args.tile_size is not None and args.tile_size != store_cfg.tile_size:
+    if args.tile_size != store_cfg.tile_size:
         p.error(f"--tile-size {args.tile_size} != store tile_size "
                 f"{store_cfg.tile_size}")
-    args.tile_size = store_cfg.tile_size
 
     if not torch.cuda.is_available():
         sys.exit("needs a GPU")

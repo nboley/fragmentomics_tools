@@ -592,7 +592,7 @@ yourself (it moves per commit).
 - **`tile_size` is required** (owner decision 176): `CutSiteStoreConfig` and
   `CutSiteFragmentModel` have no default. `train_cut_site.py` and
   `gpu_benchmark.py` read it from the store's `config_json`, as the dataset
-  does; their `--tile-size` is an optional cross-check that must match. The
+  does; their `--tile-size` is required and must match the store. The
   hash of `CutSiteStoreConfig(tile_size=2048)` is unchanged, `e71256c72cbacd4e`.
 - **F offset range**: `n_offsets = L_max` (180),
   `o_l_min = WINDOW_HALF`. Under start admission the left tap is fixed.

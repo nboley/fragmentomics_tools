@@ -130,8 +130,10 @@ CUT_OFFSET_IN_KMER = 3
 def _onehot_to_hex_indices(x_onehot: torch.Tensor, k: int = HEX_K) -> torch.Tensor:
     """Convert (B, 4, L) one-hot sequence to (B, L-k+1) hexamer indices.
 
-    Each index is in [0, 4^k).  Positions with ambiguous bases (no channel
-    active, i.e. N) get index 0 (safe — just maps to a single hex entry).
+    Each index is in [0, 4^k).  An N base is one-hot encoded as uniform
+    (0.25 in every channel), and argmax breaks the tie to channel 0, so N
+    reads as A: a window containing N gets the index of the same k-mer with
+    each N replaced by A (``ACGTNA`` -> the index of ``ACGTAA``), not index 0.
     """
     # argmax over channel dim: (B, L) base indices 0-3
     bases = x_onehot.argmax(dim=1)  # (B, L)

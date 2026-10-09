@@ -85,10 +85,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--store", required=True)
     p.add_argument("--run-dir", required=True)
-    # The tile size is read from the store (owner decision 176: no default);
-    # the dataset reads it there too.  --tile-size is only a cross-check.
-    p.add_argument("--tile-size", type=int, default=None,
-                   help="optional; must equal the store's tile_size")
+    # No default (owner decision 176).  The dataset reads the tile size from
+    # the store, so --tile-size is required AND must match the store.
+    p.add_argument("--tile-size", type=int, required=True,
+                   help="required; must equal the store's tile_size")
     p.add_argument("--L-min", type=int, default=L_MIN)
     p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--epochs", type=int, default=30)
@@ -132,7 +132,7 @@ def main():
     # reads from config_json.  A separate CLI value could silently disagree.
     store_cfg = CutSiteStoreConfig.from_json(
         zarr.open_group(args.store, mode="r").attrs["config_json"])
-    if args.tile_size is not None and args.tile_size != store_cfg.tile_size:
+    if args.tile_size != store_cfg.tile_size:
         p.error(f"--tile-size {args.tile_size} != store tile_size "
                 f"{store_cfg.tile_size}")
 
