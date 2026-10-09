@@ -56,8 +56,14 @@ WORKTREE = os.environ.get("MUTATION_WORKTREE")
 # as the forbidden path to check against, not as a default.
 FORBIDDEN_WORKTREE = (
     "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/background-model-work")
-TEST_FILE = "tests/test_cut_site_simulator.py"
-PROP_TEST_FILE = "tests/test_simulator_propensity_denominators.py"
+# tests/test_cut_site_simulator.py until owner decision 188 split it by module.
+TEST_FILES = (
+    "tests/test_hexamers.py",
+    "tests/test_simulator_measure.py",
+    "tests/test_simulator_draw.py",
+    "tests/test_cut_site_hygiene.py",
+    "tests/test_simulator_propensity_denominators.py",
+)
 
 PYTHON = "/home/nathanboley/miniconda3/envs/biomarker_env/bin/python"
 PYTHON_BIN = os.path.dirname(PYTHON)
@@ -480,8 +486,7 @@ def run_tests():
     """
     r = subprocess.run(
         [PYTHON, "-m", "pytest",
-         os.path.join(WORKTREE, TEST_FILE),
-         os.path.join(WORKTREE, PROP_TEST_FILE),
+         *(os.path.join(WORKTREE, f) for f in TEST_FILES),
          "-v", "--tb=no",
          ],
         capture_output=True, text=True,

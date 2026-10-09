@@ -57,9 +57,10 @@ TEST_TIMEOUT ?= 3600
 # hook firing under this exact invocation.
 #
 # Rejected alternatives: importmode=importlib and adding __init__.py both fix
-# the collision but break `import cut_site_oracle` in
-# tests/test_cut_site_simulator.py, which relies on prepend mode putting
-# tests/ on sys.path. Moving test/fragment_array/conftest.py to the root
+# the collision but break `import cut_site_oracle` and `import
+# cut_site_helpers` in the cut-site test files (tests/test_hexamers.py,
+# tests/test_simulator_*.py, ...), which rely on prepend mode putting tests/
+# on sys.path. Moving test/fragment_array/conftest.py to the root
 # breaks its DATA_DIR, which is built from __file__.
 PYTEST_ARGS ?= test/ tests/ fragmentomics_tools/ -q --doctest-modules \
 	--ignore=fragmentomics_tools/bias_correction \

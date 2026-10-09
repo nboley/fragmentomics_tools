@@ -475,11 +475,16 @@ Kept briefly because the Open list claimed all three for longer than they were
 true, and a reader who saw it mid-day would have acted on stale information.
 
 - ~~**No tests.**~~ Closed by `844f227`, `45b32ec` and `d9c6e90`, against the
-  pre-split `count_hexamers_rdf.py`. As of 2026-10-09 the three modules are
-  covered by `tests/test_cut_site_simulator.py` (75 tests, including an
-  independent encoder oracle in `tests/cut_site_oracle.py`) and
+  pre-split `count_hexamers_rdf.py`. As of 2026-10-09 the four modules are
+  covered by 76 tests split by module (owner decision 188; one file,
+  `tests/test_cut_site_simulator.py`, until then): `tests/test_hexamers.py`
+  (encoder and constants, 6), `tests/test_simulator_measure.py` (34),
+  `tests/test_simulator_draw.py` (32) and `tests/test_cut_site_hygiene.py`
+  (layering, doctests, oracle independence, 4). Shared fixtures are in
+  `tests/conftest.py`, shared helpers in `tests/cut_site_helpers.py`, and the
+  independent encoder oracle in `tests/cut_site_oracle.py`. Plus
   `tests/test_simulator_propensity_denominators.py` (4). Mutation tested:
-  `scripts/_mutation_test.py` carries 47 mutations, 1 of them VOID, and exits
+  `scripts/_mutation_test.py` carries 52 mutations, 1 of them VOID, and exits
   non-zero unless every non-VOID one matches its anchor exactly once in code
   and turns at least one test red.
 - ~~**`attach_sequence` near a contig end is UNVERIFIED.**~~
