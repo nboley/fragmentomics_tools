@@ -281,7 +281,7 @@ which is a relabelling of the same position.
 
 Four modules, split along their dependency layers (owner decisions 169 and
 174-177). Each imports only from layers above it, so `draw` imports `hexamers`
-directly as well as `cut_site_stats`:
+directly as well as `simulator.measure`:
 
 0. `background_model/constants.py` — the shared cut-site DEFINITIONS, and
    nothing else: `L_MIN`, `L_MAX` (inclusive), `N_LENGTHS`, `KMER`,
@@ -300,8 +300,11 @@ directly as well as `cut_site_stats`:
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
-2. `background_model/cut_site_stats.py` — measurement on real data (`C(h)`,
+2. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
+   It was `background_model/cut_site_stats.py` until owner decision 187
+   (2026-10-09) moved it into the simulator package, since only simulator code
+   imports it. A pure move: no computed output changed.
 3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
 
 Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
@@ -311,18 +314,18 @@ moved code without changing it, and so did moving the definitions into
 
 | Function | Module | Does |
 |---|---|---|
-| `filter_fragments` | `cut_site_stats` | dedup, length filter, admission. All filtering |
-| `cut_site_hexamers` | `cut_site_stats` | per region → `start_hex`, `stop_hex`, `strand` |
-| `counts_from_hexamers` | `cut_site_stats` | genomic start/stop + strand → the four tables |
-| `count_srdf` | `cut_site_stats` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
-| `count_sample` | `cut_site_stats` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `filter_fragments` | `simulator.measure` | dedup, length filter, admission. All filtering |
+| `cut_site_hexamers` | `simulator.measure` | per region → `start_hex`, `stop_hex`, `strand` |
+| `counts_from_hexamers` | `simulator.measure` | genomic start/stop + strand → the four tables |
+| `count_srdf` | `simulator.measure` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
+| `count_sample` | `simulator.measure` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `cut_site_stats` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
-| `uniform_hexamer_counts` | `cut_site_stats` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `cut_site_stats` | `w(i)` above |
-| `propensities` | `cut_site_stats` | `C / N` |
+| `FragmentLengthDist` | `simulator.measure` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `uniform_hexamer_counts` | `simulator.measure` | → `N(h)`, in parallel over fixed region blocks. See §8 |
+| `fl_end_weight` | `simulator.measure` | `w(i)` above |
+| `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
@@ -583,7 +586,7 @@ looks like a defect, read the reason before changing it.
   **tautologies**, not routing protection — measured: feeding
   `counts_from_hexamers` a start/stop swap leaves both true, because each sum is
   just that strand's row count however the hexamers are routed. They stay only
-  to catch a malformed `counts` dict from outside `cut_site_stats`.
+  to catch a malformed `counts` dict from outside `simulator.measure`.
 
   Scope of that guard, so it is not mistaken for more than it is.
   `sample_region` skips a whole strand block on `if tot <= 0: continue`, with no

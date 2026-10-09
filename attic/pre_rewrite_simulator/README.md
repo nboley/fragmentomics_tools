@@ -8,7 +8,8 @@ paths no longer exist. They were moved rather than deleted so the design stays
 readable next to its successor.
 
 The live simulator is `background_model/hexamers.py`,
-`background_model/cut_site_stats.py` and `background_model/simulator/draw.py`.
+`background_model/simulator/measure.py` (`background_model/cut_site_stats.py`
+until owner decision 187) and `background_model/simulator/draw.py`.
 Its authority is `docs/pending/simulator_spec.md`. The design documents for
 this generation are in `attic/pre_rewrite_simulator_docs/`.
 

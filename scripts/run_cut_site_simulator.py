@@ -94,7 +94,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
-from background_model.cut_site_stats import (  # noqa: E402
+from background_model.simulator.measure import (  # noqa: E402
     FragmentLengthDist,
     TABLE_NAMES,
     count_sample,

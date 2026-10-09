@@ -1,5 +1,5 @@
 """Tests for the cut-site simulator: ``background_model/hexamers.py``,
-``background_model/cut_site_stats.py`` and ``background_model/simulator/draw.py``.
+``background_model/simulator/measure.py`` and ``background_model/simulator/draw.py``.
 
 These three were one module, ``count_hexamers_rdf.py``, until owner decision
 169 split it along its dependency layers; the tests were kept together because
@@ -39,7 +39,7 @@ from background_model.hexamers import (
     hexamer_vocabulary,
     rc_permutation,
 )
-from background_model.cut_site_stats import (
+from background_model.simulator.measure import (
     FragmentLengthDist,
     TABLE_NAMES,
     count_sample,
@@ -2615,11 +2615,11 @@ class TestT7Hygiene:
         dropping out.
         """
         import background_model.constants as const_mod
-        import background_model.cut_site_stats as stats_mod
+        import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
         for mod, must_have_examples in ((const_mod, True), (hex_mod, True),
-                                        (stats_mod, False), (draw_mod, False)):
+                                        (measure_mod, False), (draw_mod, False)):
             results = doctest.testmod(mod, verbose=False)
             if must_have_examples:
                 assert results.attempted > 0, f"no doctests found in {mod.__name__}"
@@ -2647,13 +2647,20 @@ class TestT7Hygiene:
                         assert not alias.name.startswith("fragmentomics_tools")
 
     def test_no_removed_feature_imports(self):
-        """M40 (module imports simulator.precompute)."""
-        import background_model.cut_site_stats as stats_mod
+        """M40 (module imports simulator.precompute).
+
+        Also: ``background_model.cut_site_stats`` is gone, not shimmed. Owner
+        decision 187 moved it to ``simulator.measure`` with no alias left
+        behind, so an old import fails loudly instead of resolving.
+        """
+        import importlib.util
+        assert importlib.util.find_spec("background_model.cut_site_stats") is None
+        import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
         banned = {"flgc", "simulator.capture", "simulator.precompute",
                    "simulator.weights", "simulator.sampler", "simulator.emit"}
-        for mod in (hex_mod, stats_mod, draw_mod):
+        for mod in (hex_mod, measure_mod, draw_mod):
             with open(mod.__file__) as f:
                 tree = ast.parse(f.read())
             for node in ast.walk(tree):
@@ -2667,28 +2674,41 @@ class TestT7Hygiene:
     def test_layering_holds(self):
         """Owner decision 169 split one module into three layers, each
         importing only from layers above it: ``hexamers.py`` (numpy + stdlib
-        only) <- ``cut_site_stats.py`` (adds pandas, fragmentomics_tools) <-
+        only) <- ``simulator/measure.py`` (adds pandas, fragmentomics_tools) <-
         ``simulator/draw.py``. Decisions 174-177 put ``constants.py`` (stdlib
-        + ``background_model.tracks`` only) above all three. Guards mutations
-        L1 (hexamers imports pandas), L2 (cut_site_stats imports upward from
-        simulator) and L3 (constants imports numpy).
+        + ``background_model.tracks`` only) above all three, and decision 187
+        moved ``measure`` (formerly ``cut_site_stats.py``) into the simulator
+        package. Guards mutations L1 (hexamers imports pandas), L2 (measure
+        imports upward from draw), L3 (constants imports numpy) and L4
+        (measure imports draw relatively, ``from . import draw``).
 
         "Above", not "the one above": ``draw`` importing ``hexamers`` directly
         is allowed, so this checks each import against the importer's own
         layer rather than demanding it come from the adjacent one.
         """
         import background_model.constants as const_mod
-        import background_model.cut_site_stats as stats_mod
         import background_model.hexamers as hex_mod
+        import background_model.simulator as sim_pkg
         import background_model.simulator.draw as draw_mod
+        import background_model.simulator.measure as measure_mod
 
         # Upstream first: a module may import only from a LOWER index here,
-        # i.e. from a layer above it. Anything under background_model.simulator
-        # is the draw's layer, so importing the package counts as importing it.
+        # i.e. from a layer above it. measure is the one simulator module above
+        # the draw; any OTHER background_model.simulator submodule is the
+        # draw's layer, so a new sibling cannot slip in above measure unseen.
+        measure_layer = "background_model.simulator.measure"
+        sim_pkg_name = "background_model.simulator"
         layers = ["background_model.constants", "background_model.hexamers",
-                  "background_model.cut_site_stats", "background_model.simulator"]
+                  measure_layer, sim_pkg_name]
 
         def layer_of(name):
+            # The bare package is a namespace, not a layer: measure and draw
+            # both live in it, so `from . import x` names it as the base. The
+            # alias (``.x``) still carries the layer. Skipping the bare name is
+            # sound only while the package __init__ imports nothing, which is
+            # asserted below.
+            if name == sim_pkg_name:
+                return None
             for i, prefix in enumerate(layers):
                 if name == prefix or name.startswith(prefix + "."):
                     return i
@@ -2715,7 +2735,13 @@ class TestT7Hygiene:
                     for alias in node.names:
                         yield f"{base}.{alias.name}"
 
-        for own, mod in enumerate((const_mod, hex_mod, stats_mod, draw_mod)):
+        with open(sim_pkg.__file__) as f:
+            assert not [n for n in ast.walk(ast.parse(f.read()))
+                        if isinstance(n, (ast.Import, ast.ImportFrom))], (
+                f"{sim_pkg.__file__} imports something; the bare-package skip "
+                f"in layer_of is no longer sound")
+
+        for own, mod in enumerate((const_mod, hex_mod, measure_mod, draw_mod)):
             cross = set()
             for name in imported_names(mod):
                 other = layer_of(name)
@@ -2843,7 +2869,7 @@ class TestT7Hygiene:
         # Non-vacuity of the glob: the known importers must be in the scan.
         rel = {os.path.relpath(p, repo_root) for p in paths}
         for known in ("background_model/hexamers.py",
-                      "background_model/cut_site_stats.py",
+                      "background_model/simulator/measure.py",
                       "background_model/simulator/draw.py",
                       "scripts/count_cut_site_hexamers.py",
                       "scripts/run_cut_site_simulator.py",

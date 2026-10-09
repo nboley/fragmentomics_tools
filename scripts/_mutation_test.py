@@ -2,9 +2,10 @@
 """Programmatic mutation testing for the cut-site simulator.
 
 Targets ``background_model/constants.py``, ``background_model/hexamers.py``,
-``background_model/cut_site_stats.py`` and ``background_model/simulator/draw.py``
+``background_model/simulator/measure.py`` and ``background_model/simulator/draw.py``
 (the last three were one file, ``count_hexamers_rdf.py``, until decision 169
-split it), plus a few library and oracle files.
+split it; ``measure`` was ``background_model/cut_site_stats.py`` until
+decision 187), plus a few library and oracle files.
 
 Applies each mutation as a text substitution, runs the test suite,
 records which tests fail, reverts, and prints a matrix.
@@ -90,37 +91,37 @@ MUTATIONS = [
 
     # M7: drop valid mask in cut_site_hexamers
     ("M7", "drop valid mask in cut_site_hexamers",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "    ok = s_ok & e_ok\n    return pd.DataFrame({\n        \"start_hex\": s_hex[ok].astype(np.int32),\n        \"stop_hex\": e_hex[ok].astype(np.int32),\n        \"strand\": np.asarray(rfa.fragment_strands)[ok],\n    })",
      "    ok = np.ones(len(s_ok), dtype=bool)\n    return pd.DataFrame({\n        \"start_hex\": s_hex[ok].astype(np.int32),\n        \"stop_hex\": e_hex[ok].astype(np.int32),\n        \"strand\": np.asarray(rfa.fragment_strands)[ok],\n    })"),
 
     # M8: swap start_rev/end_rev sources
     ("M8", "swap start_rev/end_rev sources",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      '    counts["start_rev"] = np.bincount(perm[e[~plus]], minlength=NHEX)\n    counts["end_rev"] = np.bincount(perm[s[~plus]], minlength=NHEX)',
      '    counts["start_rev"] = np.bincount(perm[s[~plus]], minlength=NHEX)\n    counts["end_rev"] = np.bincount(perm[e[~plus]], minlength=NHEX)'),
 
     # M9: omit perm on minus strand
     ("M9", "omit perm on minus strand",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      '    counts["start_rev"] = np.bincount(perm[e[~plus]], minlength=NHEX)\n    counts["end_rev"] = np.bincount(perm[s[~plus]], minlength=NHEX)',
      '    counts["start_rev"] = np.bincount(e[~plus], minlength=NHEX)\n    counts["end_rev"] = np.bincount(s[~plus], minlength=NHEX)'),
 
     # M10: whole swap (plus = strand != "+")
     ("M10", "whole plus/minus swap",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      '    plus = df["strand"].to_numpy() == "+"',
      '    plus = df["strand"].to_numpy() != "+"'),
 
     # M19: return C (no division) -- make propensities return counts not ratios
     ("M19", "propensities returns C (no division)",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        r = np.zeros(NHEX, dtype=np.float64)\n        r[ok] = counts[name][ok] / d[ok]\n        out[name] = r",
      "        r = np.zeros(NHEX, dtype=np.float64)\n        r[ok] = counts[name][ok].astype(np.float64)\n        out[name] = r"),
 
     # M20: >= instead of > for min_expected
     ("M20", ">= instead of > for min_expected",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        ok = d > min_expected",
      "        ok = d >= min_expected"),
 
@@ -132,7 +133,7 @@ MUTATIONS = [
 
     # M31: bytes comparison for strand
     ("M31", "bytes comparison for strand",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      '    plus = df["strand"].to_numpy() == "+"',
      '    plus = df["strand"].to_numpy() == b"+"'),
 
@@ -150,19 +151,19 @@ MUTATIONS = [
 
     # M38: densify without normalisation
     ("M38", "densify without normalisation",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        self.densities = counts / np.float64(total)",
      "        self.densities = counts.astype(np.float64)"),
 
     # M41: restore pre-fix pairing (swap start_rev/end_rev denominators)
     ("M41", "restore pre-fix denominator pairing",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      '        "start_rev": n_end.astype(np.float64)[perm],\n        "end_rev": n_start.astype(np.float64)[perm],',
      '        "start_rev": n_start.astype(np.float64)[perm],\n        "end_rev": n_end.astype(np.float64)[perm],'),
 
     # M42: drop valid in uniform_hexamer_counts (start)
     ("M42", "drop valid in uniform_hexamer_counts starts",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "            s_valid = valid[s_idx]\n            N_start += np.bincount(fwd[s_idx][s_valid], minlength=NHEX)",
      "            N_start += np.bincount(fwd[s_idx], minlength=NHEX)"),
 
@@ -176,7 +177,7 @@ MUTATIONS = [
 
     # M6: left_pad=0 in count_sample
     ("M6", "left_pad=0 in count_sample",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      # Anchored on the one line: 3895d08 put a comment block between it and
      # `srdf = (`, which silently turned the two-line pattern into a SKIP.
      "    left_flank, right_flank = HEX_HALF, l_max + HEX_HALF\n",
@@ -190,26 +191,26 @@ MUTATIONS = [
 
     # M13: subset_fragment_lengths(l_min, l_max) -- half-open drops L_MAX
     ("M13", "half-open drops L_MAX=180",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "    fa = fa.drop_duplicate_fragments().subset_fragment_lengths(l_min, l_max + 1)",
      "    fa = fa.drop_duplicate_fragments().subset_fragment_lengths(l_min, l_max)"),
 
     # M16: right_pad=l_max (drops HEX_HALF, truncates overhang coverage)
     ("M16", "right_pad=l_max instead of l_max+HEX_HALF",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      # Same drift as M6: anchored on the one line.
      "    left_flank, right_flank = HEX_HALF, l_max + HEX_HALF\n",
      "    left_flank, right_flank = HEX_HALF, l_max\n"),
 
     # M17: fl_end_weight off-by-one (drop the -1 on min_fl)
     ("M17", "fl_end_weight: max(min_fl, i-R) instead of max(min_fl-1, i-R)",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        - fl.cdf_at(np.maximum(fl.min_fl - 1, i - region_len))",
      "        - fl.cdf_at(np.maximum(fl.min_fl, i - region_len))"),
 
     # M18: N_end over the region only (no flank)
     ("M18", "N_end computed over region_len only, no flank",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "            w = fl_end_weight(n_hex, region_len, fl)\n            m = valid & (w > 0)",
      "            w = fl_end_weight(region_len, region_len, fl)\n            m = valid & (w > 0)"),
 
@@ -257,7 +258,7 @@ MUTATIONS = [
 
     # M32: clip stops_0 to the region before the hexamer lookup
     ("M32", "clip stops_0 to region before hexamer lookup",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "    e_hex, e_ok = hexamers_at(sequence, rfa.stops_0)",
      "    e_hex, e_ok = hexamers_at(sequence, np.minimum(rfa.stops_0, rfa.length - 1))"),
 
@@ -275,14 +276,14 @@ MUTATIONS = [
 
     # M36: skip the length filter entirely
     ("M36", "skip the length filter entirely",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "    fa = fa.drop_duplicate_fragments().subset_fragment_lengths(l_min, l_max + 1)",
      "    fa = fa.drop_duplicate_fragments()"),
 
     # M39: VOID (see VOID below) -- the one-empty-strand raise was deleted by
     # owner decision 2026-10-08, so the pattern no longer exists in the source.
     ("M39", "delete the one-empty-strand raise (VOID: guard removed)",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        if not n_plus or not n_minus:\n            raise AssertionError(",
      "        if not n_plus and not n_minus:\n            raise AssertionError("),
 
@@ -305,7 +306,7 @@ MUTATIONS = [
      '        rng=globals().setdefault("_MUT_RNG", region_rng(seed, 0)), _dup_counter=dup_counter,'),
 
     ("D3", "N(h) reduction grouping follows n_workers",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "    los = np.arange(0, n, block_size, dtype=np.int64)",
      "    block_size = max(1, -(-n // (n_workers or __import__('os').cpu_count())))\n    los = np.arange(0, n, block_size, dtype=np.int64)"),
 
@@ -320,7 +321,7 @@ MUTATIONS = [
      "                probs=probs, n_dup_redraws=0)"),
 
     ("D5", "region_index from row position, not the index label",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      "        rdf = rdf.assign(region_index=np.asarray(rdf.index, dtype=np.int64))",
      "        rdf = rdf.assign(region_index=np.arange(len(rdf), dtype=np.int64))"),
 
@@ -332,23 +333,30 @@ MUTATIONS = [
 
     # M40b: module imports simulator.precompute (unreachable, AST-visible only)
     ("M40b", "module imports simulator.precompute",
-     "background_model/cut_site_stats.py",
+     "background_model/simulator/measure.py",
      # 3895d08 added DataFrameBase to this import, which had made it a SKIP.
      "from fragmentomics_tools.dataframe import (\n    DataFrameBase,\n    SampleAndRegionDataFrame,\n    SampleDataFrame,\n)",
      "from fragmentomics_tools.dataframe import (\n    DataFrameBase,\n    SampleAndRegionDataFrame,\n    SampleDataFrame,\n)\nif False:\n    from background_model.simulator.precompute import hexamer_indices as _unused"),
 
-    # ── Owner decision 169: layer split (hexamers <- cut_site_stats <- draw) ──
+    # ── Owner decisions 169, 187: layers (hexamers <- simulator.measure <- simulator.draw) ──
 
     ("L1", "hexamers imports pandas",
      "background_model/hexamers.py",
      "import numpy as np\n",
      "import numpy as np\nimport pandas as _pd  # noqa: F401\n"),
 
-    ("L2", "cut_site_stats imports upward from simulator",
-     "background_model/cut_site_stats.py",
+    ("L2", "simulator.measure imports upward from simulator.draw",
+     "background_model/simulator/measure.py",
      # Re-pointed when HEX_HALF/NHEX moved to background_model.constants.
      "from background_model.hexamers import (\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)",
      "from background_model.hexamers import (\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
+
+    # Decision 187 put measure and draw in ONE package, so the upward import can
+    # now also be spelled relative to it, or name draw only as an alias.
+    ("L4", "simulator.measure imports draw relatively (from . import draw)",
+     "background_model/simulator/measure.py",
+     "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
+     "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\nif False:\n    from . import draw as _unused\n"),
 
     # ── Owner decisions 174-177: shared definitions in constants.py ───────
 
@@ -362,13 +370,13 @@ MUTATIONS = [
      "L_MAX: int = max(hi for _lo, hi in FL_BANDS)",
      "L_MAX: int = max(hi for _lo, hi in FL_BANDS) + 1"),
 
-    ("C2", "cut_site_stats restates L_MAX locally (same value)",
-     "background_model/cut_site_stats.py",
+    ("C2", "simulator.measure restates L_MAX locally (same value)",
+     "background_model/simulator/measure.py",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
      "from background_model.constants import HEX_HALF, L_MIN, NHEX\nL_MAX: int = 180\n"),
 
-    ("C3", "cut_site_stats restates L_MIN, L_MAX as a tuple (same values)",
-     "background_model/cut_site_stats.py",
+    ("C3", "simulator.measure restates L_MIN, L_MAX as a tuple (same values)",
+     "background_model/simulator/measure.py",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
      "from background_model.constants import HEX_HALF, NHEX\nL_MIN, L_MAX = 25, 180\n"),
 ]

@@ -35,7 +35,7 @@ from background_model.tracks import FL_BANDS
 # ── fragment length bounds, INCLUSIVE, from FL_BANDS ──────────────────────
 #
 # The library's subset_fragment_lengths is half-open, so callers pass
-# L_MAX + 1 to it; see cut_site_stats.filter_fragments.
+# L_MAX + 1 to it; see simulator.measure.filter_fragments.
 
 L_MIN: int = min(lo for lo, _hi in FL_BANDS)          # 25
 L_MAX: int = max(hi for _lo, hi in FL_BANDS)          # 180, inclusive

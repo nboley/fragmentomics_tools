@@ -20,7 +20,7 @@ Scoped narrowly on purpose: it asserts the PAIRING, not the numerics of
 import numpy as np
 import pytest
 
-from background_model.cut_site_stats import TABLE_NAMES, propensities
+from background_model.simulator.measure import TABLE_NAMES, propensities
 from background_model.constants import NHEX
 from background_model.hexamers import rc_permutation
 

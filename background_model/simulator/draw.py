@@ -1,6 +1,6 @@
 """The cut-site simulator's draw: fragments from ``r(h)``, ``f(L)`` and per-region counts.
 
-Inputs come from ``background_model.cut_site_stats`` (``count_sample``,
+Inputs come from ``background_model.simulator.measure`` (``count_sample``,
 ``uniform_hexamer_counts``, ``propensities``, ``FragmentLengthDist``); encoding
 is ``background_model.hexamers``.  Authority: ``docs/pending/simulator_spec.md``.
 Driver: ``scripts/run_cut_site_simulator.py``.
@@ -9,10 +9,10 @@ Driver: ``scripts/run_cut_site_simulator.py``.
 across worker counts** (owner decision 166): each region draws from its own
 stream ``default_rng([seed, region_index])``, and every reduction is grouped
 independently of ``n_workers``.  See ``region_rng``, and ``UNIFORM_BLOCK_SIZE``
-in ``cut_site_stats`` for the same guarantee on ``N(h)``.
+in ``measure`` for the same guarantee on ``N(h)``.
 
 The sampler takes the per-site RATE ``r(h)`` from
-``cut_site_stats.propensities``, not raw counts: it re-enumerates candidate
+``measure.propensities``, not raw counts: it re-enumerates candidate
 positions itself, so counts would apply hexamer abundance twice.
 """
 
@@ -28,8 +28,8 @@ import pandas as pd
 from fragmentomics_tools.dataframe import DataFrameBase
 
 from background_model.constants import HEX_HALF, L_MAX
-from background_model.cut_site_stats import FragmentLengthDist
 from background_model.hexamers import hexamer_indices
+from background_model.simulator.measure import FragmentLengthDist
 
 # Seeds and region indices are each ONE 32-bit word; see region_rng.
 _SEED_WORD_MAX: int = 2 ** 32
@@ -270,7 +270,7 @@ def simulate_fragments_to_bed(
     function's.
 
     ``region_counts`` is the per-row ``n``, as returned by
-    ``cut_site_stats.count_srdf``.
+    ``measure.count_srdf``.
     ``seed`` is required rather than defaulted: an unseeded run cannot be
     reproduced, and the seed is this artifact's only provenance.
 
@@ -280,7 +280,7 @@ def simulate_fragments_to_bed(
     region set, a property of the region rather than of this frame, so a
     filtered or reordered ``srdf`` draws exactly the same fragments for the
     regions it keeps.  It is taken from the argument if given, else from the
-    frame's ``region_index`` column, which ``cut_site_stats.count_sample``
+    frame's ``region_index`` column, which ``measure.count_sample``
     attaches.  There is no positional fallback: ``arange(len(srdf))`` would
     silently re-key every region of a filtered frame.  Values must be unique.
 
