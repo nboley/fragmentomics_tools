@@ -7,8 +7,10 @@ import lightning as L
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
+import zarr
 from torch.utils.data import DataLoader
 from background_model.constants import L_MAX, L_MIN
+from background_model.cut_site_store import CutSiteStoreConfig
 from background_model.cut_site_model import CutSiteFragmentModel
 from background_model.cut_site_dataset import CutSiteFragmentDataset, cut_site_collate_fn
 
@@ -83,8 +85,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--store", required=True)
     p.add_argument("--run-dir", required=True)
-    # Required, no default (owner decision 176): must match the store's.
-    p.add_argument("--tile-size", type=int, required=True)
+    # The tile size is read from the store (owner decision 176: no default);
+    # the dataset reads it there too.  --tile-size is only a cross-check.
+    p.add_argument("--tile-size", type=int, default=None,
+                   help="optional; must equal the store's tile_size")
     p.add_argument("--L-min", type=int, default=L_MIN)
     p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--epochs", type=int, default=30)
@@ -124,10 +128,18 @@ def main():
                         "fragment rule silently drifted on four axes.")
     args = p.parse_args()
 
+    # The model must be built for the store's tile size, which the dataset
+    # reads from config_json.  A separate CLI value could silently disagree.
+    store_cfg = CutSiteStoreConfig.from_json(
+        zarr.open_group(args.store, mode="r").attrs["config_json"])
+    if args.tile_size is not None and args.tile_size != store_cfg.tile_size:
+        p.error(f"--tile-size {args.tile_size} != store tile_size "
+                f"{store_cfg.tile_size}")
+
     os.makedirs(args.run_dir, exist_ok=True)
 
     model = CutSiteFragmentModel(
-        L_min=args.L_min, L_max=args.L_max, tile_size=args.tile_size,
+        L_min=args.L_min, L_max=args.L_max, tile_size=store_cfg.tile_size,
         N1=128, K=128, N2=32, H=32, L_chunk=32,
         dispersion_window_size=256,
         learning_rate=args.lr, nb_w0=args.nb_w0, nb_T_anneal=args.nb_T_anneal,
@@ -149,8 +161,8 @@ def main():
         with torch.no_grad():
             model.w_out.zero_()
             model.len_bias.zero_()
-        assert model.w_out.abs().max().item() == 0.0
-        assert model.len_bias.abs().max().item() == 0.0
+        if model.w_out.abs().max().item() != 0.0 or model.len_bias.abs().max().item() != 0.0:
+            raise RuntimeError("zero-correction failed: w_out / len_bias not zero")
         print("zero-correction: f_theta == 0 (w_out=0, len_bias=0)")
 
     train_ds = CutSiteFragmentDataset(

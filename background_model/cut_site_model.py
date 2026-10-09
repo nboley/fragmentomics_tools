@@ -27,7 +27,6 @@ import torch
 import torch.nn as nn
 
 from background_model.constants import KMER, L_MAX, L_MIN, NHEX
-from background_model.hexamers import hexamer_indices
 from background_model_core import (
     MaskedNegativeBinomialOffsetNLLLoss,
     masked_mean_pool,
@@ -117,17 +116,6 @@ def length_to_group(L: torch.Tensor, L_min: int) -> torch.Tensor:
 HEX_K = KMER         # 6, from background_model.constants
 N_HEX = NHEX         # 4096
 
-# Hex tables are keyed by hexamer index, so a table is only meaningful under
-# the encoder that built it.  stage1_hex_baseline.py writes this tag into every
-# .npz it saves, and the model refuses any table that does not carry it.
-#
-# Owner decision 186 moved this model from a little-endian index
-# (sum base[p+i] * 4^i) to the shared big-endian order of
-# background_model.hexamers.  Every table built before that change is keyed in
-# the old order and carries no tag; loading one would read every hexamer's
-# value from a different hexamer, with no error.
-HEX_TABLE_ENCODING = "background_model.hexamers/big-endian"
-
 # Position of the cut BASE within the k-mer, junction-centred: for a cut at
 # base s the k-mer spans s-3 .. s+2, so the cut junction (between s-1 and s)
 # sits exactly mid-k-mer.  Owner-specified 2026-10-05.
@@ -139,65 +127,20 @@ HEX_TABLE_ENCODING = "background_model.hexamers/big-endian"
 CUT_OFFSET_IN_KMER = 3
 
 
-def _shared_positional_weights() -> np.ndarray:
-    """Per-position weights of the shared encoder, read off it, not restated.
+def _onehot_to_hex_indices(x_onehot: torch.Tensor, k: int = HEX_K) -> torch.Tensor:
+    """Convert (B, 4, L) one-hot sequence to (B, L-k+1) hexamer indices.
 
-    The 6-mer with C (code 1) at position i and A (code 0) everywhere else
-    encodes to exactly the weight of position i, so pushing those KMER probes
-    through ``hexamers.hexamer_indices`` recovers its convention.  The model
-    therefore follows the shared encoder rather than holding a second copy of
-    its base-4 order that could drift from it.
-    """
-    probes = np.full((KMER, KMER), ord("A"), dtype=np.uint8)
-    probes[np.arange(KMER), np.arange(KMER)] = ord("C")
-    fwd, _rc, valid = hexamer_indices(probes.reshape(-1))
-    assert valid[::KMER].all()
-    return fwd[::KMER].astype(np.int64)
-
-
-# (KMER,) weights, first base most significant: [4^5, 4^4, ..., 4^0].
-_HEX_POSITIONAL_WEIGHTS = _shared_positional_weights()
-
-
-def _onehot_to_hex_indices(x_onehot: torch.Tensor) -> torch.Tensor:
-    """Convert (B, 4, L) one-hot sequence to (B, L-KMER+1) hexamer indices.
-
-    The index order is the shared one of ``background_model.hexamers``
-    (big-endian, first base most significant), so ``hexamer_vocabulary()[i]``
-    is the 6-mer that index ``i`` here refers to.  The one-hot channels are
-    A, C, G, T, the same base codes the shared encoder uses.
-
-    Positions with ambiguous bases (no channel active, i.e. N) read as base 0
-    (A) via argmax, so an N-containing window gets the index of its N-as-A
-    reading.  This N handling is unchanged by the switch to the shared order.
+    Each index is in [0, 4^k).  Positions with ambiguous bases (no channel
+    active, i.e. N) get index 0 (safe — just maps to a single hex entry).
     """
     # argmax over channel dim: (B, L) base indices 0-3
     bases = x_onehot.argmax(dim=1)  # (B, L)
-    weights = torch.as_tensor(_HEX_POSITIONAL_WEIGHTS, device=x_onehot.device)
-    # Sliding window: sum base[p+i] * weights[i] for i in 0..KMER-1
-    bases_unf = bases.unfold(1, KMER, 1)  # (B, L-KMER+1, KMER)
-    indices = (bases_unf * weights[None, None, :]).sum(dim=-1)  # (B, L-KMER+1)
+    powers = (4 ** torch.arange(k, device=x_onehot.device)).long()  # (k,)
+    # Sliding window: sum base[p+i] * 4^i for i in 0..k-1
+    # Use unfold for efficiency
+    bases_unf = bases.unfold(1, k, 1)  # (B, L-k+1, k)
+    indices = (bases_unf * powers[None, None, :]).sum(dim=-1)  # (B, L-k+1)
     return indices
-
-
-def _load_hex_tables(path: str):
-    """Load a stage-1 hex-table .npz, refusing tables in any other index order.
-
-    See ``HEX_TABLE_ENCODING``: a table without the tag was built by the
-    pre-decision-186 little-endian encoder, and reading it under the shared
-    order would silently mis-key every hexamer.
-    """
-    data = np.load(path)
-    tag = str(data["hex_encoding"]) if "hex_encoding" in data.files else None
-    if tag != HEX_TABLE_ENCODING:
-        raise ValueError(
-            f"hex tables {path!r} carry encoding tag {tag!r}, expected "
-            f"{HEX_TABLE_ENCODING!r}.  Tables built before the switch to the "
-            f"shared big-endian hexamer order (owner decision 186) are keyed "
-            f"in the old little-endian order and cannot be used.  Rebuild them "
-            f"with scripts/stage1_hex_baseline.py."
-        )
-    return data
 
 
 def compute_log_p0(
@@ -312,7 +255,12 @@ class CutSiteFragmentModel(L.LightningModule):
         N2: int = 32,
         H: int = 32,
         L_chunk: int = 32,
-        tile_size: int = 2048,
+        # REQUIRED, no default (owner decision 176, as for
+        # CutSiteStoreConfig.tile_size): it must equal the store's tile_size,
+        # and a default silently picked the geometry for any caller that
+        # omitted it.  Keyword-only, so every parameter after it is too.
+        *,
+        tile_size: int,
         # Training
         learning_rate: float = 1e-4,
         lr_patience: int = 4,
@@ -381,7 +329,7 @@ class CutSiteFragmentModel(L.LightningModule):
         self._h_width = tile_size + W
 
         # -- L1: cut-site propensity ----------------------------------------
-        self.l1_conv = nn.Conv1d(4, N1, kernel_size=6, padding=0)
+        self.l1_conv = nn.Conv1d(4, N1, kernel_size=KMER, padding=0)
         self.l1_act = nn.LeakyReLU()
 
         # -- L2a: endpoint banks (4 = 2 taps × 2 strands) ------------------
@@ -446,7 +394,7 @@ class CutSiteFragmentModel(L.LightningModule):
         self._use_hex_baseline = hex_tables_path is not None
         self._freeze_hex = freeze_hex
         if hex_tables_path is not None:
-            data = _load_hex_tables(hex_tables_path)
+            data = np.load(hex_tables_path)
             hex_tensors = {
                 "hex_log_start_fwd": torch.from_numpy(np.log(np.maximum(data["start_fwd"], 1e-30))).float(),
                 "hex_log_stop_fwd": torch.from_numpy(np.log(np.maximum(data["stop_fwd"], 1e-30))).float(),
@@ -770,7 +718,10 @@ class CutSiteFragmentModel(L.LightningModule):
         """Pool bp-resolution dispersion to NB window level."""
         bp_len = dispersion_bp.shape[-1]
         w = self.hparams.dispersion_window_size
-        assert bp_len % w == 0, f"tile size {bp_len} not divisible by dispersion_window_size {w}"
+        if bp_len % w != 0:
+            raise ValueError(
+                f"tile size {bp_len} not divisible by dispersion_window_size {w}"
+            )
         out_size = bp_len // w
         if mask is not None and mask.dim() == 2:
             mask = mask[:, None, :]

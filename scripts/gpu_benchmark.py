@@ -20,13 +20,16 @@ Example
 import argparse, os, sys, time
 
 import torch
+import zarr
 from torch.profiler import ProfilerActivity, profile
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 torch.set_float32_matmul_precision("high")
 
+from background_model.constants import L_MAX, L_MIN
 from background_model.cut_site_model import CutSiteFragmentModel
+from background_model.cut_site_store import CutSiteStoreConfig
 from background_model.cut_site_dataset import (
     CutSiteFragmentDataset, cut_site_collate_fn,
 )
@@ -54,9 +57,11 @@ def main():
     p.add_argument("--hex-tables", default=None,
                    help="include the Stage-2 log_p0 path, as production does")
     p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--tile-size", type=int, default=1024)
-    p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=180)
+    # Read from the store, as the dataset does; --tile-size is only a cross-check.
+    p.add_argument("--tile-size", type=int, default=None,
+                   help="optional; must equal the store's tile_size")
+    p.add_argument("--L-min", type=int, default=L_MIN)
+    p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--min-N", type=int, default=10)
     p.add_argument("--precision", default="bf16", choices=sorted(_DTYPE))
     p.add_argument("--warmup", type=int, default=3)
@@ -65,6 +70,13 @@ def main():
     p.add_argument("--rows", type=int, default=25)
     p.add_argument("--trace-out", default=None, help="chrome trace .json path")
     args = p.parse_args()
+
+    store_cfg = CutSiteStoreConfig.from_json(
+        zarr.open_group(args.store, mode="r").attrs["config_json"])
+    if args.tile_size is not None and args.tile_size != store_cfg.tile_size:
+        p.error(f"--tile-size {args.tile_size} != store tile_size "
+                f"{store_cfg.tile_size}")
+    args.tile_size = store_cfg.tile_size
 
     if not torch.cuda.is_available():
         sys.exit("needs a GPU")

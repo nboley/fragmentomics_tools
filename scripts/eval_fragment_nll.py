@@ -72,10 +72,39 @@ _ROLE_CODES = {"train": 0, "heldout": 1, "dropped_low_depth": 2}
 # L_MIN / L_MAX are the shared inclusive bounds from background_model.constants
 # (owner decision 185; this script used the half-open max(hi) - 1 = 179 before).
 # L_MAX = 180 is admitted by the cut-site store and model but lies in NO
-# half-open FL band, so a 12-track model has no track to score it with.  How
-# such a fragment should be scored is an open owner decision; until it is made,
-# _eval_region refuses any admitted fragment that falls in no band rather than
-# score it with uninitialised memory.
+# half-open FL band.  See _band_index for how it is scored.
+
+# The band whose half-open hi is L_MAX.  _band_index closes it at L_MAX.
+_TOP_BAND = max(range(len(FL_BANDS)), key=lambda b: FL_BANDS[b][1])
+if FL_BANDS[_TOP_BAND][1] != L_MAX:
+    raise RuntimeError(
+        f"top FL band {FL_BANDS[_TOP_BAND]} does not end at L_MAX={L_MAX}; "
+        f"revisit the L_MAX rule in _band_index"
+    )
+
+
+def _band_index(L):
+    """FL band index for each length in ``L``; -1 for a length in no band.
+
+    THE SINGLE DELIBERATE EXCEPTION to half-open FL bands (owner decision 185):
+    here, and only here, a fragment of length L_MAX = 180 belongs to the TOP
+    band (110, 180).  L_MAX is inclusive, so the cut-site stores admit L = 180,
+    but the bands are half-open [lo, hi) and no band holds it.  A 12-track
+    model then has no track to score it with, so this evaluator scores it with
+    the top band's tracks.  FL_BANDS itself stays half-open (locked); do not
+    copy this rule anywhere else.
+    """
+    L = np.asarray(L, dtype=np.int64)
+    band_idx = np.full(L.shape, -1, dtype=np.int64)
+    for bi, (lo, hi) in enumerate(FL_BANDS):
+        band_idx[(L >= lo) & (L < hi)] = bi
+    band_idx[(L == L_MAX) & (band_idx < 0)] = _TOP_BAND
+    return band_idx
+
+
+# Band of each admitted length L_MIN..L_MAX, so log Z sums over exactly the
+# (L, band) cells that _eval_region scores fragments from.
+_BAND_OF_L = _band_index(np.arange(L_MIN, L_MAX + 1))
 
 
 def _build_endpoint_map():
@@ -118,12 +147,13 @@ def _compute_log_Z(probs, p_marginal, P):
     """
     Z = 0.0
     for s_idx in (0, 1):
-        for b_idx, (lo, hi) in enumerate(FL_BANDS):
+        for b_idx in range(len(FL_BANDS)):
             first_t, last_t = ENDPOINT_MAP[(s_idx, b_idx)]
             p_first = probs[first_t]  # (P,)
             p_last = probs[last_t]
 
-            for L in range(max(L_MIN, lo), min(L_MAX + 1, hi)):
+            # Ascending L in this band, including L_MAX for the top band.
+            for L in (np.flatnonzero(_BAND_OF_L == b_idx) + L_MIN).tolist():
                 pm = p_marginal[L - L_MIN]
                 if pm <= 0:
                     continue
@@ -194,29 +224,18 @@ def _eval_region(
     # log Z for this region
     log_Z = _compute_log_Z(probs_np, p_marginal, P)
 
-    # Band index per fragment
-    band_idx = np.full(n_frag, -1, dtype=np.int64)
-    for bi, (lo, hi) in enumerate(FL_BANDS):
-        band_idx[(frag_L >= lo) & (frag_L < hi)] = bi
-
-    # log_frag_p is np.empty below and only band members are written, so an
-    # admitted fragment in no band would contribute uninitialised memory.
-    unbanded = band_idx < 0
-    if unbanded.any():
-        raise ValueError(
-            f"{int(unbanded.sum())} admitted fragment(s) fall in no FL band "
-            f"(lengths {sorted(set(frag_L[unbanded].tolist()))}; bands "
-            f"{FL_BANDS} are half-open, L_MAX={L_MAX} is inclusive).  Scoring "
-            f"them needs an owner decision; see the note at L_MIN / L_MAX."
-        )
+    # Band index per fragment; L = L_MAX goes to the top band (decision 185).
+    band_idx = _band_index(frag_L)
 
     # Vectorised per-(strand, band) group
     log_frag_p = np.empty(n_frag, dtype=np.float64)
+    scored = np.zeros(n_frag, dtype=bool)
     for s_idx in (0, 1):
         for b_idx in range(len(FL_BANDS)):
             sel = (frag_s == s_idx) & (band_idx == b_idx)
             if not sel.any():
                 continue
+            scored |= sel
 
             first_t, last_t = ENDPOINT_MAP[(s_idx, b_idx)]
             p_sel = frag_p[sel]
@@ -239,6 +258,16 @@ def _eval_region(
                 + log_p_L
                 - log_Z
             )
+
+    # log_frag_p is np.empty and only group members were written, so a
+    # fragment in no (strand, band) group would contribute uninitialised memory.
+    if not scored.all():
+        bad = ~scored
+        raise ValueError(
+            f"{int(bad.sum())} admitted fragment(s) fall in no (strand, band) "
+            f"group: lengths {sorted(set(frag_L[bad].tolist()))}, strands "
+            f"{sorted(set(frag_s[bad].tolist()))}; bands {FL_BANDS}"
+        )
 
     per_region_nll = -log_frag_p.sum() / n_frag
     return float(per_region_nll), n_frag

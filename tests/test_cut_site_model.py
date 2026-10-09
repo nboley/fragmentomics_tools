@@ -330,7 +330,7 @@ class TestCentreBasedDomain:
 class TestParameterCounts:
     def test_endpoint_bank_params(self):
         """4 banks × (K*N1 + K*10 + H*K) = 87,040 at default sizes."""
-        m = CutSiteFragmentModel()
+        m = CutSiteFragmentModel(tile_size=2048)
         per_bank = 128 * 128 + 128 * 10 + 32 * 128  # 16384 + 1280 + 4096 = 21760
         total = per_bank * 4  # 87040
         actual = sum(
@@ -342,7 +342,7 @@ class TestParameterCounts:
 
     def test_interior_branch_params(self):
         """F (N2, 4, n_offsets) = 22,912 at default sizes."""
-        m = CutSiteFragmentModel()
+        m = CutSiteFragmentModel(tile_size=2048)
         expected_F = 32 * 4 * N_OFFSETS  # 22912
         expected_W = 32 * 32 * 2  # W_span + W_mean, no bias
         actual_F = m.interior_F.numel()
@@ -355,7 +355,7 @@ class TestParameterCounts:
         assert actual_W == expected_W, f"W: expected {expected_W}, got {actual_W}"
 
     def test_len_bias_size(self):
-        m = CutSiteFragmentModel()
+        m = CutSiteFragmentModel(tile_size=2048)
         assert m.len_bias.shape == (N_L,)  # 155
 
 

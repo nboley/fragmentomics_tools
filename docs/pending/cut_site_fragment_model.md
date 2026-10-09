@@ -23,8 +23,12 @@ removes:
 
 1. **`FL_BANDS` is baked into the output channel axis**, and all lengths in a
    band share one per-position propensity, so a 125 bp and a 174 bp fragment are
-   indistinguishable to a track.
-2. **~49% of fragments fall outside every band** and contribute to no track.
+   indistinguishable to a track. This is the structural problem, and it does not
+   go away by choosing better bands.
+2. **Fragments outside every band contribute to no track at all** — ~24% of
+   realised fragments under the current `((25,110),(110,180))`. Widening the bands
+   shrank this (it was ~49% under `((40,65),(120,175))`) but cannot remove it,
+   because any banding leaves a remainder.
 
 The new model emits a logit for every `(m, L, strand)` and trains on the
 fragment multinomial. Bands become a reporting choice, not a model
@@ -174,10 +178,11 @@ strand-independent).
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
 
 ```
-[25,40) [40,55) [55,70) [70,85) [85,100) [100,115) [115,130) [130,145) [145,160) [160,180)
+[25,40) [40,55) [55,70) [70,85) [85,100) [100,115) [115,130) [130,145) [145,160) [160,180]
 ```
 
-Index `g = min((L-25)//15, 9)`; the clamp folds `[175,180)` into the last group.
+Index `g = min((L-25)//15, 9)`; the clamp folds `[175,180]` into the last group,
+so it is closed at the inclusive `L_max = 180`.
 Limitation: 15 bp resolution cannot isolate a sharp effect at ~167.
 
 ### L2b — interior branch
@@ -514,6 +519,14 @@ predicts **uniform lengths within each band**, so its NLL is dominated by length
 mis-specification rather than by sequence bias. Structurally fair, but it does
 **not** isolate sequence-bias recovery.
 
+**`L = 180` in `scripts/eval_fragment_nll.py` (owner decision 185).** The
+evaluator admits `L_MIN..L_MAX = 25..180` from `background_model.constants`
+(inclusive), but `FL_BANDS` is half-open, so `L = 180` lies in no band. In that
+script ONLY, an `L = 180` fragment is scored with the TOP band's tracks
+`(110, 180)`, and `log Z` includes that cell. This is the single deliberate
+exception to half-open bands (`_band_index`); `FL_BANDS` stays half-open
+everywhere else. A fragment that still falls in no `(strand, band)` group raises.
+
 ### Why the model cannot reach the oracle exactly
 
 `% captured` is **capped below 100 by construction**, and the cap is the
@@ -576,6 +589,11 @@ yourself (it moves per commit).
 - **Start-based fragment admission**: D = {(m, L, s) : m ∈ [0, P), L in-band,
   s ∈ {0,1}}. |D| = P × n_L × 2 = 319,488. |D_L| = P for all L — no length bias.
 - `WINDOW_HALF` = 181, `rf_budget` = 186 (WINDOW_HALF + 5).
+- **`tile_size` is required** (owner decision 176): `CutSiteStoreConfig` and
+  `CutSiteFragmentModel` have no default. `train_cut_site.py` and
+  `gpu_benchmark.py` read it from the store's `config_json`, as the dataset
+  does; their `--tile-size` is an optional cross-check that must match. The
+  hash of `CutSiteStoreConfig(tile_size=2048)` is unchanged, `e71256c72cbacd4e`.
 - **F offset range**: `n_offsets = L_max` (180),
   `o_l_min = WINDOW_HALF`. Under start admission the left tap is fixed.
 - **NB endpoint loss kept, dispersion frozen** at `log_dispersion_init`.
