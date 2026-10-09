@@ -31,12 +31,7 @@ from typing import Optional, Tuple
 import numpy as np
 import zarr
 
-from background_model.tracks import FL_BANDS
-
-
-# Default length bounds (from FL_BANDS, overridable)
-_DEFAULT_L_MIN = min(lo for lo, hi in FL_BANDS)    # 25
-_DEFAULT_L_MAX = max(hi for lo, hi in FL_BANDS)      # 180
+from background_model.constants import L_MAX, L_MIN
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +44,18 @@ class CutSiteStoreConfig:
     """Geometry + build params for the cut-site fragment store.
 
     L_min / L_max define the scored fragment-length range and replace max_len.
-    Only fragments with L in [L_min, L_max] are stored.
+    Only fragments with L in [L_min, L_max] are stored.  They default to the
+    shared ``constants.L_MIN`` / ``constants.L_MAX`` (inclusive).
+
+    ``tile_size`` is REQUIRED (owner decision 176): a default silently picked
+    the geometry for any caller that forgot it.  Existing stores record it in
+    ``config_json``, so ``from_json`` still loads them.
     """
-    tile_size: int = 2048
+    tile_size: int
     jitter: int = 256
     rf_budget: int = 186     # Must equal WINDOW_HALF + 5 (asserted in tests/test_hex_registration.py)
-    L_min: int = _DEFAULT_L_MIN
-    L_max: int = _DEFAULT_L_MAX
+    L_min: int = L_MIN
+    L_max: int = L_MAX
     seed: int = 42
     n_train_samples: int = 1
 

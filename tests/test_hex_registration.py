@@ -405,8 +405,142 @@ def test_rf_budget_equals_window_half_plus_5():
     """rf_budget in CutSiteStoreConfig must stay in sync with WINDOW_HALF."""
     from background_model.cut_site_store import CutSiteStoreConfig
 
-    cfg = CutSiteStoreConfig()
+    cfg = CutSiteStoreConfig(tile_size=2048)
     assert cfg.rf_budget == WINDOW_HALF + 5, (
         f"rf_budget={cfg.rf_budget} != WINDOW_HALF + 5 = {WINDOW_HALF + 5}.  "
         f"Update CutSiteStoreConfig.rf_budget when WINDOW_HALF changes."
     )
+
+
+# ---------------------------------------------------------------------------
+# Owner decision 186: the cut-site side uses the SHARED hexamer index order
+# ---------------------------------------------------------------------------
+#
+# The registration tests above tie the model and the table builder to EACH
+# OTHER, so they would still pass if both drifted to the same wrong order.
+# These tie each of them to background_model.hexamers, the one encoder.
+
+
+def _ascii_seq(width, seed, n_frac=0.0):
+    rng = np.random.default_rng(seed)
+    seq = rng.choice(np.frombuffer(b"ACGT", dtype=np.uint8), size=width)
+    if n_frac:
+        seq[rng.random(width) < n_frac] = ord("N")
+    return seq
+
+
+def test_model_encoder_matches_shared_encoder():
+    """Through the dataset's own one-hot path, the model's index equals
+    hexamers.hexamer_indices' forward index at every valid position."""
+    from background_model.hexamers import hexamer_indices
+    from fragmentomics_tools.region import one_hot_encode_sequences
+
+    seq = _ascii_seq(4096, seed=186, n_frac=0.02)
+    onehot = one_hot_encode_sequences([seq.tobytes()])[0]       # (L, 4)
+    x = torch.from_numpy(np.ascontiguousarray(onehot.T)).float()[None]
+    got = _onehot_to_hex_indices(x)[0].numpy()
+
+    fwd, _rc, valid = hexamer_indices(seq)
+    assert got.shape == fwd.shape
+    assert valid.sum() > 3000 and (~valid).sum() > 100       # both cases exercised
+    np.testing.assert_array_equal(got[valid], fwd[valid])
+
+    # N handling is unchanged by decision 186: N reads as A via argmax, which
+    # is the N-as-A reading the shared encoder also reports for such windows.
+    np.testing.assert_array_equal(got[~valid], fwd[~valid])
+
+
+def test_model_encoder_is_big_endian():
+    """Pin the order directly: index i decodes to hexamer_vocabulary()[i]."""
+    from background_model.hexamers import hexamer_vocabulary
+
+    acgt = np.frombuffer(b"ACGT", dtype=np.uint8)
+    vocab = hexamer_vocabulary()
+    for i in (0, 1, 4, 1024, 1234, 4095):
+        codes = np.searchsorted(acgt, np.frombuffer(vocab[i], dtype=np.uint8))
+        oh = np.zeros((4, HEX_K), dtype=np.float32)
+        oh[codes, np.arange(HEX_K)] = 1.0
+        assert int(_onehot_to_hex_indices(torch.from_numpy(oh)[None])[0, 0]) == i
+
+
+def test_builder_encoder_matches_shared_encoder():
+    """stage1_hex_baseline keys its tables in the shared order, keeps -1 for
+    N-containing windows, and reads numeric 0-3 and lowercase like ASCII."""
+    from background_model.hexamers import hexamer_indices
+    from scripts.stage1_hex_baseline import _seq_to_hexamer_indices
+
+    seq = _ascii_seq(4096, seed=187, n_frac=0.02)
+    fwd, _rc, valid = hexamer_indices(seq)
+    got = _seq_to_hexamer_indices(seq, HEX_K)
+    np.testing.assert_array_equal(got, np.where(valid, fwd, -1))
+
+    acgt = np.frombuffer(b"ACGT", dtype=np.uint8)
+    ascii_ = _ascii_seq(512, seed=188)
+    numeric = np.searchsorted(acgt, ascii_).astype(np.uint8)
+    lower = ascii_ + np.uint8(32)
+    want = _seq_to_hexamer_indices(ascii_, HEX_K)
+    assert (want >= 0).all()
+    np.testing.assert_array_equal(_seq_to_hexamer_indices(numeric, HEX_K), want)
+    np.testing.assert_array_equal(_seq_to_hexamer_indices(lower, HEX_K), want)
+
+
+def _write_tables(path, **extra):
+    from background_model.cut_site_model import DEFAULT_L_MAX, DEFAULT_L_MIN
+
+    rng = np.random.default_rng(0)
+    np.savez(
+        path,
+        **{k: rng.dirichlet(np.ones(4 ** HEX_K)) for k in
+           ("start_fwd", "stop_fwd", "start_rev", "stop_rev")},
+        p_L=rng.dirichlet(np.ones(DEFAULT_L_MAX - DEFAULT_L_MIN + 1)),
+        **extra,
+    )
+
+
+def test_untagged_hex_table_is_refused(tmp_path):
+    """A table from the old little-endian builder has no encoding tag, and
+    loading it would silently mis-key every hexamer.  It must raise."""
+    from background_model.cut_site_model import CutSiteFragmentModel
+
+    old = str(tmp_path / "old.npz")
+    _write_tables(old, k=6, L_min=25, L_max=180)       # what the old builder wrote
+    with pytest.raises(ValueError, match="encoding tag None"):
+        CutSiteFragmentModel(tile_size=64, hex_tables_path=old, freeze_hex=True)
+
+    wrong = str(tmp_path / "wrong.npz")
+    _write_tables(wrong, hex_encoding="little-endian")
+    with pytest.raises(ValueError, match="little-endian"):
+        CutSiteFragmentModel(tile_size=64, hex_tables_path=wrong)
+
+
+def test_tagged_hex_table_loads(tmp_path):
+    from background_model.cut_site_model import (
+        HEX_TABLE_ENCODING,
+        CutSiteFragmentModel,
+    )
+
+    good = str(tmp_path / "good.npz")
+    _write_tables(good, hex_encoding=HEX_TABLE_ENCODING)
+    model = CutSiteFragmentModel(tile_size=64, hex_tables_path=good, freeze_hex=True)
+    assert model._use_hex_baseline
+
+
+# ---------------------------------------------------------------------------
+# Owner decision 176: CutSiteStoreConfig.tile_size has no default
+# ---------------------------------------------------------------------------
+
+
+def test_store_config_requires_tile_size():
+    import json
+
+    from background_model.cut_site_store import CutSiteStoreConfig
+
+    with pytest.raises(TypeError, match="tile_size"):
+        CutSiteStoreConfig()
+
+    # An existing store records tile_size in config_json, so it still loads,
+    # and its hash is unchanged (the hash covers values, not defaults).
+    cfg = CutSiteStoreConfig(tile_size=2048)
+    assert json.loads(cfg.to_json())["tile_size"] == 2048
+    loaded = CutSiteStoreConfig.from_json(cfg.to_json())
+    assert loaded == cfg and loaded.config_hash() == cfg.config_hash()

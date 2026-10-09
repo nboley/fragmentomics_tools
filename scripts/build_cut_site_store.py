@@ -8,8 +8,10 @@ Usage:
         --sample sample.fragments.h5 \
         --output store.zarr \
         --tile-size 2048 --jitter 256 \
-        --L-min 25 --L-max 179 \
         --val-frac 0.1 --test-frac 0.1
+
+--L-min / --L-max default to background_model.constants (25, 180 inclusive),
+which is also the model's default range.
 
 The output store is consumed by CutSiteFragmentDataset for training the
 CutSiteFragmentModel.  The interface is identical for sim and real data.
@@ -33,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fragments_h5 import FragmentsH5
 
+from background_model.constants import L_MAX, L_MIN
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
@@ -306,11 +309,12 @@ def main():
     p.add_argument("--reference", required=True, help="Reference genome FASTA")
     p.add_argument("--sample", required=True, help="Fragment h5 file")
     p.add_argument("--output", required=True, help="Output zarr store path")
-    p.add_argument("--tile-size", type=int, default=2048)
+    # Required, no default (owner decision 176), like CutSiteStoreConfig.tile_size.
+    p.add_argument("--tile-size", type=int, required=True)
     p.add_argument("--jitter", type=int, default=256)
     p.add_argument("--rf-budget", type=int, default=186)
-    p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=180)
+    p.add_argument("--L-min", type=int, default=L_MIN)
+    p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
     p.add_argument("--no-dedup", action="store_true", help="Skip (start,stop) deduplication")
     p.add_argument("--split-seed", type=int, default=42)

@@ -22,51 +22,39 @@ import torch
 import torch.nn as nn
 import zarr
 
-from background_model.cut_site_model import CUT_OFFSET_IN_KMER
+from background_model.constants import KMER, L_MAX, L_MIN
+from background_model.cut_site_model import CUT_OFFSET_IN_KMER, HEX_TABLE_ENCODING
 from background_model.cut_site_store import CutSiteStoreConfig, validate_length_range
+from background_model.hexamers import hexamer_indices
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 
 _SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2}
 
 
-_ASCII_TO_BASE = np.full(256, 255, dtype=np.uint8)
-_ASCII_TO_BASE[ord('A')] = 0
-_ASCII_TO_BASE[ord('C')] = 1
-_ASCII_TO_BASE[ord('G')] = 2
-_ASCII_TO_BASE[ord('T')] = 3
-# Also handle lowercase
-_ASCII_TO_BASE[ord('a')] = 0
-_ASCII_TO_BASE[ord('c')] = 1
-_ASCII_TO_BASE[ord('g')] = 2
-_ASCII_TO_BASE[ord('t')] = 3
-# Handle 0-3 encoding directly
-_ASCII_TO_BASE[0] = 0
-_ASCII_TO_BASE[1] = 1
-_ASCII_TO_BASE[2] = 2
-_ASCII_TO_BASE[3] = 3
+# Numeric base codes 0-3 -> ASCII "ACGT"; every other byte passes through
+# unchanged.  The shared encoder reads ASCII only, and this script has always
+# also accepted the numeric form (tests/test_hex_registration.py feeds it).
+_NUMERIC_TO_ASCII = np.arange(256, dtype=np.uint8)
+_NUMERIC_TO_ASCII[:4] = np.frombuffer(b"ACGT", dtype=np.uint8)
 
 
-def _seq_to_hexamer_indices(seq_uint8, k=6):
+def _seq_to_hexamer_indices(seq_uint8, k=KMER):
     """Convert a (L,) uint8 sequence to (L-k+1,) hexamer indices in [0, 4^k).
 
-    Handles both ASCII (A=65,C=67,G=71,T=84) and numeric (0-3) encodings.
+    Index order is the shared one of ``background_model.hexamers`` (owner
+    decision 186), so the tables this script writes are keyed the way the
+    model reads them.  Handles ASCII (either case) and numeric (0-3) encodings.
     Returns -1 for hexamers containing N or other non-ACGT bases.
     """
-    bases = _ASCII_TO_BASE[seq_uint8]  # 255 for unknown
-    powers = 4 ** np.arange(k, dtype=np.int64)
-    n = len(seq_uint8) - k + 1
-    indices = np.zeros(n, dtype=np.int64)
-    has_n = np.zeros(n, dtype=bool)
-    for i in range(k):
-        b = bases[i:i + n]
-        has_n |= (b == 255)
-        indices += b.astype(np.int64) * powers[i]
-    indices[has_n] = -1
-    return indices
+    if k != KMER:
+        raise ValueError(f"the shared hexamer encoder is k={KMER}; got k={k}")
+    seq = _NUMERIC_TO_ASCII[np.asarray(seq_uint8, dtype=np.uint8)]
+    fwd, _rc, valid = hexamer_indices(seq)
+    return np.where(valid, fwd, -1)
 
 
-def hex_window_for_tile(seq_full, tile_size, k=6, width=None):
+def hex_window_for_tile(seq_full, tile_size, k=KMER, width=None):
     """k-mer index array registered on the cut junction.
 
     Returns ``(width,)`` where entry ``p`` is the k-mer STARTING
@@ -95,7 +83,7 @@ def hex_window_for_tile(seq_full, tile_size, k=6, width=None):
     return _seq_to_hexamer_indices(seq_full[lo:lo + width + k - 1], k)
 
 
-def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
+def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=KMER):
     """Compute empirical hexamer cut-site frequency tables from training data.
 
     Returns:
@@ -246,7 +234,7 @@ def compute_hex_tables(root, config, split="train", L_min=25, L_max=180, k=6):
 
 
 def train_conv_baseline(root, config, hex_tables, split="train",
-                        L_min=25, L_max=180, k=6, N1=128,
+                        L_min=L_MIN, L_max=L_MAX, k=KMER, N1=128,
                         epochs=5, lr=1e-3, batch_size=256, max_tiles=5000):
     """Train Conv1d(4, N1, k=6) + LeakyReLU + Conv1d(N1, 4, k=1) to predict cut-site density.
 
@@ -429,9 +417,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--store", required=True, help="cut-site fragment store (.zarr)")
-    p.add_argument("--k", type=int, default=6, help="hexamer size (default: 6)")
-    p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=180)
+    p.add_argument("--k", type=int, default=KMER, help=f"hexamer size (default: {KMER})")
+    p.add_argument("--L-min", type=int, default=L_MIN)
+    p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--train-conv", action="store_true",
                    help="train a linear Conv1d and compare to analytical solution")
     p.add_argument("--conv-epochs", type=int, default=5)
@@ -509,6 +497,8 @@ def main():
             k=args.k,
             L_min=args.L_min,
             L_max=args.L_max,
+            # The model refuses tables without this tag; see HEX_TABLE_ENCODING.
+            hex_encoding=HEX_TABLE_ENCODING,
         )
         print(f"\nSaved to {args.output}")
 

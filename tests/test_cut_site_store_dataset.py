@@ -159,13 +159,13 @@ def synthetic_store(tmp_path):
 
 class TestCutSiteStoreConfig:
     def test_hash_deterministic(self):
-        c1 = CutSiteStoreConfig()
-        c2 = CutSiteStoreConfig()
+        c1 = CutSiteStoreConfig(tile_size=2048)
+        c2 = CutSiteStoreConfig(tile_size=2048)
         assert c1.config_hash() == c2.config_hash()
 
     def test_hash_changes_on_param_change(self):
-        c1 = CutSiteStoreConfig(L_max=179)
-        c2 = CutSiteStoreConfig(L_max=200)
+        c1 = CutSiteStoreConfig(tile_size=2048, L_max=179)
+        c2 = CutSiteStoreConfig(tile_size=2048, L_max=200)
         assert c1.config_hash() != c2.config_hash()
 
     def test_json_roundtrip(self):
@@ -192,7 +192,7 @@ class TestDomainGuards:
     def test_length_range_mismatch_raises(self, tmp_path):
         """A store with different L_min/L_max should fail validation."""
         from background_model.cut_site_store import validate_length_range
-        cfg = CutSiteStoreConfig(L_min=25, L_max=179)
+        cfg = CutSiteStoreConfig(tile_size=2048, L_min=25, L_max=179)
         store_path = str(tmp_path / "bad_range.zarr")
         root = zarr.open_group(store_path, mode="w")
         root.attrs["config_json"] = cfg.to_json()

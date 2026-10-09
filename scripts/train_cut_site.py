@@ -8,6 +8,7 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
+from background_model.constants import L_MAX, L_MIN
 from background_model.cut_site_model import CutSiteFragmentModel
 from background_model.cut_site_dataset import CutSiteFragmentDataset, cut_site_collate_fn
 
@@ -82,9 +83,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--store", required=True)
     p.add_argument("--run-dir", required=True)
-    p.add_argument("--tile-size", type=int, default=2048)
-    p.add_argument("--L-min", type=int, default=25)
-    p.add_argument("--L-max", type=int, default=180)
+    # Required, no default (owner decision 176): must match the store's.
+    p.add_argument("--tile-size", type=int, required=True)
+    p.add_argument("--L-min", type=int, default=L_MIN)
+    p.add_argument("--L-max", type=int, default=L_MAX)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
