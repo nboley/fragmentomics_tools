@@ -2,7 +2,10 @@
 
 Quarantined 2026-10-07 by owner decision. **Nothing here describes current
 behaviour.** `docs/pending/simulator_spec.md` is the authority on the simulator;
-`background_model/simulator/count_hexamers_rdf.py` is the implementation.
+the implementation is `background_model/hexamers.py`,
+`background_model/cut_site_stats.py` and `background_model/simulator/draw.py`
+(one file, `count_hexamers_rdf.py`, until 2026-10-09). The code these documents
+describe is in `attic/pre_rewrite_simulator/`.
 
 These were moved rather than deleted because all four were **untracked**, so
 there was no git history to recover them from, and `simulator_basic_inputs.md`
