@@ -730,16 +730,20 @@ class CutSiteFragmentModel(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         self._step(batch, "val")
 
-    def _step(self, batch, prefix: str) -> torch.Tensor:
-        """Shared train/val step.  Batch from CutSiteFragmentDataset + collate."""
-        x = batch["x"]                    # (B, 4, l_in)
-        frag_m = batch["frag_m"]          # list of B tensors, each (n_frag,)
-        frag_L_idx = batch["frag_L_idx"]  # list of B tensors, each (n_frag,)
-        frag_s = batch["frag_s"]          # list of B tensors, each (n_frag,)
-        frag_N = batch["frag_N"]          # (B,) total fragment count
-        endpoints = batch["endpoints"]    # (B, 2, tile_size)
-        mask = batch["mask"]              # (B, tile_size)
+    def domain_log_probs(
+        self, x: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Normalised log p(m, L, s | tile) over the full domain D.
 
+        The SINGLE definition of the fragment multinomial: forward, plus the
+        hex prior log_p0 when present, then log_softmax over all
+        P * n_L * 2 cells.  `_step` and scripts/score_cut_site_fragments.py
+        both call this, so the scorer cannot drift from the training loss.
+
+        Returns:
+            log_probs: (B, P, n_L, 2), each row's logsumexp is 0
+            endpoint_shape, disp_bp: passed through from forward
+        """
         logits, endpoint_shape, disp_bp = self(x)
 
         # -- Stage 2: add hex-table baseline log p₀ to logits --------------
@@ -752,11 +756,26 @@ class CutSiteFragmentModel(L.LightningModule):
             )
             logits = logits + log_p0
 
-        # -- Fragment multinomial NLL ---------------------------------------
         # log_softmax over the full domain D
         B, P, n_L, _ = logits.shape
         flat_logits = logits.reshape(B, -1)  # (B, P * n_L * 2)
         log_probs = torch.log_softmax(flat_logits, dim=-1)
+        return log_probs.reshape(B, P, n_L, 2), endpoint_shape, disp_bp
+
+    def _step(self, batch, prefix: str) -> torch.Tensor:
+        """Shared train/val step.  Batch from CutSiteFragmentDataset + collate."""
+        x = batch["x"]                    # (B, 4, l_in)
+        frag_m = batch["frag_m"]          # list of B tensors, each (n_frag,)
+        frag_L_idx = batch["frag_L_idx"]  # list of B tensors, each (n_frag,)
+        frag_s = batch["frag_s"]          # list of B tensors, each (n_frag,)
+        frag_N = batch["frag_N"]          # (B,) total fragment count
+        endpoints = batch["endpoints"]    # (B, 2, tile_size)
+        mask = batch["mask"]              # (B, tile_size)
+
+        log_probs, endpoint_shape, disp_bp = self.domain_log_probs(x)
+
+        # -- Fragment multinomial NLL ---------------------------------------
+        B, P, n_L, _ = log_probs.shape
         log_probs_flat = log_probs.reshape(B, P * n_L * 2)
 
         # Pad variable-length fragment lists to a single tensor for vectorized gather.

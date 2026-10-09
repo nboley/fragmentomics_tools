@@ -41,6 +41,8 @@ class CutSiteFragmentDataset(Dataset):
         frag_L_idx: (n_frag,)         int64    L index (0-based, L - L_MIN)
         frag_s    : (n_frag,)         int64    strand (0 or 1)
         frag_N    : scalar int64               total fragment count
+        frag_store_idx: (n_frag,)     int64    row in the store's fragments/*
+                                               (not collated; for scorers)
         endpoints : (2, tile_size)    float32  band-free NB targets
         mask      : (tile_size,)      bool     valid positions
     """
@@ -237,6 +239,11 @@ class CutSiteFragmentDataset(Dataset):
         keep = (frag_p_crop >= 0) & (frag_p_crop < self.tile_size)
         keep &= (frag_length >= self.L_min) & (frag_length <= self.L_max)
 
+        # Row of each admitted fragment in the store's flat fragments/*
+        # arrays, so a per-fragment scorer can join back to the store without
+        # re-deriving this admission rule.
+        frag_store_idx = flo + np.nonzero(keep)[0]
+
         frag_m = frag_p_crop[keep]
         frag_L = frag_length[keep].astype(np.int64)
         frag_s = frag_strand[keep].astype(np.int64)
@@ -253,6 +260,7 @@ class CutSiteFragmentDataset(Dataset):
             "frag_L_idx": torch.from_numpy(frag_L_idx.astype(np.int64)),
             "frag_s": torch.from_numpy(frag_s.astype(np.int64)),
             "frag_N": torch.tensor(len(frag_m), dtype=torch.int64),
+            "frag_store_idx": torch.from_numpy(frag_store_idx.astype(np.int64)),
             "endpoints": torch.from_numpy(
                 np.ascontiguousarray(ep_cropped, dtype=np.float32)
             ),
