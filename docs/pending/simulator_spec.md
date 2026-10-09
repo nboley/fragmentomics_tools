@@ -279,17 +279,28 @@ which is a relabelling of the same position.
 
 ## 6. Code
 
-Three modules, split along their dependency layers (owner decision 169). Each
-imports only from layers above it, so `draw` imports `hexamers` directly as
-well as `cut_site_stats`:
+Four modules, split along their dependency layers (owner decisions 169 and
+174-177). Each imports only from layers above it, so `draw` imports `hexamers`
+directly as well as `cut_site_stats`:
 
-1. `background_model/hexamers.py` — encoding. numpy only.
+0. `background_model/constants.py` — the shared cut-site DEFINITIONS, and
+   nothing else: `L_MIN`, `L_MAX` (inclusive), `N_LENGTHS`, `KMER`,
+   `HEX_HALF`, `NHEX`. Imports only `background_model.tracks` (stdlib only).
+   `L_MIN`/`L_MAX` are derived from the locked `tracks.FL_BANDS` (lowest `lo`,
+   highest `hi`), not restated, so there is one source; values 25 / 180 / 156.
+   It is shared with the cut-site store/model stream. Every importer takes
+   these names from `constants` directly; no other module defines them
+   (`test_constants_single_source`). Simulator-internal values
+   (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
+   `_BASE_LUT`/`_POW`) stay with the code that owns them.
+1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
 2. `background_model/cut_site_stats.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
 3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
 
-They were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split moved
-code without changing it. The previous-generation simulator (`capture`,
+Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
+moved code without changing it, and so did moving the definitions into
+`constants` (byte-identical 200-region output). The previous-generation simulator (`capture`,
 `emit`, `precompute`, `sampler`, `weights`) is in `attic/pre_rewrite_simulator/`.
 
 | Function | Module | Does |

@@ -27,8 +27,9 @@ import pandas as pd
 
 from fragmentomics_tools.dataframe import DataFrameBase
 
-from background_model.cut_site_stats import L_MAX, FragmentLengthDist
-from background_model.hexamers import HEX_HALF, hexamer_indices
+from background_model.constants import HEX_HALF, L_MAX
+from background_model.cut_site_stats import FragmentLengthDist
+from background_model.hexamers import hexamer_indices
 
 # Seeds and region indices are each ONE 32-bit word; see region_rng.
 _SEED_WORD_MAX: int = 2 ** 32

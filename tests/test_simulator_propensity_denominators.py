@@ -21,7 +21,8 @@ import numpy as np
 import pytest
 
 from background_model.cut_site_stats import TABLE_NAMES, propensities
-from background_model.hexamers import NHEX, rc_permutation
+from background_model.constants import NHEX
+from background_model.hexamers import rc_permutation
 
 
 @pytest.fixture

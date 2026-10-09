@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Programmatic mutation testing for the cut-site simulator.
 
-Targets ``background_model/hexamers.py``, ``background_model/cut_site_stats.py``
-and ``background_model/simulator/draw.py`` (one file, ``count_hexamers_rdf.py``,
-until decision 169 split it), plus a few library and oracle files.
+Targets ``background_model/constants.py``, ``background_model/hexamers.py``,
+``background_model/cut_site_stats.py`` and ``background_model/simulator/draw.py``
+(the last three were one file, ``count_hexamers_rdf.py``, until decision 169
+split it), plus a few library and oracle files.
 
 Applies each mutation as a text substitution, runs the test suite,
 records which tests fail, reverts, and prints a matrix.
@@ -345,8 +346,26 @@ MUTATIONS = [
 
     ("L2", "cut_site_stats imports upward from simulator",
      "background_model/cut_site_stats.py",
-     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)",
-     "from background_model.hexamers import (\n    HEX_HALF,\n    NHEX,\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
+     # Re-pointed when HEX_HALF/NHEX moved to background_model.constants.
+     "from background_model.hexamers import (\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)",
+     "from background_model.hexamers import (\n    hexamer_indices,\n    hexamers_at,\n    rc_permutation,\n)\nif False:\n    from background_model.simulator.draw import sample_region as _unused"),
+
+    # ── Owner decisions 174-177: shared definitions in constants.py ───────
+
+    ("L3", "constants imports numpy",
+     "background_model/constants.py",
+     "from background_model.tracks import FL_BANDS\n",
+     "from background_model.tracks import FL_BANDS\nimport numpy as _np  # noqa: F401\n"),
+
+    ("C1", "L_MAX off by one in constants",
+     "background_model/constants.py",
+     "L_MAX: int = max(hi for _lo, hi in FL_BANDS)",
+     "L_MAX: int = max(hi for _lo, hi in FL_BANDS) + 1"),
+
+    ("C2", "cut_site_stats restates L_MAX locally (same value)",
+     "background_model/cut_site_stats.py",
+     "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
+     "from background_model.constants import HEX_HALF, L_MIN, NHEX\nL_MAX: int = 180\n"),
 ]
 
 # Mutations whose target code was REMOVED on purpose, id -> reason.  Their

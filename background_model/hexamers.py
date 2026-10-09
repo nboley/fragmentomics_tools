@@ -1,7 +1,9 @@
 """Cut-site hexamer encoding -- the one encoder in ``background_model``.
 
-numpy only, so anything that needs hexamer indices can import it without
-pulling in the fragment library, pandas or the simulator.  Measurement on real
+numpy plus ``background_model.constants`` (stdlib only), so anything that
+needs hexamer indices can import it without pulling in the fragment library,
+pandas or the simulator.  ``KMER``, ``HEX_HALF`` and ``NHEX`` are defined in
+``constants`` and imported here.  Measurement on real
 data is ``background_model.cut_site_stats``; the draw is
 ``background_model.simulator.draw``.  Authority: ``docs/pending/simulator_spec.md``.
 
@@ -26,19 +28,18 @@ import functools
 
 import numpy as np
 
+from background_model.constants import KMER, NHEX
+
 # ── encoding, owned here ──────────────────────────────────────────────────
 #
 # These were once imported from simulator.precompute and simulator.weights,
 # the previous-generation simulator now in attic/pre_rewrite_simulator/.
-# Owning them here is what let that package be retired.
+# Owning them here is what let that package be retired.  The k-mer constants
+# themselves are shared definitions and live in background_model.constants.
 #
 # test_encoder_matches_oracle_all_4096 guards this encoder by checking all 4096
 # hexamers against an INDEPENDENT oracle -- which is stronger than pinning two
 # copies to each other, since those could drift in step and still agree.
-
-KMER: int = 6
-HEX_HALF: int = 3            # 3 bases in, 3 out, around a cut site
-NHEX: int = 4 ** KMER        # 4096
 
 # base -> 2-bit code; anything else (N) -> 255 sentinel.
 #

@@ -181,8 +181,8 @@ import pyarrow.parquet as pq
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from background_model.config import PlumbingConfig  # noqa: E402
-from background_model.cut_site_stats import L_MAX, L_MIN  # noqa: E402
-from background_model.hexamers import HEX_HALF, KMER, NHEX, hexamer_indices, hexamer_vocabulary  # noqa: E402
+from background_model.constants import HEX_HALF, KMER, L_MAX, L_MIN, NHEX  # noqa: E402
+from background_model.hexamers import hexamer_indices, hexamer_vocabulary  # noqa: E402
 from fragments_h5 import FragmentsH5  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -680,7 +680,7 @@ def main():
     )
     parser.add_argument("--l-min", type=int, default=L_MIN)
     parser.add_argument("--l-max", type=int, default=L_MAX,
-                        help="INCLUSIVE, matching cut_site_stats.L_MAX.")
+                        help="INCLUSIVE, matching constants.L_MAX.")
     parser.add_argument("--band-width", type=int, default=DEFAULT_BAND_WIDTH)
     parser.add_argument(
         "--no-background", action="store_true",

@@ -84,8 +84,9 @@ the code's filter pipeline.
    rate is recorded as a diagnostic.
 3. **Containment:** `gstart <= start` and `stop <= gstop` -- fully contained.
    A fragment straddling a tile boundary falls out of both tiles.
-4. **Length range:** `[25, 180]` inclusive (from `cut_site_stats.L_MIN`,
-   `L_MAX`; originally `simulator.weights`, now in `attic/pre_rewrite_simulator/`).
+4. **Length range:** `[25, 180]` inclusive (from `background_model.constants.L_MIN`,
+   `L_MAX`, derived from `tracks.FL_BANDS`; formerly `cut_site_stats`, and before
+   that `simulator.weights`, now in `attic/pre_rewrite_simulator/`).
 5. **Valid cut sites:** both the 5' and 3' hexamer windows must be fully ACGT.
 
 ### Cut-site geometry

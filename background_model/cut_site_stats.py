@@ -87,19 +87,15 @@ from fragmentomics_tools.dataframe import (
     SampleDataFrame,
 )
 
+from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX
 from background_model.hexamers import (
-    HEX_HALF,
-    NHEX,
     hexamer_indices,
     hexamers_at,
     rc_permutation,
 )
 
-# ── geometry, owned here ──────────────────────────────────────────────────
-
-L_MIN: int = 25              # INCLUSIVE length bounds -- the library's
-L_MAX: int = 180             # subset_fragment_lengths is half-open
-N_LENGTHS: int = L_MAX - L_MIN + 1   # 156
+# L_MIN / L_MAX (INCLUSIVE, derived from tracks.FL_BANDS) and N_LENGTHS are
+# shared definitions in background_model.constants.
 
 TABLE_NAMES = ("start_fwd", "end_fwd", "start_rev", "end_rev")
 

@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -25,19 +26,21 @@ import pytest
 
 import cut_site_oracle as oracle
 
-from background_model.hexamers import (
+from background_model.constants import (
     HEX_HALF,
     KMER,
+    L_MAX,
+    L_MIN,
+    N_LENGTHS,
     NHEX,
+)
+from background_model.hexamers import (
     hexamer_indices,
     hexamer_vocabulary,
     rc_permutation,
 )
 from background_model.cut_site_stats import (
     FragmentLengthDist,
-    L_MAX,
-    L_MIN,
-    N_LENGTHS,
     TABLE_NAMES,
     count_sample,
     count_srdf,
@@ -2605,16 +2608,18 @@ class TestT7Hygiene:
         """M3 (lowercase in doctest).
 
         ``make test`` does not collect ``background_model/``, so this is the
-        ONLY place these modules' doctests run.  It covers all three modules
-        of the split.  ``hexamers`` carries every example today; the other
-        two must still pass if one is added, and an example vanishing from
-        ``hexamers`` fails here rather than silently dropping out.
+        ONLY place these modules' doctests run.  It covers all four layers.
+        ``constants`` (which pins 25/180/156) and ``hexamers`` carry every
+        example today; the other two must still pass if one is added, and an
+        example vanishing from either fails here rather than silently
+        dropping out.
         """
+        import background_model.constants as const_mod
         import background_model.cut_site_stats as stats_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
-        for mod, must_have_examples in ((hex_mod, True), (stats_mod, False),
-                                        (draw_mod, False)):
+        for mod, must_have_examples in ((const_mod, True), (hex_mod, True),
+                                        (stats_mod, False), (draw_mod, False)):
             results = doctest.testmod(mod, verbose=False)
             if must_have_examples:
                 assert results.attempted > 0, f"no doctests found in {mod.__name__}"
@@ -2663,13 +2668,16 @@ class TestT7Hygiene:
         """Owner decision 169 split one module into three layers, each
         importing only from layers above it: ``hexamers.py`` (numpy + stdlib
         only) <- ``cut_site_stats.py`` (adds pandas, fragmentomics_tools) <-
-        ``simulator/draw.py``. Guards mutations L1 (hexamers imports pandas)
-        and L2 (cut_site_stats imports upward from simulator).
+        ``simulator/draw.py``. Decisions 174-177 put ``constants.py`` (stdlib
+        + ``background_model.tracks`` only) above all three. Guards mutations
+        L1 (hexamers imports pandas), L2 (cut_site_stats imports upward from
+        simulator) and L3 (constants imports numpy).
 
         "Above", not "the one above": ``draw`` importing ``hexamers`` directly
         is allowed, so this checks each import against the importer's own
         layer rather than demanding it come from the adjacent one.
         """
+        import background_model.constants as const_mod
         import background_model.cut_site_stats as stats_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
@@ -2677,8 +2685,8 @@ class TestT7Hygiene:
         # Upstream first: a module may import only from a LOWER index here,
         # i.e. from a layer above it. Anything under background_model.simulator
         # is the draw's layer, so importing the package counts as importing it.
-        layers = ["background_model.hexamers", "background_model.cut_site_stats",
-                  "background_model.simulator"]
+        layers = ["background_model.constants", "background_model.hexamers",
+                  "background_model.cut_site_stats", "background_model.simulator"]
 
         def layer_of(name):
             for i, prefix in enumerate(layers):
@@ -2707,7 +2715,7 @@ class TestT7Hygiene:
                     for alias in node.names:
                         yield f"{base}.{alias.name}"
 
-        for own, mod in enumerate((hex_mod, stats_mod, draw_mod)):
+        for own, mod in enumerate((const_mod, hex_mod, stats_mod, draw_mod)):
             cross = set()
             for name in imported_names(mod):
                 other = layer_of(name)
@@ -2722,39 +2730,105 @@ class TestT7Hygiene:
                 # modules make, or the assertion above checks nothing.
                 assert cross, f"{mod.__name__}: no cross-layer import seen"
 
-        allowed_hex_modules = set(sys.stdlib_module_names) | {"__future__", "numpy"}
-        with open(hex_mod.__file__) as f:
-            tree = ast.parse(f.read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    top = alias.name.split(".")[0]
-                    assert top in allowed_hex_modules, (
-                        f"hexamers.py imports {alias.name}, outside the "
-                        f"numpy+stdlib layer"
+        # Third-party/first-party imports each light module may make: top-level
+        # packages, plus exact background_model modules. Anything else is
+        # outside its layer.
+        stdlib = set(sys.stdlib_module_names) | {"__future__"}
+        light = (
+            (const_mod, stdlib, {"background_model.tracks"},
+             "stdlib+tracks"),
+            (hex_mod, stdlib | {"numpy"}, {"background_model.constants"},
+             "numpy+stdlib+constants"),
+        )
+        for mod, allowed_tops, allowed_exact, what in light:
+            fname = os.path.basename(mod.__file__)
+            with open(mod.__file__) as f:
+                tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for name in names:
+                    assert (name.split(".")[0] in allowed_tops
+                            or name in allowed_exact), (
+                        f"{fname} imports {name}, outside the {what} layer"
                     )
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                top = node.module.split(".")[0]
-                assert top in allowed_hex_modules, (
-                    f"hexamers.py imports from {node.module}, outside the "
-                    f"numpy+stdlib layer"
-                )
 
         # Importing only hexamers must not pull in pandas, torch or
-        # fragmentomics_tools. background_model/__init__.py imports
+        # fragmentomics_tools, and importing only constants must not pull in
+        # numpy either. background_model/__init__.py imports
         # background_model.config, which imports only stdlib and
         # background_model.tracks (stdlib only). That is why this holds; the
         # subprocess checks it rather than assuming it.
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        r = subprocess.run(
-            [sys.executable, "-c",
-             "import background_model.hexamers, sys\n"
-             "banned = [m for m in sys.modules if m == 'pandas' or m == 'torch' "
-             "or m.startswith('fragmentomics_tools')]\n"
-             "assert not banned, banned\n"],
-            capture_output=True, text=True, cwd=repo_root,
-        )
-        assert r.returncode == 0, (
-            f"importing background_model.hexamers alone pulled in a "
-            f"forbidden module:\n{r.stdout}\n{r.stderr}"
-        )
+        for module, extra_banned in (("background_model.hexamers", ()),
+                                     ("background_model.constants", ("numpy",))):
+            r = subprocess.run(
+                [sys.executable, "-c",
+                 f"import {module}, sys\n"
+                 f"extra = {tuple(extra_banned)!r}\n"
+                 "banned = [m for m in sys.modules if m == 'pandas' or m == 'torch' "
+                 "or m.startswith('fragmentomics_tools') or m in extra]\n"
+                 "assert not banned, banned\n"],
+                capture_output=True, text=True, cwd=repo_root,
+            )
+            assert r.returncode == 0, (
+                f"importing {module} alone pulled in a "
+                f"forbidden module:\n{r.stdout}\n{r.stderr}"
+            )
+
+    def test_constants_single_source(self):
+        """Owner decisions 174-177: the shared cut-site definitions live ONLY
+        in ``background_model/constants.py``, and the length bounds are
+        derived from the locked ``tracks.FL_BANDS`` rather than restated.
+        Guards mutations C1 (``L_MAX`` off by one) and C2 (a module restates
+        ``L_MAX`` locally -- same value, so only the AST check can see it).
+        """
+        import background_model.constants as const_mod
+        import background_model.cut_site_stats as stats_mod
+        import background_model.hexamers as hex_mod
+        import background_model.simulator.draw as draw_mod
+        from background_model.tracks import FL_BANDS
+
+        # The values the owner fixed, and their derivation from FL_BANDS.
+        assert (L_MIN, L_MAX, N_LENGTHS) == (25, 180, 156)
+        assert (KMER, HEX_HALF, NHEX) == (6, 3, 4096)
+        assert L_MIN == min(lo for lo, _hi in FL_BANDS)
+        assert L_MAX == max(hi for _lo, hi in FL_BANDS)  # INCLUSIVE
+
+        shared = {"L_MIN", "L_MAX", "N_LENGTHS", "KMER", "HEX_HALF", "NHEX"}
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        paths = [m.__file__ for m in (hex_mod, stats_mod, draw_mod)] + [
+            os.path.join(repo_root, "scripts", s)
+            for s in ("count_cut_site_hexamers.py", "run_cut_site_simulator.py")
+        ]
+        seen_in_constants = set()
+        for path in [const_mod.__file__] + paths:
+            with open(path) as f, warnings.catch_warnings():
+                # run_cut_site_simulator.py's module docstring holds a "\-"
+                # in its ASCII diagram, which the compiler reports as an
+                # invalid escape. Not this test's concern.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, ast.AnnAssign):
+                    targets = [node.target]
+                else:
+                    continue
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id in shared:
+                        if path == const_mod.__file__:
+                            seen_in_constants.add(t.id)
+                        else:
+                            raise AssertionError(
+                                f"{os.path.basename(path)} defines {t.id}; "
+                                f"it must import it from background_model.constants"
+                            )
+        # Non-vacuity: the walker must find the real definitions.
+        assert seen_in_constants == shared, shared - seen_in_constants
