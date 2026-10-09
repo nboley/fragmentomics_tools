@@ -1529,4 +1529,123 @@ the Stage 2 corrections should converge to zero — the baseline IS the ground
 truth. Any improvement beyond baseline indicates learned correlations; any
 degradation indicates overfitting.
 
+---
+
+## 11. Cut-Site Model — Blind Fit on a Simulated Sample (2026-10-09)
+
+First end-to-end blind validation of the cut-site fragment model: fit on a
+simulated sample using only the inputs a real sample would provide, then
+compared against the generative oracle *after* the fit was frozen.
+
+### Setup
+
+Inputs, and nothing else: `RD-56804.fragments.h5` (241,078 fragments),
+`regions.bed` (6,665 tiles x 1536 bp, 23 contigs), and the GRCh38.p12 FASTA.
+The hexamer prior was refit on this sample's train split alone — no tables from
+any other sample were reused.
+
+Geometry `tile_size=1024, jitter=256`, so `l_target=1536` matches the supplied
+regions exactly and `|D| = 1024*156*2 = 319,488`, identical to the real-data
+pipeline. Lengths [25, 180] inclusive. Split: random over regions, seed 42,
+**5333 / 666 / 666** tiles; `min_N=10` leaves 5210 / 655 / 647 scored.
+
+Training: 20 epochs, batch 32, lr 1e-3, bf16-mixed, multinomial objective only,
+prior frozen. One A10G, ~32 min. Artifacts under
+`/efs/analytics/nathanboley/model_output_sim_rand10pct_20261009/`.
+
+![Sim blind fit — training paths and oracle ceiling](training_analysis_plots/22_sim_rand10pct_training_paths.png)
+
+### The model overfits at epoch 5-6
+
+Two independent runs both bottom out at epoch 5-6 and then rise monotonically
+to epoch 19, so this is a property of the data size (5,333 train tiles, a tenth
+of the real quiet store), not a fluke of one run.
+
+| run | best epoch | best val | final (ep 19) |
+|---|---|---|---|
+| 1 | 5 | 12.086762 | 12.104975 |
+| 2 (shipped) | 6 | 12.084553 | 12.101922 |
+
+This surfaced a real gap: `train_cut_site.py` configured no `ModelCheckpoint`,
+so Lightning persisted only the last epoch — 0.017 nats worse than the best.
+It had never bitten because earlier runs only *reported* best-epoch NLL out of
+`metrics.csv`; the first consumer needing to score *from* the best model
+exposed it. Fixed in `6ef0e1d`.
+
+**A span-only convergence check passes this run.** The last six epochs span
+0.0039, under the usual 0.01 threshold, while the curve rises monotonically
+away from its optimum. A flat tail is not a good stopping point when the trend
+has a sign.
+
+### Results, region-weighted, all on the model's domain
+
+| split | regions | oracle (ceiling) | prior | model | captured |
+|---|---|---|---|---|---|
+| train | 5210 | 11.980869 | 12.095545 | 11.956233 | 103.6% |
+| val | 655 | 11.984081 | 12.203930 | 12.084561 | 85.4% |
+| **test** | **647** | **11.999074** | **12.214898** | **12.105756** | **84.2%** |
+
+uniform = ln(319,488) = 12.674475.
+`captured = (uniform - model) / (uniform - oracle)`.
+
+**On held-out test the model captures 84.2% of the achievable bias.** The
+zero-parameter analytical prior alone captures 68.0%; the neural correction
+adds 16.2 percentage points. The residual gap to the oracle is 0.1067 nats.
+
+Val is *not* held out — the epoch was selected on it, which makes it optimistic
+by 0.021 nats relative to test. Quote test.
+
+**The 103.6% on train is not the model beating the truth.** It has partly
+memorised the realised draws, so it scores the training sample better than the
+generative probability that produced it. It is the epoch-6 overfitting,
+measured a second way.
+
+### The published oracle number is not directly comparable
+
+`run.json` reports `oracle_nll = 12.384644985938586`. Set beside the model's
+12.105756 that would say the model beats the oracle, which is impossible.
+Three differences:
+
+| | oracle as published | model |
+|---|---|---|
+| domain | 1536 starts x 156 x 2 = 479,232 | centred 1024 x 156 x 2 = 319,488 |
+| population | all 241,078 fragments | scored, `min_N>=10`, per split |
+| estimator | fragment-weighted | region-weighted |
+
+The domain difference alone is ln(479,232) − ln(319,488) = **0.405465 nats**.
+
+Conditioning the oracle on "the start lands in the crop" gives
+`p_cond = p / Z_r`, i.e. `-log p_cond = -log p + log Z_r`. `Z_r` is not in the
+sidecar, which carries `p` only for drawn fragments, so it must be estimated
+from the draws. A per-region estimate from ~36 draws carries ~0.12 nats of
+noise on `log Z` — larger than the 0.107-nat effect being measured — and
+reuses the same draws for estimation and evaluation, so the pooled estimate is
+used instead:
+
+    Z = 160,951 / 241,078 = 0.667630     log Z = -0.404021  (SE 0.00144)
+    geometric 1024/1536   = 0.666667     excess +0.000964
+
+The 0.1% agreement with the pure length ratio is an independent check: the
+oracle's positional density is near-uniform at the 512 bp scale, as a bp-scale
+hexamer propensity should be.
+
+Reproduction check before any of this: recomputing `-mean(log p)` over all
+241,078 sidecar rows returns 12.384644985938586, **identical** to the published
+value (difference 0.0e+00).
+
+### Caveats
+
+1. **A third of fragments carry no score.** 160,951 of 241,078 have their
+   leftmost endpoint inside the centred 1024 crop; 80,127 do not and are
+   emitted as NaN. A consequence of `tile_size=1024` against 1536 bp regions,
+   not a defect of the fit.
+2. **Training is not exactly reproducible.** No global seed, unseeded shuffle,
+   and the jitter RNG is seeded partly on `os.getpid()`. Two runs of identical
+   code differed by ~0.002 nats on best-epoch val. Do not read a third-decimal
+   difference between runs as a real effect.
+3. **One carried defect.** The learned endpoint branch taps the 3' cut at
+   `m + L` while the prior, the store and the registration test use `m + L - 1`.
+   It predates this work and affects the correction, not the prior.
+4. **One sample.** Nothing here measures transfer across samples.
+
 <!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/training_analysis.md", "title": "[WIP] Background Model v2 — Simulation Study Training Analysis", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T22:07:11.520404+00:00", "page_id": "4963532846", "published_version": 3} -->
