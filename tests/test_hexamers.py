@@ -177,9 +177,7 @@ class TestConstants:
         for known in ("background_model/hexamers.py",
                       "background_model/simulator/measure.py",
                       "background_model/simulator/draw.py",
-                      "scripts/count_cut_site_hexamers.py",
-                      "scripts/run_cut_site_simulator.py",
-                      "scripts/fit_hexamer_dispersion.py"):
+                      "scripts/run_cut_site_simulator.py"):
             assert known in rel, known
 
         def parse(path):

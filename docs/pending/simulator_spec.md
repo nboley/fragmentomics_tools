@@ -466,7 +466,9 @@ Needs action. Nothing here has been decided.
   (2026-10-09, decision 171). `background_model/hexamers.py` is the only live
   encoder. `scripts/count_cut_site_hexamers.py` was rewired to it; the old copy
   did not fold case, but that script upper-cases before it encodes, so its
-  output does not change. `test_encoder_matches_oracle_all_4096` still checks
+  output does not change. That script was itself retired to
+  `attic/hexamer_prior_pipeline/` by owner decision 189, replaced by
+  `scripts/measure_cut_site_hexamers.py`, which calls `simulator.measure`. `test_encoder_matches_oracle_all_4096` still checks
   all 4096 against an INDEPENDENT oracle.
 
 ### Closed since this section was last accurate

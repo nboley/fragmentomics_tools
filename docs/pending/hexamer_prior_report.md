@@ -1,5 +1,12 @@
 # Pooled Hexamer Prior: 92-Sample Fit Report
 
+> **Retired code (owner decision 189, 2026-10-09).** The scripts and tests this
+> document names are in `attic/hexamer_prior_pipeline/` and no longer run. The
+> findings below stand as a record of the 92-sample containment-admission
+> tables. The live per-sample counter is `scripts/measure_cut_site_hexamers.py`,
+> which uses the simulator's start-in-region admission, so its counts are not
+> comparable with these. See that directory's README.
+
 ## Shrinkage form
 
 **Dirichlet-multinomial conjugate model**, fitted independently per table

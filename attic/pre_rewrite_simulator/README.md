@@ -44,7 +44,9 @@ suite. They could not stay live: every one imports the retired modules.
 
 ## What stayed live, and why
 
-Importers that needed only shared pieces were rewired, not moved:
+Importers that needed only shared pieces were rewired, not moved. (The
+counter, the prior builder and the counter's test below were later retired to
+`attic/hexamer_prior_pipeline/` by owner decision 189.)
 
 - `scripts/count_cut_site_hexamers.py` used `precompute`'s encoder and
   `weights`' `L_MIN`/`L_MAX`. It now uses `hexamers` and `cut_site_stats`. The
