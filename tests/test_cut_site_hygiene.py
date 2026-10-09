@@ -1,8 +1,9 @@
 """Cross-module hygiene for the cut-site stack: ``constants`` <- ``hexamers``
 <- ``simulator.measure`` <- ``simulator.draw``.
 
-Layering, doctests across all four modules, oracle independence and removed
-imports.  These span the stack, so they sit in neither module's file.  Split
+Layering, doctests across all four modules, oracle independence, removed
+imports, and the decision-187 boundary (model code never imports
+``simulator/``; ``conftest`` keeps it out of module level).  These span the stack, so they sit in neither module's file.  Split
 out of ``tests/test_cut_site_simulator.py`` by owner decision 188; the test
 bodies are unchanged.  The single-source check for the shared definitions is
 ``TestConstants`` in ``tests/test_hexamers.py``.
@@ -223,3 +224,125 @@ class TestT7Hygiene:
                 f"importing {module} alone pulled in a "
                 f"forbidden module:\n{r.stdout}\n{r.stderr}"
             )
+
+    def test_model_code_never_imports_simulator(self):
+        """Owner decision 187: ``simulator/`` is the on-disk blindness
+        boundary. The cut-site model is evaluated blind on simulated data, so
+        no module under ``background_model/`` outside
+        ``background_model/simulator/``, and not ``background_model_core.py``,
+        may import ``background_model.simulator`` -- absolutely, as
+        ``from background_model import simulator``, relatively
+        (``from .simulator import draw``), or by string through
+        ``importlib.import_module`` / ``__import__``. Guards mutation B1.
+
+        Scans the files on disk, not ``sys.modules``, so a module no test
+        imports is still checked.
+        """
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pkg_dir = os.path.join(repo_root, "background_model")
+        sim_dir = os.path.join(pkg_dir, "simulator")
+        banned = "background_model.simulator"
+
+        def is_banned(name):
+            return name == banned or name.startswith(banned + ".")
+
+        def module_name(path):
+            rel = os.path.relpath(path, repo_root)[:-len(".py")]
+            parts = rel.split(os.sep)
+            if parts[-1] == "__init__":
+                parts = parts[:-1]
+            return ".".join(parts)
+
+        def imported_names(path):
+            name = module_name(path)
+            # A package's __init__ resolves relative imports against itself.
+            is_pkg = os.path.basename(path) == "__init__.py"
+            package = name if is_pkg else name.rpartition(".")[0]
+            with open(path) as f:
+                tree = ast.parse(f.read(), filename=path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        yield alias.name
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level:
+                        parts = package.split(".") if package else []
+                        parts = parts[:len(parts) - (node.level - 1)]
+                        base = ".".join(parts + ([base] if base else []))
+                    yield base
+                    # `from background_model import simulator` names the
+                    # package in the alias, not in the module.
+                    for alias in node.names:
+                        yield f"{base}.{alias.name}"
+                elif (isinstance(node, ast.Call) and node.args
+                      and isinstance(node.args[0], ast.Constant)
+                      and isinstance(node.args[0].value, str)):
+                    fn = node.func
+                    fname = (fn.attr if isinstance(fn, ast.Attribute)
+                             else getattr(fn, "id", None))
+                    if fname in ("import_module", "__import__"):
+                        yield node.args[0].value
+
+        scanned, first_party, offenders = [], 0, []
+        for root, dirs, files in os.walk(pkg_dir):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            if os.path.commonpath([root, sim_dir]) == sim_dir:
+                continue
+            for fn in files:
+                if fn.endswith(".py"):
+                    scanned.append(os.path.join(root, fn))
+        scanned.append(os.path.join(repo_root, "background_model_core.py"))
+        for path in scanned:
+            for name in imported_names(path):
+                if name.startswith("background_model"):
+                    first_party += 1
+                if is_banned(name):
+                    offenders.append(f"{os.path.relpath(path, repo_root)} "
+                                     f"imports {name}")
+        assert not offenders, (
+            "model code imports the simulator (decision 187 boundary):\n  "
+            + "\n  ".join(offenders))
+
+        # Non-vacuity. 13 modules sit outside simulator/ today, plus the core;
+        # far fewer means the walk is skipping files. And they import each
+        # other, so seeing no first-party import means the walker is blind.
+        assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
+        assert first_party >= 10, (
+            f"saw only {first_party} background_model imports across "
+            f"{len(scanned)} modules")
+        # The detector itself fires: draw.py does import the simulator.
+        draw_path = os.path.join(sim_dir, "draw.py")
+        assert any(is_banned(n) for n in imported_names(draw_path))
+
+    def test_conftest_does_not_import_simulator_at_load(self):
+        """``tests/conftest.py`` and the ``cut_site_helpers`` it imports load
+        for EVERY module in ``tests/``, so a module-level simulator import
+        there turns one broken simulator module into a collection failure of
+        the whole suite.  Imports inside a function body (a fixture) run only
+        when that fixture is used, and are allowed."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        n_imports = 0
+        for fname in ("conftest.py", "cut_site_helpers.py"):
+            with open(os.path.join(here, fname)) as f:
+                tree = ast.parse(f.read())
+            stack = list(tree.body)
+            while stack:
+                node = stack.pop()
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.Lambda)):
+                    continue
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""] + [
+                        f"{node.module}.{a.name}" for a in node.names]
+                else:
+                    stack.extend(ast.iter_child_nodes(node))
+                    continue
+                n_imports += 1
+                for name in names:
+                    assert not name.startswith("background_model.simulator"), (
+                        f"{fname} imports {name} at module level")
+        # Non-vacuity: both files make several module-level imports.
+        assert n_imports >= 8, f"saw only {n_imports} module-level imports"

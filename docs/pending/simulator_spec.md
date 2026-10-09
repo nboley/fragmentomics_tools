@@ -307,6 +307,12 @@ directly as well as `simulator.measure`:
    imports it. A pure move: no computed output changed.
 3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
 
+**Model code never imports `simulator/`:** no module under `background_model/`
+outside `background_model/simulator/`, nor `background_model_core.py`, imports
+`background_model.simulator` in any form, because `simulator/` is the on-disk
+blindness boundary for evaluating the cut-site model on simulated data (owner
+decision 187, enforced by `test_model_code_never_imports_simulator`).
+
 Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
 moved code without changing it, and so did moving the definitions into
 `constants` (byte-identical 200-region output). The previous-generation simulator (`capture`,
@@ -319,6 +325,7 @@ moved code without changing it, and so did moving the definitions into
 | `counts_from_hexamers` | `simulator.measure` | genomic start/stop + strand → the four tables |
 | `count_srdf` | `simulator.measure` | an attached frame → `C(h)`, per-row admitted counts, stats. No strand assertions — see Settled |
 | `count_sample` | `simulator.measure` | stages 1, 2 and 4 end to end → `(C(h), region_counts, stats, srdf)`. **Returns the frame**, which `f(L)` and the sampler both need |
+| `measure_sample` | `simulator.measure` | the whole measure step: `count_sample` → `f(L)` → `N(h)` → `r(h)`, as a `SampleMeasurement`. Both scripts call it |
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
@@ -333,8 +340,8 @@ moved code without changing it, and so did moving the definitions into
 
 Two scripts call these. `scripts/run_cut_site_simulator.py` runs measure and
 draw end to end. `scripts/measure_cut_site_hexamers.py` (owner decision 189)
-runs only the measure step for one sample, with the same calls and arguments,
-and writes `C(h)`, `N(h)`, `r(h)`, `f(L)` and the per-region counts to an
+runs only the measure step for one sample, through the same `measure_sample`
+call, and writes `C(h)`, `N(h)`, `r(h)`, `f(L)` and the per-region counts to an
 `.npz` plus a provenance `.json`. It replaced the containment counter now in
 `attic/hexamer_prior_pipeline/`.
 

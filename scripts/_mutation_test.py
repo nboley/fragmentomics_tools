@@ -5,7 +5,9 @@ Targets ``background_model/constants.py``, ``background_model/hexamers.py``,
 ``background_model/simulator/measure.py`` and ``background_model/simulator/draw.py``
 (the last three were one file, ``count_hexamers_rdf.py``, until decision 169
 split it; ``measure`` was ``background_model/cut_site_stats.py`` until
-decision 187), plus a few library and oracle files.
+decision 187), plus a few library and oracle files, and
+``background_model/train.py`` as the stand-in model module for the decision-187
+boundary (B1, B2).
 
 Applies each mutation as a text substitution, runs the test suite,
 records which tests fail, reverts, and prints a matrix.
@@ -363,6 +365,20 @@ MUTATIONS = [
      "background_model/simulator/measure.py",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\nif False:\n    from . import draw as _unused\n"),
+
+    # ── Owner decision 187: model code never imports simulator/ ───────────
+    # The blindness boundary. B1 names the package only in the alias, B2
+    # reaches it relatively; neither spells "background_model.simulator".
+
+    ("B1", "a non-simulator module imports simulator (from background_model import simulator)",
+     "background_model/train.py",
+     "import numpy as np\nimport lightning as L\n",
+     "import numpy as np\nimport lightning as L\nif False:\n    from background_model import simulator as _unused\n"),
+
+    ("B2", "a non-simulator module imports simulator relatively (from .simulator import measure)",
+     "background_model/train.py",
+     "from __future__ import annotations\n",
+     "from __future__ import annotations\nif False:\n    from .simulator import measure as _unused\n"),
 
     # ── Owner decisions 174-177: shared definitions in constants.py ───────
 

@@ -23,6 +23,9 @@ alone are ``r(h)·N(h)``, so feeding them to a sampler that re-enumerates
 candidate positions applies hexamer abundance twice.  The spread in ``N`` across hexamers is large, so this is not
 a small correction.
 
+``measure_sample`` runs the whole sequence for one sample -- ``count_sample``,
+``f(L)``, ``N(h)``, ``r(h)`` -- and is what both scripts call.
+
 The ``C(h)`` path is three chained passes over a ``SampleAndRegionDataFrame``:
 
 1. ``attach_fragment_arrays(min_mapq=..., fragment_array_callback=filter_fragments)``
@@ -76,7 +79,8 @@ convention applied; ``counts_from_hexamers`` owns that mapping.  A dense
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Tuple
+import contextlib
+from typing import Callable, Dict, Iterable, NamedTuple, Tuple
 
 import numpy as np
 import pandas as pd
@@ -106,6 +110,11 @@ TABLE_NAMES = ("start_fwd", "end_fwd", "start_rev", "end_rev")
 # makes N(h) identical for any worker count.  Changing it changes N_end's last
 # bits.
 UNIFORM_BLOCK_SIZE: int = 256
+
+# ``propensities``' default floor on N.  A name rather than a literal so that
+# ``measure_sample`` and the per-sample counter's JSON record the value used
+# without restating it.
+DEFAULT_MIN_EXPECTED: float = 0.0
 
 
 def empty_counts() -> Dict[str, np.ndarray]:
@@ -492,7 +501,7 @@ def propensities(
     counts: Dict[str, np.ndarray],
     expected: Dict[str, np.ndarray],
     *,
-    min_expected: float = 0.0,
+    min_expected: float = DEFAULT_MIN_EXPECTED,
 ) -> Dict[str, np.ndarray]:
     """``r(h) = C(h) / N(h)``, observed over expected, for all four tables.
 
@@ -826,3 +835,96 @@ def count_sample(
         srdf, n_workers=n_workers, verbose=verbose
     )
     return counts, region_counts, stats, srdf
+
+
+class SampleMeasurement(NamedTuple):
+    """What ``measure_sample`` returns: every measured input of the draw.
+
+    ``srdf`` is kept because the draw samples against its attached sequences
+    and lifts region-local draws through its coordinates; see
+    ``count_sample``.  ``min_expected`` is the floor ``propensities`` applied,
+    recorded so a writer need not restate it.
+    """
+    C: Dict[str, np.ndarray]
+    region_counts: np.ndarray
+    stats: Dict[str, int]
+    srdf: "SampleAndRegionDataFrame"
+    fl: FragmentLengthDist
+    N: Dict[str, np.ndarray]
+    n_meta: Dict[str, float]
+    r: Dict[str, np.ndarray]
+    min_expected: float
+
+
+def measure_sample(
+    rdf,
+    sample_id: str,
+    h5_path: str,
+    fasta_path: str,
+    *,
+    min_mapq: int = 10,
+    min_expected: float = DEFAULT_MIN_EXPECTED,
+    n_workers: int | None = None,
+    verbose: bool = True,
+    stage: Callable[[str], contextlib.AbstractContextManager] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> SampleMeasurement:
+    """The whole measure step for one sample: ``C``, ``f(L)``, ``N`` and ``r``.
+
+    The ONE place the sequence is written down, shared by
+    ``scripts/run_cut_site_simulator.py`` and
+    ``scripts/measure_cut_site_hexamers.py``:
+
+        count_sample -> FragmentLengthDist.from_srdf
+                     -> uniform_hexamer_counts(rdf, ...) -> propensities
+
+    The order is forced.  ``f(L)`` must exist before ``N(h)``, whose end
+    expectation is f(L)-weighted, and ``uniform_hexamer_counts`` takes the
+    ``rdf``, NOT the ``srdf`` -- it refuses a frame carrying fragment arrays.
+
+    ``stage(name)`` and ``log(line)`` are hooks for a caller's progress
+    output and change nothing computed.  ``stage`` must return a context
+    manager; it wraps the three timed stages, named ``"count_sample"``,
+    ``"f(L)"`` and ``"N(h)"``.  ``log`` receives one summary line after each
+    stage and one per ``r(h)`` table.
+    """
+    if stage is None:
+        def stage(_name):
+            return contextlib.nullcontext()
+    if log is None:
+        def log(_line):
+            return None
+
+    # Stages 1, 2 and 4 -- one pass. The frame is returned, not discarded,
+    # because f(L), the padded sequences and the region coordinates all live on
+    # it and rebuilding it costs a second fetch plus a second FASTA walk.
+    with stage("count_sample"):
+        C, region_counts, stats, srdf = count_sample(
+            rdf, sample_id, h5_path, fasta_path,
+            min_mapq=min_mapq, n_workers=n_workers, verbose=verbose,
+        )
+    log(f"[C(h)]    {stats}")
+    log(f"[counts]  per-region min/median/max = "
+        f"{region_counts.min()}/{int(np.median(region_counts))}/{region_counts.max()}")
+
+    with stage("f(L)"):
+        fl = FragmentLengthDist.from_srdf(srdf)
+    log(f"[f(L)]    support [{fl.min_fl}, {fl.max_fl}], "
+        f"n={int(fl.counts.sum())}")
+
+    # Stage 3. Takes the RDF, not the srdf, and needs f(L) to already exist.
+    with stage("N(h)"):
+        N, n_meta = uniform_hexamer_counts(
+            rdf, fasta_path, fl, n_workers=n_workers, verbose=verbose,
+        )
+    log(f"[N(h)]    {n_meta}")
+
+    r = propensities(C, N, min_expected=min_expected)
+    for name in TABLE_NAMES:
+        nz = int((r[name] > 0).sum())
+        log(f"[r(h)]    {name:<10} nonzero {nz:4d}/4096  max {r[name].max():.4f}")
+
+    return SampleMeasurement(
+        C=C, region_counts=region_counts, stats=stats, srdf=srdf, fl=fl,
+        N=N, n_meta=n_meta, r=r, min_expected=min_expected,
+    )

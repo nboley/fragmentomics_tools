@@ -25,8 +25,12 @@ from cut_site_helpers import (
 )
 
 from background_model.constants import L_MAX, L_MIN, N_LENGTHS
-from background_model.simulator.measure import FragmentLengthDist
 from fragmentomics_tools.dataframe import RegionDataFrame
+
+# Nothing from background_model.simulator is imported at module level. This
+# file loads as a plugin for EVERY module in tests/, so a broken simulator
+# import here would fail collection of the whole suite rather than just the
+# tests that use the simulator. Fixtures that need it import it themselves.
 
 
 @pytest.fixture(scope="session")
@@ -146,6 +150,8 @@ def bruteforce_h5(toy_dir, toy_genome):
 @pytest.fixture(scope="session")
 def simple_fl():
     """A simple fragment-length distribution for testing."""
+    from background_model.simulator.measure import FragmentLengthDist
+
     counts = np.zeros(N_LENGTHS, dtype=np.int64)
     counts[0] = 10    # L=25
     counts[25] = 30   # L=50

@@ -18,6 +18,8 @@ as the module having no tests.
 
 The four stages, and why the order is forced
 --------------------------------------------
+``simulator.measure.measure_sample`` runs this sequence; the per-sample
+counter ``scripts/measure_cut_site_hexamers.py`` calls the same function.
 Stages 1, 2 and 4 of the spec share ONE pass over the h5, which is why
 ``count_sample`` returns the frame it built rather than discarding it:
 
@@ -85,8 +87,6 @@ import os
 import sys
 import time
 
-import numpy as np
-
 # scripts/ is not a package and the repo is not pip-installed, so the repo root
 # has to go on sys.path before the first-party imports. Without this the script
 # only runs from the repo root with PYTHONPATH already set.
@@ -94,13 +94,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
-from background_model.simulator.measure import (  # noqa: E402
-    FragmentLengthDist,
-    TABLE_NAMES,
-    count_sample,
-    propensities,
-    uniform_hexamer_counts,
-)
+from background_model.simulator.measure import measure_sample  # noqa: E402
 from background_model.simulator.draw import (  # noqa: E402
     simulate_fragments_to_bed,
 )
@@ -177,34 +171,15 @@ def main(argv=None):
             rdf = rdf.iloc[: args.n_regions]
     print(f"[regions] {len(rdf)} from {os.path.basename(args.region_bed)}")
 
-    # Stages 1, 2 and 4 -- one pass. The frame is returned, not discarded,
-    # because f(L), the padded sequences and the region coordinates all live on
-    # it and rebuilding it costs a second fetch plus a second FASTA walk.
-    with _stage("count_sample", seconds):
-        C, region_counts, stats, srdf = count_sample(
-            rdf, args.sample_id, args.fragments_h5, args.fasta,
-            min_mapq=args.min_mapq, n_workers=args.n_workers, verbose=False,
-        )
-    print(f"[C(h)]    {stats}")
-    print(f"[counts]  per-region min/median/max = "
-          f"{region_counts.min()}/{int(np.median(region_counts))}/{region_counts.max()}")
-
-    with _stage("f(L)", seconds):
-        fl = FragmentLengthDist.from_srdf(srdf)
-    print(f"[f(L)]    support [{fl.min_fl}, {fl.max_fl}], "
-          f"n={int(fl.counts.sum())}")
-
-    # Stage 3. Takes the RDF, not the srdf, and needs f(L) to already exist.
-    with _stage("N(h)", seconds):
-        N, n_meta = uniform_hexamer_counts(
-            rdf, args.fasta, fl, n_workers=args.n_workers, verbose=False,
-        )
-    print(f"[N(h)]    {n_meta}")
-
-    r = propensities(C, N)
-    for name in TABLE_NAMES:
-        nz = int((r[name] > 0).sum())
-        print(f"[r(h)]    {name:<10} nonzero {nz:4d}/4096  max {r[name].max():.4f}")
+    # Stages 1-4 and r(h). measure_sample times each stage through _stage and
+    # prints the same summary lines this script used to print itself.
+    m = measure_sample(
+        rdf, args.sample_id, args.fragments_h5, args.fasta,
+        min_mapq=args.min_mapq, n_workers=args.n_workers, verbose=False,
+        stage=lambda name: _stage(name, seconds), log=print,
+    )
+    stats, region_counts, srdf = m.stats, m.region_counts, m.srdf
+    fl, n_meta, r = m.fl, m.n_meta, m.r
 
     bed_path = f"{stem}.bed"
     # seed and sample_id go into the p sidecar's header: the seed is the
