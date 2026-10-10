@@ -178,7 +178,7 @@ tile) pairs and store them. This would eliminate the per-item `np.add.at`
 The change is minimal — add a preload phase to `__init__` and modify
 `__getitem__` to use the preloaded arrays instead of zarr reads.
 
-### Changes to `background_model/dataset.py`
+### Changes to `background_model/band_model/dataset.py`
 
 ```python
 class BackgroundTileDataset(Dataset):
@@ -262,7 +262,7 @@ class BackgroundTileDataset(Dataset):
         )
 ```
 
-### Changes to `background_model/train.py`
+### Changes to `background_model/band_model/train.py`
 
 None required — `build_loaders` already sets `pin_memory=True` and
 `persistent_workers=True`. The preload happens inside the Dataset `__init__`.

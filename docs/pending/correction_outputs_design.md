@@ -1010,7 +1010,7 @@ new error.**
 - `dataframe.py`: dead-fn `:1876,:1902,:1905`; live-fn `:1916,:1933-1935,:1936,
   :1940,:1943`. ✓
 - `background_model_core.py:104` FL_BANDS; `:126-131` track nesting (C=12). ✓
-- `background_model/preprocess.py:163,:185,:188` Phase-A strandless invariant. ✓
+- `background_model/band_model/preprocess.py:163,:185,:188` Phase-A strandless invariant. ✓
 
 **Grade: A−.** The fix round is clean and source-grounded; the High (F1) is
 genuinely closed by an invariant that matches Phase A, the successor-risk mapping

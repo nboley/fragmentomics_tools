@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from background_model.store import _create_array
+from background_model.band_model.store import _create_array
 import torch
 import zarr
 

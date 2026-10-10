@@ -826,26 +826,62 @@ class Region(DataClassMixin):
     def get_sequence(
         self,
         reference_fasta: pysam.Fastafile,
-    ) -> numpy.ndarray:
+        left_pad: int = 0,
+        right_pad: int = 0,
+    ) -> bytes:
         """
         get the sequence of a region from a fasta file
-        :return: a str
+
+        :param left_pad: extra bases to fetch before ``start``
+        :param right_pad: extra bases to fetch after ``stop``
+        :return: bytes of length ``len(region) + left_pad + right_pad``
+
+        Padding is applied at the fetch, so a caller needing flanking context
+        (a k-mer encoder, say) gets it without resizing the region itself and
+        then having to track the offset separately.
+
+        A padded span running off either end of the contig raises. ``pysam``
+        TRUNCATES silently at a contig end, and a short sequence misaligns
+        every downstream position, so the length is checked rather than
+        trusted.
         """
-        return reference_fasta.fetch(self.chrom, self.start, self.stop).encode()
+        if left_pad < 0 or right_pad < 0:
+            raise ValueError(
+                f"padding must be non-negative, got left_pad={left_pad}, "
+                f"right_pad={right_pad}"
+            )
+        start, stop = self.start - left_pad, self.stop + right_pad
+        if start < 0:
+            raise ValueError(
+                f"{self}: left_pad={left_pad} runs off the start of "
+                f"{self.chrom} (start would be {start})"
+            )
+        seq = reference_fasta.fetch(self.chrom, start, stop).encode()
+        if len(seq) != stop - start:
+            raise ValueError(
+                f"{self}: fetched {len(seq)} bases, expected {stop - start} "
+                f"-- the fetch was truncated, which happens when the padded "
+                f"span runs off the end of {self.chrom}"
+            )
+        return seq
 
     def get_one_hot_encoded_sequence(
         self,
         reference_fasta: pysam.Fastafile,
         reverse_complement_sequence_if_minus_strand: bool = False,
+        left_pad: int = 0,
+        right_pad: int = 0,
     ) -> numpy.ndarray:
         """
         get the sequence of a region from a fasta file
         :param reverse_complement_sequence_if_minus_strand: If set to True, then flip/RC the sequence if it is on the minus strand.
+        :param left_pad: extra bases to fetch before ``start``
+        :param right_pad: extra bases to fetch after ``stop``
         :return: a 4xlength one-hot encoded numpy array
         """
-        seq = one_hot_encode_sequences([self.get_sequence(reference_fasta)]).astype(
-            "int8"
-        )
+        seq = one_hot_encode_sequences(
+            [self.get_sequence(reference_fasta, left_pad, right_pad)]
+        ).astype("int8")
         one_hot = seq[0]
         if reverse_complement_sequence_if_minus_strand and self.is_minus_strand():
             return one_hot[::-1, ::-1].T

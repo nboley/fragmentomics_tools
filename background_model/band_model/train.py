@@ -1,0 +1,1465 @@
+"""Training driver for the background model (Phase 3.4).
+
+Device-agnostic (``accelerator="auto"``) — runs on CPU or GPU with no code
+change; nothing here calls ``.cuda()`` and the Dataset does its own worker-safe,
+CUDA-free reads.  The frozen statistical core (``background_model_core.py``) is
+NOT modified: all diagnostics live in the :class:`InstrumentedBackgroundModel`
+subclass and in callbacks.  Per-track losses reuse the frozen ``loss_fn`` on
+channel slices (they do not reimplement any likelihood).
+
+Usage::
+
+    python -m background_model.band_model.train \
+        --loss multinomial --run-name my_run \
+        --max-epochs 10 --batch-size 8 --lr 1e-4
+
+CLI (see ``build_arg_parser``): ``--loss --run-name --max-epochs --batch-size
+--lr --limit-batches`` plus ``--num-workers --seed --lr-patience
+--max-lr-reductions --max-recoveries --store --runs-root --resume-from``
+conveniences.
+
+Reproducibility contract: every run dir records ``config_hash``,
+``split_version``, git sha and the full resolved config in ``run_meta.json``.
+NOTE: the Dataset's jitter/RC augmentation RNG is keyed on ``[seed, worker_pid]``
+(dataset.py docstring), so bit-identical loss curves across two *separate
+processes* are only guaranteed with augmentation off; within one process two
+freshly-built datasets under the same seed reproduce (used by the L6 rung).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+
+import numpy as np
+import lightning as L
+import torch
+from lightning.pytorch.callbacks import (
+    Callback,
+    DeviceStatsMonitor,
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
+from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.utilities import grad_norm
+from lightning.pytorch.utilities.rank_zero import rank_zero_info
+from torch.utils.data import DataLoader
+
+from background_model.band_model.config import TILE, PlumbingConfig
+from background_model.band_model.dataset import BackgroundTileDataset
+from background_model_core import (
+    LOSSES,
+    BackgroundModel,
+    BackgroundModelHybrid,
+    BackgroundModelKEN,
+    MaskedMultinomialNLLLoss,
+    _prepare_mask,
+)
+
+DEFAULT_STORE = (
+    "/efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr"
+)
+DEFAULT_RUNS_ROOT = "/efs/analytics/nathanboley/background_model/runs"
+
+# Track-to-FL-band mapping: which FL band each of the 12 tracks belongs to.
+# Layout: 2 strands × 2 FL bands × 3 coverage types
+# Tracks 0-2 = (+, short), 3-5 = (+, mono), 6-8 = (-, short), 9-11 = (-, mono)
+_TRACK_TO_BAND = torch.tensor([0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1])
+
+
+def _per_element_multinomial_nll(shape_logits, target, mask3):
+    """Per-sample, per-track multinomial NLL — (B, C) without mean reduction.
+
+    This is ``MaskedMultinomialNLLLoss.forward()`` stopped before the final
+    ``.mean()``, needed by FL reweighting which applies per-sample-per-track
+    weights before aggregation.  Uses ``_prepare_mask`` from the frozen core
+    for masking logic.  Equivalence is asserted by
+    ``test_per_element_nll_matches_frozen_loss``.
+    """
+    if mask3 is not None:
+        shape_logits = shape_logits.masked_fill(~mask3, float("-inf"))
+    logp = torch.log_softmax(shape_logits, dim=-1)
+    if mask3 is not None:
+        logp = logp.masked_fill(~mask3, 0.0)
+    totals = target.sum(dim=-1).clamp(min=1.0)
+    return -(target * logp).sum(dim=-1) / totals  # (B, C)
+
+
+def _apply_fl_reweighting(loss_unweighted, fl_fracs, shape_logits, y, mask3,
+                           loss_fn, log_disp, loss_name):
+    """Recompute loss with per-sample, per-track FL band weighting.
+
+    Each sample's loss contribution is weighted by its own FL band fractions,
+    so tracks with more fragments in THAT sample's length distribution
+    contribute proportionally more to the gradient.
+
+    fl_fracs: (B, n_bands) — fraction of fragments in each FL band per sample
+    Returns: scalar weighted loss (with gradients)
+    """
+    if loss_name != "multinomial" and log_disp is not None:
+        # NB-offset FL reweighting is NOT IMPLEMENTED.  The multinomial
+        # component dominates shape learning, and per-sample NB loss with
+        # FL weighting requires owner-approved statistical design work.
+        # This bail-out is deliberate, not an oversight.
+        return loss_unweighted
+
+    B, C, L = shape_logits.shape
+    band_idx = _TRACK_TO_BAND.to(shape_logits.device)  # (C,)
+    # Per-sample, per-track weights
+    w = fl_fracs[:, band_idx]  # (B, C)
+    w = w / w.sum(dim=1, keepdim=True) * C  # normalize per sample
+
+    nll = _per_element_multinomial_nll(shape_logits, y, mask3)  # (B, C)
+
+    # Weighted mean: each (sample, track) pair weighted by that sample's
+    # FL band fraction for that track's band
+    return (nll * w).sum() / (B * C)
+
+
+# --------------------------------------------------------------------------
+# Instrumented model (frozen core + detached diagnostics only)
+# --------------------------------------------------------------------------
+
+
+class _InstrumentationMixin:
+    """Per-track loss, dispersion-trajectory, multinomial-NLL and grad-norm
+    logging.  Architecture-agnostic: mix into any model exposing
+    ``self.hparams.loss``, ``self.loss_fn``, ``self.output_tracks``, and
+    ``self._pooled_log_dispersion``.
+
+    All extra logging is ``detach``-ed and adds no gradient path — the
+    training loss and gradients are byte-for-byte those of the underlying
+    model's ``_step``.
+
+    Previously two independent copies existed (one for the CNN, one for
+    KEN/Hybrid).  This mixin replaces both — a duplicated loop drifting
+    silently is the defect shape this codebase has the most receipts for.
+    """
+
+    def _step(self, batch, log_name):
+        if len(batch) == 4:
+            x, y, mask, fl_fracs = batch
+        else:
+            x, y, mask = batch
+            fl_fracs = None
+        mask3 = _prepare_mask(mask, y)
+        shape_logits, dispersion_bp = self(x)
+
+        if self.hparams.loss == "multinomial":
+            log_disp = None
+            loss = self.loss_fn(shape_logits, y, mask3)
+        else:
+            log_disp = self._pooled_log_dispersion(dispersion_bp, mask3)
+            loss = self.loss_fn(shape_logits, log_disp, y, mask3)
+
+        # FL-conditioned per-track reweighting: scale the loss by each
+        # sample's FL band fractions so tracks with more fragments in that
+        # sample's length distribution contribute proportionally more.
+        if fl_fracs is not None:
+            loss = _apply_fl_reweighting(loss, fl_fracs, shape_logits, y, mask3,
+                                         self.loss_fn, log_disp, self.hparams.loss)
+
+        self.log(log_name, loss, prog_bar=True, sync_dist=True)
+        self._log_per_track(log_name, shape_logits, log_disp, y, mask3)
+        self._log_dispersion_trajectory(log_name, log_disp)
+        self._log_multinomial_nll(log_name, shape_logits, y, mask3)
+        return loss
+
+    @torch.no_grad()
+    def _log_multinomial_nll(self, log_name, shape_logits, y, mask3):
+        """Log multinomial NLL for all models (comparable to oracle=7.5745).
+
+        For multinomial loss this equals val_loss. For other losses it provides
+        a cross-family comparison metric on the same scale.
+        """
+        stage = log_name.split("_")[0]
+        sl = shape_logits.detach()
+        if mask3 is not None:
+            sl = sl.masked_fill(~mask3, float("-inf"))
+        logp = torch.log_softmax(sl, dim=-1)
+        if mask3 is not None:
+            logp = logp.masked_fill(~mask3, 0.0)
+        totals = y.detach().sum(dim=-1).clamp(min=1.0)
+        nll = -(y.detach() * logp).sum(dim=-1) / totals
+        self.log(f"{stage}_multinomial_nll", nll.mean(), sync_dist=True)
+
+    @torch.no_grad()
+    def _log_per_track(self, log_name, shape_logits, log_disp, y, mask3):
+        """Per-track mean NLL, computed by slicing channels and re-calling the
+        SAME frozen loss module (no statistics reimplemented)."""
+        stage = log_name.split("_")[0]  # "train" | "val"
+        sl_logits = shape_logits.detach()
+        sl_y = y.detach()
+        for c, name in enumerate(self.output_tracks):
+            ch = slice(c, c + 1)
+            if self.hparams.loss == "multinomial":
+                lt = self.loss_fn(sl_logits[:, ch], sl_y[:, ch], mask3)
+            else:
+                lt = self.loss_fn(
+                    sl_logits[:, ch], log_disp.detach()[:, ch], sl_y[:, ch], mask3
+                )
+            self.log(f"{stage}_track/{name}", lt, sync_dist=True)
+
+    @torch.no_grad()
+    def _log_dispersion_trajectory(self, log_name, log_disp):
+        """mean / p10 / p90 of pooled log_dispersion (no-op for multinomial)."""
+        if log_disp is None:
+            return
+        stage = log_name.split("_")[0]
+        flat = log_disp.detach().reshape(-1).float()
+        self.log(f"{stage}_logdisp/mean", flat.mean(), sync_dist=True)
+        self.log(f"{stage}_logdisp/p10", torch.quantile(flat, 0.10), sync_dist=True)
+        self.log(f"{stage}_logdisp/p90", torch.quantile(flat, 0.90), sync_dist=True)
+
+    def on_before_optimizer_step(self, optimizer):
+        # Pre-clip 2-norm (Trainer applies gradient_clip_val=1.0 afterwards);
+        # logging it shows how often clipping binds.
+        norms = grad_norm(self, norm_type=2)
+        total = norms.get("grad_2.0_norm_total")
+        if total is not None:
+            self.log("grad_2norm", total, prog_bar=False)
+
+
+class InstrumentedBackgroundModel(_InstrumentationMixin, BackgroundModel):
+    """BackgroundModel + training instrumentation."""
+
+
+class InstrumentedBackgroundModelKEN(
+    _InstrumentationMixin, BackgroundModelKEN
+):
+    """BackgroundModelKEN + training instrumentation."""
+
+
+class InstrumentedBackgroundModelHybrid(
+    _InstrumentationMixin, BackgroundModelHybrid
+):
+    """BackgroundModelHybrid + training instrumentation."""
+
+
+# --------------------------------------------------------------------------
+# Divergence guard
+# --------------------------------------------------------------------------
+
+
+#: Stop reasons that divergence recovery will retry from.  Defined once and
+#: consumed by both the recovery loop and its exhaustion check — two literals
+#: compared in two places is the defect shape that produced the LR-ladder and
+#: floor-clamp bugs, so the membership test has exactly one definition.
+#:
+#: ``non_finite`` is included because NaN/Inf is the most severe divergence
+#: there is, and restoring the best checkpoint at a reduced LR is the right
+#: response to it.  Excluding it cost a real run: sim_v3_A_hybrid_nb_frozen_lr5e-3
+#: hit NaN at epoch 7 and discarded its best checkpoint (4.0454 @ ep6) rather
+#: than retrying at a halved LR.
+#:
+#: NOT recoverable, deliberately: ``stalled`` (a collapsed constant-output model
+#: will re-collapse from the same weights — recovery cannot help), and
+#: ``early_stopped`` / ``completed`` (normal termination).
+RECOVERABLE_REASONS = frozenset({"diverged", "non_finite"})
+
+
+class DivergenceStop(Callback):
+    """Stop training on divergence or metric stall.
+
+    Two independent guards, each independently disableable:
+
+    **Divergence** (``factor``): stop when val_loss exceeds ``factor`` x its
+    own best.  ``EarlyStopping(check_finite=True)`` only catches NaN/inf;
+    observed divergences stayed finite (8.73, 383, 8.4e8) and ran to the
+    epoch cap.  Set ``factor=0`` to disable the divergence-ratio check
+    (non-finite detection is always active regardless of ``factor``).
+
+    Divergence threshold rationale, measured on the v3 runs:
+
+    ======================================  =================
+    run                                     max val/best
+    ======================================  =================
+    KEN, CNN multinomial, CNN frozen-NB     1.0001 - 1.0002
+    hybrid lr1e-3 (healthy)                 1.00056
+    cnn frozen-NB lr5e-3, 117 ep (healthy)  1.00023
+    **phase4 hybrid lr2e-3 (DEGRADED)**     **1.0079**
+    CNN multinomial lr=1e-2 (diverged)      380
+    Hybrid lr=5e-3 (diverged)               1.9e9
+    ======================================  =================
+
+    **The default was 1.10 and is now 1.005 (owner-approved 2026-09-24).**
+    The original 1.10 was chosen against the two *explosion* rows — it sits
+    far above the noise floor and far below 380 — and on that evidence it was
+    correct.  What the evidence did not contain was a third regime, since
+    observed by ``phase4_hybrid_lr2e-3_recovery``: the model fell out of a
+    good basin at epoch 10 to **1.0079x** its best and never returned,
+    plateauing ~0.027 nats worse for the rest of the run.  That is ~14x the
+    worst healthy excursion but ~48000x below the smallest explosion, so
+    **1.10 could not fire on it** and the run wasted its remaining epochs.
+
+    1.005 sits ~8x above the worst healthy excursion (1.0006) and below the
+    degradation (1.0079).  Re-checked against every run available: no healthy
+    run exceeds 1.0006, including the one documented as having "noisy val
+    loss" (1.00023 over 117 epochs), so the tighter bound does not thrash.
+
+    Consequence to be aware of: ``reason="diverged"`` now covers both
+    explosions and basin-loss degradations.  A ``summary.json`` reporting
+    "diverged" may mean a 0.8% regression, not a blow-up — read ``value``
+    against ``best``, do not assume magnitude from the label.
+
+    **Stall** (``stall_patience``): stop when ``stall_patience`` consecutive
+    validation epochs produce a *bitwise identical* metric value — the
+    signature of a collapsed model whose output is constant and whose
+    per-epoch loss depends only on batch composition.  This is deliberately
+    exact equality, not an epsilon test: an epsilon-based "no improvement"
+    check is what ``EarlyStopping(patience=...)`` already does, and
+    duplicating it would risk firing on slow convergence.
+    Set ``stall_patience=0`` to disable.
+
+    Stall threshold rationale, measured across 15 v3 simulation runs:
+
+    ======================================  ==========  ====================
+    run                                     epochs      longest identical run
+    ======================================  ==========  ====================
+    all 13 healthy runs                     16-124      1 (two runs reach 2)
+    lrsweep_ken_lr2e-3                      32          2
+    lrsweep_ken_lr1e-3                      37          2
+    **lrsweep_ken_lr2e-2 (dead)**           16          **16**
+    ======================================  ==========  ====================
+
+    The default 5 sits ~2.5x above the healthy ceiling of 2 and far below
+    the observed failure of 16.
+    """
+
+    def __init__(self, factor: float = 1.10, monitor: str = "val_loss",
+                 stall_patience: int = 5):
+        self.factor = factor
+        self.monitor = monitor
+        self.stall_patience = stall_patience
+        self.best = None
+        self._last_val = None
+        self._stall_count = 0
+        # Populated when a guard fires; read after trainer.fit() to
+        # determine why the run stopped.  Keys: reason, epoch, plus
+        # guard-specific detail (value, best, factor, consecutive_epochs).
+        self.stop_reason = None
+
+    def on_validation_end(self, trainer, pl_module):
+        if trainer.sanity_checking:
+            return
+        current = trainer.callback_metrics.get(self.monitor)
+        if current is None:
+            return
+        current = float(current)
+
+        # --- Non-finite detection (unconditional, checked first) ---
+        # Must precede the stall check: inf == inf is True, so without
+        # this guard a repeated-inf trace with factor=0 would be
+        # mislabelled as "stalled" instead of "non-finite".
+        if not math.isfinite(current):
+            self.stop_reason = {
+                "reason": "non_finite",
+                "epoch": int(trainer.current_epoch),
+                "value": str(current),  # inf/nan are not JSON-serialisable
+            }
+            trainer.should_stop = True
+            rank_zero_info(
+                f"[DivergenceStop] {self.monitor}={current} is not finite "
+                f"-- stopping at epoch {trainer.current_epoch}."
+            )
+            return
+
+        # --- Stall detection (exact equality) ---
+        if self.stall_patience > 0:
+            if self._last_val is not None and current == self._last_val:
+                self._stall_count += 1
+            else:
+                self._stall_count = 1
+            self._last_val = current
+            if self._stall_count >= self.stall_patience:
+                self.stop_reason = {
+                    "reason": "stalled",
+                    "epoch": int(trainer.current_epoch),
+                    "value": current,
+                    "consecutive_epochs": self._stall_count,
+                }
+                trainer.should_stop = True
+                rank_zero_info(
+                    f"[DivergenceStop] {self.monitor}={current:.10f} frozen for "
+                    f"{self._stall_count} consecutive epochs -- stalled, stopping "
+                    f"at epoch {trainer.current_epoch}."
+                )
+                return
+
+        # --- Divergence detection ---
+        if self.factor <= 0:
+            return
+        if self.best is None or current < self.best:
+            self.best = current
+            return
+        if current > self.best * self.factor:
+            self.stop_reason = {
+                "reason": "diverged",
+                "epoch": int(trainer.current_epoch),
+                "value": current,
+                "best": self.best,
+                "factor": self.factor,
+            }
+            trainer.should_stop = True
+            rank_zero_info(
+                f"[DivergenceStop] {self.monitor}={current:.4f} exceeds "
+                f"{self.factor:.2f}x best ({self.best:.4f}) -- diverged, stopping "
+                f"at epoch {trainer.current_epoch}."
+            )
+
+
+# --------------------------------------------------------------------------
+# Post-resume LR reduction (Phase 3 — divergence recovery)
+# --------------------------------------------------------------------------
+
+
+class ApplyLRReduction(Callback):
+    """Set each param group to its ABSOLUTE recovery rung after Lightning
+    restores optimizer state.
+
+    Lightning's ``trainer.fit(ckpt_path=...)`` restores ``param_groups[i]["lr"]``
+    from the checkpoint (verified: ``test_lightning_resume_restores_param_group_lr``).
+    Any LR change made *before* the restore is silently overwritten, so this
+    fires on ``on_train_start``, after the restore.
+
+    Per group::
+
+        target = original_lr_i * target_ratio          # absolute rung
+        new    = max(min_lr_i, min(current_lr, target))
+
+    **Why absolute rather than multiplicative** (changed 2026-09-24). The
+    original form multiplied the restored LR by a factor computed *relative to
+    the resume checkpoint*, which forced the caller to track how many
+    reductions were already baked into that checkpoint (``best_recovery_level``).
+    That bookkeeping was the source of the LR-ladder double-count bug: an
+    attempt that improved the global best moved the pointer onto an
+    already-reduced checkpoint, and the from-original factor was applied on top
+    (measured 1.25e-3 where 2.5e-3 was intended). Targeting the rung absolutely
+    removes the state, and with it that whole class of error.
+
+    **Why ``min(current_lr, target)``.** A bare absolute set can *raise* the LR:
+    if the plateau scheduler pushed the LR below the rung during the previous
+    attempt, snapping back to the rung would undo that adaptation and increase
+    the LR immediately after a divergence. Taking the minimum keeps the
+    reduction monotonic — the property the multiplicative form had for free —
+    while still pinning the ladder exactly when plateau has not intervened.
+
+    ``original_lr_i`` is derived from the live scheduler rather than passed in:
+    ``_with_lr_schedule`` sets ``min_lr_i = original_lr_i * floor_ratio``, so
+    ``original_lr_i = min_lr_i / floor_ratio``. One authoritative source, no
+    second copy of the formula to drift — the same reasoning as the floor clamp.
+
+    When the floor binds for any group, ``self.clamped_groups`` records
+    per-group detail so the caller can include it in ``summary.json``.
+
+    If no ``ReduceLROnPlateau`` is configured there is no ``min_lrs`` and hence
+    no way to recover ``original_lr``; the callback then falls back to the old
+    multiplicative behaviour (``lr *= target_ratio``), which is only reachable
+    from tests that build a trainer without the project's scheduler.
+    """
+
+    def __init__(self, target_ratio: float, floor_ratio: float | None = None):
+        #: ratio of the target rung to the ORIGINAL lr, i.e. recovery_factor**N
+        self.target_ratio = target_ratio
+        #: min_lr / original_lr, i.e. lr_factor ** max_lr_reductions
+        self.floor_ratio = floor_ratio
+        self.clamped_groups = None   # populated if the floor binds
+        self.applied_lrs = None      # per-group LR actually installed
+
+    def on_train_start(self, trainer, pl_module):
+        min_lrs = self._get_min_lrs(trainer)
+
+        clamped, applied = [], []
+        for opt in trainer.optimizers:
+            for i, pg in enumerate(opt.param_groups):
+                current = pg["lr"]
+                floor = min_lrs[i] if (min_lrs is not None and i < len(min_lrs)) else None
+
+                if floor is not None and self.floor_ratio:
+                    # Absolute rung, derived from the live scheduler's floor.
+                    original = floor / self.floor_ratio
+                    new = min(current, original * self.target_ratio)
+                else:
+                    # No way to recover original_lr — treat target_ratio as a
+                    # RELATIVE step from the current LR.  Only reachable from
+                    # callers that build a trainer without the project's
+                    # scheduler, or that omit floor_ratio.
+                    new = current * self.target_ratio
+
+                # The floor binds whenever the scheduler exposes one, whatever
+                # route produced `new`.  Keeping this outside the branch above
+                # matters: an earlier version skipped the clamp when
+                # floor_ratio was absent, which let a caller drive the LR below
+                # min_lr and re-created the bug the clamp exists to prevent.
+                if floor is not None and new < floor:
+                    clamped.append({
+                        "group": i,
+                        "requested_lr": new,
+                        "clamped_lr": floor,
+                    })
+                    rank_zero_info(
+                        f"[ApplyLRReduction] group {i}: rung {new:.4e} < floor "
+                        f"{floor:.4e} — clamped (recovery budget effectively spent)"
+                    )
+                    new = floor
+
+                pg["lr"] = new
+                applied.append(new)
+
+        self.applied_lrs = applied
+        if clamped:
+            self.clamped_groups = clamped
+
+    @staticmethod
+    def _get_min_lrs(trainer):
+        """Read per-group min_lrs from the trainer's ReduceLROnPlateau, if any."""
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+        for sched_cfg in trainer.lr_scheduler_configs:
+            scheduler = sched_cfg.scheduler
+            if isinstance(scheduler, ReduceLROnPlateau):
+                return scheduler.min_lrs
+        return None
+
+
+# --------------------------------------------------------------------------
+# Throughput callback
+# --------------------------------------------------------------------------
+
+
+class ThroughputCallback(Callback):
+    """Log steps/s and samples/s over training (windowed)."""
+
+    def __init__(self, batch_size: int):
+        self.batch_size = batch_size
+        self._t0 = None
+        self._n = 0
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._t0 = time.perf_counter()
+        self._n = 0
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self._n += 1
+        dt = time.perf_counter() - self._t0
+        if dt > 0:
+            pl_module.log("steps_per_s", self._n / dt, prog_bar=True)
+            pl_module.log("samples_per_s", self._n * self.batch_size / dt)
+
+
+# --------------------------------------------------------------------------
+# Dataset / model / trainer builders (importable for the ladder script)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class TrainConfig:
+    loss: str
+    run_name: str
+    max_epochs: int
+    batch_size: int
+    lr: float
+    limit_batches: float | None
+    num_workers: int
+    seed: int
+    patience: int
+    store: str
+    runs_root: str
+    resume_from: str | None
+    n_kernels: int = 512
+    num_residual_layers: int = 2
+    dropout: float = 0.15
+    precision: str = "32"
+    min_N: int = 50
+    auto_lr: bool = False
+    freeze_dispersion: bool = False
+    dispersion_lr_scale: float = 1.0
+    dispersion_window_size: int = 256
+    model: str = "cnn"
+    k: int = 6
+    d_embed: int = 64
+    d_context: int = 128
+    n_context_layers: int = 2
+    context_kernel_size: int = 15
+    weight_decay: float = 0.0
+    fl_dist_npz: str | None = None
+    divergence_factor: float = 1.005
+    stall_patience: int = 5
+    lr_patience: int = 4
+    max_lr_reductions: int = 3
+    lr_factor: float = 0.2
+    max_recoveries: int = 3
+    recovery_factor: float = 0.2
+
+    def __post_init__(self):
+        if self.lr_patience < 1:
+            raise ValueError(
+                "lr_patience must be >= 1 (0 would make LR reduction and "
+                "early-stopping detection ambiguous)"
+            )
+        if self.max_lr_reductions < 0:
+            raise ValueError(
+                "max_lr_reductions must be >= 0 (-1 would set min_lr above "
+                "the initial LR, making the schedule silently inert)"
+            )
+        if self.patience < 1:
+            raise ValueError(
+                "patience must be >= 1 (derived from lr_patience and "
+                "max_lr_reductions as (lr_patience+1)*max_lr_reductions "
+                "+ lr_patience; 0 would make early-stopping detection "
+                "ambiguous)"
+            )
+        if self.max_recoveries < 0:
+            raise ValueError(
+                "max_recoveries must be >= 0 (0 disables divergence recovery)"
+            )
+        if not (0 < self.recovery_factor <= 1):
+            raise ValueError(
+                "recovery_factor must be in (0, 1] "
+                "(0 would zero every LR; >1 raises LR on recovery)"
+            )
+        if self.stall_patience == 1 or self.stall_patience < 0:
+            raise ValueError(
+                "stall_patience must be 0 (disabled) or >= 2 "
+                "(1 would stop on the first validation epoch)"
+            )
+
+
+def _load_fl_band_fracs(fl_dist_npz: str, store_path: str) -> np.ndarray:
+    """Load per-sample FL band fractions from an NPZ file.
+
+    Returns (n_samples_in_store, n_bands) float32 array where each row sums
+    to ~1 (the fraction of fragments in each FL band for that sample).
+    Samples are matched by index order in the store.
+    """
+    from background_model_core import FL_BANDS
+
+    data = np.load(fl_dist_npz)
+    fl_counts = data["counts"]        # (n_fl_samples, n_lengths)
+    fl_lengths = data["fragment_length"]  # (n_lengths,)
+
+    # For each FL sample, compute fraction in each band
+    n_fl = fl_counts.shape[0]
+    n_bands = len(FL_BANDS)
+    band_fracs = np.zeros((n_fl, n_bands), dtype=np.float32)
+    totals = fl_counts.sum(axis=1, keepdims=True).astype(np.float64)
+    totals = np.maximum(totals, 1.0)
+    for b, (lo, hi) in enumerate(FL_BANDS):
+        mask = (fl_lengths >= lo) & (fl_lengths < hi)
+        band_fracs[:, b] = fl_counts[:, mask].sum(axis=1) / totals.ravel()
+
+    # Match to store samples: the simulation assigns FL distributions to
+    # samples in order (sample 0 gets fl_dist 0, etc.). For real data,
+    # the mapping would come from the sample sheet.
+    import zarr
+    root = zarr.open_group(store_path, mode="r")
+    n_store_samples = root["samples/role"].shape[0]
+
+    if n_fl >= n_store_samples:
+        return band_fracs[:n_store_samples]
+    else:
+        # Fewer FL samples than store samples — tile cyclically
+        reps = (n_store_samples + n_fl - 1) // n_fl
+        return np.tile(band_fracs, (reps, 1))[:n_store_samples]
+
+
+def build_model(cfg: TrainConfig) -> L.LightningModule:
+    lr_kw = dict(
+        lr_patience=cfg.lr_patience,
+        max_lr_reductions=cfg.max_lr_reductions,
+        lr_factor=cfg.lr_factor,
+    )
+    if cfg.model == "ken":
+        return InstrumentedBackgroundModelKEN(
+            k=cfg.k, d_embed=cfg.d_embed, d_context=cfg.d_context,
+            n_context_layers=cfg.n_context_layers,
+            context_kernel_size=cfg.context_kernel_size,
+            loss=cfg.loss, learning_rate=cfg.lr, dropout=cfg.dropout,
+            weight_decay=cfg.weight_decay,
+            freeze_dispersion=cfg.freeze_dispersion,
+            dispersion_lr_scale=cfg.dispersion_lr_scale,
+            dispersion_window_size=cfg.dispersion_window_size,
+            **lr_kw,
+        )
+    if cfg.model == "hybrid":
+        return InstrumentedBackgroundModelHybrid(
+            k=cfg.k, d_embed=cfg.d_embed, n_kernels=cfg.n_kernels,
+            num_residual_layers=cfg.num_residual_layers,
+            loss=cfg.loss, learning_rate=cfg.lr, dropout=cfg.dropout,
+            weight_decay=cfg.weight_decay,
+            freeze_dispersion=cfg.freeze_dispersion,
+            dispersion_lr_scale=cfg.dispersion_lr_scale,
+            dispersion_window_size=cfg.dispersion_window_size,
+            **lr_kw,
+        )
+    return InstrumentedBackgroundModel(
+        loss=cfg.loss, learning_rate=cfg.lr, n_kernels=cfg.n_kernels,
+        num_residual_layers=cfg.num_residual_layers, dropout=cfg.dropout,
+        freeze_dispersion=cfg.freeze_dispersion,
+        dispersion_lr_scale=cfg.dispersion_lr_scale,
+        dispersion_window_size=cfg.dispersion_window_size,
+        **lr_kw,
+    )
+
+
+def build_datasets(store: str, model: L.LightningModule, min_N: int = 50, seed: int = 1337,
+                    fl_band_fracs=None):
+    """train (jitter+RC ON) and val (center, no RC) datasets on the real store."""
+    # Read tile_size from the store's own config so the harness works with any
+    # tile size (production 16384 or simulation 2048).
+    import zarr as _zarr
+    _root = _zarr.open_group(store, mode="r")
+    _tile_size = PlumbingConfig.from_json(_root.attrs["config_json"]).tile_size
+    model_input_size = model.calc_input_region_size(_tile_size)
+    train_ds = BackgroundTileDataset(
+        store_path=store,
+        model_input_size=model_input_size,
+        split="train",
+        sample_role="train",
+        min_N=min_N,
+        train_mode=True,   # jitter + RC ON
+        seed=seed,
+        fl_band_fracs=fl_band_fracs,
+    )
+    val_ds = BackgroundTileDataset(
+        store_path=store,
+        model_input_size=model_input_size,
+        split="val",
+        sample_role="train",
+        min_N=min_N,
+        train_mode=False,  # center crop, no RC
+        seed=seed,
+        fl_band_fracs=fl_band_fracs,
+    )
+    return train_ds, val_ds
+
+
+def build_loaders(train_ds, val_ds, batch_size: int, num_workers: int):
+    pin = torch.cuda.is_available()
+    common = dict(
+        num_workers=num_workers,
+        pin_memory=pin,
+        persistent_workers=num_workers > 0,
+    )
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, drop_last=True, **common
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, drop_last=False, **common
+    )
+    return train_loader, val_loader
+
+
+def _git_sha() -> str:
+    """Resolve the git SHA (and dirty flag) from the *package location*, not CWD.
+
+    Three traps this handles:
+    1. Batch jobs run ``cd /tmp`` with ``PYTHONPATH`` pointing at the repo,
+       so ``git rev-parse HEAD`` from CWD fails with "not a git repository".
+    2. git may not be on PATH in the container at all.
+    3. In a git worktree, ``.git`` is a *file* containing
+       ``gitdir: /path/to/main/.git/worktrees/<name>``, not a directory.
+
+    Strategy: walk from this file's directory toward the root looking for
+    ``.git`` (file or directory).  If found, read HEAD directly from the
+    filesystem — no ``git`` binary required.  Fall back to ``subprocess``
+    if the filesystem read fails.  Degrade to ``"unknown"`` rather than
+    killing a training run.
+    """
+    try:
+        return _resolve_git_info_from_package()
+    except Exception:
+        pass
+    # Fallback: try subprocess from this file's directory
+    try:
+        pkg_dir = os.path.dirname(os.path.abspath(__file__))
+        sha = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=pkg_dir,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+        return sha + _check_dirty_subprocess(pkg_dir)
+    except Exception:
+        return "unknown"
+
+
+def _resolve_git_info_from_package() -> str:
+    """Read HEAD sha and dirty status from the filesystem, no git binary needed."""
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    git_dir = _find_git_dir(pkg_dir)
+    if git_dir is None:
+        raise FileNotFoundError("no .git found in ancestors")
+
+    sha = _read_head_sha(git_dir)
+
+    # Classify the working tree.  Note this yields "-dirtyunknown" rather than
+    # a bare sha when git is unavailable: a sha that silently claims clean is
+    # worse than one that admits it does not know.
+    return sha + _check_dirty_subprocess(pkg_dir)
+
+
+def _find_git_dir(start: str) -> "str | None":
+    """Walk ancestors of *start* to find the git directory.
+
+    Handles both regular repos (``.git/`` is a directory) and worktrees
+    (``.git`` is a file containing ``gitdir: <path>``).
+    """
+    d = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(d, ".git")
+        if os.path.isdir(candidate):
+            return candidate
+        if os.path.isfile(candidate):
+            # Worktree: .git is a file with "gitdir: <path>"
+            with open(candidate) as f:
+                line = f.readline().strip()
+            if line.startswith("gitdir:"):
+                return line.split(":", 1)[1].strip()
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _read_head_sha(git_dir: str) -> str:
+    """Read the resolved HEAD sha from a git directory."""
+    head_path = os.path.join(git_dir, "HEAD")
+    with open(head_path) as f:
+        head = f.readline().strip()
+    if head.startswith("ref:"):
+        # Symbolic ref — resolve it
+        ref_path = head.split(":", 1)[1].strip()
+        # In a worktree the ref may be in the worktree's git dir or
+        # in the main repo's git dir (commondir).
+        for base in _git_search_paths(git_dir):
+            full = os.path.join(base, ref_path)
+            if os.path.isfile(full):
+                with open(full) as f:
+                    return f.readline().strip()
+        # packed-refs fallback
+        for base in _git_search_paths(git_dir):
+            packed = os.path.join(base, "packed-refs")
+            if os.path.isfile(packed):
+                with open(packed) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) == 2 and parts[1] == ref_path:
+                            return parts[0]
+        raise FileNotFoundError(f"cannot resolve ref {ref_path}")
+    # Detached HEAD — the content IS the sha
+    return head
+
+
+def _git_search_paths(git_dir: str) -> "list[str]":
+    """Return directories to search for refs: the git dir itself, then commondir.
+
+    In a worktree, ``commondir`` points to the main repo's ``.git/`` which
+    holds the shared refs.
+    """
+    paths = [git_dir]
+    commondir_file = os.path.join(git_dir, "commondir")
+    if os.path.isfile(commondir_file):
+        with open(commondir_file) as f:
+            rel = f.readline().strip()
+        common = os.path.normpath(os.path.join(git_dir, rel))
+        if common != git_dir:
+            paths.append(common)
+    return paths
+
+
+def _check_dirty_subprocess(repo_dir: str) -> str:
+    """Classify the working tree, as a sha suffix.
+
+    Returns ``""`` (clean), ``"-dirty"``, ``"-untracked"``,
+    ``"-dirty-untracked"``, or ``"-dirtyunknown"``.
+
+    Two things this deliberately does NOT do, both learned from real incidents:
+
+    1. **It does not exclude untracked files.**  It used to pass
+       ``--untracked-files=no``.  But the incident that motivated recording
+       dirty state at all was an *untracked* file (``scripts/sim_oracle.py``)
+       that committed code imported: a fresh clone could not run it, while
+       every run here was stamped with a clean sha.  Untracked files are
+       reported *separately* rather than folded into ``-dirty``, because an
+       untracked scratch file is usually harmless and an untracked *imported*
+       file is not — and only a human reading the record can tell which.
+
+    2. **It never reports "clean" when it cannot tell.**  This check needs the
+       ``git`` binary, which is NOT on PATH in the batch container — the same
+       reason the sha itself is resolved from the filesystem rather than by
+       shelling out.  Returning ``False`` on failure meant every containerised
+       run was stamped clean regardless of the truth, which is exactly the
+       false assurance the dirty flag exists to prevent.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return "-dirtyunknown"
+        lines = [ln for ln in result.stdout.decode(errors="replace").splitlines() if ln.strip()]
+    except Exception:
+        return "-dirtyunknown"
+
+    tracked = any(not ln.startswith("??") for ln in lines)
+    untracked = any(ln.startswith("??") for ln in lines)
+    return ("-dirty" if tracked else "") + ("-untracked" if untracked else "")
+
+
+def _write_run_meta(run_dir: str, cfg: TrainConfig, train_ds, val_ds):
+    os.makedirs(run_dir, exist_ok=True)
+    import dataclasses as _dc
+    # Serialize ALL TrainConfig fields so new fields cannot silently go
+    # missing.  Previously a hand-maintained dict omitted 8+ fields
+    # (dispersion_window_size, min_N, fl_dist_npz, d_context, etc.).
+    meta = _dc.asdict(cfg)
+    meta.update({
+        "git_sha": _git_sha(),
+        "config_hash": train_ds.config_hash,
+        "split_version": int(train_ds.split_version),
+        "n_train_pairs": len(train_ds),
+        "n_val_pairs": len(val_ds),
+        "plumbing_config": json.loads(train_ds.config.full_config_json()),
+    })
+    with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
+    return meta
+
+
+def build_trainer(cfg: TrainConfig, run_dir: str, attempt: int = 0) -> L.Trainer:
+    ckpt = ModelCheckpoint(
+        dirpath=os.path.join(run_dir, "checkpoints"),
+        monitor="val_loss",
+        mode="min",
+        save_top_k=-1,
+        save_last=True,
+        filename="{epoch}-{step}-{val_loss:.4f}",
+    )
+    early = EarlyStopping(
+        monitor="val_loss", mode="min", patience=cfg.patience, min_delta=0.0
+    )
+    # Each recovery attempt gets its OWN metrics.csv.  Lightning's CSVLogger
+    # re-initialises when recovery re-fits, so reusing one version silently
+    # overwrote the file and left only the LAST attempt: a 26-epoch run that
+    # recovered 3x retained 5 epochs, and train_loss for the overwritten
+    # attempts was unrecoverable (checkpoint filenames preserve val_loss but
+    # not train_loss).  attempt 0 keeps the original path so existing readers
+    # and the analysis docs are unaffected.
+    version = cfg.run_name if attempt == 0 else f"{cfg.run_name}/recovery_{attempt}"
+    csv_logger = CSVLogger(save_dir=cfg.runs_root, name="", version=version)
+    limit = cfg.limit_batches
+    trainer = L.Trainer(
+        accelerator="auto",
+        devices="auto",
+        precision=cfg.precision,
+        max_epochs=cfg.max_epochs,
+        gradient_clip_val=1.0,
+        deterministic=True,
+        default_root_dir=run_dir,
+        logger=csv_logger,
+        callbacks=[ckpt, early,
+                   DivergenceStop(cfg.divergence_factor,
+                                  stall_patience=cfg.stall_patience),
+                   LearningRateMonitor(logging_interval="epoch"),
+                   ThroughputCallback(cfg.batch_size),
+                   DeviceStatsMonitor(cpu_stats=False)],
+        limit_train_batches=limit if limit is not None else 1.0,
+        limit_val_batches=limit if limit is not None else 1.0,
+        log_every_n_steps=1,
+        enable_progress_bar=False,
+    )
+    return trainer
+
+
+def _determine_stop_reason(trainer):
+    """Inspect trainer callbacks to determine why the run stopped.
+
+    Returns a dict with at least ``{"reason": <str>, "epoch": <int>}``
+    plus guard-specific detail.  Priority:
+
+    1. Our ``DivergenceStop`` — it records its own reason directly.
+    2. Lightning's ``EarlyStopping`` — ``stopped_epoch`` is 0 by default
+       and set to ``trainer.current_epoch`` when it fires.  With
+       ``patience >= 1`` the earliest possible firing epoch is
+       ``patience``, so ``stopped_epoch > 0`` is a reliable "it fired"
+       signal.  (Patience 0 would fire at epoch 0, making the check
+       ambiguous; ``TrainConfig.__post_init__`` enforces patience >= 1.)
+    3. Otherwise the run completed normally (hit ``max_epochs``).
+    """
+    for cb in trainer.callbacks:
+        if isinstance(cb, DivergenceStop) and cb.stop_reason is not None:
+            return cb.stop_reason
+    for cb in trainer.callbacks:
+        if isinstance(cb, EarlyStopping) and cb.stopped_epoch > 0:
+            bs = cb.best_score
+            if bs is None:
+                best_score_val = None
+            else:
+                bs_float = float(bs)
+                best_score_val = bs_float if math.isfinite(bs_float) else str(bs_float)
+            return {
+                "reason": "early_stopped",
+                "epoch": int(cb.stopped_epoch),
+                "patience": cb.patience,
+                "best_score": best_score_val,
+            }
+    return {"reason": "completed", "epoch": int(trainer.current_epoch)}
+
+
+class _RecoveryEpochTracker(Callback):
+    """Track whether any training epochs started during a fit."""
+
+    def __init__(self):
+        self.epochs_started = 0
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epochs_started += 1
+
+
+def run_recovery_loop(build_and_fit, stop_reason, global_best_score,
+                       global_best_path, max_recoveries, recovery_factor,
+                       floor_ratio=None):
+    """Divergence recovery outer loop (§4).
+
+    Retries training after divergence (or a non-finite loss), restoring the
+    best checkpoint and lowering the LR for each attempt.
+
+    The Nth recovery targets an **absolute** rung, ``recovery_factor ** N``
+    times the ORIGINAL learning rate, independent of which checkpoint is being
+    resumed.  ``ApplyLRReduction`` installs ``min(current_lr, rung)`` so the LR
+    can never be raised, then clamps up to the per-group ``min_lrs`` floor.
+    Two consequences worth knowing:
+
+    1. If the plateau scheduler drove the LR *below* the rung during an earlier
+       attempt, that deeper adaptation is kept — the rung is a ceiling, not an
+       assignment.
+    2. When the floor binds, the recovery event records per-group detail in
+       ``"floor_clamped_groups"``; ``"applied_lrs"`` always records the LRs
+       actually installed, so the ladder is auditable from ``summary.json``.
+
+    This replaced a multiplicative scheme whose factor was relative to the
+    resume checkpoint, which required tracking how many reductions that
+    checkpoint already contained.  That bookkeeping produced the LR-ladder
+    double-count bug; targeting the rung absolutely removes the state.
+
+    Parameters
+    ----------
+    build_and_fit : callable(ckpt_path, extra_callbacks) -> Trainer
+        Builds a fresh Trainer (with fresh callbacks), calls
+        ``trainer.fit(model, ..., ckpt_path=ckpt_path)`` with the given
+        extra callbacks appended, and returns the fitted Trainer.
+    stop_reason : dict
+        Result of ``_determine_stop_reason`` from the preceding fit.
+    global_best_score : float | None
+        Best val_loss across all fits so far.
+    global_best_path : str
+        Path to the checkpoint with *global_best_score*.
+    max_recoveries : int
+        Maximum number of recovery attempts (0 disables recovery).
+    recovery_factor : float
+        LR reduction per recovery (e.g. 0.2 → cut by 80%).  Keep equal to
+        ``lr_factor`` so the ladder and the plateau floor bottom out together.
+    floor_ratio : float | None
+        ``min_lr / original_lr``, i.e. ``lr_factor ** max_lr_reductions``.
+        Lets ``ApplyLRReduction`` recover each group's original LR from the
+        live scheduler's ``min_lrs``; Lightning does not record ``initial_lr``
+        for ``ReduceLROnPlateau``, so it cannot be read off the optimizer.
+        ``None`` falls back to multiplicative behaviour (tests only).
+
+    Returns
+    -------
+    tuple of (stop_reason, global_best_score, global_best_path, recoveries, last_trainer)
+        ``last_trainer`` is the Trainer from the final recovery attempt, or
+        ``None`` if no recovery was attempted.  Callers need this because
+        the initial-fit Trainer becomes stale after recovery: its
+        ``global_step`` and ``current_epoch`` describe only the first
+        attempt.
+    """
+    recoveries = []
+    recovery_count = 0
+    last_trainer = None
+
+    while (
+        stop_reason.get("reason") in RECOVERABLE_REASONS
+        and recovery_count < max_recoveries
+    ):
+        resume_ckpt = global_best_path
+        if not resume_ckpt:
+            rank_zero_info(
+                "[Recovery] No checkpoint available for recovery — "
+                "stopping with diverged_unrecovered."
+            )
+            stop_reason = {
+                "reason": "diverged_unrecovered",
+                "epoch": stop_reason["epoch"],
+                "recoveries_attempted": recovery_count,
+                "detail": "no checkpoint available",
+            }
+            break
+
+        recovery_count += 1
+        # ABSOLUTE rung: the Nth recovery targets recovery_factor**N x the
+        # ORIGINAL lr, regardless of which checkpoint is being resumed.
+        # ApplyLRReduction takes min(current, rung) so this can never raise
+        # the LR, and clamps to the scheduler floor.
+        target_ratio = recovery_factor ** recovery_count
+
+        rank_zero_info(
+            f"[Recovery] Attempt {recovery_count}/{max_recoveries}: "
+            f"restoring {resume_ckpt}, target LR = "
+            f"{target_ratio:.4g}x original"
+        )
+
+        recovery_event = {
+            "attempt": recovery_count,
+            "epoch": stop_reason["epoch"],
+            "pre_divergence_best": stop_reason.get("best"),
+            "diverged_value": stop_reason.get("value"),
+            "recovery_lr_factor": target_ratio,
+            "checkpoint": resume_ckpt,
+        }
+
+        lr_cb = ApplyLRReduction(target_ratio, floor_ratio)
+        epoch_tracker = _RecoveryEpochTracker()
+        trainer = build_and_fit(
+            resume_ckpt, [lr_cb, epoch_tracker], attempt=recovery_count
+        )
+        last_trainer = trainer
+
+        # Record floor-clamp detail if any group was clamped
+        if lr_cb.clamped_groups is not None:
+            recovery_event["floor_clamped_groups"] = lr_cb.clamped_groups
+        if lr_cb.applied_lrs is not None:
+            recovery_event["applied_lrs"] = lr_cb.applied_lrs
+        stop_reason = _determine_stop_reason(trainer)
+
+        # A recovery that trains zero epochs (max_epochs already reached
+        # from the checkpoint's epoch) must not be reported as completed.
+        if epoch_tracker.epochs_started == 0:
+            recovery_event["zero_epochs"] = True
+            recoveries.append(recovery_event)
+            stop_reason = {
+                "reason": "diverged_unrecovered",
+                "epoch": recovery_event["epoch"],
+                "recoveries_attempted": recovery_count,
+                "detail": "recovery trained zero epochs (max_epochs reached)",
+            }
+            break
+
+        recoveries.append(recovery_event)
+
+        # Update global best if this attempt improved on it.
+        attempt_score = trainer.checkpoint_callback.best_model_score
+        if attempt_score is not None:
+            attempt_score_f = float(attempt_score)
+            if global_best_score is None or attempt_score_f < global_best_score:
+                global_best_score = attempt_score_f
+                global_best_path = trainer.checkpoint_callback.best_model_path
+
+    # If we exhausted recoveries and still diverged, mark it.
+    if (
+        stop_reason.get("reason") in RECOVERABLE_REASONS
+        and recovery_count > 0
+        and recovery_count >= max_recoveries
+    ):
+        stop_reason = {
+            "reason": "diverged_unrecovered",
+            "epoch": stop_reason["epoch"],
+            "recoveries_attempted": recovery_count,
+            "final_value": stop_reason.get("value"),
+            "best_before_final_divergence": stop_reason.get("best"),
+        }
+
+    return stop_reason, global_best_score, global_best_path, recoveries, last_trainer
+
+
+def run_training(cfg: TrainConfig):
+    L.seed_everything(cfg.seed, workers=True)
+    run_dir = os.path.join(cfg.runs_root, cfg.run_name)
+    model = build_model(cfg)
+
+    # ── optional FL-conditioned loss reweighting ──────────────────────
+    fl_band_fracs = None
+    if cfg.fl_dist_npz is not None:
+        fl_band_fracs = _load_fl_band_fracs(cfg.fl_dist_npz, cfg.store)
+
+    train_ds, val_ds = build_datasets(
+        cfg.store, model, min_N=cfg.min_N, seed=cfg.seed,
+        fl_band_fracs=fl_band_fracs,
+    )
+    meta = _write_run_meta(run_dir, cfg, train_ds, val_ds)
+    train_loader, val_loader = build_loaders(
+        train_ds, val_ds, cfg.batch_size, cfg.num_workers
+    )
+    trainer = build_trainer(cfg, run_dir)
+    if cfg.auto_lr:
+        tuner = L.pytorch.tuner.Tuner(trainer)
+        lr_result = tuner.lr_find(model, train_loader, val_loader)
+        suggested = lr_result.suggestion()
+        print(f"[auto-lr] suggested LR: {suggested:.6e}", flush=True)
+        model.hparams.learning_rate = suggested
+        model.learning_rate = suggested
+        meta["lr"] = suggested
+        meta["auto_lr_suggestion"] = suggested
+        with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+
+    # ── initial fit ───────────────────────────────────────────────────
+    ckpt_path = cfg.resume_from
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+    stop_reason = _determine_stop_reason(trainer)
+
+    global_best_score = (
+        float(trainer.checkpoint_callback.best_model_score)
+        if trainer.checkpoint_callback.best_model_score is not None
+        else None
+    )
+    global_best_path = trainer.checkpoint_callback.best_model_path
+
+    # ── divergence recovery outer loop (§4) ───────────────────────────
+    def _build_and_fit(ckpt_path, extra_callbacks, attempt=0):
+        t = build_trainer(cfg, run_dir, attempt=attempt)
+        t.callbacks.extend(extra_callbacks)
+        t.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+        return t
+
+    stop_reason, global_best_score, global_best_path, recoveries, last_trainer = (
+        run_recovery_loop(
+            build_and_fit=_build_and_fit,
+            stop_reason=stop_reason,
+            global_best_score=global_best_score,
+            global_best_path=global_best_path,
+            max_recoveries=cfg.max_recoveries,
+            recovery_factor=cfg.recovery_factor,
+            # min_lr / original_lr, so ApplyLRReduction can recover each
+            # group's ORIGINAL lr from the live scheduler's min_lrs rather
+            # than being told it separately (Lightning does not record
+            # initial_lr for ReduceLROnPlateau).
+            floor_ratio=cfg.lr_factor ** cfg.max_lr_reductions,
+        )
+    )
+
+    # Use the recovery loop's final trainer if recovery fired, otherwise
+    # the initial-fit trainer.  Before this fix, the initial trainer was
+    # always used, making global_step/current_epoch stale on recovered runs.
+    final_trainer = last_trainer if last_trainer is not None else trainer
+
+    # ── persist final metrics summary ─────────────────────────────────
+    summary = build_run_summary(
+        global_best_path=global_best_path,
+        global_best_score=global_best_score,
+        final_trainer=final_trainer,
+        stop_reason=stop_reason,
+        recoveries=recoveries,
+    )
+    with open(os.path.join(run_dir, "summary.json"), "w") as f:
+        json.dump({**meta, **summary}, f, indent=2)
+    return final_trainer, model
+
+
+def build_run_summary(
+    global_best_path,
+    global_best_score,
+    final_trainer,
+    stop_reason,
+    recoveries,
+):
+    """Build the summary dict from training results.  Pure function — no I/O.
+
+    Extracted from ``run_training`` so the summary-dict construction can be
+    tested without a real zarr store or Lightning fit.  Mirrors the earlier
+    extraction of ``run_recovery_loop`` behind a callable seam, for the
+    same reason: a defect in the summary (reading ``global_step`` from the
+    wrong trainer) lived undetected because the code path was untestable.
+
+    Parameters
+    ----------
+    global_best_path : str
+        Path to the checkpoint with the best val_loss across all attempts.
+    global_best_score : float | None
+        Best val_loss achieved.
+    final_trainer : Lightning Trainer
+        The trainer from the LAST fit (recovery or initial).  Its
+        ``global_step`` and ``current_epoch`` describe the final state.
+    stop_reason : dict
+        Result of ``_determine_stop_reason``.
+    recoveries : list[dict]
+        Recovery event dicts from ``run_recovery_loop`` (empty if none fired).
+
+    Returns
+    -------
+    dict
+        Summary ready for JSON serialization (merged with run_meta upstream).
+    """
+    summary = {
+        "best_model_path": global_best_path,
+        "best_val_loss": global_best_score,
+        "global_step": int(final_trainer.global_step),
+        "current_epoch": int(final_trainer.current_epoch),
+        "stop_reason": stop_reason,
+    }
+    if recoveries:
+        summary["recoveries"] = recoveries
+    return summary
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Background model training driver")
+    p.add_argument("--loss", choices=LOSSES, required=True)
+    p.add_argument("--run-name", required=True)
+    p.add_argument("--max-epochs", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument(
+        "--limit-batches",
+        type=float,
+        default=None,
+        help="limit_train_batches/limit_val_batches (int count or float frac) for smokes",
+    )
+    p.add_argument("--n-kernels", type=int, default=512, help="trunk width (smokes use small)")
+    p.add_argument("--num-residual-layers", type=int, default=2, help="number of residual blocks")
+    p.add_argument("--dropout", type=float, default=0.15, help="spatial dropout rate (0 to disable)")
+    p.add_argument("--precision", default="32",
+                   choices=["32", "16-mixed", "bf16-mixed"],
+                   help="training precision (bf16-mixed for ~2x speedup on A10G)")
+    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--seed", type=int, default=1337)
+    p.add_argument("--lr-patience", type=int, default=4,
+                   help="epochs without val_loss improvement before cutting LR "
+                        "(ReduceLROnPlateau patience)")
+    p.add_argument("--max-lr-reductions", type=int, default=3,
+                   help="max number of LR reductions, so the per-group min_lr "
+                        "floor is lr * lr_factor**this (= lr/125 at the "
+                        "default lr_factor 0.2). EarlyStopping patience is "
+                        "derived as (lr_patience+1)*max_lr_reductions "
+                        "+ lr_patience.")
+    p.add_argument("--divergence-factor", type=float, default=1.005,
+                   help="stop if val_loss exceeds this multiple of its own "
+                        "best, and hand the run to divergence recovery "
+                        "(0 disables the ratio check; non-finite detection "
+                        "is always active). Healthy v3 runs peak at 1.0006x, "
+                        "a real basin-loss degradation reached 1.0079x, and "
+                        "explosions reach 380x+.")
+    p.add_argument("--stall-patience", type=int, default=5,
+                   help="stop if val_loss is bitwise identical for this many "
+                        "consecutive epochs (0 disables). Healthy v3 runs "
+                        "repeat at most 2; collapsed runs repeat indefinitely.")
+    p.add_argument("--max-recoveries", type=int, default=3,
+                   help="max divergence recovery attempts (0 disables recovery; "
+                        "each recovery restores the best checkpoint and reduces LR)")
+    p.add_argument("--recovery-factor", type=float, default=0.2,
+                   help="multiplicative LR reduction per recovery attempt "
+                        "(0.2 = cut by 80%%; Nth recovery targets factor**N x "
+                        "original LR, subject to the min_lr clamp). Changed "
+                        "from 0.5 on 2026-09-24 together with lr_factor, "
+                        "which moved 0.5 -> 0.2 in the same step: at 0.5 the "
+                        "KEN+NB run spent all 3 recoveries in ~3 minutes and "
+                        "still diverged. Keep this EQUAL to lr_factor -- the "
+                        "recovery ladder and the plateau floor must bottom "
+                        "out together, see the DivergenceStop docstring.")
+    p.add_argument("--min-N", type=int, default=50,
+                   help="min per-track count to include a (sample, tile) pair")
+    p.add_argument("--store", default=DEFAULT_STORE)
+    p.add_argument("--runs-root", default=DEFAULT_RUNS_ROOT)
+    p.add_argument("--resume-from", default=None)
+    p.add_argument("--auto-lr", action="store_true",
+                   help="run Lightning LR finder before training")
+    p.add_argument("--freeze-dispersion", action="store_true",
+                   help="freeze dispersion head (NB/DM runs at init, ~multinomial)")
+    p.add_argument("--dispersion-lr-scale", type=float, default=1.0,
+                   help="relative LR for dispersion head (e.g. 0.1 = 10x slower)")
+    p.add_argument("--dispersion-window-size", type=int, default=256,
+                   help="dispersion pooling window in bp (1 = per-base, 256 = default)")
+    # KEN model selection and hyperparameters
+    p.add_argument("--model", choices=["cnn", "ken", "hybrid"], default="cnn")
+    p.add_argument("--k", type=int, default=6,
+                   help="k-mer size (KEN and hybrid only)")
+    p.add_argument("--d-embed", type=int, default=64, help="embedding dimension (KEN only)")
+    p.add_argument("--d-context", type=int, default=128, help="context conv channels (KEN only)")
+    p.add_argument("--n-context-layers", type=int, default=2, help="number of context conv layers (KEN only)")
+    p.add_argument("--context-kernel-size", type=int, default=15, help="context conv kernel size (KEN only)")
+    p.add_argument("--weight-decay", type=float, default=0.0, help="L2 on embedding table (KEN only)")
+    p.add_argument("--fl-dist-npz", default=None,
+                   help="path to per-sample FL distribution NPZ (gw_fldist_*.npz); "
+                        "enables FL-conditioned loss reweighting per track")
+    return p
+
+
+def cfg_from_args(args) -> TrainConfig:
+    limit = args.limit_batches
+    if limit is not None and float(limit).is_integer() and limit >= 1:
+        limit = int(limit)
+    lr_patience = args.lr_patience
+    max_lr_reductions = args.max_lr_reductions
+    # EarlyStopping patience derived from LR schedule.  ReduceLROnPlateau
+    # reduces when num_bad_epochs > patience (strict >), so each reduction
+    # takes lr_patience + 1 bad epochs.  EarlyStopping stops when
+    # wait_count >= patience, i.e. after exactly `patience` bad epochs.
+    # For the final LR level to train lr_patience epochs before stopping:
+    patience = (lr_patience + 1) * max_lr_reductions + lr_patience
+    try:
+        return TrainConfig(
+            loss=args.loss,
+            run_name=args.run_name,
+            max_epochs=args.max_epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            limit_batches=limit,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            patience=patience,
+            divergence_factor=args.divergence_factor,
+            stall_patience=args.stall_patience,
+            store=args.store,
+            runs_root=args.runs_root,
+            resume_from=args.resume_from,
+            n_kernels=args.n_kernels,
+            num_residual_layers=args.num_residual_layers,
+            precision=args.precision,
+            min_N=args.min_N,
+            dropout=args.dropout,
+            auto_lr=args.auto_lr,
+            freeze_dispersion=args.freeze_dispersion,
+            dispersion_lr_scale=args.dispersion_lr_scale,
+            dispersion_window_size=args.dispersion_window_size,
+            model=args.model,
+            k=args.k,
+            d_embed=args.d_embed,
+            d_context=args.d_context,
+            n_context_layers=args.n_context_layers,
+            context_kernel_size=args.context_kernel_size,
+            weight_decay=args.weight_decay,
+            fl_dist_npz=args.fl_dist_npz,
+            lr_patience=lr_patience,
+            max_lr_reductions=max_lr_reductions,
+            max_recoveries=args.max_recoveries,
+            recovery_factor=args.recovery_factor,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from None
+
+
+def main(argv=None):
+    args = build_arg_parser().parse_args(argv)
+    cfg = cfg_from_args(args)
+    run_training(cfg)
+
+
+if __name__ == "__main__":
+    main()

@@ -347,8 +347,8 @@ def _save_ckpt(model, path):
 @pytest.mark.parametrize("loss", ["multinomial", "dirichlet_multinomial",
                                   "nb_offset"])
 def test_hybrid_checkpoint_round_trips_through_inference_and_correction(loss):
-    from background_model.correction import expected_profile
-    from background_model.inference import (
+    from background_model.band_model.correction import expected_profile
+    from background_model.band_model.inference import (
         WindowGeometry,
         predict_region_profiles,
     )
@@ -401,7 +401,7 @@ def test_hybrid_checkpoint_round_trips_through_inference_and_correction(loss):
 def test_cross_architecture_checkpoint_load_fails_loudly():
     """A hybrid checkpoint must not silently load as the CNN baseline.
 
-    ``scripts/sim_evaluate.py`` and ``scripts/ctcf_pileup_run.py`` hardcode the
+    ``scripts/sim_evaluate.py`` and ``scripts/ctcf/ctcf_pileup_run.py`` hardcode the
     non-hybrid classes; the failure mode that would matter is a SILENT partial
     load, not an exception.
     """

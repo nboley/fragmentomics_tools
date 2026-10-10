@@ -434,7 +434,7 @@ All 11 round-1 findings verified as FIXED. No critical, high, or medium issues r
 ## Reconciliation notes (post slice-1 implementation, 2026-08-27)
 
 - Track constants (STRANDS, FL_BANDS, COVERAGE_TYPES, C=12) are DUPLICATED in
-  background_model/config.py rather than imported from background_model_core.py,
+  background_model/band_model/config.py rather than imported from background_model_core.py,
   to keep the plumbing package free of torch/lightning imports. INVARIANT: the
   two definitions must match exactly (order included); locked by
   test_track_index_covers_all_tracks. Reviewed and accepted (impl review r1,

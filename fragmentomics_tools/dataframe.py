@@ -39,6 +39,8 @@ import seaborn as sns
 import pysam
 import logging
 
+from fragments_h5 import FragmentsH5
+
 from fragmentomics_tools.region import Region, OutOfBoundsError
 from fragmentomics_tools.formats import BedReader, BigWigReader
 from fragmentomics_tools.contig import CONTIG_LENGTHS
@@ -1731,18 +1733,44 @@ class RegionDataFrame(DataFrameBase):
         fasta_path,
         seq_type,
         reverse_complement_sequence_if_minus_strand,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
+        """Fetch one sequence per region.
+
+        ``fasta_path`` is REQUIRED. It used to default to
+        ``self.get_fasta_path()``, which for ``ref='hg38'`` returns a
+        hardcoded ``/scratch`` path to a DIFFERENT assembly patch
+        (GRCh38.p12) -- so the default either failed on a machine without
+        ``/scratch`` or silently answered from another reference.
+        """
         if fasta_path is None:
-            fasta_path = self.get_fasta_path()
+            raise ValueError(
+                "fasta_path is required. There is no safe default: "
+                "get_fasta_path() returns a hardcoded /scratch path to "
+                "GRCh38.p12, a different assembly patch from the hg38 FASTA "
+                "callers normally use."
+            )
 
         assert seq_type in ["one_hot_encoded", "bytearray"]
         if seq_type == "one_hot_encoded":
-            method = "get_one_hot_encoded_sequence"
             name = "one_hot_encoded_sequence"
         elif seq_type == "bytearray":
-            method = "get_sequence"
             name = "sequence"
+            # Region.get_sequence returns raw bytes and has no strand
+            # handling, and this package has no reverse-complement helper to
+            # give it one. Forwarding this flag is what made
+            # get_sequence/attach_sequence raise TypeError from the callee --
+            # they had never worked. Refuse explicitly rather than ignore.
+            if reverse_complement_sequence_if_minus_strand:
+                raise NotImplementedError(
+                    "reverse_complement_sequence_if_minus_strand is not "
+                    "supported for raw sequence; it is implemented only for "
+                    "the one-hot path, which can flip the encoded array. Use "
+                    "get_one_hot_encoded_sequence, or reverse-complement the "
+                    "bytes yourself."
+                )
         else:
             assert False, "UNREACHABLE"
 
@@ -1751,24 +1779,45 @@ class RegionDataFrame(DataFrameBase):
             for region in tqdm(
                 self.iter_regions(), total=len(self), disable=(not verbose), desc="get sequences"
             ):
-                seqs.append(
-                    getattr(region, method)(
-                        fasta,
-                        reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                if seq_type == "one_hot_encoded":
+                    seqs.append(
+                        region.get_one_hot_encoded_sequence(
+                            fasta,
+                            reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+                            left_pad=left_pad,
+                            right_pad=right_pad,
+                        )
                     )
-                )
+                else:
+                    seqs.append(region.get_sequence(fasta, left_pad, right_pad))
         return pd.Series(seqs, index=self.index, name=name)
 
     def get_sequence(
         self,
-        fasta_path=None,
+        fasta_path,
         reverse_complement_sequence_if_minus_strand=False,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
+        """One bytes sequence per region, optionally with flanking context.
+
+        :param left_pad: extra bases before each region's ``start``
+        :param right_pad: extra bases after each region's ``stop``
+
+        Padding is applied at the fetch, so regions are NOT resized and
+        positions stay expressible relative to the original ``start``. The
+        alternative -- ``expand_regions`` then fetch -- moves the bounds that
+        a caller doing its own coordinate arithmetic then has to undo, and
+        ``SampleAndRegionDataFrame.expand_regions`` additionally refuses once
+        fragment arrays are attached.
+        """
         return self._get_seq(
             fasta_path,
             "bytearray",
             reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            left_pad=left_pad,
+            right_pad=right_pad,
             verbose=verbose,
         )
 
@@ -1779,14 +1828,18 @@ class RegionDataFrame(DataFrameBase):
 
     def get_one_hot_encoded_sequence(
         self,
-        fasta_path=None,
+        fasta_path,
         reverse_complement_sequence_if_minus_strand=False,
+        left_pad=0,
+        right_pad=0,
         verbose=False,
     ):
         return self._get_seq(
             fasta_path,
             "one_hot_encoded",
             reverse_complement_sequence_if_minus_strand=reverse_complement_sequence_if_minus_strand,
+            left_pad=left_pad,
+            right_pad=right_pad,
             verbose=verbose,
         )
 
@@ -1966,6 +2019,34 @@ class SampleAndRegionDataFrame(RegionDataFrame):
         # reset the progress bar
         tqdm._instances.clear()
 
+        # One open handle per (process, path), reused across regions. Passing
+        # the path STRING to from_fragments_h5 makes it open and close the h5
+        # once PER REGION, which on a real 1.19GB sample cost 96s of a
+        # 300-region serial load against 5.6s with the handle reused.
+        #
+        # An HDF5 handle opened before a fork must not be used in the child
+        # (CLAUDE.md records a parallel_apply fork deadlock that ran 12 hours
+        # emitting nothing), so NOTHING may be cached in the parent before the
+        # fork. Two things ensure that: this dict is call-local, and on the
+        # forking path `get_fa` only ever runs in a worker, so the parent's
+        # copy is still empty when ProcessPoolExecutor forks. The pid in the
+        # key is a second barrier -- a child cannot reuse or close an entry
+        # that is not its own.
+        open_h5s = {}
+
+        def resolve_h5(frag_h5):
+            # A live handle already in the column belongs to the caller (see
+            # detach_h5/close_handles): pass it through rather than caching it,
+            # so the release below never closes something we did not open.
+            if not isinstance(frag_h5, str):
+                return frag_h5
+            key = (os.getpid(), frag_h5)
+            h5 = open_h5s.get(key)
+            if h5 is None:
+                h5 = FragmentsH5(frag_h5, cache_pointers=False)
+                open_h5s[key] = h5
+            return h5
+
         def get_fa(record):
             region = Region(record.contig, record.start, record.stop, record.strand, ref=self.ref)
             _kwargs = dict(
@@ -1975,26 +2056,39 @@ class SampleAndRegionDataFrame(RegionDataFrame):
                 fetch_array_kwargs=fetch_array_kwargs,
                 min_mapq=min_mapq,
             )
-            fa = RegionFragmentArray.from_fragments_h5(record.frag_h5, **_kwargs)
+            fa = RegionFragmentArray.from_fragments_h5(resolve_h5(record.frag_h5), **_kwargs)
             if fragment_array_callback is not None:
                 fa = fragment_array_callback(fa)
             return fa
 
-        if n_workers == 1:
-            res = [
-                get_fa(x)
-                for x in tqdm(
-                    self.itertuples(), total=len(self), disable=(verbose <= 0)
-                )
-            ]
-            return pandas.Series(res, index=self.index, name="fragment_array")
-        else:
-            if n_workers == None:
-                n_workers = multiprocessing.cpu_count()
-            field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
-            rv = self[field_subset].parallel_apply(get_fa, n_workers=n_workers, verbose=verbose)
-            rv.columns = ['fragment_array']
-            return rv
+        try:
+            if n_workers == 1:
+                res = [
+                    get_fa(x)
+                    for x in tqdm(
+                        self.itertuples(), total=len(self), disable=(verbose <= 0)
+                    )
+                ]
+                return pandas.Series(res, index=self.index, name="fragment_array")
+            else:
+                if n_workers == None:
+                    n_workers = multiprocessing.cpu_count()
+                field_subset = ["contig", "start", "stop", "strand", "sample_id", "frag_h5"]
+                rv = self[field_subset].parallel_apply(get_fa, n_workers=n_workers, verbose=verbose)
+                rv.columns = ['fragment_array']
+                return rv
+        finally:
+            # Handles a WORKER opened die with the worker: parallel_apply uses
+            # ProcessPoolExecutor as a context manager, so every child is
+            # already joined by the time we get here. Only handles this process
+            # opened (the n_workers=1 path) are ours to close -- hence the pid
+            # test, since closing an entry a fork parent owns would invalidate
+            # it for the parent.
+            this_pid = os.getpid()
+            for (pid, _), h5 in open_h5s.items():
+                if pid == this_pid:
+                    h5.close()
+            open_h5s.clear()
 
 
     def attach_fragment_arrays(self, *args, rebuild_fragment_arrays=False, **kwargs):

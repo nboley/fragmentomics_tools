@@ -1,4 +1,4 @@
-"""Tests for background_model.config — PlumbingConfig + hashing."""
+"""Tests for background_model.band_model.config — PlumbingConfig + hashing."""
 
 import json
 import os
@@ -6,7 +6,7 @@ import tempfile
 
 import pytest
 
-from background_model.config import (
+from background_model.band_model.config import (
     C,
     L_SEQ,
     L_TARGET,

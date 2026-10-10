@@ -39,7 +39,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from background_model.train import build_arg_parser, cfg_from_args, run_training
+from background_model.band_model.train import build_arg_parser, cfg_from_args, run_training
 
 # Default runs root for the comparison runs
 DEFAULT_RUNS_ROOT = "/efs/analytics/nathanboley/background_model/runs"

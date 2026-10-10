@@ -282,11 +282,11 @@ data loading, not GPU compute.
 | Track naming / RC perm | `background_model_core.py:99-156` | Track convention is model-independent |
 | `jitter_matrix` | `background_model_core.py:164-228` | Augmentation primitive, used by dataset |
 | `SpatialDropout` | `background_model_core.py:236-249` | Reused directly |
-| Dataset | `background_model/dataset.py` | No changes — `model_input_size` is passed in |
-| DataLoaders | `background_model/train.py:240-253` | No changes |
-| Inference/stitching | `background_model/inference.py` | Uses `calc_input_region_size` and `predict_profile` |
-| Correction | `background_model/correction.py` | Operates on `predict_profile` output |
-| Config | `background_model/config.py` | Store geometry unchanged |
+| Dataset | `background_model/band_model/dataset.py` | No changes — `model_input_size` is passed in |
+| DataLoaders | `background_model/band_model/train.py:240-253` | No changes |
+| Inference/stitching | `background_model/band_model/inference.py` | Uses `calc_input_region_size` and `predict_profile` |
+| Correction | `background_model/band_model/correction.py` | Operates on `predict_profile` output |
+| Config | `background_model/band_model/config.py` | Store geometry unchanged |
 
 ### 2.2 What CHANGES
 
@@ -311,7 +311,7 @@ Also adds two standalone functions:
 - `rc_kmer_permutation(k)`: fixed permutation mapping k-mer indices to RC partners
 - `one_hot_to_kmer_indices(one_hot, k, powers)`: converts one-hot DNA to k-mer indices
 
-#### 2.2.2 `background_model/train.py` — model selection
+#### 2.2.2 `background_model/band_model/train.py` — model selection
 
 Add `--model {cnn,ken}` flag to the CLI. Extend `build_model`:
 
@@ -1105,7 +1105,7 @@ def test_rc_kmer_permutation_is_involution():
 **Command:**
 ```bash
 cd /home/nathanboley/src/fragmentomics_tools
-PYTHONPATH=. python -m background_model.train \
+PYTHONPATH=. python -m background_model.band_model.train \
     --model ken --k 6 --d-embed 64 --d-context 128 \
     --n-context-layers 2 --context-kernel-size 15 \
     --loss multinomial --lr 1e-3 --batch-size 64 \
@@ -1211,7 +1211,7 @@ the total to ~207+ passed.
    `background_model_core.py` (standalone functions)
 2. **Add `BackgroundModelKEN`** with RC weight tying to
    `background_model_core.py` (after `BackgroundModel`)
-3. **Add `InstrumentedBackgroundModelKEN`** to `background_model/train.py`
+3. **Add `InstrumentedBackgroundModelKEN`** to `background_model/band_model/train.py`
 4. **Add CLI flags** for model selection and KEN hyperparameters
 5. **Write unit tests** (T1-T8, including RC weight tying)
 6. **Run unit tests** — all must pass
@@ -1257,7 +1257,7 @@ Run each ablation as a separate training run:
 **Store:** `/efs/analytics/nathanboley/background_model/stores/bg_store_b67d7c95.zarr`
 
 ```bash
-PYTHONPATH=. python -m background_model.train \
+PYTHONPATH=. python -m background_model.band_model.train \
     --model ken --k 6 --d-embed 64 --d-context 128 \
     --n-context-layers 2 --context-kernel-size 15 \
     --loss multinomial --lr 1e-3 --batch-size 64 \
@@ -1319,7 +1319,7 @@ Phase 1 shows overfitting, sweep dropout and weight_decay).
 ### Modified files:
 - `background_model_core.py` — add `rc_kmer_permutation()`,
   `one_hot_to_kmer_indices()`, and `BackgroundModelKEN` class (~170 lines)
-- `background_model/train.py` — add `InstrumentedBackgroundModelKEN`,
+- `background_model/band_model/train.py` — add `InstrumentedBackgroundModelKEN`,
   `--model` CLI flag, KEN hyperparameter args, update `build_model()`
   and `TrainConfig` (~80 lines)
 
@@ -1342,7 +1342,7 @@ The implementation agent should follow this exact sequence:
 2. **Add `BackgroundModelKEN`** to `background_model_core.py` (after
    `BackgroundModel`, before the calibration diagnostics section)
 
-3. **Add `InstrumentedBackgroundModelKEN`** to `background_model/train.py`
+3. **Add `InstrumentedBackgroundModelKEN`** to `background_model/band_model/train.py`
    (after `InstrumentedBackgroundModel`)
 
 4. **Extend `TrainConfig`** with KEN fields

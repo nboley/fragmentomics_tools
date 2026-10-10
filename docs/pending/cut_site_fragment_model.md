@@ -155,9 +155,16 @@ per tap (both strands) `43,520`; all four banks `87,040`.
 **A free per-`L` additive term `len_bias (n_L,)` is required**, separate from the
 length groups. The groups carry the length × *sequence* interaction at 15 bp
 resolution; `len_bias` carries the length distribution itself at 1 bp resolution.
-The length component is worth **~0.4255 nats, about 5× the whole sequence-bias
-gap of ~0.084**, so forcing it through a piecewise-constant 15 bp approximation
-would be a large avoidable loss.
+The length component is worth **0.173 nats on real data and 0.272 on the full
+simulation** (measured 2026-10-10 as `uniform - (uniform cut-site + marginal
+p_L)`, test split), so forcing it through a piecewise-constant 15 bp
+approximation would be a large avoidable loss.
+
+An earlier version of this line claimed ~0.4255 nats, "about 5× the whole
+sequence-bias gap of ~0.084". Both figures are superseded and the ordering is
+inverted: measured on the same test splits, the sequence component is **larger**
+than the length component (0.359 vs 0.173 on real, 0.331 vs 0.272 on the full
+sim), not one fifth of it.
 
 **Placement: on the logit, after the nonlinearity** — not into the
 pre-activation. `logit[m,L,s] = w_out · act(pre) + len_bias[L]`. This is

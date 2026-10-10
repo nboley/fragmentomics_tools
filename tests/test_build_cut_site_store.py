@@ -13,7 +13,7 @@ import pytest
 import zarr
 
 from background_model.cut_site_model import CutSiteFragmentModel, _compute_geometry
-from background_model.store import _create_array
+from background_model.band_model.store import _create_array
 from background_model.cut_site_store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
