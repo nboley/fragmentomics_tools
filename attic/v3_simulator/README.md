@@ -26,6 +26,23 @@ exists to prevent.
 | `sim_build_store.py` | Built v3 zarr stores from `sim_fragments.py` `.npz` output; the old 12-band track class |
 | `sim_evaluate.py`, `sim_fit_gc_bias.py`, `sim_train_all.sh` | v3 evaluation / fitting / driver |
 | `nb_oracle_*.py`, `score_v3nb_multinomial.py`, `_oracle_*.py` | The separate v3nb (negative-binomial) store's oracle and scoring |
+| `_verify_oracle_alignment.py` | Independent coordinate-alignment check for `sim_oracle.py` (crop frame, shift-correlation peak at 0, uniform NLL through the frozen loss) |
+| `_inspect_store_v3a.py`, `_write_oracle_json.py` | One-off v3_A probes: dump store facts; assemble `simulation_v3/A/oracle.json` from two `sim_oracle.py` runs |
+| `_chain_1536.sh` | One-off 2026-09-26 chain: wait for the 1536 sim, build its store, submit the KEN run, compute its oracle anchors |
+
+The four `_`-prefixed files above arrived later (owner, 2026-10-10). They had been
+sitting UNTRACKED in the main checkout's `scripts/` (and one in a worktree's),
+invoking paths this reorganisation moved — `python -m background_model.train` and
+`scripts/sim_build_store.py`. Untracked and stale is the worst combination: git
+holds no copy, so they cannot be recovered once lost, and nothing updates their
+paths when the tree moves. They are kept here as a record of how the v3 anchors
+were produced. **Their paths are NOT updated and they are not expected to run.**
+
+Note `sim_oracle.py` here is the LATER version, which derives all geometry from the
+store config at run time. The main checkout also held an untracked earlier copy
+with the geometry hardcoded (`l_target=2304`, `tile_size=2048`); it was not
+imported here, because a second, worse copy of one rule is the hazard this
+directory exists to prevent.
 
 None of these import `background_model.simulator`, and nothing outside this
 directory imported them at the time of the move — that is why the move was safe.

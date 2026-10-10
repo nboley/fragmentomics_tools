@@ -71,9 +71,25 @@ class TestT7Hygiene:
         Also: ``background_model.cut_site_stats`` is gone, not shimmed. Owner
         decision 187 moved it to ``simulator.measure`` with no alias left
         behind, so an old import fails loudly instead of resolving.
+
+        The same applies to the nine 12-track modules owner decision 195 moved
+        into ``background_model.band_model``.  "No shims" is only enforceable
+        as an assertion: without it, re-adding a top-level ``train.py`` or a
+        ``from .band_model.train import *`` alias would pass every other test,
+        and the flat layout would creep back one module at a time.
         """
         import importlib.util
         assert importlib.util.find_spec("background_model.cut_site_stats") is None
+        for moved in ("config", "store", "preprocess", "sample_sheet",
+                      "dataset", "train", "inference", "correction",
+                      "measure_throughput"):
+            assert importlib.util.find_spec(
+                f"background_model.{moved}"
+            ) is None, (
+                f"background_model.{moved} resolves; it moved to "
+                f"background_model.band_model.{moved} with no shim "
+                f"(owner decision 195)"
+            )
         import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
