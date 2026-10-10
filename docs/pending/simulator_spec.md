@@ -300,6 +300,11 @@ directly as well as `simulator.measure`:
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
+   `background_model/fragment_lengths.py` — `FragmentLengthDist` and
+   `fl_end_weight`, numpy only. Moved unchanged out of `simulator/measure.py`
+   (owner decision 2026-10-10) because model code needs the same code for its
+   own tables and may not import `simulator/`. Every caller, simulator
+   included, imports them from here.
 2. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
    It was `background_model/cut_site_stats.py` until owner decision 187
@@ -329,9 +334,9 @@ moved code without changing it, and so did moving the definitions into
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `simulator.measure` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `FragmentLengthDist` | `fragment_lengths` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
 | `uniform_hexamer_counts` | `simulator.measure` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `simulator.measure` | `w(i)` above |
+| `fl_end_weight` | `fragment_lengths` | `w(i)` above |
 | `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |

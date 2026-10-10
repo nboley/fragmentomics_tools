@@ -1,7 +1,8 @@
 """Cross-module hygiene for the cut-site stack: ``constants`` <- ``hexamers``
-<- ``simulator.measure`` <- ``simulator.draw``.
+<- ``simulator.measure`` <- ``simulator.draw``, plus ``fragment_lengths``
+(numpy only, shared with model code).
 
-Layering, doctests across all four modules, oracle independence, removed
+Layering, doctests across all five modules, oracle independence, removed
 imports, and the decision-187 boundary (model code never imports
 ``simulator/``; ``conftest`` keeps it out of module level).  These span the stack, so they sit in neither module's file.  Split
 out of ``tests/test_cut_site_simulator.py`` by owner decision 188; the test
@@ -34,10 +35,12 @@ class TestT7Hygiene:
         dropping out.
         """
         import background_model.constants as const_mod
+        import background_model.fragment_lengths as fl_mod
         import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
         for mod, must_have_examples in ((const_mod, True), (hex_mod, True),
+                                        (fl_mod, False),
                                         (measure_mod, False), (draw_mod, False)):
             results = doctest.testmod(mod, verbose=False)
             if must_have_examples:
@@ -122,6 +125,7 @@ class TestT7Hygiene:
         layer rather than demanding it come from the adjacent one.
         """
         import background_model.constants as const_mod
+        import background_model.fragment_lengths as fl_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator as sim_pkg
         import background_model.simulator.draw as draw_mod
@@ -200,6 +204,9 @@ class TestT7Hygiene:
              "stdlib+tracks"),
             (hex_mod, stdlib | {"numpy"}, {"background_model.constants"},
              "numpy+stdlib+constants"),
+            # Shared with model code (owner decision 2026-10-10), so it must
+            # not reach back into the simulator or anything heavier.
+            (fl_mod, stdlib | {"numpy"}, set(), "numpy+stdlib"),
         )
         for mod, allowed_tops, allowed_exact, what in light:
             fname = os.path.basename(mod.__file__)
@@ -226,6 +233,7 @@ class TestT7Hygiene:
         # checks it rather than assuming it.
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for module, extra_banned in (("background_model.hexamers", ()),
+                                     ("background_model.fragment_lengths", ()),
                                      ("background_model.constants", ("numpy",))):
             r = subprocess.run(
                 [sys.executable, "-c",
@@ -320,11 +328,16 @@ class TestT7Hygiene:
             "model code imports the simulator (decision 187 boundary):\n  "
             + "\n  ".join(offenders))
 
-        # Non-vacuity. 14 modules sit outside simulator/ today (4 top-level,
+        # Non-vacuity. 15 modules sit outside simulator/ today (5 top-level,
         # 10 in band_model/), plus the core; far fewer means the walk is
         # skipping files. And they import each other, so seeing no first-party
         # import means the walker is blind.
-        assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
+        assert len(scanned) >= 13, f"scanned only {len(scanned)} modules"
+        # fragment_lengths.py holds simulator code that model code imports
+        # (owner decision 2026-10-10); it is exactly what this boundary must
+        # see, so its absence from the walk is a failure on its own.
+        assert os.path.join(pkg_dir, "fragment_lengths.py") in scanned, (
+            "fragment_lengths.py was not scanned")
         # The walk descends into sibling sub-packages, not just the top level:
         # band_model/ is model code and is held to the same boundary.
         assert os.path.join(pkg_dir, "band_model", "train.py") in scanned, (
@@ -332,9 +345,13 @@ class TestT7Hygiene:
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")
-        # The detector itself fires: draw.py does import the simulator.
-        draw_path = os.path.join(sim_dir, "draw.py")
-        assert any(is_banned(n) for n in imported_names(draw_path))
+        # The detector itself fires on a file that does import the simulator.
+        # draw.py served until FragmentLengthDist moved to fragment_lengths
+        # (owner decision 2026-10-10), which removed draw's only import of
+        # measure; the driver imports both simulator modules by design.
+        driver_path = os.path.join(repo_root, "scripts", "simulator",
+                                   "run_cut_site_simulator.py")
+        assert any(is_banned(n) for n in imported_names(driver_path))
 
     def test_conftest_does_not_import_simulator_at_load(self):
         """``tests/conftest.py`` and the ``cut_site_helpers`` it imports load
