@@ -3,9 +3,10 @@
 Shared definitions, like ``constants`` and ``hexamers``: numpy and stdlib
 only, and nothing from ``background_model.simulator``.  The simulator
 measures ``f(L)`` and draws from it (``background_model.simulator.measure``,
-``background_model.simulator.draw``); model code needs the same CODE to build
-its own tables, and decision 187 forbids it from importing ``simulator/``.  So
-the code lives here and both sides import it.  Moved out of
+``background_model.simulator.draw``).  Model-side code that builds its own
+tables from ``f(L)``, such as the cut-site table counter, needs the same CODE,
+and decision 187 forbids model code from importing ``simulator/``.  So the
+code lives here, where either side may import it.  Moved out of
 ``simulator/measure.py`` unchanged (owner decision 2026-10-10).
 Authority: ``docs/pending/simulator_spec.md``.
 """
@@ -23,8 +24,9 @@ class FragmentLengthDist:
     and are indexed by ``L - min_fl``.
 
     The support is whatever the caller supplies.  Built from an SRDF after
-    ``filter_fragments`` it is bounded by the admission filter, but the class
-    does not assume that and does not impose ``L_MIN`` / ``L_MAX``.
+    the caller's admission filter (the simulator's is
+    ``simulator.measure.filter_fragments``) it is bounded by that filter, but
+    the class does not assume that and does not impose ``L_MIN`` / ``L_MAX``.
     """
 
     __slots__ = ("counts", "densities", "min_fl", "max_fl", "_cdf")
@@ -90,8 +92,9 @@ class FragmentLengthDist:
     def from_srdf(cls, srdf) -> "FragmentLengthDist":
         """From an SRDF that already carries filtered ``fragment_array``s.
 
-        Call AFTER ``filter_fragments``, so this is the same population
-        ``C(h)`` counts.
+        Call AFTER the caller's admission filter (the simulator's is
+        ``simulator.measure.filter_fragments``), so this is the same
+        population the caller's hexamer tables count.
         """
         if "fragment_array" not in srdf.columns:
             raise ValueError(

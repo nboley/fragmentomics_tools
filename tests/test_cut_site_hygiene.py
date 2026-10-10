@@ -28,11 +28,12 @@ class TestT7Hygiene:
         """M3 (lowercase in doctest).
 
         ``make test`` does not collect ``background_model/``, so this is the
-        ONLY place these modules' doctests run.  It covers all four layers.
+        ONLY place these modules' doctests run.  It covers all five modules.
         ``constants`` (which pins 25/180/156) and ``hexamers`` carry every
-        example today; the other two must still pass if one is added, and an
-        example vanishing from either fails here rather than silently
-        dropping out.
+        example today, and an example vanishing from either fails here rather
+        than silently dropping out; the other three (``fragment_lengths``,
+        ``simulator.measure``, ``simulator.draw``) must still pass if one is
+        added.
         """
         import background_model.constants as const_mod
         import background_model.fragment_lengths as fl_mod
@@ -283,8 +284,12 @@ class TestT7Hygiene:
             is_pkg = os.path.basename(path) == "__init__.py"
             package = name if is_pkg else name.rpartition(".")[0]
             with open(path) as f:
-                tree = ast.parse(f.read(), filename=path)
-            for node in ast.walk(tree):
+                return names_in(f.read(), package, path)
+
+        def names_in(source, package, filename="<synthetic>"):
+            # Split from imported_names so the self-check below feeds the SAME
+            # detector synthetic source, rather than testing a copy of it.
+            for node in ast.walk(ast.parse(source, filename=filename)):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         yield alias.name
@@ -333,9 +338,10 @@ class TestT7Hygiene:
         # skipping files. And they import each other, so seeing no first-party
         # import means the walker is blind.
         assert len(scanned) >= 13, f"scanned only {len(scanned)} modules"
-        # fragment_lengths.py holds simulator code that model code imports
-        # (owner decision 2026-10-10); it is exactly what this boundary must
-        # see, so its absence from the walk is a failure on its own.
+        # fragment_lengths.py holds code moved out of the simulator so that
+        # model-side code can share it (owner decision 2026-10-10); it is
+        # exactly what this boundary must see, so its absence from the walk is
+        # a failure on its own.
         assert os.path.join(pkg_dir, "fragment_lengths.py") in scanned, (
             "fragment_lengths.py was not scanned")
         # The walk descends into sibling sub-packages, not just the top level:
@@ -345,13 +351,38 @@ class TestT7Hygiene:
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")
-        # The detector itself fires on a file that does import the simulator.
-        # draw.py served until FragmentLengthDist moved to fragment_lengths
-        # (owner decision 2026-10-10), which removed draw's only import of
-        # measure; the driver imports both simulator modules by design.
-        driver_path = os.path.join(repo_root, "scripts", "simulator",
-                                   "run_cut_site_simulator.py")
-        assert any(is_banned(n) for n in imported_names(driver_path))
+        # The detector itself fires, on each form the docstring names, one
+        # form per source so a dead branch cannot hide behind a live one.
+        # Synthetic source, resolved as if it sat at background_model/x.py,
+        # so the check is tied to no real file.
+        forms = {
+            "absolute import": "import background_model.simulator.draw\n",
+            "absolute from":
+                "from background_model.simulator.measure import count_srdf\n",
+            "package as alias": "from background_model import simulator\n",
+            "relative": "from .simulator import draw\n",
+            "import_module": "import importlib\n"
+                             "importlib.import_module("
+                             "'background_model.simulator.draw')\n",
+            "__import__": "__import__('background_model.simulator')\n",
+        }
+        for form, src in forms.items():
+            assert any(is_banned(n) for n in names_in(src, "background_model")), (
+                f"detector misses the {form} form: {src!r}")
+        # Control: the same forms naming a non-simulator module are not
+        # flagged. simulator_notes checks the prefix stops at a dot, and the
+        # bare background_model.tracks comes only from the ImportFrom base.
+        control = ("import background_model.hexamers\n"
+                   "from background_model.fragment_lengths import fl_end_weight\n"
+                   "from background_model import constants\n"
+                   "from .tracks import FL_BANDS\n"
+                   "import importlib\n"
+                   "importlib.import_module('background_model.hexamers')\n"
+                   "__import__('background_model.simulator_notes')\n")
+        names = set(names_in(control, "background_model"))
+        assert {"background_model.tracks",
+                "background_model.simulator_notes"} <= names, names
+        assert not [n for n in names if is_banned(n)], names
 
     def test_conftest_does_not_import_simulator_at_load(self):
         """``tests/conftest.py`` and the ``cut_site_helpers`` it imports load
