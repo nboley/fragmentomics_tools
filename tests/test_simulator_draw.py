@@ -484,6 +484,105 @@ class TestT5Sampler:
 
         np.testing.assert_allclose(float(total), 1.0, rtol=1e-12)
 
+    # f(L) supports for the bitwise test, as (min_fl, counts).  "point" is
+    # n_L == 1, "narrow" a 3-length support with a zero, "realistic" the full
+    # [L_MIN, L_MAX] range with zeros -- long enough (n_L >= 8) that the row
+    # sum is pairwise, so a reassociation can move its last bits.
+    _BITWISE_SUPPORTS = {
+        "point": (60, np.array([3], dtype=np.int64)),
+        "narrow": (60, np.array([2, 0, 5], dtype=np.int64)),
+        "realistic": (L_MIN, np.where(
+            np.arange(N_LENGTHS) % 17 == 5, 0,
+            np.random.RandomState(192).randint(1, 1000, N_LENGTHS),
+        ).astype(np.int64)),
+    }
+
+    @pytest.mark.parametrize("support,region_len", [
+        (name, R)
+        for name, (_m, c) in _BITWISE_SUPPORTS.items()
+        for R in sorted({1, 2, c.size - 1, c.size, c.size + 1, 300})
+        if R >= 1
+    ])
+    def test_probs_bitwise_equal_pre_192_formula(self, support, region_len):
+        """Pins decision 192's byte-identity claim for the ``W_s`` block and ``t_s``.
+
+        Decision 192 replaced the 2-D gather
+        ``e_tab[track[ends_all]] * valid[ends_all] * f(L)`` with a sliding
+        window over a 1-D end span, under the constraint that the output stays
+        BYTE-identical.  This recomputes ``probs`` for the drawn triples with
+        the old formula, in production's expression order, and compares bits.
+        A tolerance would let a reassociation through: laying the block out
+        in F order (mutation verified) moves the last bits of ``t_s`` while
+        staying within 1e-15.  The rng stream is not pinned; the expectation
+        is built for whatever was drawn.
+        """
+        min_fl, counts = self._BITWISE_SUPPORTS[support]
+        fl = FragmentLengthDist(counts, min_fl)
+        n_L = fl.max_fl - fl.min_fl + 1
+
+        rs = np.random.RandomState(1920 + region_len)
+        seq_len = region_len + 2 * HEX_HALF + fl.max_fl
+        bases = np.array(list("ACGT"))[rs.randint(0, 4, seq_len)]
+        # Some N bases, so valid has zeros on both the start and end sides.
+        bases[rs.rand(seq_len) < 0.03] = "N"
+        # Keep start 0 live on both strands at L = min_fl (f(min_fl) > 0 in
+        # every support), or a 1-2 bp region can draw nothing at all.
+        for w in (slice(0, 6), slice(fl.min_fl, fl.min_fl + 6)):
+            bases[w] = np.where(bases[w] == "N", "A", bases[w])
+        assert fl.densities[0] > 0
+        seq = "".join(bases)
+        r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
+        for k in TABLE_NAMES:
+            r[k][rs.choice(NHEX, 40, replace=False)] = 0.0
+        fwd0, rc0, _ = hexamer_indices(seq)
+        for k, idx in (("start_fwd", fwd0[0]), ("end_rev", rc0[0]),
+                       ("end_fwd", fwd0[fl.min_fl]),
+                       ("start_rev", rc0[fl.min_fl])):
+            r[k][idx] = max(r[k][idx], 1.0)
+
+        # Few lengths per start means few distinct (start, stop) keys, so
+        # back off from n == region_len there or the 2n redraw bound fires.
+        n = region_len if n_L >= 20 else max(1, region_len // 3)
+        p_plus = 0.37
+        starts, lengths, is_plus, probs = sample_region(
+            seq.encode(), region_len, n, r=r, fl=fl, p_plus=p_plus,
+            rng=np.random.default_rng([192, region_len, n_L]),
+        )
+        assert probs.size > 0, "nothing drawn -- the comparison is vacuous"
+
+        fwd, rc, valid = hexamer_indices(seq)
+        Ls = np.arange(fl.min_fl, fl.max_fl + 1)
+        pos = np.arange(region_len)
+        ends_all = pos[:, None] + Ls[None, :]
+        expected = np.empty_like(probs)
+        for plus in (True, False):
+            sel = is_plus == plus
+            if not sel.any():
+                continue
+            track = fwd if plus else rc
+            s_tab = r["start_fwd"] if plus else r["end_rev"]
+            e_tab = r["end_fwd"] if plus else r["start_rev"]
+            p_strand = np.float64(p_plus if plus else (1.0 - p_plus))
+
+            W_s_old = (e_tab[track[ends_all]] * valid[ends_all]
+                       * fl.densities[None, :])
+            t_s = W_s_old.sum(axis=1, dtype=np.float64)
+            live = t_s > 0
+            a_s = s_tab[track[pos]] * valid[pos]
+            a_s_live = a_s * live
+            start_probs = a_s_live / a_s_live.sum(dtype=np.float64)
+
+            s, L = starts[sel], lengths[sel]
+            expected[sel] = p_strand * start_probs[s] * (
+                W_s_old[s, L - fl.min_fl] / t_s[s])
+
+        assert np.array_equal(probs, expected), (
+            f"{int((probs != expected).sum())} of {probs.size} probs differ "
+            f"from the pre-192 formula; max |diff| "
+            f"{np.abs(probs - expected).max():.3g}"
+        )
+        assert probs.tobytes() == expected.tobytes()
+
     def test_n_exceeds_region_len_raises(self):
         """Requesting more fragments than positions raises."""
         R = 100
@@ -1242,6 +1341,46 @@ class TestT8SeedingAndParallelDeterminism:
             want = sorted(zip((g0 + st).tolist(), (g0 + st + L).tolist(),
                               np.where(plus, "+", "-").tolist()))
             assert a[contig] == want, contig
+
+    @pytest.mark.parametrize("block_rows", [1, 7])
+    def test_sidecar_block_boundaries_keep_every_row(
+        self, draw_setup, tmp_path, monkeypatch, block_rows
+    ):
+        """The sidecar's block loop neither drops nor duplicates a row.
+
+        Decision 192 formats sidecar rows in blocks of ``_SIDECAR_BLOCK_ROWS``
+        (1 << 20), more rows than any other test writes, so the block seam is
+        otherwise never crossed.  Shrinking the block to 1 and to 7 (which
+        does not divide the row count) crosses it hundreds of times; an
+        off-by-one slice such as ``hi = lo + _SIDECAR_BLOCK_ROWS - 1`` drops a
+        row per block (mutation verified).
+        """
+        import background_model.simulator.draw as draw_module
+
+        s = draw_setup
+        st_ref = self._simulate(s, s["frame"], s["counts"],
+                                tmp_path / "ref.bed")
+        monkeypatch.setattr(draw_module, "_SIDECAR_BLOCK_ROWS", block_rows)
+        st_blk = self._simulate(s, s["frame"], s["counts"],
+                                tmp_path / "blk.bed")
+
+        n_rows = st_ref["n_rows_written"]
+        assert n_rows > 20 * block_rows
+        assert n_rows % 7 != 0, "block size 7 must not divide the row count"
+        assert st_ref["n_short_regions"] == 0
+        assert st_ref["n_drawn"] == st_ref["n_requested"] == n_rows
+
+        bed_ref, side_ref = _read_outputs(tmp_path / "ref.bed", st_ref)
+        bed_blk, side_blk = _read_outputs(tmp_path / "blk.bed", st_blk)
+        assert len(side_ref) - 2 == n_rows
+        assert len(side_blk) - 2 == n_rows, (
+            f"sidecar has {len(side_blk) - 2} data rows with block size "
+            f"{block_rows}, expected {n_rows}"
+        )
+        assert side_blk == side_ref
+        assert bed_blk == bed_ref
+        drop = lambda st: {k: v for k, v in st.items() if k != "p_sidecar"}
+        assert drop(st_blk) == drop(st_ref)
 
     def test_seed_and_index_guards(self, draw_setup, tmp_path):
         s = draw_setup

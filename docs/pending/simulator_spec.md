@@ -364,6 +364,40 @@ would leave the cached CDF stale.
 strand, then draws the initial batch vectorised.  Only duplicate collisions
 enter a scalar redraw loop.
 
+`W_s` is built from a 1-D gather, not a 2-D one (owner decision 192, a
+speed fix).  `W_s[i, l]` depends on its end only through `i + l`, so
+`e_tab[track[e]] · valid(e)` is gathered once over the end span
+`[min_fl, region_len + max_fl)`, then read through a sliding window and
+multiplied by `f(L)` into a C-ordered block.  Each element is still
+`(e · valid) · f(L)` in that order, and the row sums still run over a
+contiguous row.  The block, `t_s` and every draw are therefore bit-identical
+to the direct gather, for any `region_len` (checked bitwise at 1 to 2,047
+and four `f(L)` supports).  The C order is load-bearing: a
+differently laid-out block sums in another order and moves `t_s`'s last bits.
+`test_probs_bitwise_equal_pre_192_formula` pins this.  It recomputes `probs`
+with the old 2-D gather and compares bits, and it fails under `order="F"` or
+a shifted end span.
+
+The writer assembles all regions at once (decision 192).  It concatenates each
+returned column in row order, then applies the one stable sort.  It formats the
+sidecar in blocks of rows, not row by row.  The BED, the sidecar and
+`oracle_nll` are byte-identical to the per-region build it replaced.  This was
+checked on 200 and 2,000 regions at 1 and 16 workers, and on a synthetic
+2.4M-row, 66,649-region assembly that crosses three sidecar blocks.  Its peak
+traced memory there was 751 MiB, against 1,236 MiB for the per-region build.
+`test_sidecar_block_boundaries_keep_every_row` pins the block seams.
+
+The sidecar is written at **`compresslevel=6`**, gzip's own default rather than
+Python's 9 (owner decision 2026-10-10).  Level 9 was most of the parent's
+remaining time -- 0.70 s of a ~1.2 s tail per 2,000 regions, so ~23 s over the
+full region set -- for a file 0.40% smaller (measured: 1,243,926 B against
+1,239,002 B on 2,000 regions).
+
+**Comparing two sidecars requires decompressing them**, at any level.  The
+compressed bytes were never stable: gzip stores an mtime in its header, so two
+runs of identical code already differ there.  The decompressed bytes, the join
+key and the `%.17g` round-trip are unaffected by the level.
+
 ## 7. Sidecar and oracle
 
 `simulate_fragments_to_bed` writes a **`.p.tsv.gz` sidecar** next to the BED.
