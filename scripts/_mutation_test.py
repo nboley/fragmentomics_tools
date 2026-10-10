@@ -407,6 +407,29 @@ MUTATIONS = [
      "background_model/simulator/measure.py",
      "from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX\n",
      "from background_model.constants import HEX_HALF, NHEX\nL_MIN, L_MAX = 25, 180\n"),
+
+    # ── Owner decision 192: byte-identical draw/writer speedup ────────────
+    # The speedup is only legitimate while it stays bit-identical, so each
+    # entry is a change that still runs but breaks that identity or drops rows.
+
+    # A Fortran-ordered block sums each row in a different order, which moves
+    # the last bits of t_s and so of every probability.
+    ("P1", "W_s block built in F order instead of C",
+     "background_model/simulator/draw.py",
+     '                          fl.densities[None, :], order="C")',
+     '                          fl.densities[None, :], order="F")'),
+
+    ("P2", "end span upper bound off by one",
+     "background_model/simulator/draw.py",
+     "    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)",
+     "    end_span = np.arange(fl.min_fl, region_len + fl.max_fl + 1)"),
+
+    # Drops the last row of every sidecar block; invisible unless a test
+    # shrinks _SIDECAR_BLOCK_ROWS below the row count.
+    ("P3", "sidecar block slice drops the row at each seam",
+     "background_model/simulator/draw.py",
+     "            hi = lo + _SIDECAR_BLOCK_ROWS",
+     "            hi = lo + _SIDECAR_BLOCK_ROWS - 1"),
 ]
 
 # Mutations whose target code was REMOVED on purpose, id -> reason.  Their
