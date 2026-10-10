@@ -27,6 +27,10 @@ from scripts.cut_site_model.score_fragments import (
     score_store,
 )
 from background_model.cut_site_model.dataset import CutSiteFragmentDataset
+from background_model.cut_site_model.model import (
+    HEX_REGISTRATION_KEY,
+    hex_registration_record,
+)
 from tests.test_cut_site_store_dataset import _create_synthetic_store
 
 TILE_SPLITS = np.array([0, 1, 1, 2, 2], dtype=np.uint8)   # train, val, val, test, test
@@ -44,7 +48,8 @@ def store(tmp_path):
     n_L = cfg.L_max - cfg.L_min + 1
     source = {t: rng.dirichlet(np.ones(4096)) for t in TABLES}
     source.update(p_L=rng.dirichlet(np.ones(n_L)), k=np.int64(6),
-                  L_min=np.int64(cfg.L_min), L_max=np.int64(cfg.L_max))
+                  L_min=np.int64(cfg.L_min), L_max=np.int64(cfg.L_max),
+                  **hex_registration_record())
     hex_path = str(tmp_path / "hex.npz")
     np.savez(hex_path, **source)
     return store_path, cfg, hex_path, tmp_path
@@ -75,7 +80,8 @@ def test_emitter_schema(store):
     n_L = cfg.L_max - cfg.L_min + 1
     for kind in ("uniform", "unif_pL"):
         d = np.load(_emit(store, kind))
-        assert set(d.files) == set(TABLES) | {"p_L", "k", "L_min", "L_max"}
+        assert set(d.files) == (set(TABLES)
+                                | {"p_L", "k", "L_min", "L_max", HEX_REGISTRATION_KEY})
         for t in TABLES:
             assert d[t].shape == (4096,)
             assert np.all(d[t] == d[t][0])

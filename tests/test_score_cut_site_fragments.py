@@ -18,7 +18,11 @@ from background_model.cut_site_model.dataset import (
     CutSiteFragmentDataset,
     cut_site_collate_fn,
 )
-from background_model.cut_site_model.model import CutSiteFragmentModel, compute_log_p0
+from background_model.cut_site_model.model import (
+    CutSiteFragmentModel,
+    compute_log_p0,
+    hex_registration_record,
+)
 from background_model_core import calculate_start_and_stop_from_jitter
 from scripts.cut_site_model.score_fragments import (
     COLUMNS,
@@ -51,6 +55,7 @@ def setup(tmp_path):
         **{k: rng.dirichlet(np.ones(4096)) for k in
            ("start_fwd", "stop_fwd", "start_rev", "stop_rev")},
         p_L=rng.dirichlet(np.ones(n_L)),
+        **hex_registration_record(),
     )
 
     torch.manual_seed(0)

@@ -6,19 +6,28 @@
   unif_pL   all four hexamer tables constant; p_L copied from --p-L-from.
             The domain probability collapses to p_L(L) / (tile_size * 2).
 
-Same schema as the stage-1 tables: start_fwd, stop_fwd, start_rev, stop_rev
-(4096,) probabilities summing to 1, p_L (n_L,), and k, L_min, L_max.  The
-constant tables carry no registration, so they score identically under any
-3' convention.
+Same schema as count_tables.py's tables: start_fwd, stop_fwd, start_rev,
+stop_rev (4096,) probabilities summing to 1, p_L (n_L,), k, L_min, L_max, and
+the 3' registration entry.  The constant tables score identically under any 3'
+convention, so the entry only satisfies the model's loader, which refuses an
+.npz without it.
 
 Usage:
     python scripts/cut_site_model/baselines/emit_reference_npz.py \\
-        --p-L-from stage1_hex_tables_v4_start.npz --kind unif_pL --output unif_pL.npz
+        --p-L-from N0.npz --kind unif_pL --output unif_pL.npz
 """
 
 import argparse
+import os
+import sys
 
 import numpy as np
+
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+sys.path.insert(0, _REPO)
+
+from background_model.cut_site_model.model import hex_registration_record  # noqa: E402
 
 TABLES = ("start_fwd", "stop_fwd", "start_rev", "stop_rev")
 
@@ -34,7 +43,8 @@ def reference_tables(source: dict, kind: str) -> dict:
     elif kind != "unif_pL":
         raise ValueError(f"kind must be uniform or unif_pL, not {kind!r}")
     out = {t: np.full(4 ** k, 1.0 / 4 ** k) for t in TABLES}
-    out.update(p_L=p_L, k=np.int64(k), L_min=np.int64(L_min), L_max=np.int64(L_max))
+    out.update(p_L=p_L, k=np.int64(k), L_min=np.int64(L_min), L_max=np.int64(L_max),
+               **hex_registration_record())
     return out
 
 

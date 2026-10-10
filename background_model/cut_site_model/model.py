@@ -73,9 +73,10 @@ class EndpointGather(torch.autograd.Function):
 # Window geometry (fixed)
 # ---------------------------------------------------------------------------
 
-# WINDOW_HALF >= L_max - 1 = 179.  Under start admission the max 3' cut is
-# at position (P-1) + L_max - 1 = P + 178, so the model needs hex indices
-# that far past the tile edge.  181 gives rf_budget = WINDOW_HALF + 5 = 186.
+# WINDOW_HALF >= L_max = 180.  Under start admission the furthest 3' cut base
+# is (P-1) + L_max = P + 179 (fragment_cut_bases), so the model needs hex
+# indices that far past the tile edge.  181 gives rf_budget = WINDOW_HALF + 5
+# = 186.
 WINDOW_HALF = 181                                            # W/2
 
 # Length groups: 10, half-open, 15 wide from L_min with the last group wider
@@ -125,6 +126,98 @@ N_HEX = NHEX         # 4096
 # cut-2 while the model read at cut+0, so the tables were keyed on one k-mer and
 # looked up with another.  Guarded by tests/test_hex_registration.py.
 CUT_OFFSET_IN_KMER = 3
+
+# The 3' cut base, relative to m + L.  A fragment at m of length L occupies
+# m .. m+L-1, so its 3' junction is m+L-1 | m+L and the junction-centred cut
+# base is m+L: offset 0.  Owner ruling 6, 2026-10-10; until then the prior read
+# m+L-1 (offset -1) while L2a and the simulator read m+L.
+#
+# The value is also written into every hex-table .npz (HEX_REGISTRATION_KEY)
+# and kept as a buffer in every checkpoint that carries tables, and the
+# loaders refuse a mismatch: tables counted at one registration and read at
+# another load silently, since the shapes do not change.
+STOP_CUT_BASE_OFFSET = 0
+HEX_REGISTRATION_KEY = "stop_cut_base_offset"
+_HEX_REGISTRATION_BUFFER = "_hex_stop_cut_base_offset"
+
+
+def fragment_cut_bases(m, L):
+    """Tile bases of a fragment's left (5'-genomic) and right cut sites.
+
+    THE single definition of where the prior reads a fragment's hexamers:
+    ``compute_log_p0`` gathers through it and the table counter
+    (``scripts/cut_site_model/baselines/count_tables.py``) counts through it,
+    so the tables cannot be keyed at one base and read at another.  Works on
+    ints, numpy arrays and tensors.
+    """
+    return m, m + L + STOP_CUT_BASE_OFFSET
+
+
+def hex_pos_of_tile_base(q):
+    """``hex_idx`` position of the k-mer registered on tile base ``q``.
+
+    ``hex_idx[j]`` spans ``x[j : j+HEX_K]`` and the tile starts at x position
+    ``WINDOW_HALF + CUT_OFFSET_IN_KMER`` (checked in ``__init__``), so the
+    k-mer whose offset-``CUT_OFFSET_IN_KMER`` base is ``q`` starts at
+    ``WINDOW_HALF + q``.
+    """
+    return WINDOW_HALF + q
+
+
+def hex_registration_record() -> dict:
+    """The registration entry every hex-table .npz writer must include."""
+    return {HEX_REGISTRATION_KEY: np.int64(STOP_CUT_BASE_OFFSET)}
+
+
+def check_hex_registration(npz, source: str = "hex tables") -> None:
+    """Refuse hex tables not counted at this model's 3' registration.
+
+    ``npz`` is an ``np.load`` result or a dict.  Tables without the key were
+    counted by ``stage1_hex_baseline.py`` (3' cut at m+L-1) or predate it.
+    """
+    keys = npz.files if hasattr(npz, "files") else npz.keys()
+    if HEX_REGISTRATION_KEY not in keys:
+        raise ValueError(
+            f"{source} has no '{HEX_REGISTRATION_KEY}' entry, so it was not "
+            f"counted at this model's 3' registration (m+L).  Tables from "
+            f"stage1_hex_baseline.py, including stage1_hex_tables_v4_start.npz, "
+            f"were counted at m+L-1 and are refused.  Rebuild them with "
+            f"scripts/cut_site_model/baselines/count_tables.py."
+        )
+    got = int(npz[HEX_REGISTRATION_KEY])
+    if got != STOP_CUT_BASE_OFFSET:
+        raise ValueError(
+            f"{source} was counted with the 3' cut at m+L{got:+d}; this model "
+            f"reads it at m+L{STOP_CUT_BASE_OFFSET:+d}"
+        )
+
+
+def _refuse_misregistered_hex_state(module, state_dict, prefix, *_args):
+    """load_state_dict pre-hook: refuse a checkpoint's hex tables at another
+    registration.
+
+    The tables are buffers (``--freeze-hex``) or parameters, so they travel in
+    the state dict, and every checkpoint from ``bad981d`` or earlier carries
+    m+L-1 tables with no registration entry.  Their shapes match, so without
+    this they would load and score with no error.  Fires for
+    ``load_from_checkpoint`` and for a plain ``load_state_dict``.
+    """
+    if prefix + "hex_log_start_fwd" not in state_dict:
+        return          # no hex tables, nothing registered
+    key = prefix + _HEX_REGISTRATION_BUFFER
+    if key not in state_dict:
+        raise RuntimeError(
+            "checkpoint carries hex tables but no 3' registration entry: it "
+            "predates the m+L registration (bad981d or earlier), so its "
+            "tables were counted at m+L-1.  Refusing to load it under m+L "
+            "code; retrain under the new prior."
+        )
+    got = int(state_dict[key])
+    if got != STOP_CUT_BASE_OFFSET:
+        raise RuntimeError(
+            f"checkpoint hex tables were counted with the 3' cut at m+L{got:+d}; "
+            f"this model reads it at m+L{STOP_CUT_BASE_OFFSET:+d}"
+        )
 
 
 def _onehot_to_hex_indices(x_onehot: torch.Tensor, k: int = HEX_K) -> torch.Tensor:
@@ -178,9 +271,9 @@ def compute_log_p0(
     hex_idx = _onehot_to_hex_indices(x_onehot)  # (B, l_in - k + 1)
 
     # Under start admission, m IS the fragment start.  The hex lookup for a
-    # fragment (m, L) on the + strand reads k-mers at positions m (5' cut)
-    # and m + L - 1 (3' cut) in tile space, which map to hex_idx positions
-    # WINDOW_HALF + m and WINDOW_HALF + m + L - 1.
+    # fragment (m, L) reads the k-mers registered on its two cut bases,
+    # m and m + L in tile space (fragment_cut_bases), which map to hex_idx
+    # positions WINDOW_HALF + m and WINDOW_HALF + m + L (hex_pos_of_tile_base).
 
     # Look up per-position log-probs for all 4 tables
     log_sf = hex_log_start_fwd[hex_idx]   # (B, n_hex_pos)
@@ -192,16 +285,19 @@ def compute_log_p0(
     L_vals = torch.arange(L_min, L_max + 1, device=x_onehot.device)  # (n_L,)
     m_vals = torch.arange(tile_size, device=x_onehot.device)          # (P,)
 
-    # start_pos[m, L] = WINDOW_HALF + m           (5' cut in hex_idx coords)
-    # stop_pos[m, L]  = WINDOW_HALF + m + L - 1   (3' cut in hex_idx coords)
+    # start_pos[m, L] = WINDOW_HALF + m       (left cut in hex_idx coords)
+    # stop_pos[m, L]  = WINDOW_HALF + m + L   (right cut in hex_idx coords)
     # start_pos is the same for all L under start admission.
-    stop_pos = (WINDOW_HALF + m_vals[:, None] + L_vals[None, :] - 1).long()    # (P, n_L)
-    start_pos = (WINDOW_HALF + m_vals[:, None]).long().expand_as(stop_pos)      # (P, n_L)
+    left_base, right_base = fragment_cut_bases(m_vals[:, None], L_vals[None, :])
+    stop_pos = hex_pos_of_tile_base(right_base).long()                        # (P, n_L)
+    start_pos = hex_pos_of_tile_base(left_base).long().expand_as(stop_pos)    # (P, n_L)
 
     # Shape check: the input tensor must be wide enough for every (m, L)
-    # cell.  Uses Python ints (hex_idx.shape[1]), not tensor reductions,
-    # so there is no device-to-host sync on the hot path.
-    required_width = WINDOW_HALF + tile_size + L_max - 1
+    # cell, i.e. reach the right cut of an L_max fragment at m = P-1.  Uses
+    # Python ints (hex_idx.shape[1]), not tensor reductions, so there is no
+    # device-to-host sync on the hot path.
+    required_width = int(hex_pos_of_tile_base(
+        fragment_cut_bases(tile_size - 1, L_max)[1])) + 1
     if hex_idx.shape[1] < required_width:
         raise ValueError(
             f"hex_idx width {hex_idx.shape[1]} < required {required_width}: "
@@ -276,7 +372,8 @@ class CutSiteFragmentModel(L.LightningModule):
         nb_w0: float = 1.0,
         nb_T_anneal: int = 5,
         mult_weight: float = 1.0,
-        # Stage 2: hex-table baseline (path to .npz from stage1_hex_baseline.py)
+        # Stage 2: hex-table baseline (path to .npz from
+        # scripts/cut_site_model/baselines/count_tables.py)
         hex_tables_path: Optional[str] = None,
         freeze_hex: bool = False,
     ):
@@ -289,14 +386,17 @@ class CutSiteFragmentModel(L.LightningModule):
         self._o_l_min = o_l_min
         self._n_offsets = n_offsets
 
-        # Under start admission the max 3' hex lookup is at
-        # WINDOW_HALF + (P-1) + (L_max-1).  This must be a valid hex_idx
-        # index, which requires WINDOW_HALF >= L_max - 1.
-        if WINDOW_HALF < L_max - 1:
+        # Under start admission the max 3' lookup -- the prior's hex_idx
+        # gather and L2a's right tap alike -- is at WINDOW_HALF + (P-1) +
+        # L_max (right cut base m + L).  h has exactly P + 2*WINDOW_HALF
+        # positions after the parity trim in forward(), so this requires
+        # WINDOW_HALF >= L_max.  (hex_idx keeps the parity base, but relying
+        # on rounding to supply the last cell would be an accident.)
+        if WINDOW_HALF < L_max:
             raise ValueError(
-                f"WINDOW_HALF={WINDOW_HALF} < L_max-1={L_max - 1}: "
+                f"WINDOW_HALF={WINDOW_HALF} < L_max={L_max}: "
                 f"the geometry cannot reach every (m, L) cell.  "
-                f"Increase WINDOW_HALF to at least {L_max - 1}."
+                f"Increase WINDOW_HALF to at least {L_max}."
             )
 
         # Verify the k-mer registration offset.  CUT_OFFSET_IN_KMER=3
@@ -395,8 +495,18 @@ class CutSiteFragmentModel(L.LightningModule):
         n_L = L_max - L_min + 1
         self._use_hex_baseline = hex_tables_path is not None
         self._freeze_hex = freeze_hex
+        # Refuses a checkpoint whose hex tables carry another registration;
+        # see _refuse_misregistered_hex_state.
+        self.register_load_state_dict_pre_hook(_refuse_misregistered_hex_state)
         if hex_tables_path is not None:
             data = np.load(hex_tables_path)
+            check_hex_registration(data, hex_tables_path)
+            # Persisted with the tables, so a checkpoint records the
+            # registration they were counted at.
+            self.register_buffer(
+                _HEX_REGISTRATION_BUFFER,
+                torch.tensor(STOP_CUT_BASE_OFFSET, dtype=torch.int64),
+            )
             hex_tensors = {
                 "hex_log_start_fwd": torch.from_numpy(np.log(np.maximum(data["start_fwd"], 1e-30))).float(),
                 "hex_log_stop_fwd": torch.from_numpy(np.log(np.maximum(data["stop_fwd"], 1e-30))).float(),

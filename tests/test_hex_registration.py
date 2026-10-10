@@ -1,14 +1,17 @@
 """Pin the hexamer registration relative to the cut site.
 
-There was no guard on this and it drifted: the table builder registered the
-k-mer at cut-2 while the model looked it up at cut+0, so the tables were keyed
-on one hexamer and read with another.  Nothing caught it because every test
-asserted shapes, gradients or self-consistent NLLs -- none tied a sequence to
-the specific k-mer index it should produce.
+There was no guard on this and it drifted twice.  First the table builder
+registered the k-mer at cut-2 while the model looked it up at cut+0.  Then the
+prior read the 3' cut at m+L-1 while L2a and the simulator read m+L, and the
+test that should have caught it asserted ``WINDOW_HALF + m + L - 1`` -- a
+restatement of the code's own formula, which any formula satisfies.
 
-The convention is junction-centred: for a cut at base ``s`` the k-mer spans
-``s - CUT_OFFSET_IN_KMER .. s - CUT_OFFSET_IN_KMER + k - 1``, i.e. the cut base
-sits at offset ``CUT_OFFSET_IN_KMER`` within the k-mer.
+So every expectation here is DERIVED, never restated: from the fragment's span
+(it occupies tile bases m .. m+L-1, so its junctions are (m-1)|m and
+(m+L-1)|(m+L)), from CUT_OFFSET_IN_KMER (the k-mer for a junction starts that
+many bases left of the base just right of the junction), and from where the
+dataset places the tile inside x.  And the 3' read is tied ACROSS stacks: to
+L2a's right tap and to the simulator's stop hexamer (T12).
 
 These tests assert the *registration*, not a stored number, so they stay valid
 across table rebuilds.
@@ -21,17 +24,78 @@ from background_model.cut_site_model.model import (
     CUT_OFFSET_IN_KMER,
     HEX_K,
     WINDOW_HALF,
+    CutSiteFragmentModel,
     _onehot_to_hex_indices,
     compute_log_p0,
 )
+from fragmentomics_tools.region import one_hot_encode_sequences
 
 
 def _random_onehot(width, seed=0):
+    """``(x, letters)``: random ACGT, one-hot encoded by the DATASET's encoder,
+    so channel order cannot differ from what the model sees in training."""
     rng = np.random.default_rng(seed)
-    bases = rng.integers(0, 4, size=width)
-    oh = np.zeros((4, width), dtype=np.float64)
-    oh[bases, np.arange(width)] = 1.0
-    return torch.tensor(oh)[None], bases
+    letters = np.frombuffer(b"ACGT", dtype=np.uint8)[rng.integers(0, 4, size=width)]
+    oh = one_hot_encode_sequences([letters.tobytes()])[0]          # (width, 4)
+    return torch.tensor(np.ascontiguousarray(oh.T), dtype=torch.float64)[None], letters
+
+
+def _geometry(tile_size, L_min, L_max):
+    """``(l_in, pad)``: the model's input width, and the x position of tile
+    base 0.  The dataset centres the tile in x (``jitter_matrix`` at j=0), and
+    ``test_calc_input_region_size_implies_the_cut_offset`` pins that contract."""
+    l_in = CutSiteFragmentModel(tile_size=tile_size, L_min=L_min, L_max=L_max,
+                                N1=4, K=4, N2=4, H=4).model_input_size
+    return l_in, (l_in - tile_size) // 2
+
+
+def _junction_bases(m, L):
+    """Tile index of the base just right of each cut junction, from the span.
+
+    The fragment occupies ``first = m`` .. ``last = m + L - 1``.  Its 5'
+    junction is ``(first-1) | first`` and its 3' junction ``last | (last+1)``.
+    """
+    first, last = m, m + L - 1
+    return first, last + 1
+
+
+def _expected_hex_pos(junction_base, pad):
+    """hex_idx index of the junction-centred k-mer.  It starts
+    CUT_OFFSET_IN_KMER bases left of ``junction_base``, i.e. at x position
+    ``pad + junction_base - CUT_OFFSET_IN_KMER``, and ``hex_idx[j]`` is the
+    k-mer starting at ``x[j]``."""
+    return pad + junction_base - CUT_OFFSET_IN_KMER
+
+
+def _identity_probe(x, slot, tile_size, L_min, L_max):
+    """compute_log_p0 with an identity table in ``slot`` (0 start_fwd,
+    1 stop_fwd, 2 start_rev, 3 stop_rev) and zeros elsewhere, so each cell
+    returns the k-mer index that table gathered there."""
+    n_hex = 4 ** HEX_K
+    tabs = [torch.zeros(n_hex, dtype=torch.float64) for _ in range(4)]
+    tabs[slot] = torch.arange(n_hex, dtype=torch.float64)
+    log_pL = torch.zeros(L_max - L_min + 1, dtype=torch.float64)
+    out = compute_log_p0(x, *tabs, log_pL, tile_size, L_min, L_max)
+    return out[0].round().long().numpy()                 # (P, n_L, 2)
+
+
+def model_index_of_sim_index():
+    """``little[b]``: the model's k-mer index for the simulator's index ``b``.
+
+    Both sides through their OWN encoders, joined by the k-mer string: the
+    simulator's ``hexamer_vocabulary`` decodes ``b``, and the model's
+    ``_onehot_to_hex_indices`` re-encodes it after the dataset's one-hot.
+    No base-4 convention is restated here.
+    """
+    from background_model.hexamers import hexamer_vocabulary
+
+    vocab = hexamer_vocabulary()
+    flat = b"".join(vocab.tolist())
+    oh = one_hot_encode_sequences([flat])[0]
+    x = torch.tensor(np.ascontiguousarray(oh.T), dtype=torch.float32)[None]
+    idx = _onehot_to_hex_indices(x)[0].numpy()[::HEX_K]
+    assert np.unique(idx).size == len(idx) == 4 ** HEX_K
+    return idx
 
 
 def test_cut_offset_is_junction_centred():
@@ -44,100 +108,66 @@ def test_cut_offset_is_junction_centred():
 
 
 def test_compute_log_p0_reads_kmer_starting_cut_offset_before_the_cut():
-    """Probe which k-mer index compute_log_p0 actually gathers.
-
-    Trick: make start_fwd an identity table (``table[j] == j``) and zero the
-    others, so log_p0 for strand 0 returns the gathered index verbatim.
-    """
-    tile_size = 64
-    L_min, L_max = 25, 40
-    n_L = L_max - L_min + 1
-    l_in = tile_size + 2 * WINDOW_HALF
-
+    """The 5' read: the k-mer centred on the junction (m-1)|m."""
+    tile_size, L_min, L_max = 64, 25, 40
+    l_in, pad = _geometry(tile_size, L_min, L_max)
     x, _ = _random_onehot(l_in, seed=7)
-    hex_idx = _onehot_to_hex_indices(x)[0].numpy()   # hex_idx[i] = k-mer at x pos i
-
-    n_hex = 4 ** HEX_K
-    identity = torch.arange(n_hex, dtype=torch.float64)
-    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
-    log_pL = torch.zeros(n_L, dtype=torch.float64)
-
-    log_p0 = compute_log_p0(
-        x, identity, zeros_tab, zeros_tab, zeros_tab, log_pL,
-        tile_size, L_min, L_max,
-    )
+    hex_idx = _onehot_to_hex_indices(x)[0].numpy()
+    got = _identity_probe(x, 0, tile_size, L_min, L_max)
 
     for m in (0, 17, tile_size - 1):
         for L in (L_min, 33, L_max):
-            li = L - L_min
-            got = int(round(float(log_p0[0, m, li, 0])))
-            # Under start admission m IS the start; 5' cut is at m.
-            cut_in_x = WINDOW_HALF + m
-            expected = int(hex_idx[cut_in_x])
-            assert got == expected, (
-                f"m={m} L={L}: gathered k-mer {got}, expected {expected} "
-                f"(k-mer starting {CUT_OFFSET_IN_KMER} before the cut)"
+            j5, _ = _junction_bases(m, L)
+            expected = int(hex_idx[_expected_hex_pos(j5, pad)])
+            assert got[m, L - L_min, 0] == expected, (
+                f"m={m} L={L}: gathered k-mer {got[m, L - L_min, 0]}, expected "
+                f"{expected} (k-mer starting {CUT_OFFSET_IN_KMER} before the "
+                f"5' junction)"
             )
 
 
 def test_stop_endpoint_uses_the_same_registration():
-    """The 3' cut must be registered identically to the 5' cut."""
-    tile_size = 64
-    L_min, L_max = 25, 40
-    n_L = L_max - L_min + 1
-    l_in = tile_size + 2 * WINDOW_HALF
-
+    """The 3' cut must be registered like the 5' cut: on the k-mer centred on
+    its junction (m+L-1)|(m+L), derived from the span, for every cell."""
+    tile_size, L_min, L_max = 64, 25, 180
+    l_in, pad = _geometry(tile_size, L_min, L_max)
     x, _ = _random_onehot(l_in, seed=11)
     hex_idx = _onehot_to_hex_indices(x)[0].numpy()
+    got = _identity_probe(x, 1, tile_size, L_min, L_max)      # stop_fwd
 
-    n_hex = 4 ** HEX_K
-    identity = torch.arange(n_hex, dtype=torch.float64)
-    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
-    log_pL = torch.zeros(n_L, dtype=torch.float64)
-
-    # identity on stop_fwd this time; start_fwd zeroed
-    log_p0 = compute_log_p0(
-        x, zeros_tab, identity, zeros_tab, zeros_tab, log_pL,
-        tile_size, L_min, L_max,
+    m = np.arange(tile_size)[:, None]
+    L = np.arange(L_min, L_max + 1)[None, :]
+    _, j3 = _junction_bases(m, L)
+    expected = hex_idx[_expected_hex_pos(j3, pad)]
+    bad = np.argwhere(got[:, :, 0] != expected)
+    assert bad.size == 0, (
+        f"{len(bad)} cells read the wrong 3' k-mer, first (m, L) = "
+        f"({bad[0][0]}, {bad[0][1] + L_min})"
     )
 
-    for m in (5, 30):
-        for L in (L_min, L_max):
-            li = L - L_min
-            got = int(round(float(log_p0[0, m, li, 0])))
-            # Under start admission: 3' cut is at m + L - 1.
-            stop_in_x = WINDOW_HALF + m + L - 1
-            expected = int(hex_idx[stop_in_x])
-            assert got == expected, (
-                f"m={m} L={L}: stop k-mer {got}, expected {expected}"
-            )
 
-
-def test_builder_and_model_agree_on_registration():
-    """The builder's window helper must produce the same k-mer the model reads.
+def test_counter_and_model_agree_on_registration():
+    """The table counter's k-mer for tile base p must be the one the model
+    frame puts there.
 
     This is the invariant that actually broke.  Testing each side against the
     constant separately would still pass if both drifted together; this ties
-    them to each other.
+    them to each other.  (Retargeted from the retired stage1 builder.)
     """
-    from scripts.cut_site_model.stage1_hex_baseline import hex_window_for_tile
+    from scripts.cut_site_model.baselines.count_tables import (
+        cut_base_window, tile_hexamers,
+    )
 
-    tile_size = 64
-    l_seq = tile_size + 2 * WINDOW_HALF      # builder tolerates any wider frame
-    x, bases = _random_onehot(l_seq, seed=23)
-
-    builder_hex = hex_window_for_tile(bases.astype(np.uint8), tile_size, HEX_K)
-    assert len(builder_hex) == tile_size
-
+    tile_size, L_min, L_max = 64, 25, 180
+    l_in, pad = _geometry(tile_size, L_min, L_max)
+    x, _ = _random_onehot(l_in, seed=23)
     model_hex = _onehot_to_hex_indices(x)[0].numpy()
-    tile_start = (l_seq - tile_size) // 2
 
-    for p in (0, 1, 31, tile_size - 1):
-        cut_in_seq = tile_start + p
-        expected = int(model_hex[cut_in_seq - CUT_OFFSET_IN_KMER])
-        assert int(builder_hex[p]) == expected, (
-            f"p={p}: builder gave {builder_hex[p]}, model frame gives {expected}"
-        )
+    n = cut_base_window(tile_size, L_max)
+    counter_hex, ok = tile_hexamers(x[0], n)
+    assert ok.all()
+    p = np.arange(n)
+    np.testing.assert_array_equal(counter_hex, model_hex[_expected_hex_pos(p, pad)])
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +199,6 @@ def test_calc_input_region_size_implies_the_cut_offset():
     hex prior measures WORSE than uniform (12.835 vs ln|D| = 12.674) while
     still looking like a trained-model improvement.
     """
-    from background_model.cut_site_model.model import CutSiteFragmentModel
-
     for tile_size in (256, 512, 1024):
         model = CutSiteFragmentModel(tile_size=tile_size)
         l_in = model.calc_input_region_size(tile_size)
@@ -191,8 +219,6 @@ def test_training_and_inference_agree_on_l_in():
     If someone passed calc_input_region_size to the dataset, l_in would be
     6 bases too wide — a 3-base frame shift per side.
     """
-    from background_model.cut_site_model.model import CutSiteFragmentModel
-
     for tile_size in (256, 512, 1024):
         model = CutSiteFragmentModel(tile_size=tile_size)
         assert model.model_input_size == model.calc_input_region_size(tile_size), (
@@ -209,89 +235,61 @@ def test_training_and_inference_agree_on_l_in():
 
 def test_hex_lookup_covers_all_cuts_under_start_admission():
     """For every (m, L, strand) cell the dataset can produce, the model's
-    hex lookup must index a valid hex_idx position whose k-mer CONTAINS the
-    cut site.
+    hex lookup must index a valid hex_idx position whose k-mer is the one
+    centred on the cut junction.
 
     This is the test that would have caught the WINDOW_HALF=128 silent
     overrun: at the right edge, 1,275 of 159,744 cells per strand (0.80%)
     were clamped to the wrong hexamer with no error.
     """
-    from background_model.cut_site_model.model import CutSiteFragmentModel, DEFAULT_L_MIN, DEFAULT_L_MAX
+    from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 1024
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
-    model = CutSiteFragmentModel(tile_size=tile_size, L_min=L_min, L_max=L_max)
-    l_in = model.model_input_size
-
-    x, bases = _random_onehot(l_in, seed=42)
+    l_in, pad = _geometry(tile_size, L_min, L_max)
+    x, _ = _random_onehot(l_in, seed=42)
     hex_idx = _onehot_to_hex_indices(x)[0].numpy()
     max_hex = len(hex_idx) - 1
+    starts = _identity_probe(x, 0, tile_size, L_min, L_max)
+    stops = _identity_probe(x, 1, tile_size, L_min, L_max)
 
-    n_hex = 4 ** HEX_K
-    identity = torch.arange(n_hex, dtype=torch.float64)
-    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
-    n_L = L_max - L_min + 1
-    log_pL = torch.zeros(n_L, dtype=torch.float64)
-
-    log_p0 = compute_log_p0(
-        x, identity, zeros_tab, zeros_tab, zeros_tab, log_pL,
-        tile_size, L_min, L_max,
-    )
-
-    # Probe the corners: {+ strand, - strand} × {L_min, L_max} × right edge
-    probe_cases = [
-        (0, L_min, 0, "left edge, L_min, + strand"),
-        (tile_size - 1, L_min, 0, "right edge, L_min, + strand"),
-        (tile_size - 1, L_max, 0, "right edge, L_max, + strand"),
-        (0, L_min, 1, "left edge, L_min, - strand"),
-        (tile_size - 1, L_max, 1, "right edge, L_max, - strand"),
-    ]
-
-    for m, L, strand, label in probe_cases:
+    # Probe the corners: {L_min, L_max} x {left, right edge}
+    for m, L, label in [
+        (0, L_min, "left edge, L_min"),
+        (tile_size - 1, L_min, "right edge, L_min"),
+        (tile_size - 1, L_max, "right edge, L_max"),
+        (0, L_max, "left edge, L_max"),
+    ]:
         li = L - L_min
-        # Under start admission: 5' cut at m, 3' cut at m + L - 1.
-        start_pos = WINDOW_HALF + m
-        stop_pos = WINDOW_HALF + m + L - 1
-        assert 0 <= start_pos <= max_hex, (
-            f"{label}: start_pos {start_pos} out of hex_idx range [0, {max_hex}]"
-        )
-        assert 0 <= stop_pos <= max_hex, (
-            f"{label}: stop_pos {stop_pos} out of hex_idx range [0, {max_hex}]"
-        )
-
-        # The gathered value must match the hex_idx at that position
-        got_start = int(round(float(log_p0[0, m, li, 0])))
-        assert got_start == int(hex_idx[start_pos]), (
-            f"{label}: start hex {got_start} != expected {hex_idx[start_pos]}"
-        )
+        j5, j3 = _junction_bases(m, L)
+        start_pos = _expected_hex_pos(j5, pad)
+        stop_pos = _expected_hex_pos(j3, pad)
+        assert 0 <= start_pos <= max_hex, f"{label}: start_pos {start_pos} out of range"
+        assert 0 <= stop_pos <= max_hex, f"{label}: stop_pos {stop_pos} out of range"
+        assert starts[m, li, 0] == int(hex_idx[start_pos]), label
+        assert stops[m, li, 0] == int(hex_idx[stop_pos]), label
 
 
-def test_builder_widened_window_covers_right_edge():
-    """The hex table builder's widened window must reach the 3' endpoint
-    of a L_max fragment starting at tile_size - 1.
-    """
-    from scripts.cut_site_model.stage1_hex_baseline import hex_window_for_tile
+def test_counter_window_covers_right_edge():
+    """The counter's window must reach the 3' cut of an L_max fragment
+    starting at tile_size - 1, with a valid k-mer there.  (Retargeted from the
+    retired stage1 builder, which hardcoded ``L_max - 1``.)"""
+    from scripts.cut_site_model.baselines.count_tables import (
+        cut_base_window, tile_hexamers,
+    )
     from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
-    tile_size = 64
-    L_max = DEFAULT_L_MAX
-    hex_width = tile_size + L_max - 1
-    l_seq = tile_size + 2 * WINDOW_HALF + 2 * L_max
+    tile_size, L_min, L_max = 64, DEFAULT_L_MIN, DEFAULT_L_MAX
+    l_in, _ = _geometry(tile_size, L_min, L_max)
+    x, _ = _random_onehot(l_in, seed=99)
 
-    _, bases = _random_onehot(l_seq, seed=99)
-    builder_hex = hex_window_for_tile(
-        bases.astype(np.uint8), tile_size, HEX_K, width=hex_width,
+    _, far_junction = _junction_bases(tile_size - 1, L_max)
+    n = cut_base_window(tile_size, L_max)
+    assert n == far_junction + 1, (
+        f"counter window {n} does not end at the far 3' cut base {far_junction}"
     )
-    assert len(builder_hex) == hex_width
-
-    # The furthest 3' endpoint: start at tile_size-1, length L_max
-    far_end = tile_size - 1 + L_max - 1
-    assert far_end < len(builder_hex), (
-        f"far 3' endpoint at {far_end} is outside builder window of {len(builder_hex)}"
-    )
-    assert builder_hex[far_end] >= 0, (
-        f"hex index at far 3' endpoint is invalid ({builder_hex[far_end]})"
-    )
+    _, ok = tile_hexamers(x[0], n)
+    assert ok[far_junction]
 
 
 # ---------------------------------------------------------------------------
@@ -299,31 +297,17 @@ def test_builder_widened_window_covers_right_edge():
 # ---------------------------------------------------------------------------
 
 
-def test_minus_strand_start_rev_gathers_at_stop_pos():
-    """Probe minus-strand start_rev: it gathers at flat_stop, so with an
-    identity table on start_rev the value at log_p0[0, m, li, 1] should be
-    hex_idx[stop_pos] where stop_pos = WINDOW_HALF + m + L - 1.
-    """
+def test_minus_strand_start_rev_gathers_at_the_3prime_junction():
+    """Minus-strand start_rev reads the k-mer centred on the RIGHT junction
+    (m+L-1)|(m+L): a minus-strand fragment's 5' end is its genomic stop."""
     from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 64
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
-    n_L = L_max - L_min + 1
-    raw = tile_size + 2 * WINDOW_HALF + 5
-    l_in = raw + (raw % 2)
-
+    l_in, pad = _geometry(tile_size, L_min, L_max)
     x, _ = _random_onehot(l_in, seed=55)
     hex_idx = _onehot_to_hex_indices(x)[0].numpy()
-
-    n_hex = 4 ** HEX_K
-    identity = torch.arange(n_hex, dtype=torch.float64)
-    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
-    log_pL = torch.zeros(n_L, dtype=torch.float64)
-
-    log_p0 = compute_log_p0(
-        x, zeros_tab, zeros_tab, identity, zeros_tab, log_pL,
-        tile_size, L_min, L_max,
-    )
+    got = _identity_probe(x, 2, tile_size, L_min, L_max)
 
     for m, L, label in [
         (0, L_min, "left edge, L_min"),
@@ -331,41 +315,24 @@ def test_minus_strand_start_rev_gathers_at_stop_pos():
         (tile_size - 1, L_min, "right edge, L_min"),
         (tile_size - 1, L_max, "right edge, L_max"),
     ]:
-        li = L - L_min
-        got = int(round(float(log_p0[0, m, li, 1])))
-        stop_in_x = WINDOW_HALF + m + L - 1
-        expected = int(hex_idx[stop_in_x])
-        assert got == expected, (
-            f"{label}: minus-strand start_rev gathered {got}, "
-            f"expected {expected} at stop_pos {stop_in_x}"
+        _, j3 = _junction_bases(m, L)
+        expected = int(hex_idx[_expected_hex_pos(j3, pad)])
+        assert got[m, L - L_min, 1] == expected, (
+            f"{label}: minus-strand start_rev gathered {got[m, L - L_min, 1]}, "
+            f"expected {expected}"
         )
 
 
-def test_minus_strand_stop_rev_gathers_at_start_pos():
-    """Probe minus-strand stop_rev: it gathers at flat_start, so with an
-    identity table on stop_rev the value at log_p0[0, m, li, 1] should be
-    hex_idx[start_pos] where start_pos = WINDOW_HALF + m.
-    """
+def test_minus_strand_stop_rev_gathers_at_the_5prime_junction():
+    """Minus-strand stop_rev reads the k-mer centred on the LEFT junction."""
     from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 64
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
-    n_L = L_max - L_min + 1
-    raw = tile_size + 2 * WINDOW_HALF + 5
-    l_in = raw + (raw % 2)
-
+    l_in, pad = _geometry(tile_size, L_min, L_max)
     x, _ = _random_onehot(l_in, seed=77)
     hex_idx = _onehot_to_hex_indices(x)[0].numpy()
-
-    n_hex = 4 ** HEX_K
-    identity = torch.arange(n_hex, dtype=torch.float64)
-    zeros_tab = torch.zeros(n_hex, dtype=torch.float64)
-    log_pL = torch.zeros(n_L, dtype=torch.float64)
-
-    log_p0 = compute_log_p0(
-        x, zeros_tab, zeros_tab, zeros_tab, identity, log_pL,
-        tile_size, L_min, L_max,
-    )
+    got = _identity_probe(x, 3, tile_size, L_min, L_max)
 
     for m, L, label in [
         (0, L_min, "left edge, L_min"),
@@ -373,13 +340,138 @@ def test_minus_strand_stop_rev_gathers_at_start_pos():
         (tile_size - 1, L_min, "right edge, L_min"),
         (tile_size - 1, L_max, "right edge, L_max"),
     ]:
-        li = L - L_min
-        got = int(round(float(log_p0[0, m, li, 1])))
-        start_in_x = WINDOW_HALF + m
-        expected = int(hex_idx[start_in_x])
-        assert got == expected, (
-            f"{label}: minus-strand stop_rev gathered {got}, "
-            f"expected {expected} at start_pos {start_in_x}"
+        j5, _ = _junction_bases(m, L)
+        expected = int(hex_idx[_expected_hex_pos(j5, pad)])
+        assert got[m, L - L_min, 1] == expected, (
+            f"{label}: minus-strand stop_rev gathered {got[m, L - L_min, 1]}, "
+            f"expected {expected}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T12: tie the prior's reads to L2a and to the simulator (cross-checks)
+# ---------------------------------------------------------------------------
+#
+# The probes above compare the prior to a derivation.  These compare it to the
+# two OTHER implementations of "which bases does a cut site see": L2a's taps
+# and the simulator's hexamers.  The 3' registration bug was exactly a
+# disagreement between the prior and both of them, and no test compared them.
+
+
+def _receptive_fields(fn, x):
+    """``fields[j]``: which output cells change when the base at x[j] changes.
+
+    Exhaustive over every position of x: each base is swapped for another
+    and ``fn`` re-run, so a field is measured, not assumed.
+    """
+    base = fn(x)
+    fields = np.zeros((x.shape[-1],) + base.shape, dtype=bool)
+    for j in range(x.shape[-1]):
+        x2 = x.clone()
+        x2[0, :, j] = x2[0, :, j].roll(1)
+        fields[j] = fn(x2) != base
+    return fields
+
+
+def _expected_fields(junction, pad, l_in):
+    """(l_in, P, n_L) bool: the junction-centred k-mer's x positions per cell."""
+    lo = _expected_hex_pos(junction, pad)
+    j = np.arange(l_in)[:, None, None]
+    return (j >= lo[None]) & (j < lo[None] + HEX_K)
+
+
+def test_T12a_prior_reads_match_L2a_taps():
+    """Every cell, both strands, both ends: the bases the prior's hexamer read
+    depends on == the bases L2a's tap depends on == the k-mer centred on the
+    junction derived from the span.  Fails on an m+L-1 prior (shifted 1 left
+    of L2a) and on an L2a that drifts while the prior holds."""
+    tile_size, L_min, L_max = 64, 25, 40
+    l_in, pad = _geometry(tile_size, L_min, L_max)
+    x, _ = _random_onehot(l_in, seed=5)
+    x = x.float()
+    m = np.arange(tile_size)[:, None]
+    L = np.arange(L_min, L_max + 1)[None, :]
+    j5, j3 = _junction_bases(m, L)
+    want = {"left": _expected_fields(j5, pad, l_in),
+            "right": _expected_fields(np.broadcast_to(j3, (tile_size, L.size)), pad, l_in)}
+    want["left"] = np.broadcast_to(want["left"], want["right"].shape)
+
+    # The prior: (slot, strand) of each table, grouped by the end it reads.
+    prior_reads = {"left": [(0, 0), (3, 1)], "right": [(1, 0), (2, 1)]}
+    for end, reads in prior_reads.items():
+        for slot, strand in reads:
+            fields = _receptive_fields(
+                lambda xx: _identity_probe(xx.double(), slot, tile_size, L_min, L_max),
+                x)[..., strand]
+            assert np.array_equal(fields, want[end]), (
+                f"prior table slot {slot} ({end} end): receptive field differs "
+                f"from the junction-centred k-mer"
+            )
+
+    # L2a: only one tap's banks live, every other branch zeroed, so a logit
+    # depends on x only through that tap.
+    torch.manual_seed(0)
+    model = CutSiteFragmentModel(tile_size=tile_size, L_min=L_min, L_max=L_max,
+                                 N1=8, K=8, N2=2, H=4).eval()
+    banks = {"left": (0, 1), "right": (2, 3)}
+    for end, live in banks.items():
+        with torch.no_grad():
+            model.interior_F.zero_()
+            model.w_out.fill_(1.0)
+            for b in range(4):
+                model.bank_a[b].normal_()
+                if b not in live:
+                    model.bank_a[b].zero_()
+
+        def logits(xx):
+            with torch.no_grad():
+                return model(xx)[0][0].numpy()
+
+        fields = _receptive_fields(logits, x)
+        for strand in (0, 1):
+            assert np.array_equal(fields[..., strand], want[end]), (
+                f"L2a {end} tap, strand {strand}: receptive field differs from "
+                f"the junction-centred k-mer"
+            )
+
+
+def test_T12b_prior_reads_match_simulator_hexamers():
+    """Every cell, both strands: the k-mer the prior reads at each end is the
+    k-mer the simulator records there (``measure.cut_site_hexamers``, whose
+    stop is ``stops_0 = m + L``, half-open), compared across the two encoders
+    by k-mer string."""
+    from types import SimpleNamespace
+
+    from background_model.constants import HEX_HALF
+    from background_model.simulator.measure import cut_site_hexamers
+
+    tile_size, L_min, L_max = 64, 25, 180
+    l_in, pad = _geometry(tile_size, L_min, L_max)
+    x, letters = _random_onehot(l_in, seed=31)
+    m, L = np.meshgrid(np.arange(tile_size), np.arange(L_min, L_max + 1),
+                       indexing="ij")
+    m, L = m.ravel(), L.ravel()
+
+    # The simulator's sequence contract: region-local, left_pad == HEX_HALF,
+    # so sequence[c] begins the window for cut site c.  Tile base 0 is x[pad].
+    seq = letters[pad - HEX_HALF:]
+    rfa = SimpleNamespace(n_frags=len(m), starts_0=m, stops_0=m + L,
+                          fragment_strands=np.full(len(m), "+"))
+    sim = cut_site_hexamers(rfa, seq)
+    assert len(sim) == len(m)                      # every window valid
+    to_model = model_index_of_sim_index()
+    sim_left = to_model[sim["start_hex"].to_numpy()].reshape(tile_size, -1)
+    sim_right = to_model[sim["stop_hex"].to_numpy()].reshape(tile_size, -1)
+
+    for slot, strand, want, label in [
+        (0, 0, sim_left, "start_fwd"), (1, 0, sim_right, "stop_fwd"),
+        (2, 1, sim_right, "start_rev"), (3, 1, sim_left, "stop_rev"),
+    ]:
+        got = _identity_probe(x, slot, tile_size, L_min, L_max)[..., strand]
+        bad = np.argwhere(got != want)
+        assert bad.size == 0, (
+            f"{label}: {len(bad)} cells disagree with the simulator, first "
+            f"(m, L) = ({bad[0][0]}, {bad[0][1] + L_min})"
         )
 
 

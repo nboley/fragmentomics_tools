@@ -7,10 +7,11 @@ Covers two seams that unit tests of the library cannot see:
   ``config_json`` (owner decision 176).  The dataset reads the tile size from
   the store, so a CLI value that silently disagreed would build the model for
   one geometry and feed it another.
-- The ``.npz`` written by ``scripts/cut_site_model/stage1_hex_baseline.py
-  --output`` is what
-  ``CutSiteFragmentModel(hex_tables_path=...)`` reads.  The writer and reader
-  name the arrays independently, so the key names are checked end to end.
+- The ``.npz`` written by ``scripts/cut_site_model/baselines/count_tables.py
+  tables`` is what ``CutSiteFragmentModel(hex_tables_path=...)`` reads.  The
+  writer and reader name the arrays independently, so the key names are
+  checked end to end.  ``stage1_hex_baseline.py --output`` is no longer a
+  producer: it counts the 3' cut at m+L-1, and the loader must refuse it.
 """
 
 import sys
@@ -18,8 +19,9 @@ import sys
 import numpy as np
 import pytest
 
-from background_model.cut_site_model.model import CutSiteFragmentModel
+from background_model.cut_site_model.model import HEX_REGISTRATION_KEY, CutSiteFragmentModel
 from scripts.cut_site_model import gpu_benchmark, stage1_hex_baseline, train
+from scripts.cut_site_model.baselines import count_tables
 from tests.test_cut_site_store_dataset import _create_synthetic_store
 
 _SCRIPTS = {"train": train, "gpu_benchmark": gpu_benchmark}
@@ -62,12 +64,31 @@ def test_tile_size_mismatch_with_store_is_rejected(name, tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("freeze_hex", [True, False])
-def test_stage1_npz_loads_into_model(freeze_hex, tmp_path, monkeypatch):
+def test_stage1_npz_is_refused(freeze_hex, tmp_path, monkeypatch):
+    """T13, the npz half, on the retired writer's real output."""
     store_path, cfg = _create_synthetic_store(
         tmp_path, tile_size=256, n_frags_per_tile=200)
-    npz_path = str(tmp_path / "hex_tables.npz")
+    npz_path = str(tmp_path / "stage1.npz")
     _run_main(monkeypatch, stage1_hex_baseline,
               ["--store", store_path, "--output", npz_path])
+    assert HEX_REGISTRATION_KEY not in np.load(npz_path).files
+    with pytest.raises(ValueError, match=HEX_REGISTRATION_KEY):
+        CutSiteFragmentModel(
+            tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+            dispersion_window_size=cfg.tile_size,
+            hex_tables_path=npz_path, freeze_hex=freeze_hex,
+        )
+
+
+@pytest.mark.parametrize("freeze_hex", [True, False])
+def test_count_tables_npz_loads_into_model(freeze_hex, tmp_path):
+    store_path, cfg = _create_synthetic_store(
+        tmp_path, tile_size=256, n_frags_per_tile=200)
+    counts_path = str(tmp_path / "counts.npz")
+    npz_path = str(tmp_path / "hex_tables.npz")
+    count_tables.main(["count", "--store", store_path, "--output", counts_path])
+    count_tables.main(["tables", "--counts", counts_path,
+                       "--estimator", "stage1_ref", "--output", npz_path])
 
     model = CutSiteFragmentModel(
         tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
