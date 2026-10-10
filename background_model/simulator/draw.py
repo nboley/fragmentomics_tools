@@ -24,6 +24,7 @@ import gzip
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from fragmentomics_tools.dataframe import DataFrameBase
 
@@ -33,6 +34,10 @@ from background_model.simulator.measure import FragmentLengthDist
 
 # Seeds and region indices are each ONE 32-bit word; see region_rng.
 _SEED_WORD_MAX: int = 2 ** 32
+
+# Sidecar rows formatted per write.  Bounds the text held at once (~60 MB)
+# for a full region set; any value gives the same bytes.
+_SIDECAR_BLOCK_ROWS: int = 1 << 20
 
 
 def sample_region(
@@ -82,7 +87,14 @@ def sample_region(
     fwd, rc, valid = hexamer_indices(seq)
     Ls = np.arange(fl.min_fl, fl.max_fl + 1)
     pos = np.arange(region_len)
-    ends_all = pos[:, None] + Ls[None, :]
+    # Every end position ``i + L`` any start can reach, in order.  W_s[i, l]
+    # depends on its end only through ``end_span[i + l]``, so the per-end
+    # factor is gathered once over this 1-D span and the (region_len x n_L)
+    # block is read through a sliding window of it, rather than gathered
+    # element by element.  Each element is still ``(e * valid) * f(L)`` in
+    # that order, so the block is bit-identical to the direct gather.
+    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)
+    n_L = len(Ls)
 
     n_plus = int(rng.binomial(n, p_plus))
     used = set()
@@ -97,7 +109,12 @@ def sample_region(
         e_tab = r["end_fwd"] if is_plus else r["start_rev"]
         p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
 
-        W_s = e_tab[track[ends_all]] * valid[ends_all] * fl.densities[None, :]
+        e_end = e_tab[track[end_span]] * valid[end_span]
+        # C order is required, not cosmetic: the row sums below are pairwise
+        # along a contiguous row, and a differently laid-out block would sum
+        # in another order and move the last bits of t_s.
+        W_s = np.multiply(sliding_window_view(e_end, n_L),
+                          fl.densities[None, :], order="C")
         t_s = W_s.sum(axis=1, dtype=np.float64)
         live = t_s > 0
 
@@ -108,8 +125,6 @@ def sample_region(
             continue
 
         start_probs = a_s_live / tot
-
-        n_distinct = int(((a_s_live > 0)[:, None] & (W_s > 0)).sum())
 
         starts = rng.choice(pos, size=k, replace=True, p=start_probs)
         w = W_s[starts]
@@ -139,6 +154,10 @@ def sample_region(
                 # spinning.  Do not loosen this without redoing that
                 # arithmetic.
                 if n_dup_redraws > n:
+                    # Only the message reads this, so it is built here rather
+                    # than as a full-block boolean on every strand.
+                    n_distinct = int(
+                        ((a_s_live > 0)[:, None] & (W_s > 0)).sum())
                     raise RuntimeError(
                         f"duplicate redraws ({n_dup_redraws}) exceeded n={n}, "
                         f"i.e. more than 2n={2 * n} total draw attempts for "
@@ -398,8 +417,6 @@ def simulate_fragments_to_bed(
             "one row per (sample, region) pair and is not supported here."
         )
 
-    chunks = []
-    n_requested = n_drawn = n_short = n_dup_redraws = 0
     if len(srdf):
         work = DataFrameBase(pd.DataFrame({
             "sequence": srdf["sequence"].to_numpy(),
@@ -417,50 +434,48 @@ def simulate_fragments_to_bed(
             verbose=verbose,
         )
         # Records come back in ROW order whatever process drew them, so
-        # everything below is the serial assembly.
-        draws = draws.itertuples(index=False)
+        # concatenating each column in that order is the serial assembly.
+        starts_0 = np.concatenate(draws["starts_0"].tolist())
+        lengths = np.concatenate(draws["lengths"].tolist())
+        is_plus = np.concatenate(draws["is_plus"].tolist())
+        probs = np.concatenate(draws["probs"].tolist())
+        n_per_region = np.array([len(s) for s in draws["starts_0"]],
+                                dtype=np.int64)
+        n_dup_redraws = int(sum(int(v) for v in draws["n_dup_redraws"]))
     else:
-        draws = iter(())
+        starts_0 = lengths = np.zeros(0, dtype=np.int64)
+        is_plus = np.zeros(0, dtype=bool)
+        probs = np.zeros(0, dtype=np.float64)
+        n_per_region = np.zeros(0, dtype=np.int64)
+        n_dup_redraws = 0
 
-    for i, (contig, gstart, d) in enumerate(zip(
-        srdf["contig"], srdf["start"], draws,
-    )):
-        n = int(region_counts[i])
-        n_requested += n
-        n_dup_redraws += int(d.n_dup_redraws)
-        starts_0, lengths, is_plus, probs = (
-            d.starts_0, d.lengths, d.is_plus, d.probs
-        )
-        if n == 0:
-            continue
-        n_drawn += len(starts_0)
-        if len(starts_0) < n:
-            n_short += 1
-        if not len(starts_0):
-            continue
+    n_requested = int(region_counts.sum())
+    asked = region_counts > 0
+    n_drawn = int(n_per_region[asked].sum())
+    n_short = int((n_per_region[asked] < region_counts[asked]).sum())
 
-        starts = int(gstart) + starts_0
-        stops = starts + lengths
-        strands = np.where(is_plus, "+", "-")
-
-        chunks.append(pd.DataFrame({
-            "contig": contig,
-            "start": starts,
-            "stop": stops,
-            "name": "",
-            "score": 0,
-            "strand": strands,
-            "mapq1": mapq,
-            "mapq2": mapq,
-            "p": probs,
-        }))
-
-    if chunks:
-        bed = pd.concat(chunks, ignore_index=True)
+    # One frame for every region at once.  Each region's rows sit in row
+    # order, as one DataFrame per region concatenated would put them, and the
+    # stable sort below then gives the same row order as that per-region
+    # build did.
+    gstarts = np.asarray(srdf["start"].to_numpy(), dtype=np.int64)
+    starts = np.repeat(gstarts, n_per_region) + starts_0
+    stops = starts + lengths
+    strands = np.where(is_plus, "+", "-")
+    bed = pd.DataFrame({
+        "contig": np.repeat(srdf["contig"].to_numpy(dtype=object),
+                            n_per_region),
+        "start": starts,
+        "stop": stops,
+        "name": "",
+        "score": 0,
+        "strand": strands,
+        "mapq1": mapq,
+        "mapq2": mapq,
+        "p": probs,
+    })
+    if len(bed):
         bed.sort_values(["contig", "start", "stop"], kind="stable", inplace=True)
-    else:
-        bed = pd.DataFrame(columns=["contig", "start", "stop", "name", "score",
-                                    "strand", "mapq1", "mapq2", "p"])
 
     bed_out = bed[["contig", "start", "stop", "name", "score",
                    "strand", "mapq1", "mapq2"]]
@@ -478,11 +493,17 @@ def simulate_fragments_to_bed(
             meta_parts.append(f"sample={sample_id}")
         f.write(f"# {' '.join(meta_parts)}\n")
         f.write("contig\tstart\tstop\tstrand\tp\n")
-        for row in bed.itertuples(index=False):
-            f.write(
-                f"{row.contig}\t{row.start}\t{row.stop}\t"
-                f"{row.strand}\t{row.p:.17g}\n"
-            )
+        # Python-level columns, formatted in blocks: one write per block
+        # rather than per row, with memory bounded for a full region set.
+        cols = [bed[c].to_numpy() for c in ("contig", "start", "stop",
+                                            "strand", "p")]
+        for lo in range(0, len(bed), _SIDECAR_BLOCK_ROWS):
+            hi = lo + _SIDECAR_BLOCK_ROWS
+            f.write("".join(
+                f"{c}\t{s}\t{e}\t{st}\t{p:.17g}\n"
+                for c, s, e, st, p in zip(*(col[lo:hi].tolist()
+                                            for col in cols))
+            ))
 
     all_p = bed["p"].to_numpy(dtype=np.float64) if len(bed) else np.array(
         [], dtype=np.float64

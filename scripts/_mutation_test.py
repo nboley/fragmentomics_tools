@@ -246,17 +246,19 @@ MUTATIONS = [
      '        s_tab = r["start_fwd"] if is_plus else r["end_rev"]\n        e_tab = r["end_fwd"] if is_plus else r["start_rev"]',
      '        s_tab = r["end_rev"] if is_plus else r["end_rev"]\n        e_tab = r["start_rev"] if is_plus else r["start_rev"]'),
 
-    # M28: strand column flipped (retargeted: np.where moved to strands var)
+    # M28: strand column flipped (retargeted: np.where moved to strands var,
+    # then out of the per-region loop when the writer was vectorised)
     ("M28", "writer strand column flipped",
      "background_model/simulator/draw.py",
-     '        strands = np.where(is_plus, "+", "-")',
-     '        strands = np.where(is_plus, "-", "+")'),
+     '    strands = np.where(is_plus, "+", "-")',
+     '    strands = np.where(is_plus, "-", "+")'),
 
-    # M29: 1-based start
+    # M29: 1-based start (retargeted: the writer builds every region's starts
+    # in one np.repeat rather than one int(gstart) + starts_0 per region)
     ("M29", "writer start is 1-based",
      "background_model/simulator/draw.py",
-     "        starts = int(gstart) + starts_0",
-     "        starts = int(gstart) + starts_0 + 1"),
+     "    starts = np.repeat(gstarts, n_per_region) + starts_0",
+     "    starts = np.repeat(gstarts, n_per_region) + starts_0 + 1"),
 
     # M30: remove the U1 coercion on fragment_strands (library)
     ("M30", "remove U1 coercion on fragment_strands (library)",
@@ -295,11 +297,12 @@ MUTATIONS = [
      "        if not n_plus or not n_minus:\n            raise AssertionError(",
      "        if not n_plus and not n_minus:\n            raise AssertionError("),
 
-    # M24: drop valid on ends in W_s (the three-factor weight line)
+    # M24: drop valid on ends in W_s (retargeted: the end factor is now
+    # gathered once over the 1-D end span, then windowed into W_s)
     ("M24", "drop valid on ends in W_s",
      "background_model/simulator/draw.py",
-     "        W_s = e_tab[track[ends_all]] * valid[ends_all] * fl.densities[None, :]",
-     "        W_s = e_tab[track[ends_all]] * fl.densities[None, :]"),
+     "        e_end = e_tab[track[end_span]] * valid[end_span]",
+     "        e_end = e_tab[track[end_span]]"),
 
     # ── Owner decision 166: seeding and parallel determinism ──────────────
 
