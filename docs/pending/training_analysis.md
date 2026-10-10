@@ -1672,4 +1672,118 @@ value (difference 0.0e+00).
    It predates this work and affects the correction, not the prior.
 4. **One sample.** Nothing here measures transfer across samples.
 
+---
+
+## 12. Full Simulation Set vs Real Data — Paired Runs (2026-10-10)
+
+Section 11's pilot used a random 10% of regions. This runs the full simulation
+set AND real data through the same pipeline, matched so that differences are
+attributable to the data rather than the configuration.
+
+### Matched by construction
+
+| | matched |
+|---|---|
+| regions | identical 66,649 (contigs and starts verified equal) |
+| splits | identical 53,321 / 6,664 / 6,664, 100.00% agreement, seed 42 |
+| geometry | identical, `config_hash d5e89191901ea991`, `l_seq 1908` |
+| hyperparameters | 8 epochs, lr 1e-3, batch 32, bf16-mixed, `--val-check-interval 0.25`, `--freeze-hex`, `--nb-w0 0.0`, `min_N 10` |
+
+They differ **only** in the data: the sim was seeded from **RD-56804**
+(2,397,106 fragments, 36/region); real **is** RD-56413-Lib1 (1,123,884
+fragments, 17/region). That 2.2x density gap is sequencing depth between two
+libraries, not deduplication — both have near-identical duplicate rates
+(0.746 vs 0.733) and the deduped depth ratio (2.22x) matches the observed
+store ratio (2.13x).
+
+![Full sim vs real training curves](training_analysis_plots/23_sim_full_vs_real_curves.png)
+
+### Results, TEST split, region-weighted
+
+A baseline is added here: **uniform cut-site position with the marginal
+fragment-length distribution**, `p(m,L,s) = (1/tile_size) * p_L(L) * (1/2)`,
+i.e. `-log p = ln(2048) - log p_L(L)`. It uses the train-fit `p_L` from the hex
+tables (the same one the prior uses, so no leakage) and a uniform 1/2 strand.
+It separates the length contribution from the sequence contribution, which the
+hex prior otherwise conflates.
+
+| run | uniform | unif+p_L | prior | model | oracle | captured vs prior |
+|---|---|---|---|---|---|---|
+| SIM 10pct | 12.674475 | 12.409225 | 12.214898 | 12.105756 | 11.987397 | 48.0% |
+| SIM full | 12.674475 | 12.402190 | 12.071311 | 12.034882 | 12.007078 | 56.7% |
+| REAL | 12.674475 | 12.501596 | 12.142214 | 11.996969 | — | — |
+
+Real has no oracle, so no capture fraction exists for it.
+
+`captured vs prior = (prior - model) / (prior - oracle)` — the share of the
+headroom remaining **after** the free analytical prior. Measured from uniform
+instead, the same rows read 82.8% and 95.8%, but that denominator is dominated
+by a zero-parameter table anyone obtains for free and so mostly measures the
+prior rather than the model.
+
+### Additive decomposition
+
+The three gains sum exactly to `uniform - model` in every row.
+
+| run | len gain | seq gain | corr gain | total |
+|---|---|---|---|---|
+| SIM 10pct | 0.265250 | 0.194327 | 0.109142 | 0.568719 |
+| SIM full | 0.272285 | 0.330879 | 0.036429 | 0.639593 |
+| REAL | 0.172879 | 0.359382 | 0.145245 | 0.677506 |
+
+`len gain = uniform - (unif+p_L)`, `seq gain = (unif+p_L) - prior`,
+`corr gain = prior - model`.
+
+### Findings
+
+**1. More data helps, and removes the overfitting.** Test capture (vs prior)
+48.0% -> 56.7%. The pilot's overfit-past-oracle artefact is gone: train capture
+was 102.3% on the pilot, 98.2% on the full set. The curves show it directly —
+the pilot rises monotonically after epoch 7, the full set plateaus and stays
+flat.
+
+**2. The neural correction is worth ~4x more on real data than the simulation
+says.** Correction gain on test: 0.036429 (sim full) vs **0.145245** (real).
+The simulation is generated *from* a hexamer propensity, so a hexamer prior is
+nearly sufficient there and the learned arm has almost nothing left to find.
+Real fragmentation is not hexamer-shaped.
+**Do not use simulation capture% to judge whether the neural arm earns its
+keep.** It reports the correction as nearly worthless where real data makes it
+the largest non-free component.
+
+**3. The simulation's prior advantage is LENGTH, not sequence.** The sim's
+prior beats real's (0.603 vs 0.532), which invites the reading that the sim has
+stronger cut-site bias. Decomposed, the opposite holds for sequence: the sim's
+length gain is 0.099 higher, but its **sequence gain is 0.028 lower** (0.331 vs
+0.359). Real carries slightly more hexamer information. An independent
+KL(p‖uniform) comparison of the tables agrees (real 0.268 vs sim 0.260).
+
+**4. More data improves the sequence prior, not the length prior.** Across the
+two sim runs, seq gain 0.194 -> 0.331 while len gain only 0.265 -> 0.272. Four
+tables of 4,096 hexamers need far more data than 156 length bins, which are
+already well determined at 241K fragments.
+
+**5. The full sim is saturated after one epoch; real is not saturated at
+eight.** The sim reaches ~12.032 by epoch 1 and moves 0.0009 over the last two
+epochs, so its residual 3.6% gap to the oracle is model capacity, not training
+time. Real's best is at the **final** validation check, still descending.
+**`11.996969` is therefore an upper bound on real's NLL, and 0.145245 a lower
+bound on its correction gain.** Real at 17 fragments/region needs more epochs
+than sim at 36.
+
+### Caveats
+
+- **Different libraries.** The sim is seeded from RD-56804, the real run is
+  RD-56413-Lib1. Sim-vs-real differences carry a sample-identity and a 2.2x
+  depth confound on top of everything else.
+- **Pilot vs full is not paired.** They have different test region sets (a
+  random 10% vs all), so their oracles differ (11.987397 vs 12.007078). It is
+  "how the pipeline does on its own data" in each case, not a controlled
+  contrast.
+- **Real is undertrained**, as above.
+- `max/min` on a hexamer table is **not** comparable across sample sizes; use
+  KL. The two sim tables share one generative propensity, yet max/min reads
+  216.7 vs 561.2 while KL reads 0.353 vs 0.260 — the statistics move in
+  opposite directions with n.
+
 <!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/training_analysis.md", "title": "[WIP] Background Model v2 — Simulation Study Training Analysis", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T22:07:11.520404+00:00", "page_id": "4963532846", "published_version": 3} -->
