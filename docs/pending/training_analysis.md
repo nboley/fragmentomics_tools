@@ -1582,14 +1582,15 @@ has a sign.
 
 Oracle normalised **per region**.
 
-| split | regions | oracle (ceiling) | prior | model | captured |
-|---|---|---|---|---|---|
-| train | 5210 | 11.972525 | 12.095545 | 11.956233 | 102.3% |
-| val | 655 | 11.979271 | 12.203930 | 12.084561 | 84.9% |
-| **test** | **647** | **11.987397** | **12.214898** | **12.105756** | **82.8%** |
+| split | regions | uniform | prior | model | oracle (ceiling) | captured |
+|---|---|---|---|---|---|---|
+| train | 5210 | 12.674475 | 12.095545 | 11.956233 | 11.972525 | 102.3% |
+| val | 655 | 12.674475 | 12.203930 | 12.084561 | 11.979271 | 84.9% |
+| **test** | **647** | 12.674475 | **12.214898** | **12.105756** | **11.987397** | **82.8%** |
 
-uniform = ln(319,488) = 12.674475.
-`captured = (uniform - model) / (uniform - oracle)`.
+`captured = (uniform - model) / (uniform - oracle)`, with
+uniform = ln(1024 x 156 x 2) = ln(319,488). It is constant across splits but
+carried in the table so each row can be checked without looking away.
 
 **On held-out test the model captures 82.8% of the achievable bias.** The
 zero-parameter analytical prior alone captures 66.9%; the neural correction
