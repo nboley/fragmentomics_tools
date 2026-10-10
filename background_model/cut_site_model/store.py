@@ -7,7 +7,8 @@ tracks (the NB ancillary targets).
 Store layout (zarr v2):
     /attrs: config_json, config_hash, created_utc, split_version, max_len, ...
     /tiles/{contig, start, stop, strand, region_id, split, seq, mask}
-    /samples/{library, role, total_fragments}
+    /samples/{library, total_fragments}   (stores built before 2026-10-10
+                                           also carry an unread ``role``)
     /fragments/ (CSR over flat index u = s*T + t)
         indptr   (S*T + 1,)  int64
         start    (nnz,)      uint16   # region-LOCAL left endpoint p

@@ -104,10 +104,12 @@ def main():
     p.add_argument("--min-N", type=int, default=10)
     p.add_argument("--seed", type=int, default=None,
                    help="Seeds model init and the shuffle (seed_everything) "
-                        "and keys the train jitter stream. Without it the "
-                        "jitter is still reproducible (fixed default key) but "
-                        "init and shuffle are not. CUDA kernels may still be "
-                        "nondeterministic.")
+                        "and keys the train jitter stream. Without it each "
+                        "worker's sequence of jitter values still repeats "
+                        "(fixed default key, same --workers), but init and "
+                        "the shuffle are unseeded, so which item receives "
+                        "which jitter differs between runs. CUDA kernels may "
+                        "still be nondeterministic.")
     p.add_argument("--hex-tables", default=None,
                    help="Path to Stage 1 hex tables (.npz) for two-stage training")
     p.add_argument("--freeze-hex", action="store_true",

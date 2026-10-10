@@ -12,10 +12,13 @@ may lie past the crop edge.  This gives |D_L| = P for every in-band L.
 calls the same function so that the hex prior and the model see one rule.
 
 The stage-1 hex tables are built over a population that differs from this
-loader's in three deliberate ways: centred crop only, no ``min_N``, and no
-``samples/role`` filter (``compute_hex_tables`` docstring has the reasons).
-A change here to admission, crop geometry, ``min_N`` semantics or the role
-filter must be reflected there, and that list kept true.
+loader's in two deliberate ways: centred crop only, and no ``min_N``
+(``compute_hex_tables`` docstring has the reasons).  A change here to
+admission, crop geometry or ``min_N`` semantics must be reflected there, and
+that list kept true.
+
+Every sample in the store is used.  There is no sample-role filter: older
+stores carry a ``samples/role`` array, and nothing reads it.
 """
 
 from __future__ import annotations
@@ -36,9 +39,8 @@ from background_model.cut_site_model.store import (
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 
-# Split and role codes (same as 12-track dataset)
+# Tile split codes (same as 12-track dataset)
 _SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
-_ROLE_CODES = {"train": 0, "heldout": 1, "dropped_low_depth": 2}
 
 # Jitter-stream key when no seed is given.  Kept from the PID-keyed version.
 _DEFAULT_JITTER_SEED = 0x9E3779B9
@@ -106,13 +108,15 @@ class CutSiteFragmentDataset(Dataset):
     ``train_mode=True`` draws ``j`` uniformly from ``[-jitter, jitter]``,
     one fresh draw per ``__getitem__`` call, from a stream keyed on
     ``(seed, worker)``: ``worker`` is the DataLoader worker id, or the main
-    process when there are no workers.  The same ``seed`` and the same item
-    order therefore give the same jitters in every run and every process,
-    and two workers never share a stream.  The stream is sequential, not a
-    function of the item index, so an item gets a fresh ``j`` each time it
-    is drawn (the design relies on this to recover jitter diversity).  With
-    non-persistent workers each epoch restarts every worker's stream; the
-    shuffle still pairs the draws with different items.
+    process when there are no workers.  The same ``seed``, the same item
+    order AND the same ``num_workers`` therefore give the same jitters in
+    every run and every process; a different ``num_workers`` gives a
+    different sequence.  Two workers never share a stream.  The stream is
+    sequential, not a function of the item index, so an item gets a fresh
+    ``j`` each time it is drawn (the design relies on this to recover
+    jitter diversity).  With non-persistent workers each epoch restarts
+    every worker's stream; the shuffle still pairs the draws with different
+    items.
     The stream used to be keyed on ``(seed, os.getpid())``, which no seed
     could reproduce.  The change moved every train-mode jitter, and so moved
     training numbers once (run-to-run spread under the PID key was about
@@ -126,7 +130,6 @@ class CutSiteFragmentDataset(Dataset):
         model_L_min: int,
         model_L_max: int,
         split: str,
-        sample_role: str = "train",
         min_N: int = 10,
         train_mode: bool = True,
         jitter: Optional[int] = None,
@@ -135,8 +138,6 @@ class CutSiteFragmentDataset(Dataset):
     ):
         if split not in _SPLIT_CODES:
             raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)}")
-        if sample_role not in _ROLE_CODES:
-            raise ValueError(f"sample_role must be one of {sorted(_ROLE_CODES)}")
 
         self.store_path = store_path
         self.model_input_size = int(model_input_size)
@@ -177,14 +178,11 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── build (sample, tile) index ───────────────────────────────────
         split_arr = root["tiles/split"][:]      # (T,)
-        role_arr = root["samples/role"][:]       # (S,)
         N_totals = root["totals/N"][:]           # (S, T, 2)
         self.n_tiles = N_totals.shape[1]
         self.n_samples = N_totals.shape[0]
 
         split_code = _SPLIT_CODES[split]
-        role_code = _ROLE_CODES[sample_role]
-        sample_ok = np.nonzero(role_arr == role_code)[0]
         tile_ok = np.nonzero(split_arr == split_code)[0]
 
         # min_N filters on the STORED fragment count per (sample, region),
@@ -193,12 +191,12 @@ class CutSiteFragmentDataset(Dataset):
         # docstring).
         frag_indptr = root["fragments/indptr"][:]  # (S*T + 1,)
         index = []
-        for s in sample_ok:
+        for s in range(self.n_samples):
             for t in tile_ok:
-                u = int(s) * self.n_tiles + int(t)
+                u = s * self.n_tiles + int(t)
                 n_frags = int(frag_indptr[u + 1] - frag_indptr[u])
                 if n_frags >= self.min_N:
-                    index.append((int(s), int(t)))
+                    index.append((s, int(t)))
         self.index = index
 
         # ── worker-safe state ────────────────────────────────────────────

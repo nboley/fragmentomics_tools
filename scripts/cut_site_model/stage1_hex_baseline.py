@@ -109,7 +109,7 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
     Fragment population vs ``CutSiteFragmentDataset``.  The crop origin and
     the admission rule are the loader's own ``crop_origin`` /
     ``admit_fragments``, so per (sample, tile) this admits exactly the rows
-    the loader admits at ``train_mode=False``.  Three differences remain, and
+    the loader admits at ``train_mode=False``.  Two differences remain, and
     they are deliberate here; keep this list in step with the loader module
     docstring, which points back to it:
 
@@ -118,11 +118,8 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
     - No ``min_N``.  (sample, tile) pairs below the loader's ``min_N`` still
       count.  The owner rates ``min_N`` a performance filter, so the prior
       uses the extra data.  Adding the filter would change the tables.
-    - No ``samples/role`` filter: every sample in the store counts.
-      ``build_store.py`` writes ``role = 0`` (train) for every sample, so on
-      every store it builds this equals the loader's ``sample_role="train"``.
-      A store holding other roles would let held-out or dropped samples into
-      the prior.  Not changed here (that would change the tables).
+
+    Both this function and the loader use every sample in the store.
     """
     # The model reads these tables with HEX_K = KMER, so no other k is usable.
     if k != KMER:
@@ -442,8 +439,6 @@ def train_conv_baseline(root, config, hex_tables, split="train",
     print(f"\n  Final conv train loss: {conv_loss:.6f}")
 
     return {"conv1": conv1, "head": head}
-
-    return learned_start, learned_stop
 
 
 def main():

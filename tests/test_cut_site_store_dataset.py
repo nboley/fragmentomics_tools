@@ -42,7 +42,7 @@ from background_model.cut_site_model.dataset import (
 
 def _create_synthetic_store(tmp_path, tile_size=256, jitter=32, n_tiles=4,
                             n_samples=1, n_frags_per_tile=50, seed=42,
-                            full_start_range=False):
+                            full_start_range=False, legacy_roles=None):
     """Create a minimal cut-site store with random fragments.
 
     By default every fragment ends inside ``l_target`` (starts are drawn
@@ -50,6 +50,11 @@ def _create_synthetic_store(tmp_path, tile_size=256, jitter=32, n_tiles=4,
     right edge.  ``full_start_range=True`` draws starts from all of
     ``[0, l_target)``, as ``build_store.py`` admits them; ends may then run
     past ``l_target`` and those endpoints are clipped.
+
+    ``legacy_roles`` (one uint8 per sample) also writes ``samples/role``, as
+    stores built before 2026-10-10 did.  The default writes no role array,
+    as ``build_store.py`` does now.  The role array does not affect the
+    rng draws, so the same arguments give the same fragments either way.
     """
     rng = np.random.default_rng(seed)
     rf_budget = WINDOW_HALF + 5  # enough for the model
@@ -88,7 +93,8 @@ def _create_synthetic_store(tmp_path, tile_size=256, jitter=32, n_tiles=4,
     # /samples/
     samples = root.create_group("samples")
     _create_array(samples, "library", data=np.array(["lib1"] * S, dtype="<U64"))
-    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))  # all train
+    if legacy_roles is not None:
+        _create_array(samples, "role", data=np.asarray(legacy_roles, dtype="uint8"))
     _create_array(samples, "total_fragments", data=np.array([n_frags_per_tile * T] * S, dtype="uint64"))
 
     # /fragments/ — random fragments per (s, t)
@@ -267,7 +273,6 @@ class TestStartBasedAdmission:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=0,
             train_mode=False,  # centred crop, j=0
         )
@@ -292,7 +297,6 @@ class TestStartBasedAdmission:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=0,
             train_mode=False,
         )
@@ -318,7 +322,6 @@ class TestStartBasedAdmission:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=0,
             train_mode=False,
         )
@@ -400,8 +403,8 @@ class TestMinNGatesStoredCount:
 class TestStage1SharesLoaderAdmission:
     @pytest.mark.parametrize("tile_size,jitter", [(256, 32), (512, 64)])
     def test_stage1_population_equals_loader_at_j0(self, tmp_path, tile_size, jitter):
-        """On a store where the three documented differences are vacuous
-        (all roles train, min_N=0), ``compute_hex_tables`` must count exactly
+        """On a store where the two documented differences are vacuous
+        (j = 0, min_N=0), ``compute_hex_tables`` must count exactly
         the fragments the loader admits at ``train_mode=False``: same total,
         same length histogram.  Starts span all of ``l_target``, so rows fall
         off both crop edges and some long fragments start near the right edge
@@ -555,7 +558,6 @@ class TestDatasetCollate:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=0,
             train_mode=False,
         )
@@ -578,7 +580,6 @@ class TestDatasetCollate:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=0,
             train_mode=False,
         )
@@ -612,7 +613,6 @@ class TestMinNFiltering:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=10,  # 5 < 10, so all tiles should be excluded
             train_mode=False,
         )
@@ -632,11 +632,50 @@ class TestMinNFiltering:
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
             split="train",
-            sample_role="train",
             min_N=10,
             train_mode=False,
         )
         assert len(ds) == 2, f"Expected 2 items but got {len(ds)}"
+
+
+class TestNoSampleRoles:
+    """The loader uses every sample.  Stores built before 2026-10-10 carry a
+    ``samples/role`` array; the loader must ignore it, and must not need it."""
+
+    KEYS = ("x", "frag_m", "frag_L_idx", "frag_s", "frag_N",
+            "frag_store_idx", "endpoints", "mask")
+
+    def _items(self, store_path, cfg, preload):
+        model = CutSiteFragmentModel(
+            tile_size=cfg.tile_size, N1=4, K=4, N2=2, H=2, L_chunk=32)
+        ds = CutSiteFragmentDataset(
+            store_path=store_path, model_input_size=model.model_input_size,
+            model_L_min=cfg.L_min, model_L_max=cfg.L_max,
+            split="train", min_N=0, train_mode=False, preload=preload)
+        return ds.index, [ds[i] for i in range(len(ds))]
+
+    @pytest.mark.parametrize("preload", [True, False])
+    def test_legacy_role_array_is_ignored(self, tmp_path, preload):
+        """Same fragments, one store without ``samples/role`` and one with
+        roles train / heldout / dropped_low_depth: identical index and
+        identical items.  A reinstated role filter drops samples 1 and 2
+        from the legacy store; an unconditional role read fails on the new
+        one."""
+        kw = dict(tile_size=256, jitter=32, n_tiles=2, n_samples=3,
+                  n_frags_per_tile=30, seed=5)
+        (tmp_path / "new").mkdir()
+        (tmp_path / "old").mkdir()
+        new_path, cfg = _create_synthetic_store(tmp_path / "new", **kw)
+        old_path, _ = _create_synthetic_store(
+            tmp_path / "old", legacy_roles=[0, 1, 2], **kw)
+        assert "role" not in zarr.open_group(new_path, mode="r")["samples"]
+
+        new_index, new_items = self._items(new_path, cfg, preload)
+        old_index, old_items = self._items(old_path, cfg, preload)
+        assert new_index == old_index == [(s, t) for s in range(3) for t in range(2)]
+        for a, b in zip(new_items, old_items):
+            for key in self.KEYS:
+                assert torch.equal(a[key], b[key]), key
 
 
 class TestPreloadFalsePath:
@@ -650,14 +689,14 @@ class TestPreloadFalsePath:
             store_path=store_path,
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
-            split="train", sample_role="train", min_N=0,
+            split="train", min_N=0,
             train_mode=False, preload=True,
         )
         ds_no = CutSiteFragmentDataset(
             store_path=store_path,
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
-            split="train", sample_role="train", min_N=0,
+            split="train", min_N=0,
             train_mode=False, preload=False,
         )
         item_pre = ds_pre[0]
@@ -706,7 +745,7 @@ class TestStartFilterBoundary:
             store_path=store_path,
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
-            split="train", sample_role="train", min_N=0, train_mode=False,
+            split="train", min_N=0, train_mode=False,
         )
         item = ds[0]
         frag_m = item["frag_m"].numpy()

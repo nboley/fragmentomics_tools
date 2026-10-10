@@ -321,10 +321,11 @@ class TestT7Hygiene:
             + "\n  ".join(offenders))
 
         # Non-vacuity. 18 modules sit outside simulator/ today (4 top-level,
-        # 10 in band_model/, 4 in cut_site_model/), plus the core; far fewer
-        # means the walk is skipping files. And they import each other, so
+        # 10 in band_model/, 4 in cut_site_model/), plus the core: 19 files.
+        # Fewer means the walk is skipping files (or one was deleted, which
+        # should lower this floor on purpose). And they import each other, so
         # seeing no first-party import means the walker is blind.
-        assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
+        assert len(scanned) >= 19, f"scanned only {len(scanned)} modules"
         # The walk descends into sibling sub-packages, not just the top level:
         # band_model/ and cut_site_model/ are model code and are held to the
         # same boundary.  cut_site_model/ is the model that is evaluated blind.

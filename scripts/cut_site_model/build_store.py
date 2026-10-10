@@ -278,7 +278,6 @@ def build_store(args):
 
     samples = root.create_group("samples")
     _create_array(samples, "library", data=np.array([os.path.basename(args.sample)], dtype="<U256"))
-    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
     _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
 
     frags = root.create_group("fragments")

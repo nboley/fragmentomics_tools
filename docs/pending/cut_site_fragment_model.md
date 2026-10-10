@@ -329,7 +329,7 @@ disp_bp      = dispersion_head(h_centre)      # (B, 2, P) FROZEN at log_dispersi
 
 A **separate zarr store** from the 12-track store (two stores, deliberately). It
 reuses the existing store's mechanical conventions (zarr v2 format, `zarr==2.18.3`
-pin, CSR triples, `split`/`role` codes, bulk single-write build) but carries a
+pin, CSR triples, tile `split` codes, bulk single-write build) but carries a
 different payload: per sample × region the **fragment list** (the object the
 multinomial trains on) and the **two per-position endpoint count tracks** (the
 ancillary NB targets), both derived from the identical fragment list at build
@@ -339,7 +339,7 @@ time.
 /attrs: config_json, config_hash, created_utc, split_version, ...
         (the length range is in config_json as L_min, L_max; there is no max_len attr)
 /tiles/{contig, start, stop, strand, region_id, split, seq, mask}
-/samples/{library, role, total_fragments}
+/samples/{library, total_fragments}
 /fragments/ (CSR over flat index u = s*T + t)
     indptr   (S*T + 1,)  int64
     start    (nnz,)      uint16   # region-LOCAL left endpoint p (base)
@@ -362,8 +362,7 @@ time.
   A build-time test asserts these tracks equal a recomputation from
   `/fragments/`, closing the ±1 gap at the source.
 - **`/totals/N` has 2 columns**, not 12 — the count axis differs, which is why
-  this store is separate.
-- **Geometry** is recorded as the sim store does today (`tile_size`, `jitter`,
+  this store is separate.- **Geometry** is recorded as the sim store does today (`tile_size`, `jitter`,
   `rf_budget`, derived `l_target = tile_size + 2·jitter`, `l_seq = tile_size +
   2·(jitter + rf_budget)`). The v4 stores run at `tile_size ∈ {2048, 1024}`,
   `jitter = 256` → `l_target ∈ {2560, 1536}`; invoke the builder with
@@ -400,18 +399,23 @@ x         : (4, l_in)              float32   one-hot sequence
 frag_m    : (n_frag,)              int64     start positions in crop coords
 frag_L_idx: (n_frag,)              int64     L index (0-based, L - L_MIN)
 frag_s    : (n_frag,)              int64     strand (0 or 1)
-frag_N    : scalar                 int64     total fragment count
+frag_N    : scalar                 int64     fragments ADMITTED to this crop (== n_frag)
 endpoints : (2, tile_size)         float32   the two NB target tracks
 mask      : (tile_size,)           bool      valid positions
 ```
+
+`frag_N` is not the stored count. `min_N` gates on the STORED count, so an
+indexed item can still emit `frag_N < min_N`, including 0 (see `min_N` below).
 
 The multinomial shares one per-region `logp` map across the `S` samples:
 `NLL_s = -Σ_{(m,L,s)∈frags_s} logp[m,L,s] / N_s`, averaged over samples.
 
 **Crop.** The jittered crop uses `jitter_matrix` with concentric widths
 (seq → `l_in`, targets → `tile_size`). A fragment survives iff its START
-lies in `[0, tile_size)` in crop coordinates (`cut_site_model/dataset.py:234-237`),
-and its length lies in `[L_min, L_max]`. `frag_m` is that start. The Dataset
+lies in `[0, tile_size)` in crop coordinates, and its length lies in
+`[L_min, L_max]` (both inclusive). The rule has one implementation,
+`admit_fragments` in `cut_site_model/dataset.py`, with the crop offset from
+`crop_origin`; `stage1_hex_baseline.compute_hex_tables` calls both. `frag_m` is that start. The Dataset
 does not recompute an end. The store guarantees start ≤ end.  Train draws `j ∈ [-jitter, jitter]`; **val and
 test use `j = 0` (centred crop) — jitter is training-only**. "Centred" names the
 crop position, not centre admission. `jitter_matrix`'s
@@ -434,8 +438,18 @@ regions within a batch. Document this in the dataset docstring so it is not
 **RC augmentation is DROPPED: `rc_prob = 0`.** There is no RC-equivariance
 requirement on this model and no RC-equivariance test.
 
-**`min_N` = 10.** Filter on **total fragment count per `(sample, region)`**:
-regions with fewer than 10 fragments for a sample are skipped.
+**`min_N` = 10.** Filter on the **stored fragment count per `(sample,
+region)`** (`indptr[u+1] - indptr[u]`, over all of `l_target`, before any
+crop): regions with fewer than 10 stored fragments for a sample are skipped.
+It does not bound `frag_N`, the count admitted to the crop.
+
+**Jitter stream.** Train mode draws one fresh `j` per `__getitem__` from a
+NumPy generator keyed on `(seed, worker)`: `worker` is the DataLoader worker
+id + 1, or 0 in the main process. The PID is not in the key, so `--seed`
+reproduces a run for the same item order and the same `num_workers`. The
+stream is sequential, not a function of the item index. `train.py` uses
+persistent workers whenever `--workers > 0`, so each worker's stream
+continues across epochs and every epoch draws fresh jitters.
 
 **Worker safety** is inherited verbatim: lazy per-PID zarr handle, optional
 in-memory preload with copy-on-write fork sharing, no CUDA in the dataset.
@@ -585,7 +599,7 @@ yourself (it moves per commit).
 
 ## Settled parameters
 
-- `min_N` = 10 (total fragment count per sample×region).
+- `min_N` = 10 (stored fragment count per sample×region, before the crop).
 - **Start-based fragment admission**: D = {(m, L, s) : m ∈ [0, P), L in-band,
   s ∈ {0,1}}. |D| = P × n_L × 2 = 319,488. |D_L| = P for all L — no length bias.
 - `WINDOW_HALF` = 181, `rf_budget` = 186 (WINDOW_HALF + 5).

@@ -102,7 +102,6 @@ def _build_test_store(tmp_path, tile_size=2048, jitter=256, L_min=25, L_max=179)
     # /samples/
     samples = root.create_group("samples")
     _create_array(samples, "library", data=np.array(["golden_chr6"], dtype="<U256"))
-    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
     total_frags = sum(len(fd[0]) for fd in frag_data)
     _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
 
@@ -202,7 +201,7 @@ class TestBuilderIntegration:
             store_path=store_path,
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
-            split="train", sample_role="train",
+            split="train",
             min_N=0, train_mode=False,
         )
         assert len(ds) > 0
@@ -221,7 +220,7 @@ class TestBuilderIntegration:
             store_path=store_path,
             model_input_size=model.model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max,
-            split="train", sample_role="train",
+            split="train",
             min_N=0, train_mode=False,
         )
         batch = cut_site_collate_fn([ds[0]])
