@@ -243,6 +243,16 @@ def count_split(store_path, split="train", min_N=0, verbose=True):
         n_tiles=len(ds), n_fragments_admitted=int(length_counts_all.sum()),
         n_fragments_counted=int(length_counts.sum()),
         n_dropped_invalid_or_masked=n_dropped,
+        # Reviewer F-01: a consumer of these counts cannot see from the arrays
+        # alone that the mask stops short.  `tiles/mask` spans the l_target
+        # window, but a right cut reaches up to L_max past the tile, so the
+        # last `n_bases - n_in_mask` cut positions are counted UNMASKED.
+        # Harmless while the mask is all-True, silently wrong if it is not —
+        # so it is recorded rather than left to the source comment.
+        mask_honoured_bases=int(n_in_mask),
+        cut_base_window=int(n_bases),
+        mask_unhonoured_bases=int(n_bases - n_in_mask),
+        mask_all_true=bool(mask_all.all()),
         git_sha=sha, git_dirty=dirty,
         date=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
