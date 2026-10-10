@@ -2,7 +2,7 @@
 
 Exercises: synthetic store → dataset → collate → model forward → loss →
 backward → optimizer step.  Also tests the multinomial NLL, annealed NB
-loss, and the ±1 alignment between fragment centres and model tap indices.
+loss, and which input bases one (start, length, strand) logit reads.
 """
 
 import numpy as np
@@ -232,43 +232,42 @@ class TestEndToEndTraining:
 
 
 # ---------------------------------------------------------------------------
-# ±1 alignment: fragment centres vs model tap indices
+# Tap geometry, read off the model's own gradients
 # ---------------------------------------------------------------------------
 
 
-class TestAlignmentBothParities:
-    """Verify that for both even and odd L, the fragment start m maps
-    correctly to the tap indices in h."""
+class TestLogitInputSupport:
+    """Which input bases one logit depends on, measured through the model.
 
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_tap_alignment_at_boundaries(self, L_val):
-        """For a fragment at the leftmost and rightmost valid starts,
-        verify the taps land within h."""
-        P = 256
-        h_width = P + 2 * WINDOW_HALF
-        o_l = WINDOW_HALF
-        o_r = WINDOW_HALF + L_val
+    The tap offsets live inside ``_compute_chunk``; a test that restates
+    them as local constants cannot fail.  Instead, back-propagate a single
+    logit ``(m, L, s)`` and read its support on the input: the left tap
+    reads ``x[W+m : W+m+6]`` (width-6 conv), the interior reads
+    ``x[W+m : W+m+L]``, and the right tap reads ``x[W+m+L : W+m+L+6]``, so
+    the support is exactly ``[W+m, W+m+L+5]`` with ``W = WINDOW_HALF``.
+    The upper end pins the right tap at ``m+L``, i.e. the cut AFTER the
+    last base ``m+L-1``; an off-by-one there moves it.  This pins CURRENT
+    geometry: the design doc's open issue 1 records that the hex prior keys
+    the 3' cut at ``m+L-1``.  If the owner resolves that, change this test.
+    Running m = 0 and m = P-1 also shows every tap is inside ``h`` (an
+    out-of-range gather raises).
+    """
 
-        # Leftmost start: m = 0
-        assert 0 <= 0 + o_l < h_width
-        assert 0 <= 0 + o_r < h_width
-
-        # Rightmost start: m = P - 1
-        assert 0 <= (P - 1) + o_l < h_width
-        assert 0 <= (P - 1) + o_r < h_width
-
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_cut_sites_are_L_apart(self, L_val):
-        """The two cut sites m and m+L are exactly L apart (not L-1)."""
-        o_l = WINDOW_HALF
-        o_r = WINDOW_HALF + L_val
-        assert o_r - o_l == L_val
-
-    def test_endpoint_base_vs_cut_site(self):
-        """Verify the ±1 distinction: right endpoint base = m+L-1,
-        right cut site = m+L."""
-        for L_val in (25, 26, 100, 179):
-            for m in (0, 128):
-                right_cut_site = m + L_val       # what the model taps
-                right_base = m + L_val - 1       # what /endpoints/last records
-                assert right_cut_site == right_base + 1
+    @pytest.mark.parametrize("strand", [0, 1])
+    @pytest.mark.parametrize("m", [0, 63])
+    @pytest.mark.parametrize("L_val", [L_MIN_INBAND, L_MIN_INBAND + 1, 100, L_MAX_INBAND])
+    def test_support_is_start_to_right_tap(self, L_val, m, strand):
+        P = 64
+        torch.manual_seed(0)
+        model = CutSiteFragmentModel(
+            tile_size=P, N1=8, K=8, N2=4, H=4, L_chunk=32).eval()
+        # w_out is zero-initialised (f_theta == 0 at init), which zeroes
+        # every input gradient.  Any nonzero value exposes the support.
+        with torch.no_grad():
+            model.w_out.normal_()
+        x = torch.rand(1, 4, model.model_input_size, requires_grad=True)
+        logits, _, _ = model(x)
+        logits[0, m, L_val - L_MIN_INBAND, strand].backward()
+        support = torch.nonzero(x.grad[0].abs().sum(0)).flatten().tolist()
+        lo = WINDOW_HALF + m
+        assert support == list(range(lo, lo + L_val + 6))

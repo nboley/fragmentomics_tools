@@ -320,15 +320,19 @@ class TestT7Hygiene:
             "model code imports the simulator (decision 187 boundary):\n  "
             + "\n  ".join(offenders))
 
-        # Non-vacuity. 14 modules sit outside simulator/ today (4 top-level,
-        # 10 in band_model/), plus the core; far fewer means the walk is
-        # skipping files. And they import each other, so seeing no first-party
-        # import means the walker is blind.
+        # Non-vacuity. 18 modules sit outside simulator/ today (4 top-level,
+        # 10 in band_model/, 4 in cut_site_model/), plus the core; far fewer
+        # means the walk is skipping files. And they import each other, so
+        # seeing no first-party import means the walker is blind.
         assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
         # The walk descends into sibling sub-packages, not just the top level:
-        # band_model/ is model code and is held to the same boundary.
-        assert os.path.join(pkg_dir, "band_model", "train.py") in scanned, (
-            "band_model/ was not scanned")
+        # band_model/ and cut_site_model/ are model code and are held to the
+        # same boundary.  cut_site_model/ is the model that is evaluated blind.
+        for sub in (("band_model", "train.py"),
+                    ("cut_site_model", "dataset.py"),
+                    ("cut_site_model", "model.py")):
+            assert os.path.join(pkg_dir, *sub) in scanned, (
+                f"{'/'.join(sub)} was not scanned")
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")

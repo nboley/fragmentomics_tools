@@ -23,9 +23,10 @@ import torch.nn as nn
 import zarr
 
 from background_model.constants import KMER, L_MAX, L_MIN, NHEX
+from background_model.cut_site_model.dataset import admit_fragments, crop_origin
 from background_model.cut_site_model.model import CUT_OFFSET_IN_KMER
 from background_model.cut_site_model.store import CutSiteStoreConfig, validate_length_range
-from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
+from background_model_core import jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 
 _SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2}
@@ -104,6 +105,24 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
                     each a (4^k,) float64 array of probabilities (sums to 1 within each table)
         p_L: (n_L,) float64 marginal length distribution
         stats: dict with counts and diagnostics
+
+    Fragment population vs ``CutSiteFragmentDataset``.  The crop origin and
+    the admission rule are the loader's own ``crop_origin`` /
+    ``admit_fragments``, so per (sample, tile) this admits exactly the rows
+    the loader admits at ``train_mode=False``.  Three differences remain, and
+    they are deliberate here; keep this list in step with the loader module
+    docstring, which points back to it:
+
+    - Centred crop (``j = 0``) only.  The tables are one deterministic
+      estimate; train-mode jitter is augmentation.  Same split, same tiles.
+    - No ``min_N``.  (sample, tile) pairs below the loader's ``min_N`` still
+      count.  The owner rates ``min_N`` a performance filter, so the prior
+      uses the extra data.  Adding the filter would change the tables.
+    - No ``samples/role`` filter: every sample in the store counts.
+      ``build_store.py`` writes ``role = 0`` (train) for every sample, so on
+      every store it builds this equals the loader's ``sample_role="train"``.
+      A store holding other roles would let held-out or dropped samples into
+      the prior.  Not changed here (that would change the tables).
     """
     # The model reads these tables with HEX_K = KMER, so no other k is usable.
     if k != KMER:
@@ -136,8 +155,8 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
     split_code = _SPLIT_CODES[split]
     tile_ok = np.nonzero(split_arr == split_code)[0]
 
-    # Crop geometry (j=0 for centre crop)
-    crop_start, _ = calculate_start_and_stop_from_jitter(l_target, tile_size, 0)
+    # Crop geometry (j=0 for centre crop): the loader's crop_origin.
+    crop_start = crop_origin(l_target, tile_size, 0)
 
     n_tiles = seq_all.shape[0]
     n_samples = frag_indptr.shape[0] // n_tiles - 1  # indptr has S*T + 1 entries
@@ -173,26 +192,21 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
             if flo == fhi:
                 continue
 
-            starts = frag_start[flo:fhi].astype(np.int64)
             lengths = frag_length[flo:fhi].astype(np.int64)
             strands = frag_strand[flo:fhi].astype(np.int64)
 
-            # Convert to crop coordinates
-            starts_crop = starts - crop_start
+            # The loader's admission rule, at j = 0: start in
+            # [0, tile_size) of the crop, L_min <= L <= L_max.
+            starts_crop, keep = admit_fragments(
+                frag_start[flo:fhi], lengths, crop_start,
+                tile_size, L_min, L_max,
+            )
 
-            for fi in range(len(starts)):
+            for fi in np.nonzero(keep)[0]:
                 st = starts_crop[fi]
                 L = lengths[fi]
                 s_val = strands[fi]
                 end = st + L - 1
-
-                if L < L_min or L > L_max:
-                    continue
-
-                # Start-based admission: min(start, end) in [0, tile_size)
-                min_pos = min(st, end)
-                if min_pos < 0 or min_pos >= tile_size:
-                    continue
 
                 # Length distribution
                 length_counts[L - L_min] += 1
@@ -275,7 +289,10 @@ def train_conv_baseline(root, config, hex_tables, split="train",
         rng = np.random.default_rng(42)
         tile_ok = rng.choice(tile_ok, max_tiles, replace=False)
 
-    crop_start, _ = calculate_start_and_stop_from_jitter(l_target, tile_size, 0)
+    # Same crop as compute_hex_tables.  This diagnostic deliberately does NOT
+    # use admit_fragments: it targets every cut that lands inside the tile,
+    # including cuts of fragments whose start lies outside it.
+    crop_start = crop_origin(l_target, tile_size, 0)
     n_tiles = seq_all.shape[0]
     n_samples = (len(frag_indptr) - 1) // n_tiles
 
