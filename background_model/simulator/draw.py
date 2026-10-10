@@ -35,8 +35,9 @@ from background_model.simulator.measure import FragmentLengthDist
 # Seeds and region indices are each ONE 32-bit word; see region_rng.
 _SEED_WORD_MAX: int = 2 ** 32
 
-# Sidecar rows formatted per write.  Bounds the text held at once (~60 MB)
-# for a full region set; any value gives the same bytes.
+# Sidecar rows formatted per write; any value gives the same bytes.  One block
+# is ~50 MB of text, but formatting it peaks near 230 MB (the per-column lists
+# and per-row strings before the join), measured at 2**20 rows.
 _SIDECAR_BLOCK_ROWS: int = 1 << 20
 
 

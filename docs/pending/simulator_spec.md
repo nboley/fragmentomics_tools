@@ -374,12 +374,18 @@ contiguous row.  The block, `t_s` and every draw are therefore bit-identical
 to the direct gather, for any `region_len` (checked bitwise at 1 to 2,047
 and four `f(L)` supports).  The C order is load-bearing: a
 differently laid-out block sums in another order and moves `t_s`'s last bits.
+`test_probs_bitwise_equal_pre_192_formula` pins this.  It recomputes `probs`
+with the old 2-D gather and compares bits, and it fails under `order="F"` or
+a shifted end span.
 
 The writer assembles all regions at once (decision 192).  It concatenates each
 returned column in row order, then applies the one stable sort.  It formats the
 sidecar in blocks of rows, not row by row.  The BED, the sidecar and
 `oracle_nll` are byte-identical to the per-region build it replaced.  This was
-checked on 200 and 2,000 regions at 1 and 16 workers.  The gzip level is
+checked on 200 and 2,000 regions at 1 and 16 workers, and on a synthetic
+2.4M-row, 66,649-region assembly that crosses three sidecar blocks.  Its peak
+traced memory there was 751 MiB, against 1,236 MiB for the per-region build.
+`test_sidecar_block_boundaries_keep_every_row` pins the block seams.  The gzip level is
 unchanged (the `gzip.open` default, 9), and it is now most of the parent's
 remaining time.
 
