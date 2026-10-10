@@ -12,14 +12,14 @@ import numpy as np
 import pytest
 import zarr
 
-from background_model.cut_site_model import CutSiteFragmentModel, _compute_geometry
+from background_model.cut_site_model.model import CutSiteFragmentModel, _compute_geometry
 from background_model.band_model.store import _create_array
-from background_model.cut_site_store import (
+from background_model.cut_site_model.store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
     validate_length_range,
 )
-from background_model.cut_site_dataset import CutSiteFragmentDataset, cut_site_collate_fn
+from background_model.cut_site_model.dataset import CutSiteFragmentDataset, cut_site_collate_fn
 from fragmentomics_tools.fragment_array import RegionFragmentArray
 from fragmentomics_tools.region import Region
 
@@ -183,7 +183,7 @@ class TestBuilderIntegration:
             recomputed = recompute_endpoints_from_fragments(fs, fl, cfg.l_target)
 
             elo, ehi = int(ep_indptr[t]), int(ep_indptr[t + 1])
-            from background_model.cut_site_store import densify_endpoints
+            from background_model.cut_site_model.store import densify_endpoints
             stored = densify_endpoints(
                 np.asarray(root["endpoints/pos"][elo:ehi]),
                 np.asarray(root["endpoints/track"][elo:ehi]),
@@ -258,7 +258,7 @@ class TestExtractWorkerVsLibrary:
         """_extract_worker output must match RegionFragmentArray for the same region."""
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-        from scripts.build_cut_site_store import _extract_worker
+        from scripts.cut_site_model.build_store import _extract_worker
         from fragmentomics_tools.fragment_array import RegionFragmentArray
 
         L_min, L_max = 25, 179

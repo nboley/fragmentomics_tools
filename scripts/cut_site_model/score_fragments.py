@@ -69,14 +69,14 @@ import zarr
 from torch.utils.data import DataLoader, Dataset
 
 # Bootstrap: background_model is not an installed package
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from background_model.cut_site_dataset import (  # noqa: E402
+from background_model.cut_site_model.dataset import (  # noqa: E402
     CutSiteFragmentDataset,
     cut_site_collate_fn,
 )
-from background_model.cut_site_model import CutSiteFragmentModel  # noqa: E402
-from background_model.cut_site_store import CutSiteStoreConfig  # noqa: E402
+from background_model.cut_site_model.model import CutSiteFragmentModel  # noqa: E402
+from background_model.cut_site_model.store import CutSiteStoreConfig  # noqa: E402
 from background_model_core import calculate_start_and_stop_from_jitter  # noqa: E402
 
 log = logging.getLogger(__name__)

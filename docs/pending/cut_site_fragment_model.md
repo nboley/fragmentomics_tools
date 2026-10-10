@@ -43,7 +43,7 @@ independent — start in `[0, P)` gives `P` positions for every `L`).
 
 Admission reads `start` directly. No `min(start, end)` remains in the store
 builder or the dataset. The store is verified, not assumed, to hold fragments
-left-to-right. `scripts/build_cut_site_store.py` raises `ValueError` on any
+left-to-right. `scripts/cut_site_model/build_store.py` raises `ValueError` on any
 fetched fragment with `stop < start`, before dedup (commit 7ea790e). The check
 covers every fragment `fetch_array` returns. That set is an overlap superset,
 so the check also sees fragments whose start lies outside the region.
@@ -57,18 +57,18 @@ so the check also sees fragments whose start lies outside the region.
   today. That changes which fragments enter the model, so it needs owner
   sign-off.
 
-`WINDOW_HALF = 181` (`cut_site_model.py:79`). The constructor enforces
-`WINDOW_HALF >= L_max - 1 = 179` (`cut_site_model.py:288`). Derivation: the
+`WINDOW_HALF = 181` (`cut_site_model/model.py:79`). The constructor enforces
+`WINDOW_HALF >= L_max - 1 = 179` (`cut_site_model/model.py:288`). Derivation: the
 deepest hex gather is at `WINDOW_HALF + P + L_max - 2`, the 3' cut at `m = P-1`
 with `L = L_max`. The k-mer for that cut ends 2 bases past it. §Margin
 arithmetic gives the tight bound, which is one base lower. 181 is the owner's
 choice (Q1, 2026-10-06). Symmetric by design — the unused left margin is the
 price of reviewability after the off-by-3 incident.
 
-`rf_budget = WINDOW_HALF + 5 = 186` (`cut_site_store.py:56`). It is pinned by
+`rf_budget = WINDOW_HALF + 5 = 186` (`cut_site_model/store.py:56`). It is pinned by
 `tests/test_hex_registration.py::test_rf_budget_equals_window_half_plus_5`,
 not imported. Importing `WINDOW_HALF` would pull torch and lightning into
-`cut_site_store.py`, a numpy/zarr module that the AWS Batch builder depends on.
+`cut_site_model/store.py`, a numpy/zarr module that the AWS Batch builder depends on.
 
 Window `W` = 2 × WINDOW_HALF = 362 bases.
 
@@ -79,7 +79,7 @@ Index conventions. Hex index `j` is the k-mer that starts at one-hot position
 
 | Tap | Tile base | Hex index | Used by |
 |---|---|---|---|
-| 5' endpoint | `m` | `WINDOW_HALF + m` | hex prior `start_pos` (`cut_site_model.py:193`); L2a left tap (`:650`) |
+| 5' endpoint | `m` | `WINDOW_HALF + m` | hex prior `start_pos` (`cut_site_model/model.py:193`); L2a left tap (`:650`) |
 | 3' endpoint, last base | `m + L - 1` | `WINDOW_HALF + m + L - 1` | hex prior `stop_pos` (`:196`); store `last[p+L-1]`; `tests/test_hex_registration.py:109` |
 | 3' endpoint, L2a right tap | `m + L` | `WINDOW_HALF + m + L` | L2a forward (`:636`, `:651`) |
 
@@ -89,17 +89,17 @@ forward pass uses `m+L`. See §Open discrepancies, item 1.
 
 **Registration is enforced, not emergent.** The construction-time assertion
 `(l_in - tile_size)//2 - WINDOW_HALF == CUT_OFFSET_IN_KMER` runs in
-`CutSiteFragmentModel.__init__` (`cut_site_model.py:299-306`). The reason is
+`CutSiteFragmentModel.__init__` (`cut_site_model/model.py:299-306`). The reason is
 not obvious. `raw = P + 2*WINDOW_HALF + 5` is odd only because `P` is even.
 Rounding up to even gives `pad = WINDOW_HALF + 3`. An ODD `tile_size` gives an
 even `raw`, so `pad` falls to `WINDOW_HALF + 2`. The k-mer then slides to
 offset 2, and registration breaks with no error. [Verified: the comment at
-`cut_site_model.py:295-298`. The arithmetic follows from `:437-438`.] The
+`cut_site_model/model.py:295-298`. The arithmetic follows from `:437-438`.] The
 assertion turns that case into a construction error. The test is
 `tests/test_hex_registration.py:391`.
 
 **Hot-path width check.** `compute_log_p0` checks `hex_idx.shape[1] >=
-WINDOW_HALF + tile_size + L_max - 1` (`cut_site_model.py:199-207`). The check
+WINDOW_HALF + tile_size + L_max - 1` (`cut_site_model/model.py:199-207`). The check
 uses Python ints, so it adds no device-to-host sync per forward. It replaces the
 tensor `assert` on `start_pos.min()` and `stop_pos.max()`, which forced a sync.
 It runs on every call, not at construction. [Verified: 7ea790e diff.]
@@ -108,7 +108,7 @@ It runs on every call, not at construction. [Verified: 7ea790e diff.]
 
 Only even `P` is valid, which the constructor enforces. For even `P`,
 `l_in = P + 2*WINDOW_HALF + 6`, because the `+5` conv margin is rounded up to
-even (`cut_site_model.py:437-438`). So `pad = WINDOW_HALF + 3` and the right
+even (`cut_site_model/model.py:437-438`). So `pad = WINDOW_HALF + 3` and the right
 margin past the tile is `WINDOW_HALF + 3`. [Inferred from the formula above.]
 
 - The deepest 3' cut is at tile base `P + L_max - 2`. Its k-mer ends 2 bases
@@ -172,7 +172,7 @@ sim), not one fifth of it.
 
 **Placement: on the logit, after the nonlinearity** — not into the
 pre-activation. `logit[m,L,s] = w_out · act(pre) + len_bias[L]`. This is
-`(n_L,)` = **156 parameters** (`n_L = L_max - L_min + 1`, `cut_site_model.py:369`), strand-shared (the FL/GC length term is
+`(n_L,)` = **156 parameters** (`n_L = L_max - L_min + 1`, `cut_site_model/model.py:369`), strand-shared (the FL/GC length term is
 strand-independent).
 
 **Length groups: 10, half-open, 15 wide from 25 with the LAST 20 wide:**
@@ -192,7 +192,7 @@ per offset**, spanning the live range `[o_l_min, o_r_max)` (see §Geometry).
 Re-indexed as `o' = o - o_l_min`. Prefix sum along the re-indexed offset axis:
 
 ```
-u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # x = one-hot sequence (cut_site_model.py:494)
+u[n,m,o'] = sum_c F[n,c,o'] * x[c, m + o_l_min + o']   # x = one-hot sequence (cut_site_model/model.py:494)
 U          = prefix_sum(u, axis=o')       # exclusive, n_offsets+1 = 181 slots
 span       = U[n,m,o_r'] - U[n,m,o_l']   # o_l' = o_l - o_l_min, o_r' = o_r - o_l_min
 ```
@@ -380,11 +380,11 @@ store records its geometry in a separate small config (`tile_size`, `jitter`,
 
 **Domain guard.** Because `L_min` and `L_max` define `D`, the Dataset MUST
 check them against the store at construction and fail loudly. It does so in
-`validate_length_range` (`cut_site_store.py:105`), which raises `ValueError` on
+`validate_length_range` (`cut_site_model/store.py:105`), which raises `ValueError` on
 any mismatch. The Dataset also asserts `l_seq >= model_input_size + 2 * jitter`
-(`cut_site_dataset.py:98`). A silent length-range mismatch changes `|D|` and
-reinterprets every reported NLL. [Verified: `cut_site_store.py:105-116`,
-`cut_site_dataset.py:81`, `:98`.]
+(`cut_site_model/dataset.py:98`). A silent length-range mismatch changes `|D|` and
+reinterprets every reported NLL. [Verified: `cut_site_model/store.py:105-116`,
+`cut_site_model/dataset.py:81`, `:98`.]
 
 ## Dataset / dataloader
 
@@ -410,7 +410,7 @@ The multinomial shares one per-region `logp` map across the `S` samples:
 
 **Crop.** The jittered crop uses `jitter_matrix` with concentric widths
 (seq → `l_in`, targets → `tile_size`). A fragment survives iff its START
-lies in `[0, tile_size)` in crop coordinates (`cut_site_dataset.py:234-237`),
+lies in `[0, tile_size)` in crop coordinates (`cut_site_model/dataset.py:234-237`),
 and its length lies in `[L_min, L_max]`. `frag_m` is that start. The Dataset
 does not recompute an end. The store guarantees start ≤ end.  Train draws `j ∈ [-jitter, jitter]`; **val and
 test use `j = 0` (centred crop) — jitter is training-only**. "Centred" names the
@@ -442,7 +442,7 @@ in-memory preload with copy-on-write fork sharing, no CUDA in the dataset.
 
 ## The model module — where it lives
 
-**New module `background_model/cut_site_model.py`.** It imports primitives from
+**New module `background_model/cut_site_model/model.py`.** It imports primitives from
 the frozen `background_model_core.py` but does **not** modify it: `jitter_matrix`
 (via the dataset); `one_hot_to_kmer_indices`, `rc_kmer_permutation` only if L1
 uses the embedding arm; `MaskedNegativeBinomialOffsetNLLLoss` reused unchanged
@@ -551,7 +551,7 @@ explicit context branch) is the lever that shrinks the gap.
 ## Cost
 
 **Not yet measured on the implemented model.** The prior benchmark
-(`scripts/bench_fragment_logit_sweep.py`) was run on a strandless, unfolded
+(`scripts/cut_site_model/bench_fragment_logit_sweep.py`) was run on a strandless, unfolded
 prototype that differs from this architecture on both the strand axis and the
 interior branch. `L_chunk = 32` is mandatory (unchunked OOMs). Re-measure
 before budgeting GPU time.
@@ -616,7 +616,7 @@ log exactly.]
 |---|---|
 | `model_input_size` (= `l_in`) | 1392 |
 | Required `l_seq` (`>= model_input_size + 2*jitter`) | 1904 |
-| OLD store, `rf_budget = 133` | `l_seq = 1802`. REJECTED by `cut_site_dataset.py:98` |
+| OLD store, `rf_budget = 133` | `l_seq = 1802`. REJECTED by `cut_site_model/dataset.py:98` |
 | NEW store, `rf_budget = 186` | `l_seq = 1908`. Slack 4 |
 | Minimum viable `rf_budget` | 184 |
 | `config_hash`, old → new | `e0699b0902fafafa` → `d5e89191901ea991` |
@@ -629,8 +629,8 @@ log exactly.]
   above 258 breaks the guard. No check at the store boundary covers that
   relation.
 - [Inferred] Changing `L_max` rejects any existing store (`validate_length_range`,
-  `cut_site_store.py:112`). The constructor also fails for `L_max >= 183` at
-  `WINDOW_HALF = 181` (`cut_site_model.py:288`).
+  `cut_site_model/store.py:112`). The constructor also fails for `L_max >= 183` at
+  `WINDOW_HALF = 181` (`cut_site_model/model.py:288`).
 
 ## Open discrepancies
 
@@ -638,17 +638,17 @@ Code as committed at 7ea790e. This doc change records these items and does not
 fix them. Each fix changes computed results, so each needs an owner decision.
 
 1. [Verified] **3' endpoint, one base.** The L2a forward taps the 3' endpoint at
-   `m+L` (`cut_site_model.py:636`, `:651`). The hex prior (`:196`), the store
+   `m+L` (`cut_site_model/model.py:636`, `:651`). The hex prior (`:196`), the store
    (`last[p+L-1]`, §Store schema), and `test_hex_registration.py:109` use
    `m+L-1`. The learned L2a branch and the hex prior therefore key the 3' cut
    to different bases. Fixing either side changes the model output.
 2. [Verified] **Interior window.** L2b reads one-hot positions
-   `WINDOW_HALF + m + o'` for `o'` in `[0, L)` (`cut_site_model.py:494`). With
+   `WINDOW_HALF + m + o'` for `o'` in `[0, L)` (`cut_site_model/model.py:494`). With
    `pad = WINDOW_HALF + 3`, these are tile bases `m-3` to `m+L-4`. The window
    sits 3 bases left of the fragment body `m … m+L-1`. The filter is learned,
    so this is not a hex registration error. The cut-site code and this doc do
    not state whether the shift is intended.
-3. [Verified] **Stage-1 builder admission.** `scripts/stage1_hex_baseline.py:188-191`
+3. [Verified] **Stage-1 builder admission.** `scripts/cut_site_model/stage1_hex_baseline.py:188-191`
    applies `min(st, end)` under the comment "Start-based admission". The store
    already filtered, and `length >= 25`, so the test is vacuous and changes no
    result. The comment is wrong. Not changed here, because this change is doc-only.

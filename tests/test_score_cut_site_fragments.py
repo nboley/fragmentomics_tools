@@ -14,13 +14,13 @@ import pytest
 import torch
 import zarr
 
-from background_model.cut_site_dataset import (
+from background_model.cut_site_model.dataset import (
     CutSiteFragmentDataset,
     cut_site_collate_fn,
 )
-from background_model.cut_site_model import CutSiteFragmentModel, compute_log_p0
+from background_model.cut_site_model.model import CutSiteFragmentModel, compute_log_p0
 from background_model_core import calculate_start_and_stop_from_jitter
-from scripts.score_cut_site_fragments import (
+from scripts.cut_site_model.score_fragments import (
     COLUMNS,
     SPLITS,
     build_table,

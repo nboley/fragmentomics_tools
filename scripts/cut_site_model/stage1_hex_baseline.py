@@ -14,7 +14,7 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import json
 import numpy as np
@@ -23,8 +23,8 @@ import torch.nn as nn
 import zarr
 
 from background_model.constants import KMER, L_MAX, L_MIN, NHEX
-from background_model.cut_site_model import CUT_OFFSET_IN_KMER
-from background_model.cut_site_store import CutSiteStoreConfig, validate_length_range
+from background_model.cut_site_model.model import CUT_OFFSET_IN_KMER
+from background_model.cut_site_model.store import CutSiteStoreConfig, validate_length_range
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 

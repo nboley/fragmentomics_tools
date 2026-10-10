@@ -24,13 +24,13 @@ import zarr
 from torch.profiler import ProfilerActivity, profile
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 torch.set_float32_matmul_precision("high")
 
 from background_model.constants import L_MAX, L_MIN
-from background_model.cut_site_model import CutSiteFragmentModel
-from background_model.cut_site_store import CutSiteStoreConfig
-from background_model.cut_site_dataset import (
+from background_model.cut_site_model.model import CutSiteFragmentModel
+from background_model.cut_site_model.store import CutSiteStoreConfig
+from background_model.cut_site_model.dataset import (
     CutSiteFragmentDataset, cut_site_collate_fn,
 )
 

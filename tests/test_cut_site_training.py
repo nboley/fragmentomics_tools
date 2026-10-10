@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from background_model.cut_site_model import (
+from background_model.cut_site_model.model import (
     CutSiteFragmentModel,
     DEFAULT_L_MIN,
     DEFAULT_L_MAX,
@@ -20,7 +20,7 @@ from background_model.cut_site_model import (
 L_MIN_INBAND = DEFAULT_L_MIN
 L_MAX_INBAND = DEFAULT_L_MAX
 N_L, _, _, _ = _compute_geometry(L_MIN_INBAND, L_MAX_INBAND)
-from background_model.cut_site_dataset import (
+from background_model.cut_site_model.dataset import (
     CutSiteFragmentDataset,
     cut_site_collate_fn,
 )

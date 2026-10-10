@@ -31,12 +31,12 @@ import numpy as np
 import zarr
 
 # Bootstrap: background_model is not an installed package
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fragments_h5 import FragmentsH5
 
 from background_model.constants import L_MAX, L_MIN
-from background_model.cut_site_store import (
+from background_model.cut_site_model.store import (
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
 )

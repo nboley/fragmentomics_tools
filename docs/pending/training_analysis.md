@@ -964,6 +964,19 @@ conditional loss cannot see it regardless.
 
 ## 10. Cut-Site Fragment Model — Real-Data Comparison (2026-10-01)
 
+> **Retired code (owner ruling, 2026-10-10).** The 12-track cross-model
+> comparison this section reports was dropped — the quiet region set is 1,536 bp
+> islands and a 12-track model needs ~16 kb tiles at this depth, so the
+> comparison has no territory to run on. `eval_fragment_nll.py` and
+> `train_12track.py` are now in `attic/twelve_track_comparison/` and no longer
+> run. See that directory's README for the revival condition (loss masking) and
+> for why the scripts are correct rather than broken.
+>
+> **Do not quote the 12-track figures below.** The `12.325` for the old CNN is
+> a *training-set* score: that store shared 100% of its regions with the
+> cut-site validation split. The cut-site numbers here are also superseded —
+> all of them predate start-based admission. Current figures are in §11 and §12.
+
 A new model family trained on per-fragment data rather than aggregate 12-track
 position profiles. Three cut-site model ablations and two old CNN runs on the
 same tile1536 region set, evaluated on a common **fragment-level multinomial

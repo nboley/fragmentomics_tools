@@ -7,7 +7,7 @@ centre-based domain sizing, and the fold-down linearity condition.
 import pytest
 import torch
 
-from background_model.cut_site_model import (
+from background_model.cut_site_model.model import (
     CutSiteFragmentModel,
     DEFAULT_L_MIN,
     DEFAULT_L_MAX,

@@ -2,11 +2,13 @@
 
 Covers two seams that unit tests of the library cannot see:
 
-- ``--tile-size`` is required by ``train_cut_site.py`` and ``gpu_benchmark.py``
-  and must match the store's ``config_json`` (owner decision 176).  The dataset
-  reads the tile size from the store, so a CLI value that silently disagreed
-  would build the model for one geometry and feed it another.
-- The ``.npz`` written by ``stage1_hex_baseline.py --output`` is what
+- ``--tile-size`` is required by ``scripts/cut_site_model/train.py`` and
+  ``scripts/cut_site_model/gpu_benchmark.py`` and must match the store's
+  ``config_json`` (owner decision 176).  The dataset reads the tile size from
+  the store, so a CLI value that silently disagreed would build the model for
+  one geometry and feed it another.
+- The ``.npz`` written by ``scripts/cut_site_model/stage1_hex_baseline.py
+  --output`` is what
   ``CutSiteFragmentModel(hex_tables_path=...)`` reads.  The writer and reader
   name the arrays independently, so the key names are checked end to end.
 """
@@ -16,11 +18,11 @@ import sys
 import numpy as np
 import pytest
 
-from background_model.cut_site_model import CutSiteFragmentModel
-from scripts import gpu_benchmark, stage1_hex_baseline, train_cut_site
+from background_model.cut_site_model.model import CutSiteFragmentModel
+from scripts.cut_site_model import gpu_benchmark, stage1_hex_baseline, train
 from tests.test_cut_site_store_dataset import _create_synthetic_store
 
-_SCRIPTS = {"train_cut_site": train_cut_site, "gpu_benchmark": gpu_benchmark}
+_SCRIPTS = {"train": train, "gpu_benchmark": gpu_benchmark}
 
 
 def _run_main(monkeypatch, module, argv):
@@ -30,7 +32,7 @@ def _run_main(monkeypatch, module, argv):
 
 def _script_argv(name, store_path, tmp_path):
     argv = ["--store", store_path]
-    if name == "train_cut_site":
+    if name == "train":
         argv += ["--run-dir", str(tmp_path / "run")]
     return argv
 

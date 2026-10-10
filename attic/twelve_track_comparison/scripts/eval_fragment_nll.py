@@ -56,7 +56,7 @@ from background_model_core import (
     calculate_start_and_stop_from_jitter,
     jitter_matrix,
 )
-from background_model.cut_site_store import CutSiteStoreConfig
+from background_model.cut_site_model.store import CutSiteStoreConfig
 from fragmentomics_tools.region import one_hot_encode_sequences
 
 

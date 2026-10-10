@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from background_model.cut_site_model import (
+from background_model.cut_site_model.model import (
     CUT_OFFSET_IN_KMER,
     HEX_K,
     WINDOW_HALF,
@@ -120,7 +120,7 @@ def test_builder_and_model_agree_on_registration():
     constant separately would still pass if both drifted together; this ties
     them to each other.
     """
-    from scripts.stage1_hex_baseline import hex_window_for_tile
+    from scripts.cut_site_model.stage1_hex_baseline import hex_window_for_tile
 
     tile_size = 64
     l_seq = tile_size + 2 * WINDOW_HALF      # builder tolerates any wider frame
@@ -169,7 +169,7 @@ def test_calc_input_region_size_implies_the_cut_offset():
     hex prior measures WORSE than uniform (12.835 vs ln|D| = 12.674) while
     still looking like a trained-model improvement.
     """
-    from background_model.cut_site_model import CutSiteFragmentModel
+    from background_model.cut_site_model.model import CutSiteFragmentModel
 
     for tile_size in (256, 512, 1024):
         model = CutSiteFragmentModel(tile_size=tile_size)
@@ -191,7 +191,7 @@ def test_training_and_inference_agree_on_l_in():
     If someone passed calc_input_region_size to the dataset, l_in would be
     6 bases too wide — a 3-base frame shift per side.
     """
-    from background_model.cut_site_model import CutSiteFragmentModel
+    from background_model.cut_site_model.model import CutSiteFragmentModel
 
     for tile_size in (256, 512, 1024):
         model = CutSiteFragmentModel(tile_size=tile_size)
@@ -216,7 +216,7 @@ def test_hex_lookup_covers_all_cuts_under_start_admission():
     overrun: at the right edge, 1,275 of 159,744 cells per strand (0.80%)
     were clamped to the wrong hexamer with no error.
     """
-    from background_model.cut_site_model import CutSiteFragmentModel, DEFAULT_L_MIN, DEFAULT_L_MAX
+    from background_model.cut_site_model.model import CutSiteFragmentModel, DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 1024
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
@@ -270,8 +270,8 @@ def test_builder_widened_window_covers_right_edge():
     """The hex table builder's widened window must reach the 3' endpoint
     of a L_max fragment starting at tile_size - 1.
     """
-    from scripts.stage1_hex_baseline import hex_window_for_tile
-    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+    from scripts.cut_site_model.stage1_hex_baseline import hex_window_for_tile
+    from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 64
     L_max = DEFAULT_L_MAX
@@ -304,7 +304,7 @@ def test_minus_strand_start_rev_gathers_at_stop_pos():
     identity table on start_rev the value at log_p0[0, m, li, 1] should be
     hex_idx[stop_pos] where stop_pos = WINDOW_HALF + m + L - 1.
     """
-    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+    from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 64
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
@@ -346,7 +346,7 @@ def test_minus_strand_stop_rev_gathers_at_start_pos():
     identity table on stop_rev the value at log_p0[0, m, li, 1] should be
     hex_idx[start_pos] where start_pos = WINDOW_HALF + m.
     """
-    from background_model.cut_site_model import DEFAULT_L_MIN, DEFAULT_L_MAX
+    from background_model.cut_site_model.model import DEFAULT_L_MIN, DEFAULT_L_MAX
 
     tile_size = 64
     L_min, L_max = DEFAULT_L_MIN, DEFAULT_L_MAX
@@ -390,7 +390,7 @@ def test_minus_strand_stop_rev_gathers_at_start_pos():
 
 def test_odd_tile_size_raises():
     """An odd tile_size silently slides CUT_OFFSET_IN_KMER by 1."""
-    from background_model.cut_site_model import CutSiteFragmentModel
+    from background_model.cut_site_model.model import CutSiteFragmentModel
 
     with pytest.raises(ValueError, match="tile_size must be even"):
         CutSiteFragmentModel(tile_size=1023)
@@ -403,7 +403,7 @@ def test_odd_tile_size_raises():
 
 def test_rf_budget_equals_window_half_plus_5():
     """rf_budget in CutSiteStoreConfig must stay in sync with WINDOW_HALF."""
-    from background_model.cut_site_store import CutSiteStoreConfig
+    from background_model.cut_site_model.store import CutSiteStoreConfig
 
     cfg = CutSiteStoreConfig(tile_size=2048)
     assert cfg.rf_budget == WINDOW_HALF + 5, (
@@ -420,7 +420,7 @@ def test_rf_budget_equals_window_half_plus_5():
 def test_store_config_requires_tile_size():
     import json
 
-    from background_model.cut_site_store import CutSiteStoreConfig
+    from background_model.cut_site_model.store import CutSiteStoreConfig
 
     with pytest.raises(TypeError, match="tile_size"):
         CutSiteStoreConfig()
@@ -439,7 +439,7 @@ def test_store_config_requires_tile_size():
 
 def test_model_requires_tile_size():
     """CutSiteFragmentModel.tile_size has no default either (owner choice)."""
-    from background_model.cut_site_model import CutSiteFragmentModel
+    from background_model.cut_site_model.model import CutSiteFragmentModel
 
     with pytest.raises(TypeError, match="tile_size"):
         CutSiteFragmentModel()

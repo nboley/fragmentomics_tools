@@ -13,7 +13,7 @@ from background_model.band_model.store import _create_array
 import torch
 import zarr
 
-from background_model.cut_site_model import (
+from background_model.cut_site_model.model import (
     DEFAULT_L_MIN,
     DEFAULT_L_MAX,
     WINDOW_HALF,
@@ -24,13 +24,13 @@ from background_model.cut_site_model import (
 L_MIN_INBAND = DEFAULT_L_MIN
 L_MAX_INBAND = DEFAULT_L_MAX
 N_L, _, _, _ = _compute_geometry(L_MIN_INBAND, L_MAX_INBAND)
-from background_model.cut_site_store import (
+from background_model.cut_site_model.store import (
     CutSiteStoreConfig,
     densify_endpoints,
     recompute_endpoints_from_fragments,
     validate_length_range,
 )
-from background_model.cut_site_dataset import (
+from background_model.cut_site_model.dataset import (
     CutSiteFragmentDataset,
     cut_site_collate_fn,
 )
@@ -191,7 +191,7 @@ class TestDomainGuards:
 
     def test_length_range_mismatch_raises(self, tmp_path):
         """A store with different L_min/L_max should fail validation."""
-        from background_model.cut_site_store import validate_length_range
+        from background_model.cut_site_model.store import validate_length_range
         cfg = CutSiteStoreConfig(tile_size=2048, L_min=25, L_max=179)
         store_path = str(tmp_path / "bad_range.zarr")
         root = zarr.open_group(store_path, mode="w")
@@ -456,7 +456,7 @@ class TestPreloadFalsePath:
 class TestEndpointBoundaryFragment:
     def test_right_endpoint_at_boundary(self, tmp_path):
         """A fragment whose right endpoint is at l_target-1 should be handled."""
-        from background_model.cut_site_store import recompute_endpoints_from_fragments
+        from background_model.cut_site_model.store import recompute_endpoints_from_fragments
         length = 100
         start = np.array([length - 1 - 25], dtype=np.uint16)  # right end at length-1
         frag_len = np.array([25], dtype=np.uint16)
@@ -466,7 +466,7 @@ class TestEndpointBoundaryFragment:
 
     def test_right_endpoint_past_boundary(self, tmp_path):
         """A fragment whose right endpoint >= length should be clipped."""
-        from background_model.cut_site_store import recompute_endpoints_from_fragments
+        from background_model.cut_site_model.store import recompute_endpoints_from_fragments
         length = 100
         start = np.array([90], dtype=np.uint16)
         frag_len = np.array([20], dtype=np.uint16)  # right end at 109 >= 100
@@ -480,7 +480,7 @@ class TestStartFilterBoundary:
 
     def test_fragment_at_last_valid_start(self, tmp_path):
         """A fragment starting at m = tile_size - 1 should be included."""
-        from background_model.cut_site_dataset import CutSiteFragmentDataset
+        from background_model.cut_site_model.dataset import CutSiteFragmentDataset
         tile_size = 256
         store_path, cfg = _create_synthetic_store(
             tmp_path, tile_size=tile_size, jitter=32,

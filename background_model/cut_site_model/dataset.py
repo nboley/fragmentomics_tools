@@ -19,7 +19,7 @@ import torch
 import zarr
 from torch.utils.data import Dataset
 
-from background_model.cut_site_store import (
+from background_model.cut_site_model.store import (
     CutSiteStoreConfig,
     densify_endpoints,
     validate_length_range,
