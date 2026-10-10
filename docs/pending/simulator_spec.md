@@ -292,7 +292,7 @@ directly as well as `simulator.measure`:
    these names from `constants` directly. No other module under
    `background_model/` and no script under `scripts/` binds any of them
    (`test_constants_single_source`), with one named exception:
-   `scripts/bench_fragment_logit_sweep.py` binds `L_MIN, L_MAX = 25, 256`, a
+   `scripts/cut_site/bench_fragment_logit_sweep.py` binds `L_MIN, L_MAX = 25, 256`, a
    self-contained GPU cost skeleton whose length range is deliberately not the
    cut-site one. The tests import them from `constants` too, except
    `tests/cut_site_oracle.py`, which restates `KMER`/`NHEX` on purpose: it is
@@ -338,8 +338,8 @@ moved code without changing it, and so did moving the definitions into
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
 
-Two scripts call these. `scripts/run_cut_site_simulator.py` runs measure and
-draw end to end. `scripts/measure_cut_site_hexamers.py` (owner decision 189)
+Two scripts call these. `scripts/simulator/run_cut_site_simulator.py` runs measure and
+draw end to end. `scripts/simulator/measure_cut_site_hexamers.py` (owner decision 189)
 runs only the measure step for one sample, through the same `measure_sample`
 call, and writes `C(h)`, `N(h)`, `r(h)`, `f(L)` and the per-region counts to an
 `.npz` plus a provenance `.json`. It replaced the containment counter now in
@@ -383,7 +383,7 @@ fragments sorted by position; the sidecar is sorted identically (same
 the stats dict alongside `n_drawn` and `n_dup_redraws`.
 
 **Correction (not edited, out of scope):** the driver comment at
-`scripts/run_cut_site_simulator.py` claiming "the ingest dedups on (start, stop)
+`scripts/simulator/run_cut_site_simulator.py` claiming "the ingest dedups on (start, stop)
 with strand excluded" is **false** — there is no dedup in the ingest path.
 Read-time dedup is `drop_duplicate_fragments`, which runs at *fetch* inside
 `filter_fragments`, not at ingest.  With duplicates now redrawn, it removes
@@ -482,7 +482,7 @@ Needs action. Nothing here has been decided.
   did not fold case, but that script upper-cases before it encodes, so its
   output does not change. That script was itself retired to
   `attic/hexamer_prior_pipeline/` by owner decision 189, replaced by
-  `scripts/measure_cut_site_hexamers.py`, which calls `simulator.measure`.
+  `scripts/simulator/measure_cut_site_hexamers.py`, which calls `simulator.measure`.
   `test_encoder_matches_oracle_all_4096` still checks all 4096 against an
   INDEPENDENT oracle.
 

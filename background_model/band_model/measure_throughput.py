@@ -5,7 +5,7 @@ Measures wall time and memory for Phase A processing of one sample across
 all tiles, then prints a summary with extrapolated full-run estimates.
 
 Usage:
-    python -m background_model.measure_throughput \\
+    python -m background_model.band_model.measure_throughput \\
         --h5 /path/to/sample.frag.h5 \\
         --region-bed /path/to/regions.bed \\
         --fasta /path/to/genome.fa \\
@@ -22,8 +22,8 @@ import time
 
 import numpy as np
 
-from background_model.config import PlumbingConfig
-from background_model.preprocess import _worker_process_sample, build_tiles
+from background_model.band_model.config import PlumbingConfig
+from background_model.band_model.preprocess import _worker_process_sample, build_tiles
 
 log = logging.getLogger(__name__)
 

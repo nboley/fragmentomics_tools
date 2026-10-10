@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run the cut-site simulator end to end: measure parameters, draw, build an h5.
 
-    python scripts/run_cut_site_simulator.py \
+    python scripts/simulator/run_cut_site_simulator.py \
         --sample-id RD-56804 \
         --fragments-h5 /efs/.../RD-56804-Lib1.hg38.fragments.h5 \
         --region-bed  <main checkout>/data/region_sets/quiet_v2_pad1200_repeats_removed_tile1536.bed \
@@ -19,7 +19,7 @@ as the module having no tests.
 The four stages, and why the order is forced
 --------------------------------------------
 ``simulator.measure.measure_sample`` runs this sequence; the per-sample
-counter ``scripts/measure_cut_site_hexamers.py`` calls the same function.
+counter ``scripts/simulator/measure_cut_site_hexamers.py`` calls the same function.
 Stages 1, 2 and 4 of the spec share ONE pass over the h5, which is why
 ``count_sample`` returns the frame it built rather than discarding it:
 
@@ -90,7 +90,7 @@ import time
 # scripts/ is not a package and the repo is not pip-installed, so the repo root
 # has to go on sys.path before the first-party imports. Without this the script
 # only runs from the repo root with PYTHONPATH already set.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 

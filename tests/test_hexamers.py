@@ -161,13 +161,15 @@ class TestConstants:
             const_mod.__file__,
             # A self-contained GPU cost skeleton; its L range (25..256) is
             # deliberately not the cut-site one and never meets the store.
-            os.path.join(repo_root, "scripts", "bench_fragment_logit_sweep.py"),
+            os.path.join(repo_root, "scripts", "cut_site", "bench_fragment_logit_sweep.py"),
         }
         paths = sorted(
             p for p in (
                 glob.glob(os.path.join(repo_root, "background_model", "**", "*.py"),
                           recursive=True)
-                + glob.glob(os.path.join(repo_root, "scripts", "*.py"))
+                # Recursive: scripts/ is split into per-package subdirectories.
+                + glob.glob(os.path.join(repo_root, "scripts", "**", "*.py"),
+                            recursive=True)
             )
             # attic/ is superseded code kept for reference, not maintained.
             if p not in excluded and "attic" not in p.split(os.sep)
@@ -177,8 +179,8 @@ class TestConstants:
         for known in ("background_model/hexamers.py",
                       "background_model/simulator/measure.py",
                       "background_model/simulator/draw.py",
-                      "scripts/measure_cut_site_hexamers.py",
-                      "scripts/run_cut_site_simulator.py"):
+                      "scripts/simulator/measure_cut_site_hexamers.py",
+                      "scripts/simulator/run_cut_site_simulator.py"):
             assert known in rel, known
 
         def parse(path):

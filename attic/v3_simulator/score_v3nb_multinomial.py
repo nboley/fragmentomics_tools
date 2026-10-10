@@ -47,7 +47,7 @@ def load_checkpoint_path(summary_path):
 
 
 def build_dataset(store_path, model_input_size):
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.dataset import BackgroundTileDataset
     return BackgroundTileDataset(
         store_path=store_path,
         model_input_size=model_input_size,
@@ -65,7 +65,7 @@ def load_model(ckpt_path, model_type):
     Uses the Instrumented* classes so that load_from_checkpoint restores the
     hparams correctly (they inherit from the base classes).
     """
-    from background_model.train import (
+    from background_model.band_model.train import (
         InstrumentedBackgroundModelKEN,
         InstrumentedBackgroundModelHybrid,
     )
@@ -140,8 +140,8 @@ def compute_oracle_and_uniform(store_path, sim_dir, gc_lut_mode=False):
     """
     import pysam
     import zarr
-    from background_model.config import PlumbingConfig
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.config import PlumbingConfig
+    from background_model.band_model.dataset import BackgroundTileDataset
     from background_model_core import MaskedMultinomialNLLLoss
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
@@ -250,8 +250,8 @@ def alignment_verification(store_path, sim_dir, n_tiles=20):
     """
     import pysam
     import zarr
-    from background_model.config import PlumbingConfig
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.config import PlumbingConfig
+    from background_model.band_model.dataset import BackgroundTileDataset
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
 

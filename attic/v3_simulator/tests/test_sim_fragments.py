@@ -253,7 +253,7 @@ def test_representation_builds_rfa_and_coverage_counts():
     construct an RFA that meets apply_fragment_weights preconditions."""
     from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
     from fragmentomics_tools.region import Region
-    from background_model.preprocess import FL_BANDS, TRACK_INDEX
+    from background_model.band_model.preprocess import FL_BANDS, TRACK_INDEX
 
     region_len = 200
     n = region_len + 1
@@ -279,7 +279,7 @@ def test_representation_builds_rfa_and_coverage_counts():
         max_frag_len=511,
         fragment_strands=strand,
     )
-    # (a) store counts path (mirrors background_model/preprocess._worker_inner)
+    # (a) store counts path (mirrors background_model/band_model/preprocess._worker_inner)
     sparse = rfa.build_coverage_counts(
         fl_bands=list(FL_BANDS), split_strand=True, return_sparse=True
     )

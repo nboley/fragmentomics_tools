@@ -189,7 +189,7 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
     # sim I/O so a mismatch fails fast, and mirrors the read-side guard in
     # BackgroundTileDataset.  (A store built under a different layout is
     # deliberately unreadable — no migration path.)
-    from background_model.config import check_fl_bands
+    from background_model.band_model.config import check_fl_bands
     check_fl_bands(FL_BANDS)
 
     t0 = time.time()
@@ -243,7 +243,7 @@ def build_store(sim_dir, out_path, n_train_samples=16, seed=1337, workers=1,
     role_arr[:n_train_samples] = ROLE_CODES["train"]
 
     # ── Build config for store attrs ─────────────────────────────────────
-    from background_model.config import PlumbingConfig
+    from background_model.band_model.config import PlumbingConfig
     config = PlumbingConfig(
         sample_sheet="",
         region_beds={},

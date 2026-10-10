@@ -65,7 +65,7 @@ def find_best_checkpoint(runs_root, run_name):
 
 def load_model(ckpt_path, loss):
     """Load a trained BackgroundModel from checkpoint."""
-    from background_model.train import InstrumentedBackgroundModel
+    from background_model.band_model.train import InstrumentedBackgroundModel
     model = InstrumentedBackgroundModel.load_from_checkpoint(
         ckpt_path, loss=loss, learning_rate=1e-4
     )
@@ -79,8 +79,8 @@ def predict_on_store(model, store_path, split="val", sample_role="train",
 
     Returns dict: tile_idx -> (probs, mask) where probs is (C, tile_size).
     """
-    from background_model.dataset import BackgroundTileDataset
-    from background_model.config import PlumbingConfig
+    from background_model.band_model.dataset import BackgroundTileDataset
+    from background_model.band_model.config import PlumbingConfig
     import zarr
 
     root = zarr.open_group(store_path, mode="r")
@@ -132,7 +132,7 @@ def compute_true_propensity(sim_dir, store_path):
     """
     import pysam
     import zarr
-    from background_model.config import PlumbingConfig
+    from background_model.band_model.config import PlumbingConfig
     from scripts.sim_fragments import GCBias2D
     from scripts.sim_oracle import compute_oracle_propensity_for_tile
 

@@ -9,7 +9,7 @@ L = 25..180, normalised to sum 1.  Nothing is deconvolved out of it (owner
 decision 67).
 
 Both functions reuse ``load_duphist`` and ``build_cell_map`` from
-``scripts/ztnb_from_duphist.py`` (design doc §1, sanctioned reuse).
+``scripts/analysis/ztnb_from_duphist.py`` (design doc §1, sanctioned reuse).
 
 Runtime dependency: ``flgc.model`` needs
 ``PYTHONPATH=/home/nathanboley/src/biomarker``, including in the Batch container.
@@ -64,7 +64,7 @@ SIM_GC_BINS = [
 MAX_SANE_LENGTH = 1000
 
 
-# ── duphist loading (reuse from scripts/ztnb_from_duphist.py) ─────────────
+# ── duphist loading (reuse from scripts/analysis/ztnb_from_duphist.py) ─────────────
 
 def load_duphist(sample: str, duphist_dir: str = DUPHIST_DIR) -> pd.DataFrame:
     """Load and filter a paired-end duplicate histogram.

@@ -71,9 +71,25 @@ class TestT7Hygiene:
         Also: ``background_model.cut_site_stats`` is gone, not shimmed. Owner
         decision 187 moved it to ``simulator.measure`` with no alias left
         behind, so an old import fails loudly instead of resolving.
+
+        The same applies to the nine 12-track modules owner decision 195 moved
+        into ``background_model.band_model``.  "No shims" is only enforceable
+        as an assertion: without it, re-adding a top-level ``train.py`` or a
+        ``from .band_model.train import *`` alias would pass every other test,
+        and the flat layout would creep back one module at a time.
         """
         import importlib.util
         assert importlib.util.find_spec("background_model.cut_site_stats") is None
+        for moved in ("config", "store", "preprocess", "sample_sheet",
+                      "dataset", "train", "inference", "correction",
+                      "measure_throughput"):
+            assert importlib.util.find_spec(
+                f"background_model.{moved}"
+            ) is None, (
+                f"background_model.{moved} resolves; it moved to "
+                f"background_model.band_model.{moved} with no shim "
+                f"(owner decision 195)"
+            )
         import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
@@ -204,10 +220,10 @@ class TestT7Hygiene:
 
         # Importing only hexamers must not pull in pandas, torch or
         # fragmentomics_tools, and importing only constants must not pull in
-        # numpy either. background_model/__init__.py imports
-        # background_model.config, which imports only stdlib and
-        # background_model.tracks (stdlib only). That is why this holds; the
-        # subprocess checks it rather than assuming it.
+        # numpy either. background_model/__init__.py imports nothing (the
+        # PlumbingConfig re-export moved to band_model/ with config.py), so
+        # neither sub-package loads. That is why this holds; the subprocess
+        # checks it rather than assuming it.
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for module, extra_banned in (("background_model.hexamers", ()),
                                      ("background_model.constants", ("numpy",))):
@@ -304,10 +320,15 @@ class TestT7Hygiene:
             "model code imports the simulator (decision 187 boundary):\n  "
             + "\n  ".join(offenders))
 
-        # Non-vacuity. 13 modules sit outside simulator/ today, plus the core;
-        # far fewer means the walk is skipping files. And they import each
-        # other, so seeing no first-party import means the walker is blind.
+        # Non-vacuity. 14 modules sit outside simulator/ today (4 top-level,
+        # 10 in band_model/), plus the core; far fewer means the walk is
+        # skipping files. And they import each other, so seeing no first-party
+        # import means the walker is blind.
         assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
+        # The walk descends into sibling sub-packages, not just the top level:
+        # band_model/ is model code and is held to the same boundary.
+        assert os.path.join(pkg_dir, "band_model", "train.py") in scanned, (
+            "band_model/ was not scanned")
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")

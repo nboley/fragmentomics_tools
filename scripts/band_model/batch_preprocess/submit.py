@@ -14,7 +14,7 @@ Sequence:
 Code reaches the tasks via `git clone` of a PUBLIC branch/sha (bootstrap in the
 job-def command). The exact SHA is pinned. Nothing is baked into the image.
 
-Requires: boto3 + the background_model.config import (no numpy) for the hash.
+Requires: boto3 + the background_model.band_model.config import (no numpy) for the hash.
 """
 
 import argparse
@@ -27,9 +27,9 @@ import time
 
 import boto3
 
-# background_model.config imports only stdlib -> safe to import here.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from background_model.config import PlumbingConfig  # noqa: E402
+# background_model.band_model.config imports only stdlib -> safe to import here.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+from background_model.band_model.config import PlumbingConfig  # noqa: E402
 
 # ── Defaults (verified 2026-09-11) ───────────────────────────────────────
 REGION = "us-east-1"
@@ -59,7 +59,7 @@ echo "[bootstrap] clone $REPO_URL@$BRANCH ($SHA)"
 git clone --branch "$BRANCH" "$REPO_URL" "$WORKDIR/repo"
 git -C "$WORKDIR/repo" checkout --quiet "$SHA"
 export REPO_DIR="$WORKDIR/repo"
-exec bash "$REPO_DIR/scripts/batch_preprocess/$ENTRYPOINT"
+exec bash "$REPO_DIR/scripts/band_model/batch_preprocess/$ENTRYPOINT"
 """.strip()
 
 
@@ -75,7 +75,7 @@ def _s3_split(uri):
 
 def compute_hash8_and_lib0():
     """Deterministic store hash8 + first-library, from the local input files."""
-    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     cfg = PlumbingConfig(
         sample_sheet=os.path.join(repo, "data/sample_sheets/ibd_quiescent.tsv"),
         region_beds={"train_pool": os.path.join(repo, "data/region_sets/training_tiles.bed")},
@@ -91,7 +91,7 @@ def compute_hash8_and_lib0():
 def resolve_sha():
     if SHA:
         return SHA
-    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     return subprocess.check_output(
         ["git", "-C", repo, "rev-parse", "HEAD"], text=True
     ).strip()

@@ -65,7 +65,7 @@ full range:
 
 The main FL peak is at ~50 with a **secondary** mononucleosome bump at 141–180.
 
-> **`scripts/ztnb_from_duphist.py`'s docstring is WRONG on this point.** It cites
+> **`scripts/analysis/ztnb_from_duphist.py`'s docstring is WRONG on this point.** It cites
 > "the mononucleosome mode at 166bp" as evidence the length axis is fragment
 > length. The axis *is* fragment length, but 166 is the secondary bump, not the
 > mode. Do not use that line to validate anything.
@@ -108,7 +108,7 @@ model.save(<sim>/gcfl_model.json)      # cached with the simulation
 ```
 
 `load_duphist` and `build_cell_map` already exist in
-`scripts/ztnb_from_duphist.py` and are reused rather than reimplemented; only the
+`scripts/analysis/ztnb_from_duphist.py` and are reused rather than reimplemented; only the
 bins differ.
 
 | | |

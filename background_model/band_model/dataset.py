@@ -29,7 +29,7 @@ import torch
 import zarr
 from torch.utils.data import Dataset
 
-from background_model.config import PlumbingConfig, check_fl_bands
+from background_model.band_model.config import PlumbingConfig, check_fl_bands
 from background_model_core import (
     DEFAULT_OUTPUT_TRACKS,
     jitter_matrix,

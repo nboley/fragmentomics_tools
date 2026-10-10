@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Measure per-sample cut-site hexamer counts C(h), N(h) and r(h), and write them.
 
-    python scripts/measure_cut_site_hexamers.py \
+    python scripts/simulator/measure_cut_site_hexamers.py \
         --sample-id RD-56804 \
         --fragments-h5 /efs/.../RD-56804-Lib1.hg38.fragments.h5 \
         --region-bed  <main checkout>/data/region_sets/quiet_v2_pad1200_repeats_removed_tile1536.bed \
@@ -12,7 +12,7 @@ This replaces the retired ``scripts/count_cut_site_hexamers.py`` (owner
 decision 189, moved to ``attic/``). That script carried its own counting
 rule -- containment admission, its own band/encoder machinery. This one holds
 NO counting rule of its own: it calls ``simulator.measure.measure_sample``,
-the same function ``scripts/run_cut_site_simulator.py`` calls, and writes the
+the same function ``scripts/simulator/run_cut_site_simulator.py`` calls, and writes the
 result.
 
 Two differences from the retired tables, so they are NOT comparable:
@@ -50,7 +50,7 @@ import numpy as np
 
 # scripts/ is not a package and the repo is not pip-installed, so the repo
 # root has to go on sys.path before the first-party imports.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 
@@ -63,7 +63,7 @@ from background_model.simulator.measure import (  # noqa: E402
     measure_sample,
 )
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def parse_args(argv=None):

@@ -27,7 +27,7 @@ def load_checkpoint_path(summary_path):
 
 
 def build_dataset(store_path, model_input_size):
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.dataset import BackgroundTileDataset
     return BackgroundTileDataset(
         store_path=store_path,
         model_input_size=model_input_size,
@@ -40,7 +40,7 @@ def build_dataset(store_path, model_input_size):
 
 
 def load_model(ckpt_path, model_type):
-    from background_model.train import (
+    from background_model.band_model.train import (
         InstrumentedBackgroundModelKEN,
         InstrumentedBackgroundModelHybrid,
     )

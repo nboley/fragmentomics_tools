@@ -36,7 +36,7 @@ mkdir -p "$INPUTS/h5" "$SHARDS"
 mkdir -p "$WORKDIR/bgcode"
 cp -r "$REPO_DIR/background_model" "$WORKDIR/bgcode/"
 export PYTHONPATH="$WORKDIR/bgcode"
-SCRIPTS="$REPO_DIR/scripts/batch_preprocess"
+SCRIPTS="$REPO_DIR/scripts/band_model/batch_preprocess"
 
 # Small shared inputs needed by Phase A (NOT the 3 GB FASTA; only its .fai).
 for f in ibd_quiescent.tsv training_tiles.bed blacklist_encode_v2.bed draw50.tsv hg38.fa.fai; do

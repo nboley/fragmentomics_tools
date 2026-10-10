@@ -1,4 +1,4 @@
-"""Functional test for scripts/measure_cut_site_hexamers.py.
+"""Functional test for scripts/simulator/measure_cut_site_hexamers.py.
 
 Self-contained: uses no fixture from tests/conftest.py or helper from
 tests/cut_site_helpers.py, only the committed golden chr6 fixtures.
@@ -32,7 +32,7 @@ _DATA = os.path.join(_HERE, "data")
 _FRAGMENTS_H5 = os.path.join(_DATA, "golden.small.chr6.frag.h5")
 _FASTA = os.path.join(_DATA, "GRCh38.p12.genome.chr6_99110000_99130000.fa.gz")
 
-_SCRIPT_PATH = os.path.join(_HERE, "..", "scripts", "measure_cut_site_hexamers.py")
+_SCRIPT_PATH = os.path.join(_HERE, "..", "scripts", "simulator", "measure_cut_site_hexamers.py")
 _spec = importlib.util.spec_from_file_location("measure_cut_site_hexamers", _SCRIPT_PATH)
 mch = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mch)

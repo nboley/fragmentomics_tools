@@ -195,7 +195,7 @@ def main():
 
     # ── Load store metadata ────────────────────────────────────────────────
     import zarr
-    from background_model.config import PlumbingConfig
+    from background_model.band_model.config import PlumbingConfig
 
     root = zarr.open_group(args.store, mode="r")
     cfg = PlumbingConfig.from_json(root.attrs["config_json"])
@@ -228,7 +228,7 @@ def main():
     print(f"[oracle] center-crop: [{crop_start}, {crop_stop}) within l_target={l_target}")
 
     # ── Create dataset to get correctly-cropped counts and masks ───────────
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.dataset import BackgroundTileDataset
 
     # We need model_input_size to create the dataset. Use a reasonable value.
     # The model_input_size must satisfy: l_seq >= model_input_size + 2*jitter,

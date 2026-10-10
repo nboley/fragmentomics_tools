@@ -6,7 +6,7 @@ Targets ``background_model/constants.py``, ``background_model/hexamers.py``,
 (the last three were one file, ``count_hexamers_rdf.py``, until decision 169
 split it; ``measure`` was ``background_model/cut_site_stats.py`` until
 decision 187), plus a few library and oracle files, and
-``background_model/train.py`` as the stand-in model module for the decision-187
+``background_model/band_model/train.py`` as the stand-in model module for the decision-187
 boundary (B1, B2).
 
 Applies each mutation as a text substitution, runs the test suite,
@@ -371,14 +371,17 @@ MUTATIONS = [
     # reaches it relatively; neither spells "background_model.simulator".
 
     ("B1", "a non-simulator module imports simulator (from background_model import simulator)",
-     "background_model/train.py",
+     "background_model/band_model/train.py",
      "import numpy as np\nimport lightning as L\n",
      "import numpy as np\nimport lightning as L\nif False:\n    from background_model import simulator as _unused\n"),
 
-    ("B2", "a non-simulator module imports simulator relatively (from .simulator import measure)",
-     "background_model/train.py",
+    # train.py sits in band_model/, so the simulator is TWO levels up: a
+    # single-dot `.simulator` would name background_model.band_model.simulator,
+    # which does not exist, and the mutation would test nothing.
+    ("B2", "a non-simulator module imports simulator relatively (from ..simulator import measure)",
+     "background_model/band_model/train.py",
      "from __future__ import annotations\n",
-     "from __future__ import annotations\nif False:\n    from .simulator import measure as _unused\n"),
+     "from __future__ import annotations\nif False:\n    from ..simulator import measure as _unused\n"),
 
     # ── Owner decisions 174-177: shared definitions in constants.py ───────
 

@@ -9,7 +9,7 @@ channel slices (they do not reimplement any likelihood).
 
 Usage::
 
-    python -m background_model.train \
+    python -m background_model.band_model.train \
         --loss multinomial --run-name my_run \
         --max-epochs 10 --batch-size 8 --lr 1e-4
 
@@ -51,8 +51,8 @@ from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.rank_zero import rank_zero_info
 from torch.utils.data import DataLoader
 
-from background_model.config import TILE, PlumbingConfig
-from background_model.dataset import BackgroundTileDataset
+from background_model.band_model.config import TILE, PlumbingConfig
+from background_model.band_model.dataset import BackgroundTileDataset
 from background_model_core import (
     LOSSES,
     BackgroundModel,
