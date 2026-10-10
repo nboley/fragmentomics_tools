@@ -540,6 +540,22 @@ class TestReproducibleJitter:
         assert set(_loader_jitters(ds, self.N_DRAWS, 2)) == {0}
         assert set(_loader_jitters(ds, self.N_DRAWS, 0)) == {0}
 
+    @pytest.mark.parametrize("seed", [-1, -(2 ** 31)])
+    def test_negative_seed_rejected_at_construction(self, store, seed):
+        """``default_rng([seed, worker])`` rejects a negative seed, but only
+        at the first train-mode draw, inside a worker.  The constructor
+        must refuse it first, even for an eval-mode dataset."""
+        store_path, cfg = store
+        for train_mode in (True, False):
+            with pytest.raises(ValueError, match="seed must be None or >= 0"):
+                _jitter_dataset(store_path, cfg, seed, train_mode=train_mode)
+
+    def test_seed_zero_is_valid(self, store):
+        """0 is the lower edge of the valid range, not an invalid seed."""
+        store_path, cfg = store
+        ds = _jitter_dataset(store_path, cfg, 0)
+        assert len(_loader_jitters(ds, 2, 0)) == 2
+
 
 # ---------------------------------------------------------------------------
 # Dataset + collate integration

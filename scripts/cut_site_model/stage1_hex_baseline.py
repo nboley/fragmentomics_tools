@@ -25,11 +25,13 @@ import zarr
 from background_model.constants import KMER, L_MAX, L_MIN, NHEX
 from background_model.cut_site_model.dataset import admit_fragments, crop_origin
 from background_model.cut_site_model.model import CUT_OFFSET_IN_KMER
-from background_model.cut_site_model.store import CutSiteStoreConfig, validate_length_range
+from background_model.cut_site_model.store import (
+    SPLIT_CODES,
+    CutSiteStoreConfig,
+    validate_length_range,
+)
 from background_model_core import jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
-
-_SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2}
 
 
 _ASCII_TO_BASE = np.full(256, 255, dtype=np.uint8)
@@ -149,7 +151,7 @@ def compute_hex_tables(root, config, split="train", L_min=L_MIN, L_max=L_MAX, k=
     frag_length = root["fragments/length"][:]
     frag_strand = root["fragments/strand"][:]
 
-    split_code = _SPLIT_CODES[split]
+    split_code = SPLIT_CODES[split]
     tile_ok = np.nonzero(split_arr == split_code)[0]
 
     # Crop geometry (j=0 for centre crop): the loader's crop_origin.
@@ -280,7 +282,7 @@ def train_conv_baseline(root, config, hex_tables, split="train",
     frag_length_arr = root["fragments/length"][:]
     frag_strand_arr = root["fragments/strand"][:]
 
-    split_code = _SPLIT_CODES[split]
+    split_code = SPLIT_CODES[split]
     tile_ok = np.nonzero(split_arr == split_code)[0]
     if max_tiles and len(tile_ok) > max_tiles:
         rng = np.random.default_rng(42)

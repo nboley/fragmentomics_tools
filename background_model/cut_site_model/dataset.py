@@ -32,15 +32,13 @@ import zarr
 from torch.utils.data import Dataset, get_worker_info
 
 from background_model.cut_site_model.store import (
+    SPLIT_CODES,
     CutSiteStoreConfig,
     densify_endpoints,
     validate_length_range,
 )
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
-
-# Tile split codes (same as 12-track dataset)
-_SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
 
 # Jitter-stream key when no seed is given.  Kept from the PID-keyed version.
 _DEFAULT_JITTER_SEED = 0x9E3779B9
@@ -119,8 +117,10 @@ class CutSiteFragmentDataset(Dataset):
     items.
     The stream used to be keyed on ``(seed, os.getpid())``, which no seed
     could reproduce.  The change moved every train-mode jitter, and so moved
-    training numbers once (run-to-run spread under the PID key was about
-    0.002 nats on best-epoch val).
+    training numbers once.  For scale: two unseeded runs of identical code
+    under the PID key (also no global seed, unseeded shuffle) differed by
+    ~0.002 nats on best-epoch val (``docs/pending/training_analysis.md``
+    §11, Caveats, item 2).
     """
 
     def __init__(
@@ -136,8 +136,12 @@ class CutSiteFragmentDataset(Dataset):
         seed: Optional[int] = None,
         preload: bool = True,
     ):
-        if split not in _SPLIT_CODES:
-            raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)}")
+        if split not in SPLIT_CODES:
+            raise ValueError(f"split must be one of {sorted(SPLIT_CODES)}")
+        if seed is not None and seed < 0:
+            # default_rng rejects a negative entropy word, and would only say
+            # so on the first train-mode draw, inside a DataLoader worker.
+            raise ValueError(f"seed must be None or >= 0, got {seed}")
 
         self.store_path = store_path
         self.model_input_size = int(model_input_size)
@@ -182,7 +186,7 @@ class CutSiteFragmentDataset(Dataset):
         self.n_tiles = N_totals.shape[1]
         self.n_samples = N_totals.shape[0]
 
-        split_code = _SPLIT_CODES[split]
+        split_code = SPLIT_CODES[split]
         tile_ok = np.nonzero(split_arr == split_code)[0]
 
         # min_N filters on the STORED fragment count per (sample, region),

@@ -34,6 +34,11 @@ import zarr
 
 from background_model.constants import L_MAX, L_MIN
 
+# ``tiles/split`` codes, the one definition for the whole cut-site stack: the
+# builder writes them, the dataset, stage 1 and the scorer read them.  It
+# lives here, not in dataset.py, so the builder stays free of torch.  The
+# integers are on disk in every store; never renumber them.
+SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
 
 # ---------------------------------------------------------------------------
 # Config for the cut-site store (separate from PlumbingConfig)

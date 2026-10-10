@@ -65,7 +65,8 @@ arithmetic gives the tight bound, which is one base lower. 181 is the owner's
 choice (Q1, 2026-10-06). Symmetric by design — the unused left margin is the
 price of reviewability after the off-by-3 incident.
 
-`rf_budget = WINDOW_HALF + 5 = 186` (`cut_site_model/store.py:56`). It is pinned by
+`rf_budget = WINDOW_HALF + 5 = 186` (`CutSiteStoreConfig.rf_budget` in
+`cut_site_model/store.py`). It is pinned by
 `tests/test_hex_registration.py::test_rf_budget_equals_window_half_plus_5`,
 not imported. Importing `WINDOW_HALF` would pull torch and lightning into
 `cut_site_model/store.py`, a numpy/zarr module that the AWS Batch builder depends on.
@@ -362,7 +363,8 @@ time.
   A build-time test asserts these tracks equal a recomputation from
   `/fragments/`, closing the ±1 gap at the source.
 - **`/totals/N` has 2 columns**, not 12 — the count axis differs, which is why
-  this store is separate.- **Geometry** is recorded as the sim store does today (`tile_size`, `jitter`,
+  this store is separate.
+- **Geometry** is recorded as the sim store does today (`tile_size`, `jitter`,
   `rf_budget`, derived `l_target = tile_size + 2·jitter`, `l_seq = tile_size +
   2·(jitter + rf_budget)`). The v4 stores run at `tile_size ∈ {2048, 1024}`,
   `jitter = 256` → `l_target ∈ {2560, 1536}`; invoke the builder with
@@ -379,11 +381,12 @@ store records its geometry in a separate small config (`tile_size`, `jitter`,
 
 **Domain guard.** Because `L_min` and `L_max` define `D`, the Dataset MUST
 check them against the store at construction and fail loudly. It does so in
-`validate_length_range` (`cut_site_model/store.py:105`), which raises `ValueError` on
+`validate_length_range` (`cut_site_model/store.py`), which raises `ValueError` on
 any mismatch. The Dataset also asserts `l_seq >= model_input_size + 2 * jitter`
-(`cut_site_model/dataset.py:98`). A silent length-range mismatch changes `|D|` and
-reinterprets every reported NLL. [Verified: `cut_site_model/store.py:105-116`,
-`cut_site_model/dataset.py:81`, `:98`.]
+(`CutSiteFragmentDataset.__init__`, `cut_site_model/dataset.py`). A silent
+length-range mismatch changes `|D|` and reinterprets every reported NLL.
+[Verified: `validate_length_range`, and the call to it and the `l_seq` check
+in `CutSiteFragmentDataset.__init__`.]
 
 ## Dataset / dataloader
 
@@ -577,17 +580,24 @@ before budgeting GPU time.
   the cut (`:46`, `:83`). Builder and model agree (`:116`). The right-edge lookup
   covers every cut (`:210`). The minus-strand gathers are probed by value
   (`:302`, `:344`). An odd `tile_size` raises (`:391`).
-- **3' endpoint convention.** NOT pinned by any test. The hex prior, the store,
-  and `test_hex_registration.py:109` use `m+L-1`. The L2a forward uses `m+L`.
-  See §Open discrepancies, item 1.
-- **Store consistency.** `tests/test_build_cut_site_store.py:172`
-  (`test_endpoint_consistency`).
-- **Domain guard.** `tests/test_cut_site_store_dataset.py:192`
-  (`test_length_range_mismatch_raises`). It checks `L_min`/`L_max`, not `max_len`.
-- **Weak tests.** `tests/test_cut_site_training.py:244-274` assert arithmetic on
-  local constants and never call the model. `tests/test_cut_site_model.py:316`
-  round-trips `p = m - L//2`, the retired centre convention. Neither one checks
-  the alignment it is named for.
+- **3' endpoint convention.** Both sides are pinned, each at its CURRENT
+  position. The L2a forward is pinned at `m+L` by
+  `tests/test_cut_site_training.py::TestLogitInputSupport`, through the model's
+  own gradients: `test_support_is_start_to_right_tap` checks that one logit's
+  input support ends at the right tap's window, and
+  `test_each_tap_bank_on_its_own` checks each tap's 6-base window on its own.
+  The hex prior is pinned at `m+L-1` by
+  `tests/test_hex_registration.py::test_stop_endpoint_uses_the_same_registration`.
+  The two tests pin positions that differ by one base. See §Open
+  discrepancies, item 1.
+- **Fragment start.** `frag_m` equals the stored start minus the crop origin:
+  `tests/test_cut_site_store_dataset.py::test_frag_m_is_stored_start_both_parities`.
+- **Store consistency.** `tests/test_build_cut_site_store.py::TestBuilderIntegration::test_endpoint_consistency`.
+- **Domain guard.** `tests/test_cut_site_store_dataset.py::TestDomainGuards::test_length_range_mismatch_raises`.
+  It checks `L_min`/`L_max`, not `max_len`.
+- **Weak test.** `tests/test_cut_site_model.py::TestEndpointTapAlignment::test_tap_positions_match_design`
+  asserts arithmetic on local constants and never calls the model. The tap
+  positions are pinned by `TestLogitInputSupport` above, not by this test.
 - **Not implemented in this worktree.** The shared `build_region_weights` test
   and the oracle-below-uniform test. They belong to the sampler and NLL doc. RC
   equivariance is dropped, as the design says.
@@ -630,7 +640,7 @@ log exactly.]
 |---|---|
 | `model_input_size` (= `l_in`) | 1392 |
 | Required `l_seq` (`>= model_input_size + 2*jitter`) | 1904 |
-| OLD store, `rf_budget = 133` | `l_seq = 1802`. REJECTED by `cut_site_model/dataset.py:98` |
+| OLD store, `rf_budget = 133` | `l_seq = 1802`. REJECTED by the `l_seq` check in `CutSiteFragmentDataset.__init__` |
 | NEW store, `rf_budget = 186` | `l_seq = 1908`. Slack 4 |
 | Minimum viable `rf_budget` | 184 |
 | `config_hash`, old → new | `e0699b0902fafafa` → `d5e89191901ea991` |
@@ -642,8 +652,8 @@ log exactly.]
 - [Inferred] The slack is 4 bases. With `rf_budget = 186`, a dataset `jitter`
   above 258 breaks the guard. No check at the store boundary covers that
   relation.
-- [Inferred] Changing `L_max` rejects any existing store (`validate_length_range`,
-  `cut_site_model/store.py:112`). The constructor also fails for `L_max >= 183` at
+- [Inferred] Changing `L_max` rejects any existing store (`validate_length_range`
+  in `cut_site_model/store.py`). The constructor also fails for `L_max >= 183` at
   `WINDOW_HALF = 181` (`cut_site_model/model.py:288`).
 
 ## Open discrepancies
@@ -662,11 +672,7 @@ fix them. Each fix changes computed results, so each needs an owner decision.
    sits 3 bases left of the fragment body `m … m+L-1`. The filter is learned,
    so this is not a hex registration error. The cut-site code and this doc do
    not state whether the shift is intended.
-3. [Verified] **Stage-1 builder admission.** `scripts/cut_site_model/stage1_hex_baseline.py:188-191`
-   applies `min(st, end)` under the comment "Start-based admission". The store
-   already filtered, and `length >= 25`, so the test is vacuous and changes no
-   result. The comment is wrong. Not changed here, because this change is doc-only.
-4. [Inferred] **Tight margin.** The tight bound is `WINDOW_HALF >= 178` at even
+3. [Inferred] **Tight margin.** The tight bound is `WINDOW_HALF >= 178` at even
    `P` (§Margin arithmetic). The constructor enforces 179.
 
 ## Limitations (accepted, not solved here)
