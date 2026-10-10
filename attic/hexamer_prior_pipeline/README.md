@@ -16,7 +16,7 @@ suite (36 + 11 + 8 + 12).
 
 Per-sample hexamer counting is rebased on the simulator's measure step,
 `background_model/simulator/measure.py`. Its replacement is
-`scripts/measure_cut_site_hexamers.py`, which calls `count_sample`,
+`scripts/simulator/measure_cut_site_hexamers.py`, which calls `count_sample`,
 `FragmentLengthDist.from_srdf`, `uniform_hexamer_counts` and `propensities`
 and holds no counting rule of its own.
 

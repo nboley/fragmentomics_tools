@@ -13,7 +13,7 @@ import datetime
 import numpy as np
 import zarr
 
-from background_model.config import PlumbingConfig, C, L_SEQ, L_TARGET, TILE
+from background_model.band_model.config import PlumbingConfig, C, L_SEQ, L_TARGET, TILE
 
 _ZARR_MAJOR = int(zarr.__version__.split(".")[0])
 
@@ -35,7 +35,7 @@ def _create_array(group, name, overwrite=False, **kwargs):
 
 def _get_version_info():
     """Collect version strings for store attrs."""
-    from background_model.train import _git_sha
+    from background_model.band_model.train import _git_sha
     try:
         git_sha = _git_sha()
     except Exception:

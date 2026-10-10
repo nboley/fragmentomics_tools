@@ -31,7 +31,7 @@ mkdir -p "$INPUTS/h5" "$SHARDS" "$OUT"
 mkdir -p "$WORKDIR/bgcode"
 cp -r "$REPO_DIR/background_model" "$WORKDIR/bgcode/"
 export PYTHONPATH="$WORKDIR/bgcode"
-SCRIPTS="$REPO_DIR/scripts/batch_preprocess"
+SCRIPTS="$REPO_DIR/scripts/band_model/batch_preprocess"
 
 # All inputs, including the FASTA (needed for the sequence array).
 for f in ibd_quiescent.tsv training_tiles.bed blacklist_encode_v2.bed draw50.tsv hg38.fa hg38.fa.fai; do

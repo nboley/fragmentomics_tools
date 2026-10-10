@@ -872,8 +872,8 @@ def measure_sample(
     """The whole measure step for one sample: ``C``, ``f(L)``, ``N`` and ``r``.
 
     The ONE place the sequence is written down, shared by
-    ``scripts/run_cut_site_simulator.py`` and
-    ``scripts/measure_cut_site_hexamers.py``:
+    ``scripts/simulator/run_cut_site_simulator.py`` and
+    ``scripts/simulator/measure_cut_site_hexamers.py``:
 
         count_sample -> FragmentLengthDist.from_srdf
                      -> uniform_hexamer_counts(rdf, ...) -> propensities

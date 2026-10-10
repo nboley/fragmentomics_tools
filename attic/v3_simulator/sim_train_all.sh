@@ -19,7 +19,7 @@ mkdir -p "$RUNS"
 
 for LOSS in multinomial dirichlet_multinomial nb_offset; do
     echo "=== Training $LOSS ==="
-    python -m background_model.train \
+    python -m background_model.band_model.train \
         --loss "$LOSS" \
         --run-name "sim_v2_B_${LOSS}" \
         --store "$STORE" \

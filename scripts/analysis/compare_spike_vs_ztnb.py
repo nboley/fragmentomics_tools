@@ -19,6 +19,7 @@ spike_recovery.py for why the absolute scale is out of reach.
 Caveats are printed after the figure. Read them before drawing conclusions.
 """
 
+import os
 import sys
 
 import matplotlib
@@ -27,7 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from scipy.stats import spearmanr  # noqa: E402
 
-sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools/scripts")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from spike_recovery import spike_surface  # noqa: E402
 from ztnb_from_duphist import (  # noqa: E402
     SPIKE_GCS,

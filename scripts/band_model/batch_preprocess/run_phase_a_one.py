@@ -18,7 +18,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bg_batch_common import build_config, load_drawn_sheet  # noqa: E402
 
-from background_model.preprocess import _worker_process_sample, build_tiles  # noqa: E402
+from background_model.band_model.preprocess import _worker_process_sample, build_tiles  # noqa: E402
 
 
 def main():

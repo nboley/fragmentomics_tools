@@ -18,7 +18,7 @@ import os
 
 import pandas as pd
 
-from background_model.config import PlumbingConfig
+from background_model.band_model.config import PlumbingConfig
 
 # Canonical filenames within the staged inputs/ prefix.
 INPUT_FILES = {

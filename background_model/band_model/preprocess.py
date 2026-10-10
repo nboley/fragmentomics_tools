@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pysam
 
-from background_model.config import (
+from background_model.band_model.config import (
     C,
     L_SEQ,
     L_TARGET,
@@ -26,7 +26,7 @@ from background_model.config import (
     PlumbingConfig,
     _file_md5,
 )
-from background_model.store import (
+from background_model.band_model.store import (
     compute_N_for_tile,
     create_store,
     densify_counts,
@@ -606,7 +606,7 @@ def run_phase_b(
 
     # Resize CSR arrays if nnz estimate was off
     if actual_nnz != total_nnz:
-        from background_model.store import _create_array
+        from background_model.band_model.store import _create_array
         _create_array(root["counts"], "pos", shape=(actual_nnz,), dtype="uint16", chunks=(1 << 20,), overwrite=True)
         _create_array(root["counts"], "track", shape=(actual_nnz,), dtype="uint8", chunks=(1 << 20,), overwrite=True)
         _create_array(root["counts"], "data", shape=(actual_nnz,), dtype="uint16", chunks=(1 << 20,), overwrite=True)

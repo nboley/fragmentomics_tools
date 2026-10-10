@@ -32,12 +32,12 @@ from typing import List, Optional
 
 import numpy as np
 
-from background_model.config import TILE
-from background_model.inference import (
+from background_model.band_model.config import TILE
+from background_model.band_model.inference import (
     WindowGeometry,
     _iter_window_predictions,
 )
-from background_model.preprocess import FL_BANDS, TRACK_INDEX
+from background_model.band_model.preprocess import FL_BANDS, TRACK_INDEX
 
 
 @dataclass(frozen=True)

@@ -52,8 +52,8 @@ def main():
     # ── Load ground truth ──────────────────────────────────────────────────
     import pysam
     import zarr
-    from background_model.config import PlumbingConfig
-    from background_model.dataset import BackgroundTileDataset
+    from background_model.band_model.config import PlumbingConfig
+    from background_model.band_model.dataset import BackgroundTileDataset
     from scripts._oracle_scoring import eval_loss_at_log_r, make_oracle_loss_fn
     from scripts.sim_fragments import GCBias2D, MAX_LEN
     from scripts.sim_oracle import compute_oracle_propensity_for_tile

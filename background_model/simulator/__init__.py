@@ -20,7 +20,7 @@ and 174-177), each importing only from layers above it (``draw`` imports
 ``constants`` and ``hexamers`` stay outside: neither needs the simulator's
 dependencies, and ``constants`` is shared with the cut-site store/model.
 
-The driver is ``scripts/run_cut_site_simulator.py``. ``scripts/measure_cut_site_hexamers.py``
+The driver is ``scripts/simulator/run_cut_site_simulator.py``. ``scripts/simulator/measure_cut_site_hexamers.py``
 runs only the measure step for one sample and writes ``C(h)``, ``N(h)``, ``r(h)`` and
 ``f(L)`` to disk (owner decision 189).
 

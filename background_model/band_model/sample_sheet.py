@@ -5,7 +5,7 @@ clinical column (ENDO_CATEGORY) that crosses the boundary, filters to the
 quiescent pool, and emits a 4-column TSV suitable for PlumbingConfig.sample_sheet.
 
 Usage:
-    python -m background_model.sample_sheet \\
+    python -m background_model.band_model.sample_sheet \\
         --manifest manifests/ibd.data_manifest.tsv \\
         --clinical pooled_clinical.csv \\
         --output sample_sheet.tsv \\

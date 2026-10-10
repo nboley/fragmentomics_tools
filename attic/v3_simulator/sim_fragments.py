@@ -72,7 +72,7 @@ Output layout  <out-root>/<regime>/ :
   plots/*.png        the four validation-gate figures (also copied to
                      data/sim_plots/ for editor viewing)
 
-Representation note (verified against background_model/preprocess.py and the
+Representation note (verified against background_model/band_model/preprocess.py and the
 ``_rfa`` helper in tests/test_bg_correction.py): a fragment as
 (region_idx, region-local start, region-local stop, strand) plus a region table
 is sufficient to (a) build store coverage counts and (b) construct
@@ -101,7 +101,7 @@ import time
 
 import numpy as np
 
-# ── paths (on-host, matching scripts/build_inactive_regions.py + sim_fit_gc_bias.py) ──
+# ── paths (on-host, matching scripts/band_model/build_inactive_regions.py + sim_fit_gc_bias.py) ──
 REPO = "/home/nathanboley/src/fragmentomics_tools"
 FASTA = "/efs/analytics/nathanboley/data_resources/genome/hg38.fa"
 GC_BIAS_JSON = ("/efs/analytics/nathanboley/background_model/simulation/"
@@ -307,7 +307,7 @@ def load_regions(bed: str, n_regions: int, region_len: int, ref: str = "hg38"):
     """Carve ``n_regions`` central ``region_len``-bp windows from a tile BED.
 
     Uses the library (RegionDataFrame.from_bed) per CLAUDE.md rather than parsing
-    the BED by hand -- the same loader background_model/preprocess.build_tiles
+    the BED by hand -- the same loader background_model/band_model/preprocess.build_tiles
     uses, so region coordinates are identical to the plumbing path.  The carve
     is centred inside EACH tile using its own width (``_center_offset``), so tile
     sets of any width work; a tile narrower than ``region_len`` fails loudly.

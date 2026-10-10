@@ -16,8 +16,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from background_model.config import C, TILE, PlumbingConfig
-from background_model.preprocess import (
+from background_model.band_model.config import C, TILE, PlumbingConfig
+from background_model.band_model.preprocess import (
     TRACK_INDEX,
     _contig_length,
     _worker_process_sample,
@@ -27,7 +27,7 @@ from background_model.preprocess import (
     run_phase_a,
     run_phase_b,
 )
-from background_model.store import (
+from background_model.band_model.store import (
     compute_N_for_tile,
     csr_slice,
     densify_counts,
@@ -252,7 +252,7 @@ class TestTrackIndex:
         stored count, so verify alignment here."""
         core = pytest.importorskip("background_model_core")
         from background_model import tracks as bg_tracks
-        from background_model import config as bg_config
+        from background_model.band_model import config as bg_config
 
         # config.py re-exports from tracks (identity, not just equality)
         assert bg_config._FL_BANDS_DEFAULT is bg_tracks.FL_BANDS
@@ -332,7 +332,7 @@ class TestDepthFilter:
 
 class TestSampleSheetBuilder:
     def test_build_sheet(self, tmp_dir):
-        from background_model.sample_sheet import build_sample_sheet
+        from background_model.band_model.sample_sheet import build_sample_sheet
 
         # Create mock manifest
         manifest_path = os.path.join(tmp_dir, "manifest.tsv")
@@ -367,7 +367,7 @@ class TestSampleSheetBuilder:
         'Active' (non-quiescent) rows are dropped; and the clinical endo join is
         BY LIBRARY (not positional) — proven with mismatched row order and an
         extra clinical-only library."""
-        from background_model.sample_sheet import build_sample_sheet
+        from background_model.band_model.sample_sheet import build_sample_sheet
 
         manifest_path = os.path.join(tmp_dir, "manifest.tsv")
         manifest_df = pd.DataFrame({
@@ -789,7 +789,7 @@ class TestBlacklistMaskConstruction:
 
 class TestResumeSemantics:
     def test_done_marker_skips_worker(self, tmp_dir, monkeypatch):
-        import background_model.preprocess as ppmod
+        import background_model.band_model.preprocess as ppmod
 
         cfg = _make_synth_config(tmp_dir)
         sheet = pd.read_csv(cfg.sample_sheet, sep="\t")
@@ -888,7 +888,7 @@ class TestBlacklistSpanningFragmentModelE2E:
         import torch
         from background_model_core import BackgroundModel, _prepare_mask
 
-        from background_model.dataset import BackgroundTileDataset
+        from background_model.band_model.dataset import BackgroundTileDataset
 
         # ── geometry (SMALL_TILE=256, jitter=128 -> L_TARGET=512) ──────────
         # Single tile [3072, 3328); L_TARGET frame origin count_start = 2944.
@@ -1010,7 +1010,7 @@ class TestFlBandsGuard:
         d["fl_bands"] = [[40, 65], [120, 175]]
         root.attrs["config_json"] = json.dumps(d)
 
-        from background_model.dataset import BackgroundTileDataset
+        from background_model.band_model.dataset import BackgroundTileDataset
 
         with pytest.raises(ValueError) as ei:
             BackgroundTileDataset(

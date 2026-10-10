@@ -1,7 +1,7 @@
 """Build the CONTROL ("not accessible in blood") CTCF motif site set.
 
 Phase 4 control experiment.  This is the discriminating negative control for the
-main CTCF meta-profile run (scripts/ctcf_pileup_build_sites.py): the main run uses
+main CTCF meta-profile run (scripts/ctcf/ctcf_pileup_build_sites.py): the main run uses
 CTCF motifs that ARE bound/accessible in blood; this run uses motifs that are real
 CTCF motifs in OTHER tissues but have NO blood occupancy.  cfDNA is blood-derived,
 so at these sites there should be NO footprint in the raw data, while the SEQUENCE
@@ -42,7 +42,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from fragmentomics_tools.contig import CONTIG_LENGTHS  # noqa: E402
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 

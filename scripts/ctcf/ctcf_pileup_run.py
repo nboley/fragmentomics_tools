@@ -28,13 +28,14 @@ reused across all models.
 
 import argparse
 import json
+import os
 import sys
 import time
 
 import numpy as np
 import pysam
 
-sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch  # noqa: E402
 
@@ -43,9 +44,9 @@ from background_model_core import (  # noqa: E402
     DEFAULT_OUTPUT_TRACKS,
     reverse_complement_track_permutation,
 )
-from background_model.preprocess import TRACK_INDEX, FL_BANDS  # noqa: E402
-from background_model import inference as _inf  # noqa: E402
-from background_model.correction import (  # noqa: E402
+from background_model.band_model.preprocess import TRACK_INDEX, FL_BANDS  # noqa: E402
+from background_model.band_model import inference as _inf  # noqa: E402
+from background_model.band_model.correction import (  # noqa: E402
     apply_fragment_weights,
     expected_profile,
     WeightClampConfig,

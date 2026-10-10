@@ -10,7 +10,7 @@ GENOME="${GENOME:-/efs/analytics/nathanboley/data_resources/genome}"
 AWS="${AWS:-aws}"
 PYBIN="${PYBIN:-python3}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-SCRIPTS="$REPO/scripts/batch_preprocess"
+SCRIPTS="$REPO/scripts/band_model/batch_preprocess"
 
 echo "== small inputs (BEDs, sheets, .fai) =="
 $AWS s3 cp "$GENOME/hg38.fa.fai"                                       "$S3_BASE/inputs/hg38.fa.fai"

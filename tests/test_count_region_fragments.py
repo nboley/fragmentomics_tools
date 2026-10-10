@@ -1,4 +1,4 @@
-"""Tests for scripts/count_region_fragments.py.
+"""Tests for scripts/band_model/count_region_fragments.py.
 
 Covers shard partitioning (including failure modes), the MAPQ / dedup filter
 pipeline, and the midpoint-in-region counting rule.  These tests use only
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "band_model"))
 from count_region_fragments import (
     partition_samples,
     filter_and_dedup,

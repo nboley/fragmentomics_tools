@@ -35,8 +35,8 @@ from typing import List, Optional
 import numpy as np
 import torch
 
-from background_model.config import TILE
-from background_model.preprocess import _get_overlapping_blacklist_regions
+from background_model.band_model.config import TILE
+from background_model.band_model.preprocess import _get_overlapping_blacklist_regions
 from fragmentomics_tools.region import one_hot_encode_sequences
 
 

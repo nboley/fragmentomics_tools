@@ -3,7 +3,7 @@
 Inputs come from ``background_model.simulator.measure`` (``count_sample``,
 ``uniform_hexamer_counts``, ``propensities``, ``FragmentLengthDist``); encoding
 is ``background_model.hexamers``.  Authority: ``docs/pending/simulator_spec.md``.
-Driver: ``scripts/run_cut_site_simulator.py``.
+Driver: ``scripts/simulator/run_cut_site_simulator.py``.
 
 ``simulate_fragments_to_bed`` is parallel over regions, and **byte-identical
 across worker counts** (owner decision 166): each region draws from its own

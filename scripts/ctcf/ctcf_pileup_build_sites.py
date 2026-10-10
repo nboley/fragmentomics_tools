@@ -12,12 +12,13 @@ kept/dropped counts at each step.  CPU-only, cheap; run in the sandbox.
 """
 
 import json
+import os
 import sys
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, "/home/nathanboley/src/fragmentomics_tools")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from fragmentomics_tools.contig import CONTIG_LENGTHS  # noqa: E402
 from fragmentomics_tools.dataframe import RegionDataFrame  # noqa: E402
 

@@ -21,14 +21,14 @@ pytest.importorskip("background_model_core")
 
 import pysam
 
-from background_model.correction import (
+from background_model.band_model.correction import (
     ExpectedProfile,
     WeightClampConfig,
     apply_fragment_weights,
     expected_profile,
 )
-from background_model.inference import predict_region_profiles
-from background_model.preprocess import TRACK_INDEX
+from background_model.band_model.inference import predict_region_profiles
+from background_model.band_model.preprocess import TRACK_INDEX
 from background_model_core import BackgroundModel
 from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
 from fragmentomics_tools.region import Region

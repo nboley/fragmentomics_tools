@@ -1,4 +1,4 @@
-"""Tests for scripts/resolve_ibd_sample_sheet.py.
+"""Tests for scripts/band_model/resolve_ibd_sample_sheet.py.
 
 Exercises the flat-stem derivation, the layout preference rule (ibd/frag_h5s
 beats the flat cache root when a library resolves both ways), and the
@@ -8,7 +8,7 @@ tmp_path and touch no real EFS data.
 import sys, os
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts", "band_model"))
 from resolve_ibd_sample_sheet import (
     flat_stem,
     find_ibd,

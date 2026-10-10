@@ -2,7 +2,7 @@
 
 Date: 2026-09-09. Branch: `background-model-v2`.
 
-Builder `background_model/sample_sheet.py` run against the REAL IBD manifest +
+Builder `background_model/band_model/sample_sheet.py` run against the REAL IBD manifest +
 pooled clinical CSV for the first time (Phase 1 built it against the manifest
 FORMAT only). This note records the QC that gates the Phase 3.3 h5 download and
 the 40/10 train/held-out split.
@@ -79,7 +79,7 @@ Sum of manifest `size` fields for the quiescent pool:
 
 ## Code adaptation (committed separately)
 
-`background_model/sample_sheet.py` needed three minimal real-file adaptations,
+`background_model/band_model/sample_sheet.py` needed three minimal real-file adaptations,
 all test-preserving (existing `TestSampleSheetBuilder` + full bg suite green,
 191 passed):
 

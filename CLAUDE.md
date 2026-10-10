@@ -86,8 +86,14 @@ inside `Dataset.__getitem__`, and hardcoded `/scratch/...` and `/home/nboley/...
 paths that no longer exist.
 
 The live replacement is `background_model_core.py` plus the `background_model/`
-package (config, store, preprocess, dataset, inference, correction), developed
-on branch `background-model-v2` with designs in `docs/`.
+package, developed on branch `background-model-v2` with designs in `docs/`.
+Layout (owner decisions 195-197): shared definitions stay top-level
+(`constants`, `hexamers`, `tracks`); the 12-track band model is
+`background_model/band_model/` (config, store, preprocess, sample_sheet,
+dataset, train, inference, correction, measure_throughput); the cut-site
+simulator is `background_model/simulator/`. `scripts/` mirrors this with
+`simulator/`, `band_model/`, `ctcf/`, `cut_site/` and `analysis/`
+subdirectories; a script's repo-root `sys.path` pin depends on its depth.
 
 ## Frozen statistical core
 
@@ -145,7 +151,7 @@ forward.
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight
   < 1 to zero and make corrected pileups quietly wrong. See its docstring.
-- **`reverse_complement_track_permutation` is NOT dead code** — `ctcf_pileup_run.py`
+- **`reverse_complement_track_permutation` is NOT dead code** — `scripts/ctcf/ctcf_pileup_run.py`
   uses it to orient minus-strand CTCF sites, so do not delete it when refactoring
   the track models.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.

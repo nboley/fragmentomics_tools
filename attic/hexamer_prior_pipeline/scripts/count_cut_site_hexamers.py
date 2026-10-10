@@ -180,7 +180,7 @@ import pyarrow.parquet as pq
 # be, which fails silently rather than loudly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from background_model.config import PlumbingConfig  # noqa: E402
+from background_model.band_model.config import PlumbingConfig  # noqa: E402
 from background_model.constants import HEX_HALF, KMER, L_MAX, L_MIN, NHEX  # noqa: E402
 from background_model.hexamers import hexamer_indices, hexamer_vocabulary  # noqa: E402
 from fragments_h5 import FragmentsH5  # noqa: E402
