@@ -35,7 +35,7 @@ import hashlib
 import json
 import os
 import sys
-from typing import Dict, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -57,12 +57,13 @@ if not os.path.abspath(background_model.__file__).startswith(_REPO + os.sep):
     )
 
 from background_model.cut_site_model.dataset import CutSiteFragmentDataset  # noqa: E402
+from background_model.cut_site_model.model import CutSiteFragmentModel  # noqa: E402
 from background_model.cut_site_model.store import CutSiteStoreConfig  # noqa: E402
 from scripts.cut_site_model.score_fragments import (  # noqa: E402
     SPLITS,
     STRAND_CHARS,
-    load_model,
     region_weighted_mult_nll,
+    selected_tiles,
 )
 
 
@@ -97,15 +98,16 @@ def read_per_fragment(tsv_path: str, store_path: str) -> Dict[str, np.ndarray]:
         raise ValueError(f"unknown split names in {tsv_path}")
 
     # The scorer writes every row of every processed tile; recover the tile
-    # set from the rows' splits, then check the TSV is exactly those rows.
+    # set with the scorer's own selection rule, then check the TSV is exactly
+    # those rows.  Summaries written before --tiles-npy existed lack the key.
     with open(tsv_path + ".summary.json") as f:
         summary = json.load(f)
-    codes = [code_of[s] for s in summary["splits"]]
-    processed_tiles = np.isin(split_arr, codes)
-    if summary["limit_regions"] is not None:
-        keep = np.nonzero(processed_tiles)[0][:summary["limit_regions"]]
-        processed_tiles = np.zeros(n_tiles, dtype=bool)
-        processed_tiles[keep] = True
+    tiles_npy = summary.get("tiles_npy")
+    processed_tiles = selected_tiles(
+        split_arr, summary["splits"],
+        None if tiles_npy is None else np.load(tiles_npy),
+        summary["limit_regions"],
+    )
     rows = np.nonzero(processed_tiles[tile_of_row])[0]
     if len(rows) != len(df):
         raise ValueError(f"TSV has {len(df)} rows; the store's processed "
@@ -137,26 +139,45 @@ def reduce_splits(
     store_path: str,
     splits: Sequence[str],
     min_N: int,
+    tiles: Optional[Sequence[int]] = None,
+    return_terms: bool = False,
 ) -> Dict[str, object]:
-    """region_weighted_mult_nll for each split, from the scorer's TSV."""
+    """region_weighted_mult_nll for each split, from the scorer's TSV.
+
+    `tiles` restricts each split's region population to those store tile
+    indices -- a cross-validation fold's held-out regions -- and then only
+    those tiles need to have been scored.  `return_terms` is passed through.
+    """
     pf = read_per_fragment(tsv_path, store_path)
     root = zarr.open_group(store_path, mode="r")
     cfg = CutSiteStoreConfig.from_json(root.attrs["config_json"])
-    # The scorer's own model geometry; prior-only, so no checkpoint needed.
-    model = load_model(cfg, pf["summary"]["hex_tables"], zero_correction=True)
+    # The model's input geometry depends only on tile_size, so a geometry-only
+    # model gives it.  Not load_model on the TSV's own tables: the loader now
+    # refuses pre-m+L tables, and the per-fragment values are already in the
+    # TSV, so the tables are never read here -- loading them would only make
+    # the Phase-0 old-prior TSV unreducible.
+    model_input_size = CutSiteFragmentModel(
+        tile_size=cfg.tile_size, L_min=cfg.L_min, L_max=cfg.L_max,
+        N1=4, K=4, N2=4, H=4,
+    ).model_input_size
+    in_fold = (np.ones(len(pf["split_arr"]), dtype=bool) if tiles is None
+               else np.isin(np.arange(len(pf["split_arr"])), np.asarray(tiles)))
 
     out: Dict[str, object] = {}
     for name in splits:
         code, ds_split = SPLITS[name]
-        if not pf["processed_tiles"][pf["split_arr"] == code].all():
+        if not pf["processed_tiles"][(pf["split_arr"] == code) & in_fold].all():
             raise ValueError(f"split {name!r}: not every tile was scored")
         ds = CutSiteFragmentDataset(
-            store_path=store_path, model_input_size=model.model_input_size,
+            store_path=store_path, model_input_size=model_input_size,
             model_L_min=cfg.L_min, model_L_max=cfg.L_max, split=ds_split,
             min_N=min_N, train_mode=False, preload=False,
         )
+        if tiles is not None:
+            ds.index = [(s, t) for s, t in ds.index if in_fold[t]]
         out[name] = region_weighted_mult_nll(
-            pf["log_prob"], pf["scored"], pf["indptr"], ds)
+            pf["log_prob"], pf["scored"], pf["indptr"], ds,
+            return_terms=return_terms)
     return out
 
 
@@ -169,12 +190,16 @@ def main(argv=None):
                    choices=list(SPLITS))
     p.add_argument("--min-N", type=int, default=10,
                    help="min_N the trainer used (region population)")
+    p.add_argument("--tiles-npy", default=None,
+                   help=".npy of store tile indices: reduce over only those "
+                        "regions of each split (a cross-validation fold)")
     p.add_argument("--output", help="JSON path (default: <tsv>.nll.json)")
     args = p.parse_args(argv)
 
     root = zarr.open_group(args.store, mode="r")
+    tiles = None if args.tiles_npy is None else np.load(args.tiles_npy)
     result = reduce_splits(args.per_fragment_tsv, args.store, args.splits,
-                           args.min_N)
+                           args.min_N, tiles)
     with open(args.per_fragment_tsv + ".summary.json") as f:
         summary = json.load(f)
     doc = {
@@ -187,6 +212,8 @@ def main(argv=None):
         "checkpoint": summary["checkpoint"],
         "zero_correction": summary["zero_correction"],
         "min_N": args.min_N,
+        "tiles_npy": args.tiles_npy and os.path.abspath(args.tiles_npy),
+        "tiles_npy_sha256": args.tiles_npy and _sha256(args.tiles_npy),
         "background_model": os.path.abspath(background_model.__file__),
         "date": datetime.datetime.now().isoformat(timespec="seconds"),
         "splits": result,

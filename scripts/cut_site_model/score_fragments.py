@@ -143,6 +143,31 @@ def load_model(
 # ---------------------------------------------------------------------------
 
 
+def selected_tiles(
+    split_arr: np.ndarray,
+    splits: Sequence[str],
+    tiles: Optional[Sequence[int]] = None,
+    limit_regions: Optional[int] = None,
+) -> np.ndarray:
+    """Boolean mask over store tiles: the tiles `score_store` processes.
+
+    The ONE selection rule, shared with `reduce_split_nll.read_per_fragment`,
+    which must recover the processed tile set from the summary JSON: split
+    membership, then the `tiles` restriction, then the `limit_regions` cut.
+    """
+    selected = np.isin(split_arr, [SPLITS[s][0] for s in splits])
+    if tiles is not None:
+        tiles = np.asarray(tiles, dtype=np.int64)
+        if tiles.size and (tiles.min() < 0 or tiles.max() >= len(split_arr)):
+            raise ValueError("tile index outside the store")
+        selected &= np.isin(np.arange(len(split_arr)), tiles)
+    if limit_regions is not None:
+        keep = np.nonzero(selected)[0][:limit_regions]
+        selected = np.zeros(len(split_arr), dtype=bool)
+        selected[keep] = True
+    return selected
+
+
 class _Items(Dataset):
     """Flat view over (dataset, item index) pairs, in store tile order."""
 
@@ -171,11 +196,13 @@ def score_store(
     batch_size: int = 1,
     device: str = "cpu",
     workers: int = 0,
+    tiles: Optional[Sequence[int]] = None,
 ) -> Dict[str, np.ndarray]:
     """Score every store fragment in the selected tiles.
 
-    Tiles are the store tiles whose split is in `splits`, in store order,
-    truncated to the first `limit_regions`.
+    Tiles are the store tiles whose split is in `splits`, restricted to the
+    store tile indices in `tiles` if given (a cross-validation fold), in
+    store order, truncated to the first `limit_regions`.
 
     Returns arrays over ALL store rows (nnz):
         log_prob, log_prob_ml   float64, NaN where not scored
@@ -193,12 +220,7 @@ def score_store(
         raise ValueError("scorer assumes a single-sample store (S == 1)")
     nnz = int(indptr[-1])
 
-    codes = [SPLITS[s][0] for s in splits]
-    tiles = np.nonzero(np.isin(split_arr, codes))[0]
-    if limit_regions is not None:
-        tiles = tiles[:limit_regions]
-    selected = np.zeros(n_tiles, dtype=bool)
-    selected[tiles] = True
+    selected = selected_tiles(split_arr, splits, tiles, limit_regions)
 
     pairs = []
     for name in splits:
@@ -318,6 +340,7 @@ def region_weighted_mult_nll(
     scored: np.ndarray,
     indptr: np.ndarray,
     dataset: CutSiteFragmentDataset,
+    return_terms: bool = False,
 ) -> Dict[str, float]:
     """The trainer's REGION-weighted estimator, from per-fragment values.
 
@@ -327,6 +350,10 @@ def region_weighted_mult_nll(
     split and min_N.  A region whose crop admits no fragment contributes 0 to
     the mean but still counts in the denominator, exactly as in `_step`.
     Accumulates in float64.
+
+    `return_terms=True` adds the per-region terms (float64, in
+    `dataset.index` order) as `terms` and their store tile indices as
+    `term_tiles`, for paired comparisons.  The other entries are unchanged.
     """
     terms = np.empty(len(dataset.index), dtype=np.float64)
     n_empty = 0
@@ -338,11 +365,15 @@ def region_weighted_mult_nll(
             raise ValueError(f"tile {t} has a scored row with NaN log_prob")
         n_empty += len(lp) == 0
         terms[k] = -lp.sum(dtype=np.float64) / max(len(lp), 1)
-    return {
+    out = {
         "region_weighted_nll": float(terms.mean(dtype=np.float64)),
         "n_regions": len(terms),
         "n_regions_no_scored_fragment": int(n_empty),
     }
+    if return_terms:
+        out["terms"] = terms
+        out["term_tiles"] = np.array([t for _, t in dataset.index], dtype=np.int64)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +398,9 @@ def main(argv=None):
     p.add_argument("--splits", nargs="+", default=list(SPLITS), choices=list(SPLITS))
     p.add_argument("--limit-regions", type=int, default=None,
                    help="score only the first N selected tiles (smoke test)")
+    p.add_argument("--tiles-npy", default=None,
+                   help=".npy of store tile indices; score only those tiles of "
+                        "--splits (a cross-validation fold)")
     p.add_argument("--reproduce-val-mult-nll", action="store_true",
                    help="also report the trainer's region-weighted val_mult_nll "
                         "recomputed from the per-fragment output")
@@ -379,13 +413,15 @@ def main(argv=None):
     cfg = CutSiteStoreConfig.from_json(root.attrs["config_json"])
     model = load_model(cfg, args.hex_tables, args.checkpoint, args.zero_correction)
 
+    tiles = None if args.tiles_npy is None else np.load(args.tiles_npy)
     result = score_store(model, args.store, args.splits, args.limit_regions,
-                         args.batch_size, args.device, args.workers)
+                         args.batch_size, args.device, args.workers, tiles)
     df = build_table(args.store, result)
     write_table(df, args.output)
 
     nnz = len(result["scored"])
-    complete = args.limit_regions is None and set(args.splits) == set(SPLITS)
+    complete = (args.limit_regions is None and tiles is None
+                and set(args.splits) == set(SPLITS))
     summary = {
         "store": os.path.abspath(args.store),
         "config_hash": root.attrs["config_hash"],
@@ -394,6 +430,7 @@ def main(argv=None):
         "hex_tables": os.path.abspath(args.hex_tables),
         "splits": args.splits,
         "limit_regions": args.limit_regions,
+        "tiles_npy": args.tiles_npy and os.path.abspath(args.tiles_npy),
         "n_regions_scored": int(result["n_regions"]),
         "rows_written": len(df),
         "rows_scored": int(df["scored"].sum()),
@@ -405,7 +442,8 @@ def main(argv=None):
         raise AssertionError(f"wrote {len(df)} rows for {nnz} store fragments")
 
     if args.reproduce_val_mult_nll:
-        if args.limit_regions is not None or "val" not in args.splits:
+        if (args.limit_regions is not None or tiles is not None
+                or "val" not in args.splits):
             p.error("--reproduce-val-mult-nll needs every val tile scored")
         val_ds = CutSiteFragmentDataset(
             store_path=args.store, model_input_size=model.model_input_size,

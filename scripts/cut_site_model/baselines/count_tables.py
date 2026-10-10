@@ -54,6 +54,7 @@ Usage:
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -117,6 +118,14 @@ def _git_state():
         return None, None
 
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def tile_hexamers(x, n_bases):
     """``(hex, ok)`` for tile bases ``0 .. n_bases-1`` of one dataset item's ``x``.
 
@@ -138,8 +147,14 @@ def cut_base_window(tile_size, L_max):
     return int(fragment_cut_bases(tile_size - 1, L_max)[1]) + 1
 
 
-def count_split(store_path, split="train", min_N=0, verbose=True):
+def count_split(store_path, split="train", min_N=0, verbose=True, tiles=None):
     """C, N_start, N_end and the length counts over one split's centred crop.
+
+    ``tiles``, if given, restricts the count to those store tile indices of
+    the split: the fitting folds of a cross-validation split.  ``C``,
+    ``N_start``, ``occ`` and the length counts are sums over tiles, so they
+    are additive across a partition; ``N_end`` is not, since its ramp comes
+    from the counted tiles' own length distribution.
 
     A fragment counts only when BOTH its cut windows are valid and unmasked
     (as ``simulator.measure.cut_site_hexamers``), and the same fragments make
@@ -184,9 +199,17 @@ def count_split(store_path, split="train", min_N=0, verbose=True):
     occ = np.zeros(n_bases * NHEX, dtype=np.int64)
     codes = []
     n_dropped = 0
+    keep_tile = None
+    if tiles is not None:
+        keep_tile = np.zeros(ds.n_tiles, dtype=bool)
+        keep_tile[np.asarray(tiles, dtype=np.int64)] = True
+    n_counted_tiles = 0
 
     for i in range(len(ds)):
         _s, t = ds.index[i]
+        if keep_tile is not None and not keep_tile[t]:
+            continue
+        n_counted_tiles += 1
         item = ds[i]
         hx, ok = tile_hexamers(item["x"], n_bases)
         mask = np.ones(n_bases, dtype=bool)
@@ -218,6 +241,10 @@ def count_split(store_path, split="train", min_N=0, verbose=True):
         if verbose and (i + 1) % 5000 == 0:
             print(f"  {i + 1}/{len(ds)} tiles", flush=True)
 
+    if keep_tile is not None and n_counted_tiles != int(keep_tile.sum()):
+        raise ValueError(
+            f"{int(keep_tile.sum()) - n_counted_tiles} requested tiles are not "
+            f"in split {split!r} at min_N={min_N}")
     if codes:
         occ += np.bincount(np.concatenate(codes), minlength=occ.size)
     occ = occ.reshape(n_bases, NHEX)
@@ -240,7 +267,8 @@ def count_split(store_path, split="train", min_N=0, verbose=True):
     meta = dict(
         store=os.path.abspath(store_path), split=split, min_N=int(min_N),
         crop="centred", config_hash=str(root.attrs["config_hash"]),
-        n_tiles=len(ds), n_fragments_admitted=int(length_counts_all.sum()),
+        n_tiles=n_counted_tiles, tile_restricted=tiles is not None,
+        n_fragments_admitted=int(length_counts_all.sum()),
         n_fragments_counted=int(length_counts.sum()),
         n_dropped_invalid_or_masked=n_dropped,
         # Reviewer F-01: a consumer of these counts cannot see from the arrays
@@ -319,6 +347,9 @@ def main(argv=None):
     c.add_argument("--split", default="train",
                    choices=["train", "val", "heldout_inactive"])
     c.add_argument("--min-N", type=int, default=0)
+    c.add_argument("--tiles-npy", default=None,
+                   help=".npy of store tile indices: count only those tiles "
+                        "of --split (cross-validation fitting folds)")
     c.add_argument("--output", required=True)
     t = sub.add_parser("tables", help="counts -> the model's .npz")
     t.add_argument("--counts", required=True)
@@ -330,7 +361,12 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     if args.cmd == "count":
-        counts, meta = count_split(args.store, args.split, args.min_N)
+        tiles = None if args.tiles_npy is None else np.load(args.tiles_npy)
+        counts, meta = count_split(args.store, args.split, args.min_N,
+                                   tiles=tiles)
+        if tiles is not None:
+            meta.update(tiles_npy=os.path.abspath(args.tiles_npy),
+                        tiles_npy_sha256=_sha256(args.tiles_npy))
         np.savez(args.output, **counts)
         _write_sidecar(args.output, meta)
         print(json.dumps(meta, indent=2))
