@@ -488,7 +488,21 @@ def simulate_fragments_to_bed(
     else:
         sidecar_default = out_path + ".p.tsv.gz"
     sidecar_path = p_sidecar_path or sidecar_default
-    with gzip.open(sidecar_path, "wt") as f:
+    # compresslevel=6 (gzip's own default; Python's gzip module defaults to 9).
+    # Measured on 2,000 regions: level 9 spent 0.70 s of a ~1.2 s parent tail in
+    # zlib.compress, which scales to ~23 s of the full 66,649-region run, for a
+    # file ~0.4% smaller.
+    #
+    # Why this is NOT a change to the artifact's content: the DECOMPRESSED bytes
+    # are identical at any level, and the join key plus `%.17g` round-tripping
+    # are unaffected. The compressed bytes do change -- but they were never
+    # stable anyway, because gzip stores an mtime in its header, so two runs of
+    # identical code already produce different `.gz` files. Comparing sidecars
+    # byte for byte therefore requires decompressing first, at any level.
+    # (Owner decision 2026-10-10, after the review established the mtime point;
+    # the level had previously been left alone on the false premise that
+    # changing it was what would make the `.gz` bytes differ.)
+    with gzip.open(sidecar_path, "wt", compresslevel=6) as f:
         meta_parts = [f"seed={seed}"]
         if sample_id is not None:
             meta_parts.append(f"sample={sample_id}")

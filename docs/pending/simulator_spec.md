@@ -385,9 +385,18 @@ sidecar in blocks of rows, not row by row.  The BED, the sidecar and
 checked on 200 and 2,000 regions at 1 and 16 workers, and on a synthetic
 2.4M-row, 66,649-region assembly that crosses three sidecar blocks.  Its peak
 traced memory there was 751 MiB, against 1,236 MiB for the per-region build.
-`test_sidecar_block_boundaries_keep_every_row` pins the block seams.  The gzip level is
-unchanged (the `gzip.open` default, 9), and it is now most of the parent's
-remaining time.
+`test_sidecar_block_boundaries_keep_every_row` pins the block seams.
+
+The sidecar is written at **`compresslevel=6`**, gzip's own default rather than
+Python's 9 (owner decision 2026-10-10).  Level 9 was most of the parent's
+remaining time -- 0.70 s of a ~1.2 s tail per 2,000 regions, so ~23 s over the
+full region set -- for a file 0.40% smaller (measured: 1,243,926 B against
+1,239,002 B on 2,000 regions).
+
+**Comparing two sidecars requires decompressing them**, at any level.  The
+compressed bytes were never stable: gzip stores an mtime in its header, so two
+runs of identical code already differ there.  The decompressed bytes, the join
+key and the `%.17g` round-trip are unaffected by the level.
 
 ## 7. Sidecar and oracle
 
