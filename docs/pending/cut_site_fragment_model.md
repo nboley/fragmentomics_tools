@@ -595,9 +595,6 @@ before budgeting GPU time.
 - **Store consistency.** `tests/test_build_cut_site_store.py::TestBuilderIntegration::test_endpoint_consistency`.
 - **Domain guard.** `tests/test_cut_site_store_dataset.py::TestDomainGuards::test_length_range_mismatch_raises`.
   It checks `L_min`/`L_max`, not `max_len`.
-- **Weak test.** `tests/test_cut_site_model.py::TestEndpointTapAlignment::test_tap_positions_match_design`
-  asserts arithmetic on local constants and never calls the model. The tap
-  positions are pinned by `TestLogitInputSupport` above, not by this test.
 - **Not implemented in this worktree.** The shared `build_region_weights` test
   and the oracle-below-uniform test. They belong to the sampler and NLL doc. RC
   equivariance is dropped, as the design says.

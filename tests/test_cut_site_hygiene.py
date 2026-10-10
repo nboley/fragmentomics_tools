@@ -242,9 +242,9 @@ class TestT7Hygiene:
             )
 
     def test_model_code_never_imports_simulator(self):
-        """Owner decision 187: ``simulator/`` is the on-disk blindness
-        boundary. The cut-site model is evaluated blind on simulated data, so
-        no module under ``background_model/`` outside
+        """Owner decisions 187/194: ``simulator/`` is an import boundary. The
+        model must never use the generating f(L) or hexamer counts as a prior
+        (blinding itself was dropped in 194), so no module under ``background_model/`` outside
         ``background_model/simulator/``, and not ``background_model_core.py``,
         may import ``background_model.simulator`` -- absolutely, as
         ``from background_model import simulator``, relatively
@@ -335,7 +335,7 @@ class TestT7Hygiene:
         assert len(scanned) >= 25, f"scanned only {len(scanned)} modules"
         # The walk descends into sibling sub-packages, not just the top level:
         # band_model/ and cut_site_model/ are model code and are held to the
-        # same boundary.  cut_site_model/ is the model that is evaluated blind.
+        # same boundary.  cut_site_model/ is the model whose prior it protects.
         for sub in (("band_model", "train.py"),
                     ("cut_site_model", "dataset.py"),
                     ("cut_site_model", "model.py")):

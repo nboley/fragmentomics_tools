@@ -531,15 +531,6 @@ class TestCrossBranchAlignment:
 class TestEndpointTapAlignment:
     """Verify that endpoint taps address the correct h positions."""
 
-    def test_tap_positions_match_design(self):
-        """For L=25 and L=179, verify o_l and o_r match design formulas."""
-        for L_val in (25, 26, 100, 179):
-            # Start admission: left tap at WINDOW_HALF, right at WINDOW_HALF + L
-            o_l = WINDOW_HALF
-            o_r = WINDOW_HALF + L_val
-            # Design: taps are L apart (cut sites m and m+L)
-            assert o_r - o_l == L_val
-
     def test_endpoint_feats_use_correct_h_positions(self):
         """The endpoint features at m=0 for the left tap should read h[:,:,o_l]."""
         m = CutSiteFragmentModel(N1=8, K=4, N2=4, H=4, tile_size=32, L_chunk=155)
