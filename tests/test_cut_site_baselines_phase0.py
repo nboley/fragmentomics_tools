@@ -147,8 +147,13 @@ def test_unif_pL_matches_its_closed_form(store):
         assert n_frags > 0
         assert got[name]["region_weighted_nll"] == pytest.approx(cf, abs=1e-5)
     # Per fragment too: log p = log p_L(L) - ln(2 * tile_size).
-    df = pd.read_csv(tsv, sep="\t")
-    df = df[df["scored"]]
+    # Parse `scored` as a STRING and compare explicitly, matching
+    # `read_per_fragment`.  Letting pandas infer it would lean on its
+    # auto-conversion of "true"/"false" to bool, which is a different rule
+    # from the production reader's -- two parsers for one column is how they
+    # drift.  (Reviewer F-01.)
+    df = pd.read_csv(tsv, sep="\t", dtype={"scored": str})
+    df = df[df["scored"] == "true"]
     log_p_L = np.log(np.load(npz)["p_L"])
     want = log_p_L[(df["stop"] - df["start"] - cfg.L_min).to_numpy()] - np.log(2.0 * cfg.tile_size)
     assert np.max(np.abs(df["log_prob"].to_numpy() - want)) < 1e-5
