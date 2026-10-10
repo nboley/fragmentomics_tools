@@ -1,6 +1,12 @@
 # Cut-site model: additional simple baseline priors (design)
 
-Date: 2026-10-10 · Branch `worktree-cut-site-model` @ `bad981d` · Status: **DRAFT r3 - review rounds 1-2 applied; owner rulings 5-7 (approved estimator fix, approved `m+L` registration fix, denominator reuse for hygiene only) and the reuse ruling applied in revision 3; awaiting round-3 review**
+Date: 2026-10-10 · Branch `worktree-cut-site-model` @ `9aa8ef5`+ · Status: **A-, APPROVED (round-3 review, §9). Revision 4 reconciles this document with Phase 0 and Phase 0b.1 as implemented — see "Implementation status" below and the revision-4 log entry at the end of §"Revision log".**
+
+### Implementation status (revision 4)
+
+- **Phase 0 — COMPLETE.** Gate G0 PASSED, all 8 real checks (commit `2a775ce`). Reviewed A- (`implementation_review_phase_0`, agent `2f724ba2-ecc`).
+- **Phase 0b.1 — COMPLETE.** Gate G0b PASSED, all 6 items (commit `9aa8ef5`). Reviewed A- (`implementation_review_phase_0b`, agent `f5d57904-005`). This is the "approved change set" of §0.4: the estimator fix (A), the `m+L` registration fix (B), and the counter (S3, `count_tables.py`) are landed and in production. No `hex_adapter.py` was built (§0.4 C, revised below).
+- **Phase 0b.2 onward — NOT STARTED.** This document is the input to Phase 0b.2 (count N0 at `w*` by train-CV and score the new anchor). Nothing past P0b.1 in §5 has run.
 
 Author: synthesis agent. I worked only from an evidence packet. Research agents, a
 measurement agent and the coordinator assembled and cross-checked it this session. I did
@@ -8,7 +14,11 @@ not open source files or run code myself. **Revision 3 exception:** the reviser 
 `model.py:115-309, 395-409, 634-647`, `simulator/measure.py:150-560`,
 `simulator/draw.py:70-187`, `stage1_hex_baseline.py:215-232` (plus a grep for lines 187/313)
 and `tests/test_hex_registration.py:1-305` directly. Pointers tagged `[Verified: … , r3]`
-come from that reading. The reviser ran no code.
+come from that reading. The reviser ran no code. **Revision 4 exception:** the reviser read
+`COORDINATION.cut-site-model.md`'s gate log and "Design-Implementation Divergences" section
+only, not the implemented source. Every revision-4 number is tagged
+`[Verified: COORDINATION gate <name>]` rather than a file pointer; re-verify against the
+source at `9aa8ef5` before relying on a line number this revision did not itself re-check.
 
 **Tag legend.** `[Verified: ptr]` = a research agent, the measurement agent or the
 coordinator examined the evidence this session at `ptr`. I did not re-open it.
@@ -48,9 +58,12 @@ since APPROVED its replacement (ruling 5, §0.4).
 
 - **Build two thin seams, then land ONE approved change set.** S2 is a reduction wrapper
   that gives val AND test region-weighted NLL from the sanctioned per-fragment output. S3 is
-  a new table counter, built on `simulator/measure.py` through ONE adapter (§0.4 C), that
-  writes a conforming `.npz` with provenance. The only model code that changes is the
-  approved 3' registration fix (§0.4 B). Neither seam edits an owned file.
+  a new table counter, built directly in the model's own hexamer convention, drawing only
+  `FragmentLengthDist`/`fl_end_weight` from `simulator/measure.py` **(revision 4: no adapter
+  — none was needed, §0.4 C)**, that writes a conforming `.npz` with provenance. The only
+  model code that changes is the approved 3' registration fix (§0.4 B). Neither seam edits
+  an owned file. **Both S2 and S3 are now BUILT** (Phase 0 and Phase 0b.1 respectively; see
+  "Implementation status" at the top of this document).
 - **First deliverable (Phase 0):** a measured real-data NLL table for `uniform`, `unif+p_L`
   and the OLD `prior` on val and test, through `score_fragments.py --zero-correction`, plus
   the identity tests that prove the reduction. This run happens at `bad981d` code, BEFORE
@@ -141,14 +154,29 @@ definitions] The prior reads `m+L-1` [Verified: model.py:198, r3] and stage1 cou
 junction-centred. L2a already taps `WINDOW_HALF + m + L` [Verified: model.py:641-643, r3]
 and the simulator already uses `ends_all = pos + Ls` [Verified: draw.py:85, r3]. **The model
 moves to their convention. L2a and the simulator do not change.**
-- Width is safe. `model_input_size=1392`, `hex_idx` width 1387; the required width goes
-  1384 → 1385, headroom 2. `WINDOW_HALF=181 >= L_max=180` holds. The store has
-  `l_seq=1908` against 1904 needed, so there is NO store rebuild — hex tables only.
-  [Verified: EM measurement, gate em_width_check_mL, `/tmp/check_mL_width.py`]
-- **Two guards carry a stale `-1` and must move with line 198, or they stop guarding:**
-  `required_width = WINDOW_HALF + tile_size + L_max - 1` at `model.py:204`, and the
-  constructor check `if WINDOW_HALF < L_max - 1` with its message at `model.py:292-300`.
-  [Verified: model.py:204, 295-299, r3] The comments at `model.py:180-183, 195-196` move too.
+- Width is safe, but not for the reason first given. `model_input_size=1392`, `hex_idx`
+  width 1387; the required width goes 1384 → 1385, headroom 2 on `hex_idx`. [Verified: EM
+  measurement, gate `em_width_check_mL`, `/tmp/check_mL_width.py`] **That gate measured the
+  wrong constraint, and implementation superseded it
+  [Verified: COORDINATION gate `em_reviewer_found_the_old_width_guard_was_BROKEN`].** The
+  binding limit is L2a's `h`, which spans `WINDOW_HALF` each side of `P`
+  (`model.py:673`), so the farthest right tap sits at `WINDOW_HALF + (P-1) + L_max`, not at
+  any position `hex_idx` reaches. The requirement is therefore `WINDOW_HALF >= L_max`, one
+  base tighter than `hex_idx`'s own headroom would suggest. `WINDOW_HALF=181 >= L_max=180`
+  still holds, and the store's `l_seq=1908` against 1904 needed still means NO store rebuild
+  — hex tables only. The conclusion is unchanged; the derivation that reached it was not.
+- **The OLD guard was not merely stale — it was LATENTLY BROKEN, independent of the `m+L`
+  change.** `required_width = WINDOW_HALF + tile_size + L_max - 1` at `model.py:204`, and the
+  constructor check `if WINDOW_HALF < L_max - 1` with its message at `model.py:292-300`,
+  derive from `hex_idx`'s width, not from `h`'s. [Verified: model.py:204, 295-299, r3] Both
+  move with line 198 to drop the trailing `-1`, since `required_width` must track the
+  registration offset — but that is not why the constructor check was wrong. The old check
+  `WINDOW_HALF < L_max - 1` would have ADMITTED `L_max = 182` at `WINDOW_HALF = 181`, whose
+  farthest tap sits exactly at the boundary of `h`'s width: a guard that did not guard.
+  [Verified: COORDINATION gate `em_reviewer_found_the_old_width_guard_was_BROKEN`] The
+  constructor now enforces `WINDOW_HALF >= L_max` and is tested: constructing
+  `CutSiteFragmentModel(L_max=WINDOW_HALF+1)` must raise (T13, §7.4). The comments at
+  `model.py:180-183, 195-196` move too.
 - `L_max=180` INCLUSIVE is NOT touched. L=180 is still in the domain, and that fragment
   still occupies `m..m+179`. Only the base the 3' hexamer is centred on moves, from
   `m+179` to `m+180`. [Inferred: from the occupancy definition above]
@@ -167,16 +195,36 @@ not on new counting code. [Verified: measure.py, r3] The two stacks differ on tw
    `rc_permutation()` [Verified: measure.py:194-198, r3]. Table names also differ:
    simulator `end_*`, npz `stop_*` [Verified: measure.py:104, model.py:401-404, r3].
 
-Registration stops being a difference once B lands. **Specify ONE adapter as the only
-crossing point:** `scripts/cut_site_model/baselines/hex_adapter.py` (TO BE WRITTEN). All
-counting, denominators, propensities and shrinkage run in simulator convention. The adapter
-is the last step before the `.npz` write: it renames `end_*` → `stop_*`, undoes the rc
-permutation on the two `_rev` tables, and applies the base-4 digit-reversal permutation.
-[Inferred: from the two differences above; the probe test, not this reasoning, is the
-authority] No other new code may convert between the two conventions. Its guard is a probe
-test (T4b, §7.4) in the style of `tests/test_hex_registration.py:46-80`: an identity table
-pushed through the simulator path and the adapter must gather the same index that
-`compute_log_p0` gathers for the same `(m, L, strand)`.
+Registration stops being a difference once B lands.
+
+**Revision 4 — superseded by implementation. No `hex_adapter.py` was built, and this is not
+a simplification of the plan below; the plan's premise was wrong.** The premise was that
+counting, denominators, propensities and shrinkage would all run in simulator convention and
+cross into the model's convention through one adapter at the `.npz` write. Implementation
+found that **nothing hexamer-keyed crosses the stack boundary in the production counting
+path at all**: the counter (`count_tables.py`, S3) imports only `FragmentLengthDist` and
+`fl_end_weight` from `measure.py`, both length- or position-indexed, never
+`counts_from_hexamers`, `propensities` or `uniform_hexamer_counts`, so the endianness and
+RC-keying differences between `hexamers.py`/`measure.py` and the model never have an
+occasion to apply. [Verified: COORDINATION gates `em_unblock_phase_0b`,
+`em_resolve_hex_half_offset`] The counter computes hexamer indices directly in the model's
+own convention throughout. An adapter would have had nothing to adapt.
+
+**What exists instead:** the T4b probe test (§7.4), now EXHAUSTIVE over all 4096 cells
+rather than a sampled probe, checks that every one of the counter's four output tables
+equals the bincount of the index `compute_log_p0` actually reads, for every cell. This is a
+self-consistency guard on the counter and the model's single shared convention, not a
+cross-stack conformance test — there is no second convention left to be consistent with in
+this code path.
+
+**The endianness split is therefore UNRESOLVED, not solved, and remains a deferred joint
+decision with the simulator EM.** `hexamers.py`/`measure.py` are still big-endian and
+forward/RC-keyed differently from the model (§1.1, §3.11); that gap only mattered for a
+crossing this phase turned out not to need. It still matters for any FUTURE comparison that
+deliberately reads both stacks' hexamer tables side by side (e.g. a diagnostic against the
+simulator's own propensities) — that comparison still needs either an adapter or a shared
+encoder, neither of which exists. Do not read "no adapter was needed" as "the split is
+closed." [Verified: COORDINATION gate `em_unblock_phase_0b`]
 
 **Out of scope this phase, named follow-up:** full consolidation onto a single hexamer
 encoder. It would re-key someone else's artifacts, and it is a joint call with the simulator
@@ -204,31 +252,42 @@ another. That is verbatim the bug recorded at `model.py:123-126`: "the builder r
 at cut-2 while the model read at cut+0". [Verified: model.py:123-126, r3]
 `stage1_hex_baseline.py` is owned by another agent this phase. So: **the NEW counter becomes
 the single table producer, and stage1's counting path is RETIRED, not edited.**
-[Verified: COORDINATION "Sequencing constraint"] What "retired" requires in practice:
-1. The B commit, the new counter and the adapter land in ONE commit. No intermediate commit
-   has the reader at `m+L` and only a `m+L-1` producer. Phase 0 (G0 at `bad981d`) finishes
-   BEFORE that commit, because the old prior cannot be scored after it (§5).
-2. A retired producer that still runs is still a hazard. The new counter writes a
-   registration key into the `.npz` (proposed: `stop_cut_offset = 0`, meaning `m+L`). The
-   B edit to the loader (`model.py:398-404`) rejects any `.npz` without it — including
-   `stage1_hex_tables_v4_start.npz`. [Inferred: a proposal; it is a guard, not a change to
-   computed results] **Old checkpoints carry the same hazard:** with `--freeze-hex` the
-   tables are `register_buffer`ed [Verified: model.py:406-408, r3], so they live in the
-   checkpoint's state dict, keyed at `m+L-1`. Scoring an old checkpoint under `m+L` code is
-   the same bug. The checkpoint must record the registration and the loader must refuse a
-   mismatch. [Inferred: buffers are persistent by default] [Unverified: confirm with
-   `torch.load(ckpt)["state_dict"].keys()` on the real run's best checkpoint]
-3. `tests/test_hex_registration.py` imports `hex_window_for_tile` from the stage1 file in
-   two tests (`:123`, `:273`), and `test_builder_widened_window_covers_right_edge` hardcodes
-   `L_max - 1` (`:278`, `:288`). [Verified: test_hex_registration.py, r3] Those two tests
-   keep pinning the retired producer. They must be retargeted to the new counter.
-4. `tests/test_hex_registration.py` must gain a cross-check tying the prior to L2a AND to the
-   simulator (T12, §7.4). Today it pins `m+L-1` to itself (`:108-109`, `:252-254`, `:336`),
-   which is why it passes while the mismatch goes unguarded. [Verified:
-   test_hex_registration.py, r3] A test that pins a convention to itself cannot catch the
-   convention being wrong.
-5. Relay the retirement to session 8d207c5986, which also owns the `dataset.py`/stage1 seam
-   ruling. [Verified: COORDINATION "Sequencing constraint"]
+[Verified: COORDINATION "Sequencing constraint"] What "retired" requires in practice, and
+**its implementation state as of Phase 0b.1 (commit `9aa8ef5`, revision 4):**
+1. **DONE.** The B commit and the new counter landed together, in ONE commit (no adapter
+   landed with them — §0.4 C, revision 4). No intermediate commit had the reader at `m+L`
+   and only a `m+L-1` producer. Phase 0 (G0 at `bad981d`) finished BEFORE that commit.
+   [Verified: COORDINATION gates `G0_phase0`, `G0b_phase_0b1`]
+2. **DONE, mechanism implemented, OWNER RULING STILL PENDING (divergence 5, §9).** The new
+   counter writes a registration key into the `.npz` (implemented as `stop_cut_base_offset`,
+   not the proposed `stop_cut_offset = 0`). The loader (`model.py:398-404`) rejects any
+   `.npz` without it — including `stage1_hex_tables_v4_start.npz` — and refuses a `bad981d`
+   checkpoint via a persisted `_hex_stop_cut_base_offset` buffer and a `load_state_dict`
+   pre-hook that **cannot be bypassed with `strict=False`**, because the pre-hook runs before
+   the load. [Verified: COORDINATION gate `implementation_review_phase_0b`] This mechanism
+   is built and tested (T13, §7.4), but — as flagged when it was proposed — it is additive
+   provenance checking the owner has not explicitly ruled on. Proceeding on it was a
+   deliberate EM call (gate `em_proceed_on_registration_key_without_explicit_ruling`), not an
+   owner approval; it is flagged to the owner and remains open.
+3. **DONE (T14, §7.4).** `tests/test_hex_registration.py` no longer imports
+   `hex_window_for_tile` from the stage1 file; the two tests that did
+   (`test_builder_and_model_agree_on_registration`, `test_builder_widened_window_covers_right_edge`)
+   are retargeted to the new counter, deriving the far 3' cut as `tile_size - 1 + L_max`
+   rather than restating stage1's offset.
+4. **DONE (T12, §7.4), and proved non-tautological by MUTATION.** The cross-check tying the
+   prior's 3' read to L2a's tap and to the simulator's stop hexamer is in. Both the
+   implementer and the reviewer independently reverted BOTH the producer and the reader to
+   `m+L-1`: 12 tests fail, including T12a/T12b and the `propensities` conformance test.
+   Reverting the READER only (the keyed-one-way-read-another state this constraint exists to
+   prevent) fails 6, including T4b. `model.py` was restored byte-identical afterward (`cmp`,
+   then independently MD5 `d88f62c4bb88ddb476842a6b7719db14` plus `git diff --quiet`). This is
+   the direct answer to the original failure mode: a suite that already "guarded"
+   registration via a test pinning a convention to itself. [Verified: COORDINATION gates
+   `em_note_mutation_test_proof`, `implementation_review_phase_0b`]
+5. **DONE.** Relayed to session 8d207c5986
+   (`/efs/analytics/nathanboley/cut_site_model_to_simulator_em_20261010.md`), including the
+   corrected note that no adapter was built (§0.4 C). [Verified: COORDINATION gate
+   `em_relay_phase_0b_landing`]
 
 **Both approved changes retire `12.142214` and `11.996969`** (and their val counterparts
 12.146835 and 12.002607 [Inferred: same tables, same code path]). The prior anchor needs a
@@ -237,6 +296,12 @@ The model number needs a RETRAIN under the new prior. [Verified: COORDINATION ru
 changes retire"] `uniform` (12.674475) and `unif+p_L` (12.501596) survive: their hexamer
 tables are constant, so neither registration nor smoothing reaches them. [Inferred: C2
 closed form, §1.2] Until the retrain, there is no real-data capture denominator (§6.1).
+
+**Note (revision 4):** `docs/pending/training_analysis.md` and other older docs still
+describe the registration as `m+L-1`. They are STALE on that point now that ruling 6 and
+commit `9aa8ef5` have landed. This document does not edit them — `training_analysis.md` is
+a separate retirement decision (COORDINATION "Remaining work" item 4) — but any reader
+cross-referencing them for registration should prefer this document.
 
 ---
 
@@ -269,7 +334,7 @@ closed form, §1.2] Until the retrain, there is no real-data capture denominator
 | Trainable tables are supported (`--freeze-hex` off gives `nn.Parameter`) | [Verified: model.py:406-411] |
 | f_θ: 116,032 params. L1 Conv k=6 (model.py:333-371); L2a four untied banks bilinear in (L1 features, 10 length groups, `g=min((L-25)//15,9)`) at model.py:457-467,636-680; L2b interior-span-sum prefix over [m,m+L) at model.py:471-539 (reviewer round 1: the earlier pointer swapped L2a and L2b); `len_bias[L]` (156) and `w_out` zero-init at model.py:696-710 | [Verified: model.py:333-371, 457-467, 471-539, 636-680, 696-710] |
 | Sim generator: strand ~ Bern(0.5); `m ~ a(h_m)·live(m)`; `L ~ e(h_{m+L})·f(L)/t(m)`. No GC, nucleosome or band term. | [Verified: background_model/simulator/draw.py:96-162] |
-| **`background_model/hexamers.py` and `background_model/simulator/measure.py` are NOT index-compatible with the model.** `hexamers.py` encodes hexamers BIG-endian (`_POW=[4^5..4^0]`); the model and stage1 encode LITTLE-endian (`base[p+i]*4^i`). AAAAAC → index 1024 in the model/stage1, index 1 in `hexamers.py`. `measure.py` right-anchors the stop end at `m+L` (not the prior's `m+L-1`) and applies the rc permutation to minus-strand tables. An `.npz` built from these pieces loads without error and the model reads every cell under the wrong 6-mer. **Revision 3:** this is no longer a reason to avoid `measure.py`. The owner's reuse ruling makes it the plan, with ONE adapter as the only crossing (§0.4 C). After B, the `m+L` registration is shared and stops being a difference; endianness, RC keying and table names remain, and the adapter handles exactly those. | [Verified: check2.log:7; model.py:140-144; stage1_hex_baseline.py:58-65; hexamers.py:58,95; measure.py:169-170,197; r3 measure.py:104, 194-198] |
+| **`background_model/hexamers.py` and `background_model/simulator/measure.py` are NOT index-compatible with the model.** `hexamers.py` encodes hexamers BIG-endian (`_POW=[4^5..4^0]`); the model and stage1 encode LITTLE-endian (`base[p+i]*4^i`). AAAAAC → index 1024 in the model/stage1, index 1 in `hexamers.py`. `measure.py` right-anchors the stop end at `m+L` (not the prior's `m+L-1`) and applies the rc permutation to minus-strand tables. An `.npz` built from these pieces loads without error and the model reads every cell under the wrong 6-mer. **Revision 3:** this is no longer a reason to avoid `measure.py`. The owner's reuse ruling makes it the plan, with ONE adapter as the only crossing (§0.4 C). After B, the `m+L` registration is shared and stops being a difference; endianness, RC keying and table names remain, and the adapter handles exactly those. **Revision 4: no adapter was built, because the production counting path never imports these hexamer-keyed functions** (`counts_from_hexamers`, `propensities`, `uniform_hexamer_counts`) — only length/position-indexed `FragmentLengthDist`/`fl_end_weight`. So this incompatibility never has an occasion to bite in the implemented system. It remains REAL and UNRESOLVED for any future comparison that reads both stacks' hexamer tables side by side; that comparison still needs an adapter or a shared encoder (§0.4 C). [Verified: COORDINATION gate `em_unblock_phase_0b`] | [Verified: check2.log:7; model.py:140-144; stage1_hex_baseline.py:58-65; hexamers.py:58,95; measure.py:169-170,197; r3 measure.py:104, 194-198] |
 | No GC, mappability, CpG or nucleosome track. No PWM, Markov or GLM cleavage model in the cut-site path. `fragmentomics_tools/motif.py` is a JASPAR TF-PWM class. | [Verified: research agents B, C] |
 
 ### 1.2 Contradictions of the brief
@@ -409,9 +474,17 @@ this design. [Verified: reviewer round 1]
 - `stage1_hex_baseline.py:469-470` prints max/min table ratios. That violates the project's
   KL-not-max/min rule.
 - It points to a nonexistent `train_cut_site.py --baseline-only`.
-- It drops N-containing windows at count time, while the model reads N as A at score time
-  (31 such TRAIN windows out of 599,412; check2.log:8). Negligible, but an inconsistency the
-  owner should know about. **The reused `measure.py` path has the same behaviour**: it drops
+- It drops N-containing windows at count time, while the model reads N as A at score time.
+  **The magnitude is UNRECONCILED and both figures are recorded rather than one picked.**
+  Round 1 measured **31** such TRAIN fragments out of 599,412 [Unverified now:
+  check2.log:8, whose script is gone]; the P0b.1 counter measured **1** dropped (at L=179)
+  under the same 599,412 denominator [Verified: COORDINATION gate `G0b_phase_0b1`]. The two
+  may count different things — round 1 was at the `m+L-1` registration and may have gated on
+  either window, while the counter drops a fragment only when a window it actually reads is
+  invalid — but a one-base registration shift is a surprising explanation for 31 -> 1, so
+  treat this as open. Negligible at either value (both are <0.006% of 599,412), so it does
+  not gate anything; settle it by rerunning the predictor if the N-handling inconsistency is
+  ever acted on. **The reused `measure.py` path has the same behaviour**: it drops
   fragments whose start OR stop window holds a non-ACGT base [Verified: measure.py:162-171,
   r3]. The inconsistency therefore survives the switch to the new counter. Record it in the
   counter's provenance sidecar; do not patch it in this phase.
@@ -584,7 +657,7 @@ the best evidence-based ceiling, not a forecast. No gain is established.
 
 | Rank | ID | Candidate | Layer / seam | Extra params | Bound or evidence | P(gain > 2SE) | Build cost |
 |---|---|---|---|---|---|---|---|
-| 1 | N0 | Counted tables with a corrected smoothing estimator, at `m+L` — **APPROVED (rulings 5-6); becomes the new prior anchor, not a candidate** | N + S3 + adapter + B | 0 | MEASURED distortion 0.016-0.019 nats/table, BIAS-side, 2-3x k/2N, upper-bound flavoured (§1.3 F1, §3.5) | medium-high | low-medium (lands with B, §0.4) |
+| 1 | N0 | Counted tables with a corrected smoothing estimator, at `m+L` — **APPROVED (rulings 5-6); becomes the new prior anchor, not a candidate; BUILT** | N + S3 + B (no adapter, revision 4) | 0 | MEASURED distortion 0.016-0.019 nats/table, BIAS-side, 2-3x k/2N, upper-bound flavoured (§1.3 F1, §3.5) | medium-high | low-medium (lands with B, §0.4) |
 | 2 | N4 | Region-weighted ML calibration of 4 tables + p_L | N (npz-only) + engine | 0 | unknown; the depth confound (§3.1). F1 is now absorbed by N0 | high | medium (engine) |
 | 3 | N1 | Count the TRAIN jitter-margin fragments | N + S3 | 0 | ≤0.0046 (noise only) | medium (leakage verified safe on this store, §3.2) | low |
 | 4 | M2 | L-band-conditional hexamer deltas, shrunk | M + S1 | ≤16,380 (or 252 lite) | ≤~0.030 observed-fragment, partly confounded | medium | medium |
@@ -766,8 +839,12 @@ term, not noise.
 **Revision 3: APPROVED (ruling 5), built at `m+L` (ruling 6), on `measure.py` (reuse
 ruling).** N0's score becomes the new prior anchor (§0.4).
 
-- **Structure.** Removes the F1 distortion. Pipeline, all in simulator convention until the
-  adapter (§0.4 C):
+- **Structure.** Removes the F1 distortion. Pipeline, built directly in the model's OWN
+  hexamer convention throughout — **revision 4: no adapter.** The round-3 plan below assumed
+  the pipeline would run in simulator convention and cross through one adapter at the end
+  (§0.4 C, old text); implementation found nothing hexamer-keyed needs to cross at all, so
+  steps 1-4 below read as "in the model's convention" wherever they said "simulator
+  convention, pending the adapter":
   1. `C(h)`: `counts_from_hexamers` on the TRAIN centred-crop fragments, with stop hexamers
      at `m+L`. [Verified: measure.py:179-199, r3]
   2. `N(h)`: `uniform_hexamer_counts` over the same crop, `FragmentLengthDist` built from the
@@ -781,10 +858,22 @@ ruling).** N0's score becomes the new prior anchor (§0.4).
      pooled empirical rate, ~0.0055; see F-07/§3.9 for the same units fix applied to N3), and
      `w` on a grid chosen by 5-fold train-CV. Limits: `w=0` gives the raw rate from step 3;
      `w→∞` gives `q`.
-  5. Normalise each table to sum 1 (the loader will not, Q6), then the adapter, then the
-     `.npz` write with the registration key and provenance sidecar.
+  5. Normalise each table to sum 1 (the loader will not, Q6), then the `.npz` write with the
+     registration key and provenance sidecar. No adapter step.
   `p_L` stays the raw TRAIN centred-crop length marginal, so it must equal the v4 npz's
-  `p_L` (gate G0b). [Inferred: neither ruling touches `p_L`]
+  `p_L` (gate G0b). [Inferred: neither ruling touches `p_L`] **Measured (revision 4,
+  Phase 0b.1): 599,412 fragments admitted, 599,411 counted, 1 dropped at L=179** — not the
+  ~31 this document predicted from the N-window-fragment question (Q24). `p_L` over all
+  admitted fragments equals the v4 npz's `p_L` bit-for-bit (`array_equal=True`); `p_L` from
+  the counted population differs from it by at most 1.658e-06. `unif+p_L` on test from the
+  new counter's `p_L`, closed form, is **12.501596321**, \|Δ\| 3.2e-7 against the pre-change
+  value, over 6,303 regions / 73,017 fragments — consistent with "neither ruling touches
+  `p_L`." [Verified: COORDINATION gate `G0b_phase_0b1`] **Counting population note:** the
+  counter runs at `min_N=0` (every tile of the split — 53,321 TRAIN tiles on the real store),
+  which is the counting population and is distinct from the evaluator's `min_N=10`. Do not
+  conflate the two when reading §2.5's event-per-cell arithmetic. [Verified: COORDINATION
+  "What was done"] Measured runtime: the counter runs in ~78 s on real TRAIN, CPU.
+  [Verified: COORDINATION "What was done"]
 - **Decomposition rows (diagnostic, all at `m+L`, all through the new counter).**
   `N0_ref`: the stage1 formula `(C+1)/(N+4096)` (`w=4096`, `q=1/4096`). `N0_raw`: `w=0`.
   `N0`: `w*` from train-CV — the new anchor. Paired against the OLD prior TSV on the same
@@ -798,7 +887,8 @@ ruling).** N0's score becomes the new prior anchor (§0.4).
   against the final `N(h)` at `m+L`. It never sees stage1's `occ` or `m+L-1`. That is the
   reason the order is safe. The same argument fixes the order downstream: N4 initialises
   from N0 and never from stage1's tables. [Inferred]
-- **Cost.** 0 params. S3 counter, adapter, change B.
+- **Cost.** 0 params. S3 counter (built, no adapter — revision 4) and change B, both landed
+  at `9aa8ef5`.
 - **Expected gain.** The P0.2 predictor is already computed, not just proposed
   (check2.log:15-18): cut-weighted var/2 of log(occ/(occ+4096)) = 0.0207 / 0.0197 / 0.0219 /
   0.0191 nats per table (start_fwd/stop_fwd/start_rev/stop_rev); with the +1 numerator,
@@ -835,8 +925,10 @@ ruling).** N0's score becomes the new prior anchor (§0.4).
 ### 3.7 N2 — strand-pooled positional-tie tables (DIAGNOSTIC; owner decision D3)
 
 - **Structure.** `start_fwd ≡ stop_rev` (both read at m) and `stop_fwd ≡ start_rev` (both read
-  at m+L after B; m+L-1 at `bad981d`). In simulator convention the tie must be written AFTER
-  the adapter, because the simulator rc-permutes the `_rev` tables (§0.4 C). [Inferred] This is a POSITIONAL tie, not reverse-complement tying. It still reduces four
+  at m+L after B; m+L-1 at `bad981d`). **Revision 4:** the round-3 text placed the tie
+  "after the adapter, because the simulator rc-permutes the `_rev` tables" — moot, since no
+  adapter exists and N2's tables, like N0's, are counted directly in the model's own
+  convention; write the tie there, with no RC un-permutation step. This is a POSITIONAL tie, not reverse-complement tying. It still reduces four
   tables to two, so it touches the "four untied tables" decision
   (cut_site_fragment_model.md:143-151). It needs owner sign-off before any non-diagnostic
   use. [Verified: §1.1 lookup]
@@ -908,10 +1000,14 @@ design plans NO edits to them. **Reviewer round 1, F-15: resolved the home modul
 `background_model_core` (stage1_hex_baseline.py:28). New code must import the jitter
 helpers from `background_model_core` directly, and must NOT import `hex_window_for_tile`
 from the stage1 file — that file is under refactor, and importing from it couples new code
-to a file nobody here owns. Revision 3 replaces the old F-01 rule ("derive hexamer windows
-via the model's own encoder"): new code derives them via `hexamers.py`/`measure.py` and
-crosses into the model's convention only through the ONE adapter (§0.4 C). New modules
-still IMPORT `CutSiteFragmentDataset`. Risk: the refactor renames or changes a signature.
+to a file nobody here owns. Revision 3 replaced the old F-01 rule ("derive hexamer windows
+via the model's own encoder") with: new code derives them via `hexamers.py`/`measure.py` and
+crosses into the model's convention only through one adapter (§0.4 C). **Revision 4: that
+plan was superseded by what was actually built — new code (`count_tables.py`) derives
+hexamer windows directly via the model's own encoder after all, drawing only the
+length/position-indexed `FragmentLengthDist`/`fl_end_weight` from `measure.py`. No adapter
+exists.** New modules still IMPORT `CutSiteFragmentDataset`. Risk: the refactor renames or
+changes a signature.
 Mitigation: an import-smoke test of every consumed name in the new test file, and a note to
 the coordinator naming the consumed symbols.
 
@@ -938,36 +1034,54 @@ last assert proves the reduction, not an anchor. It cannot run after change B, b
 
 ### 4.3 S3 — counter
 
-`scripts/cut_site_model/baselines/count_tables.py` (TO BE WRITTEN). It is needed because
-stage1 hardcodes `split="train"` and j=0, and — after §0.4 — because it is the SINGLE table
-producer. Stage1's counting path is retired. Its validity condition: `C` and `N` cover the
-same candidate set (measure.py:413-418 states the same rule). It emits the fixed `.npz`
-schema plus the registration key (§0.4) and a provenance sidecar (store path, split,
-config_hash, git sha, estimator, `w`, crop mode, region fraction and seed, n_fragments,
-n dropped non-ACGT windows, date). The stage1 `.npz` carries no provenance. A previous
-manifest named a commit that did not produce its outputs. Accumulate counts with
-`np.bincount(..., weights=float64)` or int64. Never `np.add.at` into float32.
+**BUILT (revision 4): `scripts/cut_site_model/baselines/count_tables.py`, landed at
+`9aa8ef5` as part of the Phase 0b.1 change set.** It was needed because stage1 hardcodes
+`split="train"` and j=0, and — after §0.4 — because it is the SINGLE table producer.
+Stage1's counting path is retired. Its validity condition: `C` and `N` cover the same
+candidate set (measure.py:413-418 states the same rule). It emits the fixed `.npz` schema
+plus the registration key (§0.4; implemented as `stop_cut_base_offset`) and a provenance
+sidecar: store path, split, config_hash, git sha, estimator, `w`, crop mode, region fraction
+and seed, n_fragments, n dropped non-ACGT windows, date, **plus (added for the mask
+limitation below) `mask_honoured_bases`, `cut_base_window`, `mask_unhonoured_bases`,
+`mask_all_true`**. The stage1 `.npz` carried no provenance; a previous manifest named a
+commit that did not produce its outputs — this sidecar is the fix for that. Counts
+accumulate with `np.bincount(..., weights=float64)` or int64. Never `np.add.at` into
+float32.
 
-**Reuse plan (revision 3, owner reuse ruling; supersedes the round-1 F-01 text).** The
-counter is a thin driver over `measure.py` (§0.4 C, §3.5 steps 1-5). Fragment admission comes
-from `CutSiteFragmentDataset(split="train", train_mode=False)`, so the counted population
-cannot drift from the evaluator's. [Unverified: that the dataset exposes per-fragment
-`(m, L, strand)` in a form the counter can consume; `grep -n "def __getitem__" -A40
-$W/background_model/cut_site_model/dataset.py`] Hexamers come from `hexamers.hexamers_at` at `m` and
-`m+L`. All arithmetic stays in simulator convention, and `hex_adapter.py` is the only
-crossing into the model's convention, applied last. **Open feasibility point:**
-`uniform_hexamer_counts` fetches sequence from a FASTA with `pysam` over an `rdf` of regions
-[Verified: measure.py:343-363, r3], whereas the store already holds the tile sequence.
-Either feed it an `rdf` of the TRAIN crop coordinates plus the reference FASTA, and assert on
-a tile sample that its hexamers equal the store's; or, if the coordinates or FASTA cannot be
-matched, call `fl_end_weight` and `hexamer_indices` on the store sequence and write down why
-in the code (CLAUDE.md escape-hatch rule). [Unverified: Q15 `import pysam`; Q20] **Every crop mode
-(centred, window/N1, pooled/N2) needs its own one-hot probe test against `compute_log_p0`**
-(the identity-table trick from `tests/test_hex_registration.py`): build a one-hot table that
-is 1 at exactly one known hexamer/offset and 0 elsewhere, run it through the counter AND the
-adapter and through the model's lookup, and assert they agree, for both strands and both
-ends. This is a Phase-0b gate (§5): no `.npz` from this counter is scored — the new anchor
-included — until its probe test passes for the crop mode used.
+**Known, recorded limitation: mask handling past `l_target` (divergence 3, revision 4).**
+The counter honours `tiles/mask` at the cut base, as stage1 did. But a right cut reaches up
+to `L_max` bases past the tile, while `tiles/mask` spans only the `l_target` window — so the
+last `cut_base_window - mask_honoured_bases` positions of the right-cut domain are counted
+UNMASKED. This is harmless on the real store, whose mask is 100% True
+(`mask_all_true` in the sidecar), and latent on any future store with a real mask. It is not
+fixed in this phase; it is recorded in the artifact's provenance sidecar (the fields above)
+so a consumer reading only the counts can see where the mask stops, rather than assuming it
+covers the whole domain. [Verified: COORDINATION gate `em_apply_phase_0b_review_findings`,
+divergence 3]
+
+**Reuse plan (revision 3, owner reuse ruling; supersedes the round-1 F-01 text) —
+revision 4 corrects what was actually built.** The counter is a thin driver over
+`measure.py` (§0.4 C, §3.5 steps 1-5). Fragment admission comes from
+`CutSiteFragmentDataset(split="train", train_mode=False)`, so the counted population cannot
+drift from the evaluator's — counted at **`min_N=0`, every tile of the split** (53,321
+TRAIN tiles on the real store), a different population from the evaluator's own `min_N=10`
+(§3.5). Hexamer indices are computed directly in the model's OWN convention throughout.
+**No adapter was built, and none was needed:** the only `measure.py` imports in this path
+are `FragmentLengthDist` and `fl_end_weight`, both length- or position-indexed, never the
+hexamer-keyed `counts_from_hexamers` / `propensities` / `uniform_hexamer_counts` in a form
+that would require translating between conventions. [Verified: COORDINATION gate
+`em_unblock_phase_0b`] This also makes the earlier "open feasibility point" about
+`uniform_hexamer_counts`'s FASTA/`pysam` dependency (Q15, Q20) MOOT for the production path
+— a store-backed `N_start`/`N_end` loop was written instead (§0.4 C; gate
+`em_settle_Q20_reuse_feasibility`). **Every crop mode (centred, window/N1, pooled/N2) still
+needs its own one-hot probe test against `compute_log_p0`** (the identity-table trick from
+`tests/test_hex_registration.py`, now T4b, §7.4): build a one-hot table that is 1 at exactly
+one known hexamer/offset and 0 elsewhere, run it through the counter and the model's lookup,
+and assert they agree, for both strands and both ends — this is now EXHAUSTIVE over all 4096
+cells for the centred crop, not a sampled probe. This was a Phase-0b gate (§5, G0b) and
+PASSED: no `.npz` from this counter was scored — the new anchor included — until the probe
+passed for the crop mode used. Window mode (N1) and pooled mode (N2) are not yet built and
+still need their own probe test when they are.
 F-12 separately notes that `hex_window_for_tile` fixes `lo = tile_start - 3`
 (stage1_hex_baseline.py:89-96) and cannot index negative tile coordinates, so N1's
 jitter-margin starts (window mode) need NEW registration code, not a reuse of the centred-
@@ -1041,19 +1155,19 @@ Phase 0b lands the change set as ONE commit and builds the new anchor. Phase 0c 
 diagnostic that reads a prior, under the NEW anchor. Steps keep their old IDs so that
 earlier cross-references still resolve.
 
-### Phase 0 — at `bad981d` code, no candidate fit
+### Phase 0 — at `bad981d` code, no candidate fit — **COMPLETE, gate G0 PASSED (commit `2a775ce`)**
 
 | Step | What | Output | Cost |
 |---|---|---|---|
-| P0.0 | Shadow assertion; suite baseline BEFORE (both `test/` and `tests/`), measured, not quoted | log | minutes to 1 h |
-| P0.1 | Write S2 + a ~20-line npz emitter (uniform; unif+p_L from the existing HEX `p_L`). Score uniform, unif+p_L, and the OLD prior on val+test (real), plus uniform + unif+p_L on both sim stores. Keep the old-prior per-fragment TSV: P0b.3 pairs against it. The sim-counted prior moves to P0b.4 (it needs the new counter). | **Deliverable D0: real NLL table (§6.5 rows 1-3); old prior row is HISTORICAL** | 3 real + 4 sim scorings |
-| P0.4 | T4 per strand, both ends, offsets −12..+12, with offsets reported relative to BOTH `m+L-1` and `m+L`; strand-tie test (pooled vs separate held-out LL, val); sim run of the same code as a positive control (the sim right-end peak must sit where `e(h_{m+L})` puts it). Reads no prior, so it is registration-neutral. | tables | CPU |
+| P0.0 | Shadow assertion; suite baseline BEFORE (both `test/` and `tests/`), measured, not quoted. **Measured: 2 failed / 1071 passed / 3 skipped (1076), 145.69 s** [Verified: COORDINATION "What was done"] | log | minutes to 1 h |
+| P0.1 | Write S2 + a ~20-line npz emitter (uniform; unif+p_L from the existing HEX `p_L`). Score uniform, unif+p_L, and the OLD prior on val+test (real), plus uniform + unif+p_L on both sim stores. The old-prior per-fragment TSV (`/efs/analytics/nathanboley/background_model/cut_site_runs/baselines_phase0_20261010/real/per_fragment_old_prior.tsv`) is **IRREPLACEABLE, not merely "kept"**: it is the sole input to the P0b.3 paired comparison, and it cannot be regenerated once `9aa8ef5` lands, because the `m+L` loader refuses the `bad981d`-era tables that produced it. The sim-counted prior moves to P0b.4 (it needs the new counter). **DONE: all 8 real checks passed (gate G0 below).** | **Deliverable D0: real NLL table (§6.5 rows 1-3); old prior row is HISTORICAL** | 3 real + 4 sim scorings |
+| P0.4 | T4 per strand, both ends, offsets −12..+12, with offsets reported relative to BOTH `m+L-1` and `m+L`; strand-tie test (pooled vs separate held-out LL, val); sim run of the same code as a positive control (the sim right-end peak must sit where `e(h_{m+L})` puts it). Reads no prior, so it is registration-neutral. [Status: not confirmed as part of the G0 gate's 8 checks; verify before relying on it.] | tables | CPU |
 
-### Phase 0b — the approved change set (A + B + C), ONE commit
+### Phase 0b — the approved change set (A + B + C), ONE commit — **Phase 0b.1 COMPLETE, gate G0b PASSED (commit `9aa8ef5`). Phase 0b.2 onward NOT STARTED.**
 
 | Step | What | Output | Cost |
 |---|---|---|---|
-| P0b.1 | `hex_adapter.py` + its probe test (T4b); new counter on `measure.py` (§4.3); change B in `model.py` (line 198, guards at 204 and 292-300, comments, loader registration check); `tests/test_hex_registration.py` moved to `m+L`, two stage1-importing tests retargeted, T12 and T13 added. Suite baseline AFTER. | one commit; suite log | engineering |
+| P0b.1 | **DONE.** T4b exhaustive probe test, in place of an adapter (§0.4 C, revision 4 — no `hex_adapter.py` was built); new counter `count_tables.py` on `measure.py` (§4.3); change B in `model.py` (line 198, guards at 204 and 292-300 corrected per the WINDOW_HALF derivation fix, comments, loader registration check `stop_cut_base_offset`); `tests/test_hex_registration.py` moved to `m+L`, two stage1-importing tests retargeted (T14), T12 and T13 added. **Suite baseline AFTER measured: 2 failed / 1111 passed / 3 skipped (1116), up from 1100 at `9fe0d31`; +16 reconciles as +2 T12, +2 net CLI, +12 new test file.** [Verified: COORDINATION gate `G0b_phase_0b1`] | one commit; suite log | engineering |
 | P0b.2 | Count N0 on real TRAIN over the `w` grid, choosing `w*` by 5-fold train-CV. Fold scores go through `score_fragments` + S2 restricted to the held-out fold's regions — the one sanctioned evaluator, never a fold-local NLL. [Unverified: `score_fragments.py --splits train` is accepted; `grep -n "choices" $W/scripts/cut_site_model/score_fragments.py`] Emit `N0_ref` (stage1 formula), `N0_raw` (`w=0`) and `N0` (`w*`). | three `.npz` + sidecars | CPU + 5×grid fold scorings |
 | P0b.3 | Score `N0` through the sanctioned evaluator on val+test: **this is the new prior anchor**. Score `N0_ref` and `N0_raw` as decomposition rows, paired against the P0.1 old-prior TSV. Ledger every test read. | new `prior` row; decomposition | 3 real scorings |
 | P0b.4 | Count and score `N0` and `N0_ref` on both sim stores with the same code (sim TRAIN only; constraint 5). `N0` replaces the historical sim prior numbers and gaps; `N0_ref` separates the effect of B from that of A on sim. | new sim prior rows and gaps | 4 sim scorings |
@@ -1075,23 +1189,35 @@ is the empirical noise at full N.
 The thresholds are proposals for the owner. 0.002 is about the run-to-run noise of TRAINED
 runs and sits below every bound in §2.
 
-- **G0 (after P0.1, at `bad981d`).** Uniform gives ln 319488 on every region (|Δ| < 1e-5,
-  float32 forward). The old prior reproduces the RETIRED 12.146835 / 12.142214 (|Δ| < 1e-5)
-  — a check of the reduction, not an anchor. unif+p_L agrees with the closed form of C2 to
-  1e-5. [Verified: reviewer round 1, F-13 — a 1e-6 gate between a float64 computation and
-  the float32 forward will flake; see §4.4] If ANY fails: stop. Phase 0b does not start.
-- **G0b (after P0b.1-P0b.3) — the change-set gate.** ALL of: (1) T4b adapter/counter probe
-  passes for the centred crop, both strands, both ends; (2) T12 ties the prior's 3' read to
-  L2a's tap and to the simulator's stop hexamer; (3) T13: the `m+L` loader rejects
-  `stage1_hex_tables_v4_start.npz` and a `bad981d` checkpoint; (4) the new counter's `p_L`
-  equals the v4 npz's `p_L`, or differs only through the non-ACGT fragments that the sidecar
-  counts (§1.5), and unif+p_L from it still gives 12.501596 on test (|Δ| < 1e-5)
-  [Inferred: neither ruling touches `p_L`] [Unverified: whether stage1's `p_L` excludes the
-  31 N-window fragments]; (5) a T4-style
-  check that `start_fwd` from `N0_ref` reproduces stage1's `start_fwd` on a fixture (the one
-  table whose registration and denominator are unchanged); (6) suite AFTER = suite BEFORE
-  plus the new tests. If ANY fails: stop. Revert the whole commit, never a part, because a
-  part is exactly the keyed-one-way-read-another state (§0.4). No candidate is scored.
+- **G0 (after P0.1, at `bad981d`) — PASSED, all 8 real checks (commit `2a775ce`).** Uniform
+  gives ln 319488 on every region (|Δ| < 1e-5, float32 forward). The old prior reproduces the
+  RETIRED 12.146835 / 12.142214 (|Δ| < 1e-5) — a check of the reduction, not an anchor.
+  unif+p_L agrees with the closed form of C2 to 1e-5. [Verified: reviewer round 1, F-13 — a
+  1e-6 gate between a float64 computation and the float32 forward will flake; see §4.4]
+  Measured: uniform val/test 12.674474716 (\|d\| 2.77e-7); old prior val 12.146834609
+  (d −3.9e-7), test 12.142214063 (d +6.3e-8); unif+p_L val 12.502734890 vs closed form
+  12.502734316, test 12.501596932 vs 12.501596359 (d +5.74e-7 for both); sim full and sim
+  10pct uniform and unif+p_L also passed. Suite BEFORE 2F/1071P/3S, AFTER 2F/1079P/3S (+8
+  new). [Verified: COORDINATION gate `G0_phase0`]
+- **G0b (after P0b.1-P0b.3) — the change-set gate. PASSED, all 6 items (commit `9aa8ef5`).**
+  ALL of: (1) T4b probe passes for the centred crop, both strands, both ends, EXHAUSTIVE
+  over all 4096 cells x 4 tables — **revision 4: this is a self-consistency probe of the
+  counter against `compute_log_p0`, not an adapter probe; no adapter was built (§0.4 C)**;
+  (2) T12 ties the prior's 3' read to L2a's tap and to the simulator's stop hexamer; (3) T13:
+  the `m+L` loader rejects `stage1_hex_tables_v4_start.npz` and a `bad981d` checkpoint;
+  (4) the new counter's `p_L` vs the v4 npz's — **measured: 599,412 admitted, 599,411
+  counted, 1 dropped (at L=179), NOT the ~31 earlier predicted; `p_L` over all admitted
+  fragments equals the v4 npz's bit-for-bit (`array_equal=True`); `p_L` from the counted
+  population differs by <= 1.658e-06; unif+p_L on test from it, closed form, is
+  12.501596321, \|Δ\| 3.2e-7 over 6,303 regions / 73,017 fragments** [Verified: COORDINATION
+  gate `G0b_phase_0b1`]; (5) `start_fwd` AND `stop_rev` (both, not `start_fwd` alone — the T4
+  correction, divergence 1) reproduce stage1 at max relative difference 0.0 on real data;
+  (6) suite AFTER = suite BEFORE plus the new tests — **measured: BEFORE 2F/1095P/3S (1100)
+  at `9fe0d31`, AFTER 2F/1111P/3S (1116); +16 reconciles exactly as +2 T12, +2 net CLI, +12
+  new test file.** [Verified: COORDINATION gate `G0b_phase_0b1`] If ANY had failed: stop,
+  revert the whole commit, never a part, because a part is exactly the keyed-one-way-
+  read-another state (§0.4). No candidate has been scored yet — Phase 0b.2 onward is NOT
+  STARTED.
 - **G1 (after P0.2, P0.3).** If the measured noise b < 0.002: kill N1, N2, N3 as builds;
   keep N2 only as a strand diagnostic. N0 is not gated here: ruling 5 approved it, and the
   reviewer's P0.2 recomputation (0.016-0.019, §1.3 F1) sits well above 0.002 anyway. P0.2
@@ -1106,7 +1232,7 @@ runs and sits below every bound in §2.
   look wrong, report it to the owner as new information. It does not reopen ruling 6 on its
   own. Every right-end term uses `m+L` plus a probe test.
 
-### Phase 1 — Layer N through the evaluator (needs S2, S3, adapter, engine, G0b passed)
+### Phase 1 — Layer N through the evaluator (needs S2, S3 (both built), engine, G0b passed (done))
 
 N0 is already built and scored in Phase 0b; it is the anchor, not a Phase-1 row. Then
 individually: N1, N2 (diagnostic), N3, N4, each on top of N0's estimator and denominators.
@@ -1322,17 +1448,18 @@ cd /tmp && PATH=$PYENV:$PATH PYTHONPATH=$W python -u $W/scripts/cut_site_model/t
 Prefer `score_fragments` for prior-only numbers; use the trainer cross-check only to confirm
 the two paths agree.
 
-### 7.3 New scripts (TO BE WRITTEN)
+### 7.3 New scripts
 
 Every new script asserts the shadow check at start, accumulates in float64, and writes a
-provenance sidecar.
+provenance sidecar. **Revision 4: `reduce_split_nll.py` (S2) and `count_tables.py` (S3) are
+BUILT, landed in Phase 0 / 0b.1 respectively. `hex_adapter.py` was never built — removed,
+§0.4 C. The remaining rows are still TO BE WRITTEN (not started; Phase 0b.2 onward).**
 
 | Path | Purpose | Inputs → outputs |
 |---|---|---|
-| `scripts/cut_site_model/baselines/reduce_split_nll.py` | S2 | `--per-fragment-tsv --store --splits val test --min-N 10 [--paired-with TSV --bootstrap 2000 --seed 0]` → JSON: NLL per split, n_regions, Δ ± 2SE |
+| `scripts/cut_site_model/baselines/reduce_split_nll.py` | S2 — **BUILT (Phase 0)** | `--per-fragment-tsv --store --splits val test --min-N 10 [--paired-with TSV --bootstrap 2000 --seed 0]` → JSON: NLL per split, n_regions, Δ ± 2SE |
 | `scripts/cut_site_model/baselines/emit_reference_npz.py` | uniform / unif+p_L npz | `--p-L-from <npz> --kind {uniform,unif_pL}` → conforming npz. `<npz>` is `$HEX` in Phase 0 and the N0 `.npz` after the change set. Post-change outputs carry the registration key, or the `m+L` loader rejects them; the uniform tables are registration-free, so the key only satisfies the guard. [Inferred] |
-| `scripts/cut_site_model/baselines/hex_adapter.py` | The ONE crossing between simulator and model hexamer conventions (§0.4 C) | four simulator-convention tables (`start_fwd, end_fwd, start_rev, end_rev`, big-endian, `_rev` rc-keyed) → four model-convention tables (`start_fwd, stop_fwd, start_rev, stop_rev`, little-endian, forward-keyed). Nothing else in the codebase may convert between the two. Guarded by T4b. Full single-encoder consolidation is a named follow-up, out of scope. |
-| `scripts/cut_site_model/baselines/count_tables.py` | S3 counter — the SINGLE table producer after the change set (N0 incl. `N0_ref`/`N0_raw`, N1, N2, N3; P0.3 subsets) | `--store --split train --crop {centred,window} --estimator {stage1_ref,shrink,backoff} --weight --pool-strands --region-fraction --region-seed --assert-no-cross-split-overlap` → npz (with registration key) + provenance. Thin driver over `measure.py` (`counts_from_hexamers`, `uniform_hexamer_counts`, `fl_end_weight`, `FragmentLengthDist`, `propensities`); stop hexamers at `m+L`; `hex_adapter.py` applied last (revision 3 replaces the round-1 "model's own encoder" rule). `--assert-no-cross-split-overlap` raises if overlap is found rather than silently filtering (F-14) — on `quiet_tile1536_v3.zarr` it always passes (check1.log:9-13), but it is kept as a guard for other stores. Window mode (N1) needs its own registration path for negative tile coordinates (F-12); it is not the centred-crop path T4 covers. |
+| `scripts/cut_site_model/baselines/count_tables.py` | S3 counter — **BUILT (Phase 0b.1, commit `9aa8ef5`).** The SINGLE table producer after the change set (N0 incl. `N0_ref`/`N0_raw`; N1/N2/N3 crop modes not yet built) | `--store --split train --crop {centred,window} --estimator {stage1_ref,shrink,backoff} --weight --pool-strands --region-fraction --region-seed --assert-no-cross-split-overlap` → npz (with registration key `stop_cut_base_offset`) + provenance (incl. the mask-limitation fields, §4.3). Thin driver over `measure.py` for `fl_end_weight`/`FragmentLengthDist` only; hexamer indices computed directly in the model's own convention — **no adapter** (revision 4, §0.4 C; supersedes the revision-3 "`hex_adapter.py` applied last" text). `--assert-no-cross-split-overlap` raises if overlap is found rather than silently filtering (F-14) — on `quiet_tile1536_v3.zarr` it always passes (check1.log:9-13), but it is kept as a guard for other stores. Counts TRAIN at `min_N=0` (every tile, 53,321 on the real store), ~78 s CPU. Window mode (N1) needs its own registration path for negative tile coordinates (F-12); it is not the centred-crop path T4 covers, and is not yet built. |
 | `scripts/cut_site_model/baselines/phase0_diag.py` | P0.2, P0.4 | subcommands `smoothing`, `offsets --by-strand --shifts -2..2`, `strand-tie` → TSV/JSON |
 | `scripts/cut_site_model/baselines/expected_counts.py` | engine + P0.5 residual maps | `residuals --hex-tables --features table,band,flank,gc_g,lr_dinuc,tlog --split train --null-permutations 20` → JSON |
 | `scripts/cut_site_model/baselines/fit_ipf.py` | N4 (+ joint M terms later) | `--init npz(=N0 tables) --store --split train --optimizer {lbfgs,gis} --lambda --gis-eta 0.33 --max-sweeps 8 --weighting {region,fragment} --region-subsample 10000` → one npz per sweep/iterate. Reviewer round 1, F-02: `--eta`/`--alpha` damped-multiplicative spec is replaced — the fixed point of `log θ += η(log(O+α)-log(E+α))` is the unregularised MLE for any α, so α is not a regulariser; use a ridge `--lambda` toward the N0 tables (or Dirichlet pseudo-counts on O only), optimise with L-BFGS on the exact gradient O−E+penalty, or GIS capped at `η≤1/3` (3 features per cell). Fix the gauge with ONE common constant preserving `a+b=c+d` applied once at the very end, never per sweep. Choose BOTH the sweep count and `λ` by train-CV; val is confirmation only, never selection (reviewer round 2, R2-02 — the sweep count is itself a hyperparameter, so selecting it on val is the circularity F-11 removed). The fitter never reports NLL. |
@@ -1352,8 +1479,8 @@ cd /tmp && PATH=$PYENV:$PATH PYTHONPATH=$W python -u $W/scripts/cut_site_model/b
 | T1 | All-uniform tables → every region's nll = ln 319488 (tol 1e-5, float32 forward) |
 | T2 | unif+p_L → per-region `ln 2048 − mean log p_L[L_f]` (tol 1e-6) |
 | T3 | S2 wrapper mean == `region_weighted_mult_nll` mean (1e-12). With D4: Σ terms / n == mean. |
-| T4 | **Restated (revision 3).** The counter in `stage1_ref` centred-crop mode reproduces stage1's `start_fwd` on a 50-tile fixture — the one table whose registration (`m`) and denominator (start domain = `N_start`) the change set leaves unchanged. **Correction (P0b.1 implementation): `stop_rev` is unchanged too** — it is read at the same left end `m` with the same `N_start` denominator, so it also reproduces stage1 exactly, and the test asserts both; only `stop_fwd`/`start_rev` differ. The other three tables differ BY DESIGN (`m+L`; ramp-weighted `N_end`) and are pinned by T4b/T12 instead. Non-ACGT windows are excluded from the comparison. If stage1 exposes no raw counts, the test applies the stage1 formula itself, labelled as a test-side copy. [Unverified: whether a cut-site store fixture builder exists in `tests/`] Not re-verified by the reviewer. |
-| T4b | **Phase-0b gate (F-01/F-12; revision 3 extends it to the adapter).** One-hot probe of the counter + `hex_adapter.py` against `compute_log_p0`, for EVERY crop mode (centred, window/N1, pooled/N2), both strands, both ends: a table that is 1 at exactly one known hexamer/offset, 0 elsewhere, pushed through the simulator-convention path and the adapter, must gather the same index as the model's lookup. Include a hexamer that equals neither its own reverse complement nor its own reversal (e.g. AAAAAC) so that a missing endianness flip or rc un-permutation cannot pass by symmetry. [Inferred] No `.npz` from the counter is scored before its crop mode's probe passes. |
+| T4 | **Restated (revision 3); CORRECTED and MEASURED (P0b.1 implementation, revision 4).** The design named `start_fwd` as the one table whose registration (`m`) and denominator (start domain = `N_start`) the change set leaves unchanged. That was INCOMPLETE — a real design error: `stop_rev` is also unchanged, because it too is read at the left end `m` with the `N_start` denominator; only the right-cut tables (`stop_fwd`, `start_rev`) move. The test asserts both. **Measured on real data: `start_fwd` and `stop_rev` both reproduce stage1 at max relative difference 0.0; `stop_fwd` and `start_rev` differ by 11.67x and 37.47x respectively, by design.** [Verified: COORDINATION gate `G0b_phase_0b1`, divergence 1] Non-ACGT windows are excluded from the comparison. |
+| T4b | **Phase-0b gate (F-01/F-12), BUILT AND PASSED (revision 4) — role corrected.** Revision 3 described this as a probe of the counter PLUS `hex_adapter.py` against `compute_log_p0`. No adapter was built (§0.4 C): nothing hexamer-keyed crosses stacks in the production path, so there is no second convention for this test to cross-check against. What is built and guards the counter instead: a one-hot probe of the counter against `compute_log_p0`, for the centred crop, both strands, both ends, **EXHAUSTIVE over all 4096 cells x 4 tables** (not sampled) — every table equals the bincount of the index `compute_log_p0` actually reads. [Verified: COORDINATION gate `G0b_phase_0b1`] Window/N1 and pooled/N2 crop modes are not yet built and still need their own probe test when they are. No `.npz` from the counter was scored before this probe passed. |
 | T5 | Engine log-probs == `domain_log_probs` (zero correction) to **1e-5 max-abs**, or compared via `model.double()` on both sides (F-13: 1e-6 will flake against the float32 forward). |
 | T6 | IPF fixed point: tables set to the MLE of a synthetic fixture do not move (|Δ log θ| < 1e-8) |
 | T7 | **Restated (F-02).** "Penalised stationarity", not "O~E": after the fit, `‖O − E − penalty_gradient‖ < tol` on TRAIN, float64. (The earlier T7 asked for O≈E, which is only true at λ=0/unpenalised — the fixed point with a ridge or Dirichlet penalty is NOT O=E.) |
@@ -1361,8 +1488,8 @@ cd /tmp && PATH=$PYENV:$PATH PYTHONPATH=$W python -u $W/scripts/cut_site_model/b
 | T9 | S1 per term: identity-probe registration (as `tests/test_hex_registration.py`), right end at `m+L` (revision 3; was `m+L-1`) |
 | T10 | Import-smoke of every consumed symbol from dataset.py / `background_model_core` (jitter helpers) — NOT from the stage1 file for `hex_window_for_tile` (F-15; ownership seam) |
 | T11 | **Restated (F-14).** Margin counting ASSERTS zero cross-split overlap and raises if any is found (a synthetic adjacent-tile fixture exercises the raise path); it does not silently filter. On the real store the assertion is confirmed to always pass (check1.log:9-13). |
-| T12 | **New (revision 3, sequencing constraint), in `tests/test_hex_registration.py`.** A CROSS-check, not a self-check: (a) for the same `(m, L)`, the hex_idx position `compute_log_p0` gathers for the 3' cut equals the `h` position L2a taps (`WINDOW_HALF + m + L`, model.py:641-643); (b) the stop hexamer the simulator records for a fragment at `(m, L)` on a synthetic sequence (`hexamers_at` at the stop, as `measure.py`/`draw.py:85` do), mapped through `hex_adapter.py`, equals the index the prior reads. Mechanism suggestion: hoist the 3' offset into ONE named helper used by both `compute_log_p0` and L2a, so (a) cannot drift silently. [Inferred: a proposal] The existing probes at `:108-109`, `:252-254` and `:336` move to `m+L`; on their own they pin the convention to itself and cannot catch it being wrong. |
-| T13 | **New (revision 3).** The `m+L` loader rejects an `.npz` without the registration key (fixture: a copy of the v4 schema) and a checkpoint whose buffers carry `m+L-1` tables. Also: `required_width` at model.py:204 and the constructor check at :295 fire for a geometry one base too narrow under `m+L` (construct with `L_max = WINDOW_HALF + 1` = 182, which the old `-1` checks accept), proving the `-1` was removed from both. [Inferred: 181 < 182 fails the new check, 181 < 181 passes the old one] |
+| T12 | **New (revision 3, sequencing constraint), in `tests/test_hex_registration.py`. BUILT, PASSED, and PROVED non-tautological by MUTATION (revision 4).** A CROSS-check, not a self-check: (a) T12a ties the hex_idx position `compute_log_p0` gathers for the 3' cut to the `h` position L2a taps (`WINDOW_HALF + m + L`, model.py:641-643), by SWAPPING individual bases and observing the dependency, not by restating the formula; (b) T12b ties it to the simulator's `cut_site_hexamers`, joined by k-mer STRING (`model_index_of_sim_index()`), so it is convention-independent — no adapter needed for this check either, since it compares via the string, not the index. The old probes at `:108-109`, `:252-254` and `:336` moved to `m+L` (these are the ones that used to pin the convention to itself). **Non-tautology was proved by MUTATION, independently by the implementer and the reviewer:** reverting BOTH the producer and the reader to `m+L-1` fails 12 tests (incl. T12a/T12b and the `propensities` conformance test); reverting the READER only fails 6 (incl. T4b). [Verified: COORDINATION gates `em_note_mutation_test_proof`, `implementation_review_phase_0b`] |
+| T13 | **New (revision 3). BUILT (revision 4) — implemented as a key named `stop_cut_base_offset`, not the proposed `stop_cut_offset`.** The `m+L` loader rejects an `.npz` without the key (fixture: a copy of the v4 schema) and a checkpoint whose buffers carry `m+L-1` tables, via a persisted `_hex_stop_cut_base_offset` buffer plus a `load_state_dict` pre-hook that **cannot be bypassed with `strict=False`** (the pre-hook runs before the load). Also: `required_width` at model.py:204 and the constructor check at :295 fire for a geometry one base too narrow under the CORRECTED `WINDOW_HALF >= L_max` derivation (§0.4 B, revision 4) — construct with `L_max = WINDOW_HALF + 1` and the constructor must raise. This is a stronger claim than "the `-1` was removed": the OLD guard (`WINDOW_HALF < L_max - 1`) was latently broken independent of the `m+L` change, admitting `L_max=182` at the boundary of `h`'s width; the test proves the NEW guard (`WINDOW_HALF >= L_max`) catches what the old one missed. [Verified: COORDINATION gates `implementation_review_phase_0b`, `em_reviewer_found_the_old_width_guard_was_BROKEN`] **This mechanism is implemented and tested but NOT owner-ruled (divergence 5, §9):** the registration key and checkpoint refusal were the design author's proposal for enforcing the sequencing constraint; the owner has not explicitly approved the mechanism itself, only the underlying `m+L` registration (ruling 6). |
 | T14 | **Retarget (revision 3).** `test_builder_and_model_agree_on_registration` (`:116-140`) and `test_builder_widened_window_covers_right_edge` (`:269-294`) import `hex_window_for_tile` from the retired stage1 file, and the second hardcodes `L_max - 1` (`:278`, `:288`). Retarget both to the new counter (far 3' cut at `tile_size − 1 + L_max`). Do not edit the stage1 file. |
 
 ---
@@ -1377,7 +1504,7 @@ cd /tmp && PATH=$PYENV:$PATH PYTHONPATH=$W python -u $W/scripts/cut_site_model/b
 | Q4 | `train.py` precision default | **RESOLVED (reviewer round 1):** default is `--precision bf16-mixed` (train.py:101-102); always pass `--precision 32` for prior cross-checks (F-09, §7.2) |
 | Q5 | Home module of stage1 helpers | `grep -n "^from\|^import" $W/scripts/cut_site_model/stage1_hex_baseline.py` |
 | Q6 | ~~Does the loader renormalise tables (fwd/rev scale)?~~ **RESOLVED: no.** `model.py:399-404` takes `np.log(np.maximum(data[key], 1e-30))` with no normalisation step, so a table-scale change lands in the model rather than being absorbed. This is why N4's gauge must preserve `a+b=c+d` (§3.1). | [Verified: model.py:399-404, reviewer round 2 R2-03] |
-| Q7 | ~~Sim right-end index convention vs model (F6)~~ **RESOLVED (revision 3):** the simulator uses `ends_all = pos + Ls`, i.e. `m+L` [Verified: draw.py:83-85, r3]; the prior moves to it under ruling 6. Endianness and RC keying remain, handled by the adapter (§0.4 C). | [Verified: draw.py:83-85, measure.py:179-199, r3] |
+| Q7 | ~~Sim right-end index convention vs model (F6)~~ **RESOLVED (revision 3):** the simulator uses `ends_all = pos + Ls`, i.e. `m+L` [Verified: draw.py:83-85, r3]; the prior moves to it under ruling 6. Endianness and RC keying remain — **revision 4: NOT handled by an adapter, because none was built.** Nothing hexamer-keyed crosses the production path, so the split is simply unused there; it stays open and deferred as a joint call with the simulator EM (§0.4 C). | [Verified: draw.py:83-85, measure.py:179-199, r3; COORDINATION gate `em_unblock_phase_0b`] |
 | Q8 | Sim minus-strand storage convention (N2 control) | Read the strand branch of `draw.py` and the simulator writer |
 | Q9 | Cross-split tile adjacency (N1 leakage) | **RESOLVED (reviewer round 1):** ZERO overlaps found, every form checked (window×crop, crop×crop, window×window, seq-span×crop); min tile-start gap 1536, 6,036 abutting pairs (check1.log:9-13). Leakage-safe on this store (F-14); keep an assertion for other stores. |
 | Q10 | Does `compute_log_p0` accept float64? | Call it on a 1-region fixture with float64 tables |
@@ -1562,6 +1689,29 @@ brief, this document's earlier rounds, or the source read this session.
 Not applied: nothing from the brief was skipped. One item is applied as a PROPOSAL rather
 than a decision: the loader registration key and checkpoint refusal (§0.4 item 2, T13).
 They enforce the sequencing constraint, but the owner has not ruled on the mechanism.
+
+### Revision 4 (2026-10-10) — reconciled against Phase 0 and Phase 0b.1 as implemented
+
+Targeted edits only, against `COORDINATION.cut-site-model.md`'s "Design-Implementation
+Divergences" section and its gate log (commit `9aa8ef5`+, Phase 0b.1 reviewed A-). No
+section was rewritten, no conclusion, candidate ranking, or gate threshold changed. Every
+new number is tagged `[Verified: COORDINATION gate <name>]`, not asserted from this
+session's own reading.
+
+| Divergence | What was edited |
+|---|---|
+| 1 — T4 was INCOMPLETE (design error) | T4 (§7.4) and G0b gate item 5 (§5) corrected: `stop_rev` is unchanged by changes A+B, not just `start_fwd` — both are read at the left end `m` with the `N_start` denominator. Measured: both at max relative difference 0.0 vs stage1; `stop_fwd`/`start_rev` differ by 11.67x/37.47x by design. |
+| 2 — WINDOW_HALF derivation was wrong; old guard LATENTLY BROKEN | §0.4 B rewritten: the binding limit is L2a's `h` (`WINDOW_HALF` each side of `P`, farthest tap `WINDOW_HALF+(P-1)+L_max`), giving `WINDOW_HALF >= L_max`, not "drop the `-1` from `L_max-1`". The old guard `WINDOW_HALF < L_max-1` would have admitted `L_max=182` at the boundary of `h`'s width — LATENTLY BROKEN, not merely stale. T13 (§7.4) updated to describe the stronger claim and the `CutSiteFragmentModel(L_max=WINDOW_HALF+1)` raise test. |
+| 3 — Mask handling past `l_target` | New paragraph in §4.3 documents the limitation as known and recorded (harmless on the real store, mask 100% True) rather than silent: the provenance sidecar's `mask_honoured_bases`, `cut_base_window`, `mask_unhonoured_bases`, `mask_all_true` fields are added to the S3 spec. |
+| 4 — No `hex_adapter.py` built | §0.4 C, §3.5, §3.7 (N2), §4.1, §4.3, §7.3, T4b, T12, Q7, and the §1.1 incompatibility pointer all rewritten: no adapter exists; nothing hexamer-keyed crosses the simulator/model boundary in the production counting path (only `FragmentLengthDist`/`fl_end_weight` are imported, both length/position-indexed); the counter computes directly in the model's own convention. T4b is now an exhaustive (4096-cell) self-consistency probe, not a cross-stack conformance test. The endianness/RC-keying split is marked UNRESOLVED and deferred as a joint call with the simulator EM, not solved. |
+| 5 — T13 guard not owner-ruled | §0.4 sequencing-constraint item 2 and T13 (§7.4) updated with the implemented mechanism's real name (`stop_cut_base_offset` key, `_hex_stop_cut_base_offset` buffer, a `load_state_dict` pre-hook that cannot be bypassed with `strict=False`) and reaffirmed as flagged-but-not-owner-ruled, not merely "proposed" (it is built and tested). |
+| Measured facts folded in | `p_L` 599,412 admitted / 599,411 counted / 1 dropped (L=179), bit-for-bit match to v4 over admitted fragments (§0.4 C via §3.5; G0b gate item 4); `unif+p_L` test 12.501596321, \|Δ\| 3.2e-7 (§3.5, G0b gate item 4); suite 2F/1111P/3S (1116) at `9aa8ef5`, up from 1100 at `9fe0d31` (§5 P0b.1 row, G0b gate item 6; also Phase 0's own 2F/1071P/3S→2F/1079P/3S in the G0 gate); counter runtime ~78 s CPU and `min_N=0` counting population, distinct from the evaluator's `min_N=10` (§3.5, §4.3); non-tautology proved by mutation (12 tests fail reverting producer+reader, 6 fail reverting the reader only) folded into T12 (§7.4) and the sequencing-constraint item 4 (§0.4). |
+| Also fixed | §0.4 sequencing-constraint items 1-5 and §9/T13 updated from future tense to DONE/implemented, since Phase 0 and Phase 0b.1 landed at `9aa8ef5`. New "Implementation status" block at the top names Phase 0 and 0b.1 COMPLETE (gates G0, G0b PASSED) and Phase 0b.2 onward NOT STARTED. The P0.1 "old-prior TSV" note is upgraded from "kept" to IRREPLACEABLE, with its path and the reason (the `m+L` loader now refuses the tables that produced it). A one-line note added after §0.4's retirement paragraph flagging `docs/pending/training_analysis.md` and older docs as stale on `m+L-1`, not edited here. |
+
+Not applied: no edit to this document's conclusions, candidate ranking (§3.0), or gate
+thresholds (§5). `docs/pending/training_analysis.md` was flagged stale, not edited (out of
+scope, a separate retirement decision). Could not reconcile: none — all five divergences and
+every "also fix" item in the brief had a clear landing spot in the existing structure.
 
 ## Review Notes (2026-10-10, round 3)
 
