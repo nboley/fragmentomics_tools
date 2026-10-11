@@ -76,7 +76,10 @@ from background_model.cut_site_model.dataset import (  # noqa: E402
     cut_site_collate_fn,
 )
 from background_model.cut_site_model.model import CutSiteFragmentModel  # noqa: E402
-from background_model.cut_site_model.store import CutSiteStoreConfig  # noqa: E402
+from background_model.cut_site_model.store import (  # noqa: E402
+    SPLIT_CODES,
+    CutSiteStoreConfig,
+)
 from background_model_core import calculate_start_and_stop_from_jitter  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -85,9 +88,10 @@ COLUMNS = ("contig", "start", "stop", "strand", "log_prob", "log_prob_ml",
            "split", "scored")
 
 # Output split name -> (store tiles/split code, CutSiteFragmentDataset split).
-# The builder writes code 2 for its test fraction; the dataset calls that
-# code "heldout_inactive".
-SPLITS = {"train": (0, "train"), "val": (1, "val"), "test": (2, "heldout_inactive")}
+# The builder's --test-frac tiles get the "heldout_inactive" code; this
+# output calls them "test".
+SPLITS = {out: (SPLIT_CODES[ds], ds) for out, ds in (
+    ("train", "train"), ("val", "val"), ("test", "heldout_inactive"))}
 STRAND_CHARS = np.array(["+", "-"])   # store strand 0 = '+', 1 = '-'
 
 

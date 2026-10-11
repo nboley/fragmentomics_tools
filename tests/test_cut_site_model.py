@@ -1,7 +1,7 @@
 """Tests for the cut-site fragment model (Phase 1: architecture).
 
 Covers: geometry, forward pass shapes, gradient flow, parameter counts,
-centre-based domain sizing, and the fold-down linearity condition.
+start-based domain sizing, and the fold-down linearity condition.
 """
 
 import pytest
@@ -268,37 +268,25 @@ class TestGradientFlow:
 # ---------------------------------------------------------------------------
 
 
-class TestCentreBasedDomain:
-    """Verify the scoring domain D = {(m, L, s) : m in [0,P), L in-band, s in {0,1}}."""
+class TestStartBasedDomain:
+    """Verify the scoring domain D = {(m, L, s) : m in [0,P), L in-band, s in {0,1}}.
+
+    Tap placement is tested through the model's gradients in
+    ``test_cut_site_training.TestLogitInputSupport``, and ``frag_m`` as the
+    stored start in ``test_cut_site_store_dataset``; this class keeps no
+    arithmetic-only restatement of either.
+    """
 
     def test_domain_size_per_L_is_P(self):
-        """For every in-band L, the number of valid centres is exactly P."""
+        """For every in-band L, the number of valid starts is exactly P."""
         P = 256
         m = CutSiteFragmentModel(tile_size=P, N1=16, K=16, N2=8, H=8, L_chunk=32)
         l_in = m.calc_input_region_size(P)
         x = torch.randn(1, 4, l_in)
         logits, _, _ = m(x)
         # logits has shape (1, P, n_L, 2) — every (m, L) slot exists
-        assert logits.shape[1] == P  # all P centres
+        assert logits.shape[1] == P  # all P starts
         assert logits.shape[2] == N_L  # all in-band lengths
-
-    def test_taps_within_h_for_all_m_L(self):
-        """For m in [0, P) and all in-band L, both taps fall within h."""
-        P = 256
-        h_width = P + 2 * WINDOW_HALF  # h length after conv
-        for L in range(L_MIN_INBAND, L_MAX_INBAND + 1):
-            # Start admission: left tap at WINDOW_HALF, right at WINDOW_HALF + L
-            o_l = WINDOW_HALF
-            o_r = WINDOW_HALF + L
-            for m in (0, P - 1):
-                h_left = m + o_l
-                h_right = m + o_r
-                assert 0 <= h_left < h_width, (
-                    f"Left tap out of bounds: m={m}, L={L}, h_left={h_left}"
-                )
-                assert 0 <= h_right < h_width, (
-                    f"Right tap out of bounds: m={m}, L={L}, h_right={h_right}"
-                )
 
     def test_both_L_parities(self):
         """Exercise both even and odd L values."""
@@ -312,14 +300,6 @@ class TestCentreBasedDomain:
         odd_idx = 0    # L=25
         assert torch.isfinite(logits[:, :, even_idx, :]).all()
         assert torch.isfinite(logits[:, :, odd_idx, :]).all()
-
-    def test_centre_to_start_roundtrip_both_parities(self):
-        """p = m - L//2; m = p + L//2 round-trips for both even and odd L."""
-        for L in (25, 26, 100, 179):  # odd, even, even, odd
-            for m in (0, 50, 127):
-                p = m - L // 2
-                m_back = p + L // 2
-                assert m_back == m, f"Round-trip failed: m={m}, L={L}, p={p}"
 
 
 # ---------------------------------------------------------------------------
@@ -550,15 +530,6 @@ class TestCrossBranchAlignment:
 
 class TestEndpointTapAlignment:
     """Verify that endpoint taps address the correct h positions."""
-
-    def test_tap_positions_match_design(self):
-        """For L=25 and L=179, verify o_l and o_r match design formulas."""
-        for L_val in (25, 26, 100, 179):
-            # Start admission: left tap at WINDOW_HALF, right at WINDOW_HALF + L
-            o_l = WINDOW_HALF
-            o_r = WINDOW_HALF + L_val
-            # Design: taps are L apart (cut sites m and m+L)
-            assert o_r - o_l == L_val
 
     def test_endpoint_feats_use_correct_h_positions(self):
         """The endpoint features at m=0 for the left tap should read h[:,:,o_l]."""

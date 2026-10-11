@@ -2,7 +2,7 @@
 
 Exercises: synthetic store → dataset → collate → model forward → loss →
 backward → optimizer step.  Also tests the multinomial NLL, annealed NB
-loss, and the ±1 alignment between fragment centres and model tap indices.
+loss, and which input bases one (start, length, strand) logit reads.
 """
 
 import numpy as np
@@ -47,7 +47,6 @@ def small_training_setup(tmp_path):
         model_input_size=model.model_input_size,
         model_L_min=cfg.L_min, model_L_max=cfg.L_max,
         split="train",
-        sample_role="train",
         min_N=0,
         train_mode=False,
     )
@@ -134,24 +133,57 @@ class TestMultinomialNLL:
 # ---------------------------------------------------------------------------
 
 
-class TestAnnealedNBLoss:
-    def test_nb_weight_decays_to_zero(self):
-        """w(t) should decay linearly from w0 to 0 over T_anneal epochs."""
-        w0, T_anneal = 1.0, 5
-        for t in range(T_anneal + 2):
-            w_t = w0 * max(0.0, 1.0 - t / T_anneal)
-            if t == 0:
-                assert w_t == w0
-            elif t >= T_anneal:
-                assert w_t == 0.0
-            else:
-                assert 0 < w_t < w0
+class _EpochModel(CutSiteFragmentModel):
+    """Sets ``current_epoch`` directly and records ``self.log`` calls, so
+    ``_step`` runs its real annealing schedule without a Trainer."""
 
-    def test_nb_weight_zero_at_T_anneal(self):
-        """After T_anneal epochs, w(t) = 0 exactly."""
-        w0, T_anneal = 2.5, 3
-        w_t = w0 * max(0.0, 1.0 - T_anneal / T_anneal)
-        assert w_t == 0.0
+    epoch = 0
+
+    @property
+    def current_epoch(self):
+        return self.epoch
+
+    def log(self, name, value, *args, **kwargs):
+        self.logged[name] = value
+
+
+class TestAnnealedNBLoss:
+    """Runs the model's own ``_step`` and reads back the NB weight it logs
+    and the loss it returns."""
+
+    def _model_and_batch(self, small_training_setup, nb_w0, nb_T_anneal):
+        _, ds, cfg = small_training_setup
+        torch.manual_seed(0)
+        model = _EpochModel(
+            tile_size=cfg.tile_size, N1=8, K=8, N2=4, H=4, L_chunk=32,
+            dispersion_window_size=cfg.tile_size,
+            nb_w0=nb_w0, nb_T_anneal=nb_T_anneal, mult_weight=0.5)
+        model.logged = {}
+        return model, cut_site_collate_fn([ds[0], ds[1]])
+
+    def test_weight_schedule_and_loss(self, small_training_setup):
+        """w0 = 2, T_anneal = 4: the weight falls linearly to 0 at epoch 4
+        and stays 0 after.  The loss is mult_weight * L_mult + w_t * L_NB."""
+        model, batch = self._model_and_batch(small_training_setup, 2.0, 4)
+        weights = []
+        with torch.no_grad():
+            for epoch in range(6):
+                model.epoch = epoch
+                loss = model._step(batch, "train")
+                lg = model.logged
+                w_t = lg["train_nb_weight"]
+                weights.append(w_t)
+                # Nonzero, so the loss check means something at w_t == 0 too.
+                assert lg["train_nb_loss"] != 0
+                torch.testing.assert_close(
+                    loss, 0.5 * lg["train_mult_nll"] + w_t * lg["train_nb_loss"])
+        assert weights == [2.0, 1.5, 1.0, 0.5, 0.0, 0.0]
+
+    def test_T_anneal_zero_disables_nb(self, small_training_setup):
+        model, batch = self._model_and_batch(small_training_setup, 2.0, 0)
+        with torch.no_grad():
+            model._step(batch, "train")
+        assert model.logged["train_nb_weight"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -232,43 +264,76 @@ class TestEndToEndTraining:
 
 
 # ---------------------------------------------------------------------------
-# ±1 alignment: fragment centres vs model tap indices
+# Tap geometry, read off the model's own gradients
 # ---------------------------------------------------------------------------
 
 
-class TestAlignmentBothParities:
-    """Verify that for both even and odd L, the fragment start m maps
-    correctly to the tap indices in h."""
+class TestLogitInputSupport:
+    """Which input bases one logit depends on, measured through the model.
 
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_tap_alignment_at_boundaries(self, L_val):
-        """For a fragment at the leftmost and rightmost valid starts,
-        verify the taps land within h."""
-        P = 256
-        h_width = P + 2 * WINDOW_HALF
-        o_l = WINDOW_HALF
-        o_r = WINDOW_HALF + L_val
+    The tap offsets live inside ``_compute_chunk``; a test that restates
+    them as local constants cannot fail.  Instead, back-propagate a single
+    logit ``(m, L, s)`` and read its support on the input: the left tap
+    reads ``x[W+m : W+m+6]`` (width-6 conv), the interior reads
+    ``x[W+m : W+m+L]``, and the right tap reads ``x[W+m+L : W+m+L+6]``, so
+    the support is exactly ``[W+m, W+m+L+5]`` with ``W = WINDOW_HALF``.
+    The upper end pins the right tap at ``m+L``, i.e. the cut AFTER the
+    last base ``m+L-1``; an off-by-one there moves it.  This pins CURRENT
+    geometry: the design doc's open issue 1 records that the hex prior keys
+    the 3' cut at ``m+L-1``.  If the owner resolves that, change this test.
+    Running m = 0 and m = P-1 also shows every tap is inside ``h`` (an
+    out-of-range gather raises).
 
-        # Leftmost start: m = 0
-        assert 0 <= 0 + o_l < h_width
-        assert 0 <= 0 + o_r < h_width
+    The lower edge does NOT pin the left tap: the interior also starts at
+    ``W+m``, so a shifted left tap hides inside the interior's support.
+    ``test_each_tap_bank_on_its_own`` below isolates the banks for that.
+    """
 
-        # Rightmost start: m = P - 1
-        assert 0 <= (P - 1) + o_l < h_width
-        assert 0 <= (P - 1) + o_r < h_width
+    @staticmethod
+    def _model(P):
+        torch.manual_seed(0)
+        model = CutSiteFragmentModel(
+            tile_size=P, N1=8, K=8, N2=4, H=4, L_chunk=32).eval()
+        # w_out is zero-initialised (f_theta == 0 at init), which zeroes
+        # every input gradient.  Any nonzero value exposes the support.
+        with torch.no_grad():
+            model.w_out.normal_()
+        return model
 
-    @pytest.mark.parametrize("L_val", [25, 26, 100, 179])
-    def test_cut_sites_are_L_apart(self, L_val):
-        """The two cut sites m and m+L are exactly L apart (not L-1)."""
-        o_l = WINDOW_HALF
-        o_r = WINDOW_HALF + L_val
-        assert o_r - o_l == L_val
+    @staticmethod
+    def _support(model, m, L_val, strand):
+        x = torch.rand(1, 4, model.model_input_size, requires_grad=True)
+        logits, _, _ = model(x)
+        logits[0, m, L_val - L_MIN_INBAND, strand].backward()
+        return torch.nonzero(x.grad[0].abs().sum(0)).flatten().tolist()
 
-    def test_endpoint_base_vs_cut_site(self):
-        """Verify the ±1 distinction: right endpoint base = m+L-1,
-        right cut site = m+L."""
-        for L_val in (25, 26, 100, 179):
-            for m in (0, 128):
-                right_cut_site = m + L_val       # what the model taps
-                right_base = m + L_val - 1       # what /endpoints/last records
-                assert right_cut_site == right_base + 1
+    @pytest.mark.parametrize("tap", ["left", "right"])
+    @pytest.mark.parametrize("strand", [0, 1])
+    @pytest.mark.parametrize("m", [0, 63])
+    @pytest.mark.parametrize("L_val", [L_MIN_INBAND, L_MIN_INBAND + 1, 100, L_MAX_INBAND])
+    def test_each_tap_bank_on_its_own(self, L_val, m, strand, tap):
+        """Pins the CURRENT tap positions; it does not say where the taps
+        should be.  With the interior branch zeroed (``interior_F = 0``) and
+        the other tap's banks zeroed (``bank_W``), one logit's input support
+        is that tap's width-6 conv window alone:
+
+            left  tap: x[W+m   : W+m+6]
+            right tap: x[W+m+L : W+m+L+6]
+
+        A +-1 shift of either tap's gather index moves its window."""
+        model = self._model(64)
+        other = 1 if tap == "left" else 0
+        with torch.no_grad():
+            model.interior_F.zero_()
+            for s in (0, 1):
+                model.bank_W[other * 2 + s].zero_()
+        lo = WINDOW_HALF + m + (0 if tap == "left" else L_val)
+        assert self._support(model, m, L_val, strand) == list(range(lo, lo + 6))
+
+    @pytest.mark.parametrize("strand", [0, 1])
+    @pytest.mark.parametrize("m", [0, 63])
+    @pytest.mark.parametrize("L_val", [L_MIN_INBAND, L_MIN_INBAND + 1, 100, L_MAX_INBAND])
+    def test_support_is_start_to_right_tap(self, L_val, m, strand):
+        support = self._support(self._model(64), m, L_val, strand)
+        lo = WINDOW_HALF + m
+        assert support == list(range(lo, lo + L_val + 6))

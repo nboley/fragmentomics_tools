@@ -102,6 +102,14 @@ def main():
                    choices=["32", "bf16-mixed", "16-mixed"])
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--min-N", type=int, default=10)
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seeds model init and the shuffle (seed_everything) "
+                        "and keys the train jitter stream. Without it each "
+                        "worker's sequence of jitter values still repeats "
+                        "(fixed default key, same --workers), but init and "
+                        "the shuffle are unseeded, so which item receives "
+                        "which jitter differs between runs. CUDA kernels may "
+                        "still be nondeterministic.")
     p.add_argument("--hex-tables", default=None,
                    help="Path to Stage 1 hex tables (.npz) for two-stage training")
     p.add_argument("--freeze-hex", action="store_true",
@@ -138,6 +146,10 @@ def main():
 
     os.makedirs(args.run_dir, exist_ok=True)
 
+    # Before the model is built, so that init is seeded too.
+    if args.seed is not None:
+        L.seed_everything(args.seed)
+
     model = CutSiteFragmentModel(
         L_min=args.L_min, L_max=args.L_max, tile_size=store_cfg.tile_size,
         N1=128, K=128, N2=32, H=32, L_chunk=32,
@@ -169,6 +181,7 @@ def main():
         store_path=args.store, model_input_size=model.model_input_size,
         model_L_min=args.L_min, model_L_max=args.L_max,
         split="train", min_N=args.min_N, train_mode=True, preload=True,
+        seed=args.seed,
     )
     val_ds = CutSiteFragmentDataset(
         store_path=args.store, model_input_size=model.model_input_size,

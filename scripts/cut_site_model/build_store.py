@@ -37,6 +37,7 @@ from fragments_h5 import FragmentsH5
 
 from background_model.constants import L_MAX, L_MIN
 from background_model.cut_site_model.store import (
+    SPLIT_CODES,
     CutSiteStoreConfig,
     recompute_endpoints_from_fragments,
 )
@@ -148,6 +149,8 @@ def _extract_worker(args_tuple):
     # Admission: start in [0, l_target), in-band length.
     l_target = reg_stop - reg_start
     keep = (lengths >= L_min) & (lengths <= L_max)
+    # `starts < l_target` is a guard only: fetch_array already returns just
+    # fragments with start < region_stop, so no input (and no test) reaches it.
     keep &= (starts >= 0) & (starts < l_target)
 
     return (
@@ -226,15 +229,17 @@ def build_store(args):
     log.info("Extracted %d fragments from %d regions", total_frags, T)
 
     # -- Assign splits -----------------------------------------------------
+    # Codes from SPLIT_CODES; --test-frac fills "heldout_inactive".
     rng = np.random.default_rng(cfg.seed)
-    split_arr = np.zeros(T, dtype=np.uint8)
+    split_arr = np.full(T, SPLIT_CODES["train"], dtype=np.uint8)
     perm = rng.permutation(T)
     n_val = int(T * args.val_frac)
     n_test = int(T * args.test_frac)
-    split_arr[perm[:n_val]] = 1
-    split_arr[perm[n_val:n_val + n_test]] = 2
-    log.info("Splits: train=%d, val=%d, test=%d",
-             (split_arr == 0).sum(), (split_arr == 1).sum(), (split_arr == 2).sum())
+    split_arr[perm[:n_val]] = SPLIT_CODES["val"]
+    split_arr[perm[n_val:n_val + n_test]] = SPLIT_CODES["heldout_inactive"]
+    log.info("Splits: %s", ", ".join(
+        f"{name}={int((split_arr == code).sum())}"
+        for name, code in SPLIT_CODES.items()))
 
     # -- Write store -------------------------------------------------------
     open_kwargs = {"mode": "w"}
@@ -278,7 +283,6 @@ def build_store(args):
 
     samples = root.create_group("samples")
     _create_array(samples, "library", data=np.array([os.path.basename(args.sample)], dtype="<U256"))
-    _create_array(samples, "role", data=np.zeros(S, dtype="uint8"))
     _create_array(samples, "total_fragments", data=np.array([total_frags], dtype="uint64"))
 
     frags = root.create_group("fragments")
@@ -318,8 +322,11 @@ def main():
     p.add_argument("--workers", type=int, default=1, help="Parallel workers for h5 queries")
     p.add_argument("--no-dedup", action="store_true", help="Skip (start,stop) deduplication")
     p.add_argument("--split-seed", type=int, default=42)
-    p.add_argument("--val-frac", type=float, default=0.1)
-    p.add_argument("--test-frac", type=float, default=0.1)
+    p.add_argument("--val-frac", type=float, default=0.1,
+                   help="Fraction of tiles given the 'val' split code")
+    p.add_argument("--test-frac", type=float, default=0.1,
+                   help="Fraction of tiles given the 'heldout_inactive' split "
+                        "code, the test split")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")

@@ -7,7 +7,8 @@ tracks (the NB ancillary targets).
 Store layout (zarr v2):
     /attrs: config_json, config_hash, created_utc, split_version, max_len, ...
     /tiles/{contig, start, stop, strand, region_id, split, seq, mask}
-    /samples/{library, role, total_fragments}
+    /samples/{library, total_fragments}   (stores built before 2026-10-10
+                                           also carry an unread ``role``)
     /fragments/ (CSR over flat index u = s*T + t)
         indptr   (S*T + 1,)  int64
         start    (nnz,)      uint16   # region-LOCAL left endpoint p
@@ -33,6 +34,11 @@ import zarr
 
 from background_model.constants import L_MAX, L_MIN
 
+# ``tiles/split`` codes, the one definition for the whole cut-site stack: the
+# builder writes them, the dataset, stage 1 and the scorer read them.  It
+# lives here, not in dataset.py, so the builder stays free of torch.  The
+# integers are on disk in every store; never renumber them.
+SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
 
 # ---------------------------------------------------------------------------
 # Config for the cut-site store (separate from PlumbingConfig)

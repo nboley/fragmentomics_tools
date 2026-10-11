@@ -3,23 +3,36 @@
 Yields one region at a time (S=1 currently).  The item dict contains the
 one-hot sequence, fragment coordinates, endpoint NB targets, and a mask.
 
-Start-based fragment admission: a fragment survives the crop iff
-min(fragment_start, fragment_end) lies in [0, tile_size).  This gives
-|D_L| = P for every in-band L.  ``frag_m`` is the START position, not the
-centre.
+Start-based fragment admission: a fragment survives the crop iff its START
+(the stored ``fragments/start``, the lower coordinate) lies in
+[0, tile_size) of the crop and its length is in [L_min, L_max].  The end
+may lie past the crop edge.  This gives |D_L| = P for every in-band L.
+``frag_m`` is the START position, not the centre.  The rule lives in
+``admit_fragments``; ``scripts/cut_site_model/stage1_hex_baseline.py``
+calls the same function so that the hex prior and the model see one rule.
+
+The stage-1 hex tables are built over a population that differs from this
+loader's in two deliberate ways: centred crop only, and no ``min_N``
+(``compute_hex_tables`` docstring has the reasons).  A change here to
+admission, crop geometry or ``min_N`` semantics must be reflected there, and
+that list kept true.
+
+Every sample in the store is used.  There is no sample-role filter: older
+stores carry a ``samples/role`` array, and nothing reads it.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import zarr
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, get_worker_info
 
 from background_model.cut_site_model.store import (
+    SPLIT_CODES,
     CutSiteStoreConfig,
     densify_endpoints,
     validate_length_range,
@@ -27,9 +40,41 @@ from background_model.cut_site_model.store import (
 from background_model_core import calculate_start_and_stop_from_jitter, jitter_matrix
 from fragmentomics_tools.region import one_hot_encode_sequences
 
-# Split and role codes (same as 12-track dataset)
-_SPLIT_CODES = {"train": 0, "val": 1, "heldout_inactive": 2, "positive_control": 3}
-_ROLE_CODES = {"train": 0, "heldout": 1, "dropped_low_depth": 2}
+# Jitter-stream key when no seed is given.  Kept from the PID-keyed version.
+_DEFAULT_JITTER_SEED = 0x9E3779B9
+
+
+def crop_origin(l_target: int, tile_size: int, j: int) -> int:
+    """Offset of the ``tile_size`` crop inside the ``l_target`` frame at
+    jitter ``j``.  Store fragment starts minus this value are crop coords."""
+    crop_start, _ = calculate_start_and_stop_from_jitter(l_target, tile_size, j)
+    return crop_start
+
+
+def admit_fragments(
+    frag_start: np.ndarray,
+    frag_length: np.ndarray,
+    crop_start: int,
+    tile_size: int,
+    L_min: int,
+    L_max: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Start-based admission of one (sample, region)'s stored fragments.
+
+    Returns ``(p_crop, keep)``: every start re-based to crop coordinates
+    (int64), and the boolean mask of admitted rows.  A row is admitted iff
+    ``0 <= p_crop < tile_size`` and ``L_min <= length <= L_max`` (both
+    inclusive; ``L_max`` is NOT half-open).  Only the start is tested; the
+    end may lie past the crop edge.
+
+    This is the ONE implementation of the rule.  ``CutSiteFragmentDataset``
+    and ``stage1_hex_baseline.compute_hex_tables`` both call it; a second
+    copy is how the stage-1 prior once drifted from the model's population.
+    """
+    p_crop = frag_start.astype(np.int64) - crop_start
+    keep = (p_crop >= 0) & (p_crop < tile_size)
+    keep &= (frag_length >= L_min) & (frag_length <= L_max)
+    return p_crop, keep
 
 
 class CutSiteFragmentDataset(Dataset):
@@ -40,11 +85,42 @@ class CutSiteFragmentDataset(Dataset):
         frag_m    : (n_frag,)         int64    start positions in crop coords
         frag_L_idx: (n_frag,)         int64    L index (0-based, L - L_MIN)
         frag_s    : (n_frag,)         int64    strand (0 or 1)
-        frag_N    : scalar int64               total fragment count
+        frag_N    : scalar int64               number of fragments ADMITTED
+                                               to this crop (== n_frag), not
+                                               the stored count; can be 0
         frag_store_idx: (n_frag,)     int64    row in the store's fragments/*
                                                (not collated; for scorers)
         endpoints : (2, tile_size)    float32  band-free NB targets
         mask      : (tile_size,)      bool     valid positions
+
+    ``min_N`` vs ``frag_N``.  ``min_N`` gates which (sample, region) pairs
+    are indexed, on the STORED count ``indptr[u+1] - indptr[u]``, at
+    construction and before any crop.  ``frag_N`` counts what survives the
+    crop (``admit_fragments``).  The stored rows span ``l_target``, wider
+    than the crop, so an item that passes ``min_N=10`` can still emit
+    ``frag_N < 10``, including 0.  A train-mode item's ``frag_N`` also varies
+    from draw to draw with the jitter.  Consumers must not assume
+    ``frag_N >= min_N``.
+
+    Jitter.  ``train_mode=False`` always uses ``j = 0`` (the centred crop).
+    ``train_mode=True`` draws ``j`` uniformly from ``[-jitter, jitter]``,
+    one fresh draw per ``__getitem__`` call, from a stream keyed on
+    ``(seed, worker)``: ``worker`` is the DataLoader worker id, or the main
+    process when there are no workers.  The same ``seed``, the same item
+    order AND the same ``num_workers`` therefore give the same jitters in
+    every run and every process; a different ``num_workers`` gives a
+    different sequence.  Two workers never share a stream.  The stream is
+    sequential, not a function of the item index, so an item gets a fresh
+    ``j`` each time it is drawn (the design relies on this to recover
+    jitter diversity).  With non-persistent workers each epoch restarts
+    every worker's stream; the shuffle still pairs the draws with different
+    items.
+    The stream used to be keyed on ``(seed, os.getpid())``, which no seed
+    could reproduce.  The change moved every train-mode jitter, and so moved
+    training numbers once.  For scale: two unseeded runs of identical code
+    under the PID key (also no global seed, unseeded shuffle) differed by
+    ~0.002 nats on best-epoch val (``docs/pending/training_analysis.md``
+    §11, Caveats, item 2).
     """
 
     def __init__(
@@ -54,17 +130,18 @@ class CutSiteFragmentDataset(Dataset):
         model_L_min: int,
         model_L_max: int,
         split: str,
-        sample_role: str = "train",
         min_N: int = 10,
         train_mode: bool = True,
         jitter: Optional[int] = None,
         seed: Optional[int] = None,
         preload: bool = True,
     ):
-        if split not in _SPLIT_CODES:
-            raise ValueError(f"split must be one of {sorted(_SPLIT_CODES)}")
-        if sample_role not in _ROLE_CODES:
-            raise ValueError(f"sample_role must be one of {sorted(_ROLE_CODES)}")
+        if split not in SPLIT_CODES:
+            raise ValueError(f"split must be one of {sorted(SPLIT_CODES)}")
+        if seed is not None and seed < 0:
+            # default_rng rejects a negative entropy word, and would only say
+            # so on the first train-mode draw, inside a DataLoader worker.
+            raise ValueError(f"seed must be None or >= 0, got {seed}")
 
         self.store_path = store_path
         self.model_input_size = int(model_input_size)
@@ -105,32 +182,32 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── build (sample, tile) index ───────────────────────────────────
         split_arr = root["tiles/split"][:]      # (T,)
-        role_arr = root["samples/role"][:]       # (S,)
         N_totals = root["totals/N"][:]           # (S, T, 2)
         self.n_tiles = N_totals.shape[1]
         self.n_samples = N_totals.shape[0]
 
-        split_code = _SPLIT_CODES[split]
-        role_code = _ROLE_CODES[sample_role]
-        sample_ok = np.nonzero(role_arr == role_code)[0]
+        split_code = SPLIT_CODES[split]
         tile_ok = np.nonzero(split_arr == split_code)[0]
 
-        # Filter on total fragment count per (sample, region).
-        # Fragment count = indptr[u+1] - indptr[u]
+        # min_N filters on the STORED fragment count per (sample, region),
+        # indptr[u+1] - indptr[u], before any crop.  It is not the admitted
+        # count: an indexed item can still emit frag_N < min_N (see class
+        # docstring).
         frag_indptr = root["fragments/indptr"][:]  # (S*T + 1,)
         index = []
-        for s in sample_ok:
+        for s in range(self.n_samples):
             for t in tile_ok:
-                u = int(s) * self.n_tiles + int(t)
+                u = s * self.n_tiles + int(t)
                 n_frags = int(frag_indptr[u + 1] - frag_indptr[u])
                 if n_frags >= self.min_N:
-                    index.append((int(s), int(t)))
+                    index.append((s, int(t)))
         self.index = index
 
         # ── worker-safe state ────────────────────────────────────────────
         self._root = None
         self._root_pid = None
         self._rng = None
+        self._rng_owner = None
 
         # ── optional preload ─────────────────────────────────────────────
         self._preloaded = False
@@ -156,8 +233,25 @@ class CutSiteFragmentDataset(Dataset):
         if self._root is None or self._root_pid != pid:
             self._root = zarr.open_group(self.store_path, mode="r")
             self._root_pid = pid
-            base = 0x9E3779B9 if self._seed is None else int(self._seed)
-            self._rng = np.random.default_rng([base, pid])
+
+    def _jitter_rng(self) -> np.random.Generator:
+        """The train-mode jitter stream for the current worker.
+
+        Keyed on ``(seed, worker)`` only, so it is reproducible.  The PID is
+        used solely to notice that this object now lives in a different
+        process (a forked worker inherits the parent's ``_rng`` state); it
+        never enters the key.
+        """
+        info = get_worker_info()
+        # Main process -> 0, worker w -> w + 1, so no worker shares the
+        # main process's stream.
+        worker = 0 if info is None else info.id + 1
+        owner = (os.getpid(), worker)
+        if self._rng is None or self._rng_owner != owner:
+            base = _DEFAULT_JITTER_SEED if self._seed is None else int(self._seed)
+            self._rng = np.random.default_rng([base, worker])
+            self._rng_owner = owner
+        return self._rng
 
     def __len__(self):
         return len(self.index)
@@ -204,10 +298,7 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── Jitter offset ────────────────────────────────────────────────
         if self.train_mode:
-            if self._rng is None:
-                base = 0x9E3779B9 if self._seed is None else int(self._seed)
-                self._rng = np.random.default_rng([base, os.getpid()])
-            j = int(self._rng.integers(-self.jitter, self.jitter + 1))
+            j = int(self._jitter_rng().integers(-self.jitter, self.jitter + 1))
         else:
             j = 0
 
@@ -227,17 +318,13 @@ class CutSiteFragmentDataset(Dataset):
 
         # ── Fragment coordinates: start-based admission ──────────────────
         # Crop origin in l_target coordinates
-        crop_start, _ = calculate_start_and_stop_from_jitter(
-            self.l_target, self.tile_size, j
-        )
-
-        # Re-base fragment starts to crop coordinates.
-        # The store guarantees length >= L_min > 0, so start <= end.
-        frag_p_crop = frag_start.astype(np.int64) - crop_start
+        crop_start = crop_origin(self.l_target, self.tile_size, j)
 
         # Admission: start in [0, tile_size), in-band length.
-        keep = (frag_p_crop >= 0) & (frag_p_crop < self.tile_size)
-        keep &= (frag_length >= self.L_min) & (frag_length <= self.L_max)
+        frag_p_crop, keep = admit_fragments(
+            frag_start, frag_length, crop_start,
+            self.tile_size, self.L_min, self.L_max,
+        )
 
         # Row of each admitted fragment in the store's flat fragments/*
         # arrays, so a per-fragment scorer can join back to the store without
