@@ -78,7 +78,7 @@ from background_model.cut_site_model.model import (  # noqa: E402
     hex_registration_record,
 )
 from background_model.cut_site_model.store import CutSiteStoreConfig  # noqa: E402
-from background_model.simulator.measure import (  # noqa: E402
+from background_model.fragment_lengths import (  # noqa: E402
     FragmentLengthDist,
     fl_end_weight,
 )
