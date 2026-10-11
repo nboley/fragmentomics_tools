@@ -237,8 +237,9 @@ docker-push:
 # died with 12 COLLECTION ERRORS that look exactly like broken tests. That cost
 # two people time independently on 2026-10-07, each initially reading it as repo
 # breakage rather than a wrong interpreter.
+# PYTHON itself is defined near the top of this file, not here: the
+# `export PATH :=` there expands it immediately, so it must already be set.
 # Override for a different env: make test PYTHON=/path/to/python
-PYTHON ?= /home/nathanboley/miniconda3/envs/biomarker_env/bin/python
 
 # The interpreter's own bin/ goes on PATH too, and pinning PYTHON alone is NOT
 # enough. Several tests reach BINARIES that live beside it, not python modules:

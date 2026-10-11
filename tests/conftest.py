@@ -150,7 +150,7 @@ def bruteforce_h5(toy_dir, toy_genome):
 @pytest.fixture(scope="session")
 def simple_fl():
     """A simple fragment-length distribution for testing."""
-    from background_model.simulator.measure import FragmentLengthDist
+    from background_model.fragment_lengths import FragmentLengthDist
 
     counts = np.zeros(N_LENGTHS, dtype=np.int64)
     counts[0] = 10    # L=25

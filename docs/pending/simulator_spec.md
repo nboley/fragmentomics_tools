@@ -279,9 +279,10 @@ which is a relabelling of the same position.
 
 ## 6. Code
 
-Four modules, split along their dependency layers (owner decisions 169 and
+Five modules, split along their dependency layers (owner decisions 169 and
 174-177). Each imports only from layers above it, so `draw` imports `hexamers`
-directly as well as `simulator.measure`:
+directly as well as `simulator.measure`. Modules 1 and 2 are peers: both are
+numpy-only and neither imports the other.
 
 0. `background_model/constants.py` — the shared cut-site DEFINITIONS, and
    nothing else: `L_MIN`, `L_MAX` (inclusive), `N_LENGTHS`, `KMER`,
@@ -300,12 +301,18 @@ directly as well as `simulator.measure`:
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
-2. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
+2. `background_model/fragment_lengths.py` — `FragmentLengthDist` and
+   `fl_end_weight`. numpy only; it imports nothing from `background_model`.
+   Moved unchanged out of `simulator/measure.py` (owner decision 2026-10-10)
+   so that model-side code which builds its own tables from `f(L)`, such as
+   the cut-site table counter, can use the same code without importing
+   `simulator/`. Every caller, simulator included, imports them from here.
+3. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
    It was `background_model/cut_site_stats.py` until owner decision 187
    (2026-10-09) moved it into the simulator package, since only simulator code
    imports it. A pure move: no computed output changed.
-3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
+4. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
 
 **Model code never imports `simulator/`:** no module under `background_model/`
 outside `background_model/simulator/`, nor `background_model_core.py`, imports
@@ -313,7 +320,8 @@ outside `background_model/simulator/`, nor `background_model_core.py`, imports
 blindness boundary for evaluating the cut-site model on simulated data (owner
 decision 187, enforced by `test_model_code_never_imports_simulator`).
 
-Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
+Modules 1, 3 and 4 were one file, `count_hexamers_rdf.py`, until 2026-10-09;
+module 2 was carved out of module 3 on 2026-10-10. The split
 moved code without changing it, and so did moving the definitions into
 `constants` (byte-identical 200-region output). The previous-generation simulator (`capture`,
 `emit`, `precompute`, `sampler`, `weights`) is in `attic/pre_rewrite_simulator/`.
@@ -329,9 +337,9 @@ moved code without changing it, and so did moving the definitions into
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `simulator.measure` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `FragmentLengthDist` | `fragment_lengths` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
 | `uniform_hexamer_counts` | `simulator.measure` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `simulator.measure` | `w(i)` above |
+| `fl_end_weight` | `fragment_lengths` | `w(i)` above |
 | `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
@@ -363,6 +371,40 @@ would leave the cached CDF stale.
 `sample_region` precomputes the full weight block `W_s` for all positions per
 strand, then draws the initial batch vectorised.  Only duplicate collisions
 enter a scalar redraw loop.
+
+`W_s` is built from a 1-D gather, not a 2-D one (owner decision 192, a
+speed fix).  `W_s[i, l]` depends on its end only through `i + l`, so
+`e_tab[track[e]] · valid(e)` is gathered once over the end span
+`[min_fl, region_len + max_fl)`, then read through a sliding window and
+multiplied by `f(L)` into a C-ordered block.  Each element is still
+`(e · valid) · f(L)` in that order, and the row sums still run over a
+contiguous row.  The block, `t_s` and every draw are therefore bit-identical
+to the direct gather, for any `region_len` (checked bitwise at 1 to 2,047
+and four `f(L)` supports).  The C order is load-bearing: a
+differently laid-out block sums in another order and moves `t_s`'s last bits.
+`test_probs_bitwise_equal_pre_192_formula` pins this.  It recomputes `probs`
+with the old 2-D gather and compares bits, and it fails under `order="F"` or
+a shifted end span.
+
+The writer assembles all regions at once (decision 192).  It concatenates each
+returned column in row order, then applies the one stable sort.  It formats the
+sidecar in blocks of rows, not row by row.  The BED, the sidecar and
+`oracle_nll` are byte-identical to the per-region build it replaced.  This was
+checked on 200 and 2,000 regions at 1 and 16 workers, and on a synthetic
+2.4M-row, 66,649-region assembly that crosses three sidecar blocks.  Its peak
+traced memory there was 751 MiB, against 1,236 MiB for the per-region build.
+`test_sidecar_block_boundaries_keep_every_row` pins the block seams.
+
+The sidecar is written at **`compresslevel=6`**, gzip's own default rather than
+Python's 9 (owner decision 2026-10-10).  Level 9 was most of the parent's
+remaining time -- 0.70 s of a ~1.2 s tail per 2,000 regions, so ~23 s over the
+full region set -- for a file 0.40% smaller (measured: 1,243,926 B against
+1,239,002 B on 2,000 regions).
+
+**Comparing two sidecars requires decompressing them**, at any level.  The
+compressed bytes were never stable: gzip stores an mtime in its header, so two
+runs of identical code already differ there.  The decompressed bytes, the join
+key and the `%.17g` round-trip are unaffected by the level.
 
 ## 7. Sidecar and oracle
 
