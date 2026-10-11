@@ -29,6 +29,8 @@ a small correction.
 ``f(L)`` itself (``FragmentLengthDist``) and the end weight it implies
 (``fl_end_weight``) are shared with model code, so they live in
 ``background_model.fragment_lengths`` rather than here; import them from there.
+This module reaches them as ``fragment_lengths.<name>`` and does not re-export
+them, so the pre-move import path raises ImportError.
 
 The ``C(h)`` path is three chained passes over a ``SampleAndRegionDataFrame``:
 
@@ -96,7 +98,11 @@ from fragmentomics_tools.dataframe import (
 )
 
 from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX
-from background_model.fragment_lengths import FragmentLengthDist, fl_end_weight
+# Module import, not name import: ``FragmentLengthDist`` and ``fl_end_weight``
+# must not sit in this namespace, so the pre-move path
+# ``from background_model.simulator.measure import FragmentLengthDist`` raises
+# ImportError instead of resolving (owner decision 2026-10-11).
+from background_model import fragment_lengths
 from background_model.hexamers import (
     hexamer_indices,
     hexamers_at,
@@ -205,7 +211,8 @@ def counts_from_hexamers(df) -> Dict[str, np.ndarray]:
 
 
 def _uniform_block(contigs, starts, stops, lo: int, hi: int,
-                   fasta_path: str, fl: "FragmentLengthDist") -> dict:
+                   fasta_path: str,
+                   fl: "fragment_lengths.FragmentLengthDist") -> dict:
     """``N(h)`` partial tables for regions ``[lo, hi)``.  Runs in a worker.
 
     Regions are accumulated in row order, so the partial depends only on
@@ -252,7 +259,7 @@ def _uniform_block(contigs, starts, stops, lo: int, hi: int,
             # Ends: FL-weighted. The validity gate must match the fragment
             # pass, or N is inflated at exactly the repeat-rich and
             # gap-adjacent positions where r would then be depressed.
-            w = fl_end_weight(n_hex, region_len, fl)
+            w = fragment_lengths.fl_end_weight(n_hex, region_len, fl)
             m = valid & (w > 0)
             N_end += np.bincount(fwd[m], weights=w[m], minlength=NHEX)
             end_weight_total += float(w[m].sum(dtype=np.float64))
@@ -266,7 +273,7 @@ def _uniform_block(contigs, starts, stops, lo: int, hi: int,
 def uniform_hexamer_counts(
     rdf,
     fasta_path: str,
-    fl: "FragmentLengthDist",
+    fl: "fragment_lengths.FragmentLengthDist",
     *,
     n_workers: int | None = None,
     block_size: int = UNIFORM_BLOCK_SIZE,
@@ -720,7 +727,7 @@ class SampleMeasurement(NamedTuple):
     region_counts: np.ndarray
     stats: Dict[str, int]
     srdf: "SampleAndRegionDataFrame"
-    fl: FragmentLengthDist
+    fl: fragment_lengths.FragmentLengthDist
     N: Dict[str, np.ndarray]
     n_meta: Dict[str, float]
     r: Dict[str, np.ndarray]
@@ -779,7 +786,7 @@ def measure_sample(
         f"{region_counts.min()}/{int(np.median(region_counts))}/{region_counts.max()}")
 
     with stage("f(L)"):
-        fl = FragmentLengthDist.from_srdf(srdf)
+        fl = fragment_lengths.FragmentLengthDist.from_srdf(srdf)
     log(f"[f(L)]    support [{fl.min_fl}, {fl.max_fl}], "
         f"n={int(fl.counts.sum())}")
 

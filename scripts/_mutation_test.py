@@ -223,8 +223,8 @@ MUTATIONS = [
     # M18: N_end over the region only (no flank)
     ("M18", "N_end computed over region_len only, no flank",
      "background_model/simulator/measure.py",
-     "            w = fl_end_weight(n_hex, region_len, fl)\n            m = valid & (w > 0)",
-     "            w = fl_end_weight(region_len, region_len, fl)\n            m = valid & (w > 0)"),
+     "            w = fragment_lengths.fl_end_weight(n_hex, region_len, fl)\n            m = valid & (w > 0)",
+     "            w = fragment_lengths.fl_end_weight(region_len, region_len, fl)\n            m = valid & (w > 0)"),
 
     # M21: minus s_tab = start_rev instead of end_rev
     ("M21", "minus s_tab=start_rev instead of end_rev",
