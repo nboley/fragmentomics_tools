@@ -5,7 +5,9 @@ Targets ``background_model/constants.py``, ``background_model/hexamers.py``,
 ``background_model/simulator/measure.py`` and ``background_model/simulator/draw.py``
 (the last three were one file, ``count_hexamers_rdf.py``, until decision 169
 split it; ``measure`` was ``background_model/cut_site_stats.py`` until
-decision 187), plus a few library and oracle files, and
+decision 187), ``background_model/fragment_lengths.py`` (``FragmentLengthDist``
+and ``fl_end_weight``, moved out of ``measure`` by owner decision 2026-10-10),
+plus a few library and oracle files, and
 ``background_model/band_model/train.py`` as the stand-in model module for the decision-187
 boundary (B1, B2).
 
@@ -157,9 +159,10 @@ MUTATIONS = [
      '        bed.sort_values(["contig", "start", "stop"], kind="stable", inplace=True)',
      '        pass  # sorting removed'),
 
-    # M38: densify without normalisation
+    # M38: densify without normalisation (re-pointed when FragmentLengthDist
+    # moved to background_model.fragment_lengths, owner decision 2026-10-10)
     ("M38", "densify without normalisation",
-     "background_model/simulator/measure.py",
+     "background_model/fragment_lengths.py",
      "        self.densities = counts / np.float64(total)",
      "        self.densities = counts.astype(np.float64)"),
 
@@ -210,9 +213,10 @@ MUTATIONS = [
      "    left_flank, right_flank = HEX_HALF, l_max + HEX_HALF\n",
      "    left_flank, right_flank = HEX_HALF, l_max\n"),
 
-    # M17: fl_end_weight off-by-one (drop the -1 on min_fl)
+    # M17: fl_end_weight off-by-one (drop the -1 on min_fl). Re-pointed with
+    # M38 when fl_end_weight moved to background_model.fragment_lengths.
     ("M17", "fl_end_weight: max(min_fl, i-R) instead of max(min_fl-1, i-R)",
-     "background_model/simulator/measure.py",
+     "background_model/fragment_lengths.py",
      "        - fl.cdf_at(np.maximum(fl.min_fl - 1, i - region_len))",
      "        - fl.cdf_at(np.maximum(fl.min_fl, i - region_len))"),
 

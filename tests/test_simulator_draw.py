@@ -31,9 +31,9 @@ from cut_site_helpers import (
 )
 
 from background_model.constants import HEX_HALF, L_MAX, L_MIN, N_LENGTHS, NHEX
+from background_model.fragment_lengths import FragmentLengthDist
 from background_model.hexamers import hexamer_indices
 from background_model.simulator.measure import (
-    FragmentLengthDist,
     TABLE_NAMES,
     count_sample,
     filter_fragments,

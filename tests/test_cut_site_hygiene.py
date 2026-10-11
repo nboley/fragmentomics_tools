@@ -1,7 +1,8 @@
 """Cross-module hygiene for the cut-site stack: ``constants`` <- ``hexamers``
-<- ``simulator.measure`` <- ``simulator.draw``.
+<- ``simulator.measure`` <- ``simulator.draw``, plus ``fragment_lengths``
+(numpy only, shared with model code).
 
-Layering, doctests across all four modules, oracle independence, removed
+Layering, doctests across all five modules, oracle independence, removed
 imports, and the decision-187 boundary (model code never imports
 ``simulator/``; ``conftest`` keeps it out of module level).  These span the stack, so they sit in neither module's file.  Split
 out of ``tests/test_cut_site_simulator.py`` by owner decision 188; the test
@@ -27,17 +28,20 @@ class TestT7Hygiene:
         """M3 (lowercase in doctest).
 
         ``make test`` does not collect ``background_model/``, so this is the
-        ONLY place these modules' doctests run.  It covers all four layers.
+        ONLY place these modules' doctests run.  It covers all five modules.
         ``constants`` (which pins 25/180/156) and ``hexamers`` carry every
-        example today; the other two must still pass if one is added, and an
-        example vanishing from either fails here rather than silently
-        dropping out.
+        example today, and an example vanishing from either fails here rather
+        than silently dropping out; the other three (``fragment_lengths``,
+        ``simulator.measure``, ``simulator.draw``) must still pass if one is
+        added.
         """
         import background_model.constants as const_mod
+        import background_model.fragment_lengths as fl_mod
         import background_model.simulator.measure as measure_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator.draw as draw_mod
         for mod, must_have_examples in ((const_mod, True), (hex_mod, True),
+                                        (fl_mod, False),
                                         (measure_mod, False), (draw_mod, False)):
             results = doctest.testmod(mod, verbose=False)
             if must_have_examples:
@@ -122,6 +126,7 @@ class TestT7Hygiene:
         layer rather than demanding it come from the adjacent one.
         """
         import background_model.constants as const_mod
+        import background_model.fragment_lengths as fl_mod
         import background_model.hexamers as hex_mod
         import background_model.simulator as sim_pkg
         import background_model.simulator.draw as draw_mod
@@ -200,6 +205,9 @@ class TestT7Hygiene:
              "stdlib+tracks"),
             (hex_mod, stdlib | {"numpy"}, {"background_model.constants"},
              "numpy+stdlib+constants"),
+            # Shared with model code (owner decision 2026-10-10), so it must
+            # not reach back into the simulator or anything heavier.
+            (fl_mod, stdlib | {"numpy"}, set(), "numpy+stdlib"),
         )
         for mod, allowed_tops, allowed_exact, what in light:
             fname = os.path.basename(mod.__file__)
@@ -226,6 +234,7 @@ class TestT7Hygiene:
         # checks it rather than assuming it.
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for module, extra_banned in (("background_model.hexamers", ()),
+                                     ("background_model.fragment_lengths", ()),
                                      ("background_model.constants", ("numpy",))):
             r = subprocess.run(
                 [sys.executable, "-c",
@@ -275,8 +284,12 @@ class TestT7Hygiene:
             is_pkg = os.path.basename(path) == "__init__.py"
             package = name if is_pkg else name.rpartition(".")[0]
             with open(path) as f:
-                tree = ast.parse(f.read(), filename=path)
-            for node in ast.walk(tree):
+                return names_in(f.read(), package, path)
+
+        def names_in(source, package, filename="<synthetic>"):
+            # Split from imported_names so the self-check below feeds the SAME
+            # detector synthetic source, rather than testing a copy of it.
+            for node in ast.walk(ast.parse(source, filename=filename)):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         yield alias.name
@@ -320,11 +333,17 @@ class TestT7Hygiene:
             "model code imports the simulator (decision 187 boundary):\n  "
             + "\n  ".join(offenders))
 
-        # Non-vacuity. 14 modules sit outside simulator/ today (4 top-level,
+        # Non-vacuity. 15 modules sit outside simulator/ today (5 top-level,
         # 10 in band_model/), plus the core; far fewer means the walk is
         # skipping files. And they import each other, so seeing no first-party
         # import means the walker is blind.
-        assert len(scanned) >= 12, f"scanned only {len(scanned)} modules"
+        assert len(scanned) >= 13, f"scanned only {len(scanned)} modules"
+        # fragment_lengths.py holds code moved out of the simulator so that
+        # model-side code can share it (owner decision 2026-10-10); it is
+        # exactly what this boundary must see, so its absence from the walk is
+        # a failure on its own.
+        assert os.path.join(pkg_dir, "fragment_lengths.py") in scanned, (
+            "fragment_lengths.py was not scanned")
         # The walk descends into sibling sub-packages, not just the top level:
         # band_model/ is model code and is held to the same boundary.
         assert os.path.join(pkg_dir, "band_model", "train.py") in scanned, (
@@ -332,9 +351,38 @@ class TestT7Hygiene:
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")
-        # The detector itself fires: draw.py does import the simulator.
-        draw_path = os.path.join(sim_dir, "draw.py")
-        assert any(is_banned(n) for n in imported_names(draw_path))
+        # The detector itself fires, on each form the docstring names, one
+        # form per source so a dead branch cannot hide behind a live one.
+        # Synthetic source, resolved as if it sat at background_model/x.py,
+        # so the check is tied to no real file.
+        forms = {
+            "absolute import": "import background_model.simulator.draw\n",
+            "absolute from":
+                "from background_model.simulator.measure import count_srdf\n",
+            "package as alias": "from background_model import simulator\n",
+            "relative": "from .simulator import draw\n",
+            "import_module": "import importlib\n"
+                             "importlib.import_module("
+                             "'background_model.simulator.draw')\n",
+            "__import__": "__import__('background_model.simulator')\n",
+        }
+        for form, src in forms.items():
+            assert any(is_banned(n) for n in names_in(src, "background_model")), (
+                f"detector misses the {form} form: {src!r}")
+        # Control: the same forms naming a non-simulator module are not
+        # flagged. simulator_notes checks the prefix stops at a dot, and the
+        # bare background_model.tracks comes only from the ImportFrom base.
+        control = ("import background_model.hexamers\n"
+                   "from background_model.fragment_lengths import fl_end_weight\n"
+                   "from background_model import constants\n"
+                   "from .tracks import FL_BANDS\n"
+                   "import importlib\n"
+                   "importlib.import_module('background_model.hexamers')\n"
+                   "__import__('background_model.simulator_notes')\n")
+        names = set(names_in(control, "background_model"))
+        assert {"background_model.tracks",
+                "background_model.simulator_notes"} <= names, names
+        assert not [n for n in names if is_banned(n)], names
 
     def test_conftest_does_not_import_simulator_at_load(self):
         """``tests/conftest.py`` and the ``cut_site_helpers`` it imports load

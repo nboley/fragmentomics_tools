@@ -29,15 +29,14 @@ from background_model.constants import (
     N_LENGTHS,
     NHEX,
 )
+from background_model.fragment_lengths import FragmentLengthDist, fl_end_weight
 from background_model.hexamers import rc_permutation
 from background_model.simulator.measure import (
-    FragmentLengthDist,
     TABLE_NAMES,
     count_sample,
     count_srdf,
     counts_from_hexamers,
     filter_fragments,
-    fl_end_weight,
     load_sample_dataframe,
     propensities,
     uniform_hexamer_counts,

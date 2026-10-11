@@ -1,7 +1,8 @@
 """The cut-site simulator's draw: fragments from ``r(h)``, ``f(L)`` and per-region counts.
 
 Inputs come from ``background_model.simulator.measure`` (``count_sample``,
-``uniform_hexamer_counts``, ``propensities``, ``FragmentLengthDist``); encoding
+``uniform_hexamer_counts``, ``propensities``) and
+``background_model.fragment_lengths`` (``FragmentLengthDist``); encoding
 is ``background_model.hexamers``.  Authority: ``docs/pending/simulator_spec.md``.
 Driver: ``scripts/simulator/run_cut_site_simulator.py``.
 
@@ -29,8 +30,8 @@ from numpy.lib.stride_tricks import sliding_window_view
 from fragmentomics_tools.dataframe import DataFrameBase
 
 from background_model.constants import HEX_HALF, L_MAX
+from background_model.fragment_lengths import FragmentLengthDist
 from background_model.hexamers import hexamer_indices
-from background_model.simulator.measure import FragmentLengthDist
 
 # Seeds and region indices are each ONE 32-bit word; see region_rng.
 _SEED_WORD_MAX: int = 2 ** 32
