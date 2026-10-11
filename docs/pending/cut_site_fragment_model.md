@@ -81,12 +81,27 @@ Index conventions. Hex index `j` is the k-mer that starts at one-hot position
 | Tap | Tile base | Hex index | Used by |
 |---|---|---|---|
 | 5' endpoint | `m` | `WINDOW_HALF + m` | hex prior `start_pos` (`cut_site_model/model.py:193`); L2a left tap (`:650`) |
-| 3' endpoint, last base | `m + L - 1` | `WINDOW_HALF + m + L - 1` | hex prior `stop_pos` (`:196`); store `last[p+L-1]`; `tests/test_hex_registration.py:109` |
-| 3' endpoint, L2a right tap | `m + L` | `WINDOW_HALF + m + L` | L2a forward (`:636`, `:651`) |
+| 3' **cut base** (junction-centred) | `m + L` | `WINDOW_HALF + m + L` | hex prior `stop_pos`; L2a right tap; the table counter — all via the one definition `fragment_cut_bases` |
+| fragment's last base | `m + L - 1` | — | store `last[p+L-1]`. A fact about the fragment, NOT a registration choice |
 
-**The 3' endpoint is one base apart in the two branches.** The hex prior, the
-store and the registration test use the last fragment base `m+L-1`. The L2a
-forward pass uses `m+L`. See §Open discrepancies, item 1.
+**RESOLVED 2026-10-10 (owner ruling, commit `9aa8ef5`): the two branches now
+agree at `m + L`.** The hex prior previously read `m+L-1` while the L2a branch
+read `m+L`, so the analytic prior and the learned correction keyed the same cut
+to different 6-mers. `CUT_OFFSET_IN_KMER = 3` registers a cut at base `s` with
+the k-mer `s-3 .. s+2`, junction mid-k-mer; a fragment occupying `m .. m+L-1`
+has its 3' junction between `m+L-1` and `m+L`, so the junction-centred cut base
+is `m+L`. **L2a and the simulator were already right; the prior and the table
+counter moved to them.**
+
+Do not confuse the two rows above. `m+L-1` is still the fragment's last base —
+that never changed. What moved is which base *indexes the 3' cut*.
+
+Both the reader and the counter now derive the positions from a single
+`fragment_cut_bases` definition, so they cannot drift apart again, and the npz
+carries a registration key the loader refuses to mismatch. Measured effect on
+real data: `+0.002730` nats on test, which is ~1.1x the paired per-region SE —
+**the justification was consistency, not NLL, and it should not be quoted as a
+measured win.** See §Open discrepancies, item 1.
 
 **Registration is enforced, not emergent.** The construction-time assertion
 `(l_in - tile_size)//2 - WINDOW_HALF == CUT_OFFSET_IN_KMER` runs in
@@ -580,16 +595,34 @@ before budgeting GPU time.
   the cut (`:46`, `:83`). Builder and model agree (`:116`). The right-edge lookup
   covers every cut (`:210`). The minus-strand gathers are probed by value
   (`:302`, `:344`). An odd `tile_size` raises (`:391`).
-- **3' endpoint convention.** Both sides are pinned, each at its CURRENT
-  position. The L2a forward is pinned at `m+L` by
-  `tests/test_cut_site_training.py::TestLogitInputSupport`, through the model's
-  own gradients: `test_support_is_start_to_right_tap` checks that one logit's
-  input support ends at the right tap's window, and
+- **3' endpoint convention.** Both sides are pinned at `m+L`, and the tests now
+  pin them **to each other** rather than each to its own position. The L2a
+  forward is pinned by `tests/test_cut_site_training.py::TestLogitInputSupport`
+  through the model's own gradients: `test_support_is_start_to_right_tap`
+  checks that one logit's input support ends at the right tap's window, and
   `test_each_tap_bank_on_its_own` checks each tap's 6-base window on its own.
-  The hex prior is pinned at `m+L-1` by
-  `tests/test_hex_registration.py::test_stop_endpoint_uses_the_same_registration`.
-  The two tests pin positions that differ by one base. See §Open
-  discrepancies, item 1.
+  The hex prior is pinned by `tests/test_hex_registration.py`:
+  - **T12a** measures the prior's receptive field by swapping individual bases
+    and comparing the measured field against L2a's taps and the
+    junction-centred k-mer derived from `CUT_OFFSET_IN_KMER`.
+  - **T12b** ties the prior's reads to the simulator's `cut_site_hexamers`,
+    joining by k-mer STRING so the comparison is independent of either stack's
+    index convention.
+  - **T4b** asserts the table counter counts at the same index
+    `compute_log_p0` reads, over all 4096 cells x 4 tables.
+  - **T13** refuses an npz or checkpoint carrying another registration.
+
+  **Why this wording changed:** the previous pin,
+  `test_stop_endpoint_uses_the_same_registration`, was a TAUTOLOGY. It was
+  named for the right invariant and documented it — "the 3' cut must be
+  registered identically to the 5' cut" — then asserted `m+L-1`, comparing
+  `compute_log_p0`'s gather against a hand-written restatement of the same
+  formula. It passed for any formula, which is why a suite that already
+  guarded registration never caught the mismatch. Non-tautology is now proved
+  by MUTATION, reproduced independently by implementer and reviewer: reverting
+  both producer and reader to `m+L-1` fails 12 tests; reverting the READER
+  only — the keyed-one-way-read-another state — fails 6, including T4b, T12a
+  and T12b.
 - **Fragment start.** `frag_m` equals the stored start minus the crop origin:
   `tests/test_cut_site_store_dataset.py::test_frag_m_is_stored_start_both_parities`.
 - **Store consistency.** `tests/test_build_cut_site_store.py::TestBuilderIntegration::test_endpoint_consistency`.
@@ -655,22 +688,40 @@ log exactly.]
 
 ## Open discrepancies
 
-Code as committed at 7ea790e. This doc change records these items and does not
-fix them. Each fix changes computed results, so each needs an owner decision.
+Originally recorded against `7ea790e`. **Items 1 and 3 are now closed** — see
+each. Item 2 remains open. Each remaining fix changes computed results, so it
+needs an owner decision.
 
-1. [Verified] **3' endpoint, one base.** The L2a forward taps the 3' endpoint at
-   `m+L` (`cut_site_model/model.py:636`, `:651`). The hex prior (`:196`), the store
-   (`last[p+L-1]`, §Store schema), and `test_hex_registration.py:109` use
-   `m+L-1`. The learned L2a branch and the hex prior therefore key the 3' cut
-   to different bases. Fixing either side changes the model output.
+1. ~~**3' endpoint, one base.**~~ **RESOLVED 2026-10-10, owner ruling, commit
+   `9aa8ef5`.** The hex prior and the table counter moved to `m+L`, matching
+   the L2a forward and the simulator, both of which were already correct.
+   `CUT_OFFSET_IN_KMER = 3` means the junction-centred 3' cut base of a
+   fragment occupying `m .. m+L-1` is `m+L`. Reader and counter now share one
+   `fragment_cut_bases` definition, the npz carries a registration key the
+   loader refuses to mismatch, and four tests pin it (§Required tests). The
+   store's `last[p+L-1]` is unchanged and was never wrong — that is the
+   fragment's last base, a different quantity from the cut base.
+   Measured on real data: `+0.002730` nats on test, ~1.1x the paired
+   per-region SE, so **consistency was the justification, not NLL.**
 2. [Verified] **Interior window.** L2b reads one-hot positions
    `WINDOW_HALF + m + o'` for `o'` in `[0, L)` (`cut_site_model/model.py:494`). With
    `pad = WINDOW_HALF + 3`, these are tile bases `m-3` to `m+L-4`. The window
    sits 3 bases left of the fragment body `m … m+L-1`. The filter is learned,
    so this is not a hex registration error. The cut-site code and this doc do
    not state whether the shift is intended.
-3. [Inferred] **Tight margin.** The tight bound is `WINDOW_HALF >= 178` at even
-   `P` (§Margin arithmetic). The constructor enforces 179.
+3. ~~**Tight margin.**~~ **SUPERSEDED 2026-10-10, and the old guard turned out
+   to be BROKEN, not merely loose.** This item said the tight bound was
+   `WINDOW_HALF >= 178` and the constructor enforced 179. The binding limit is
+   actually L2a's `h`, which spans `WINDOW_HALF` each side of `P`, so the
+   farthest right tap is `WINDOW_HALF + (P-1) + L_max` and the requirement is
+   **`WINDOW_HALF >= L_max`** — not `hex_idx`, which carries one extra
+   rounding base. The old guard `WINDOW_HALF < L_max - 1` would have admitted
+   `L_max = 182`, whose farthest tap sits at the boundary of `h`'s width, so it
+   was a guard that did not guard. The constructor now enforces
+   `WINDOW_HALF >= L_max` and is tested: `CutSiteFragmentModel(L_max=WINDOW_HALF+1)`
+   must raise. Verified independently by the Phase-0b reviewer, which is how
+   the off-by-one was found — the implementer and the EM had both derived it
+   as "drop the `-1`".
 
 ## Limitations (accepted, not solved here)
 
