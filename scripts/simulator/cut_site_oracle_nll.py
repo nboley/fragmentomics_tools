@@ -125,10 +125,10 @@ from scripts.cut_site_model.score_fragments import (  # noqa: E402
 
 NORMALISERS = ("exact", "count_ratio")
 
-# The sidecar's p must reproduce to this relative tolerance.  It is a check on
-# the re-measured r(h)/f(L) and the restated formula, both of which should be
-# bit-identical; the slack only admits a last-bit difference.
-P_RTOL = 1e-12
+# The sidecar's p must reproduce to this relative tolerance: exactly.  It checks
+# the re-measured r(h)/f(L) and the restated formula together, and both are
+# bit-identical to the generator's (all 241,078 rows of the 10pct run).
+P_RTOL = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +385,9 @@ def read_sidecar(path: str):
     if not first.startswith("# "):
         raise ValueError(f"{path}: no provenance header")
     header = dict(kv.split("=", 1) for kv in first[2:].split())
-    df = pd.read_csv(path, sep="\t", skiprows=1,
+    # round_trip: pandas' default float parser is NOT exact, and misreads ~28%
+    # of the %.17g values by one ulp (measured on the 10pct sidecar).
+    df = pd.read_csv(path, sep="\t", skiprows=1, float_precision="round_trip",
                      dtype={"contig": str, "strand": str, "start": np.int64,
                             "stop": np.int64, "p": np.float64})
     return header, df
