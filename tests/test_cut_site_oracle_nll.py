@@ -12,7 +12,10 @@ Three properties, each pinned by its own test:
    and scored rows equal the scorer's, under the trainer's ``min_N``.
 """
 
+import gzip
+
 import numpy as np
+import pandas as pd
 import pytest
 import zarr
 
@@ -20,6 +23,7 @@ from background_model.band_model.store import _create_array
 from background_model.constants import HEX_HALF, NHEX
 from background_model.cut_site_model.model import hex_registration_record
 from background_model.fragment_lengths import FragmentLengthDist
+from background_model.hexamers import hexamer_indices
 from background_model.simulator.draw import sample_region
 from background_model.simulator.measure import TABLE_NAMES
 from scripts.cut_site_model.baselines.reduce_split_nll import (
@@ -30,6 +34,7 @@ from scripts.cut_site_model.score_fragments import SPLITS
 from scripts.cut_site_model.score_fragments import main as score_main
 from scripts.simulator.cut_site_oracle_nll import (
     oracle_arrays,
+    read_sidecar,
     region_oracle,
     store_rows,
     strand_start_probs,
@@ -106,6 +111,77 @@ def test_restatement_reproduces_sample_region_bit_for_bit():
     assert abs(total - 1.0) < 1e-12
     assert abs(out["Z"] - crop) < 1e-12
     assert 0.6 < out["Z"] < 0.95   # non-uniform, so not the geometric 0.8
+
+
+DEAD_LO, DEAD_HI = 250, 450   # N block (sequence/track coordinates)
+
+
+def test_restatement_live_gate_and_asymmetric_strands():
+    rs = np.random.default_rng(6)
+    r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
+    fl = FragmentLengthDist(rs.integers(1, 50, N_L), L_LO)
+    seq = bytearray(_seq(rs))
+    seq[DEAD_LO:DEAD_HI] = b"N" * (DEAD_HI - DEAD_LO)
+    seq = bytes(seq)
+    p_plus = 0.3
+
+    dist = strand_start_probs(seq, REGION_LEN, r=r, fl=fl)
+    _, _, valid = hexamer_indices(seq)
+    pos = np.arange(REGION_LEN)
+    # Non-vacuity: some start has a valid start window but every end window
+    # ([i + L_LO, i + L_HI]) invalid, so the live gate actually excludes it.
+    fired = any(bool((valid[pos] & (dist[s][2] == 0)).any()) for s in (True, False))
+    assert fired, "N block did not kill any live start; adjust DEAD_LO/DEAD_HI"
+
+    starts, lengths, is_plus, probs = sample_region(
+        seq, REGION_LEN, 200, r=r, fl=fl, p_plus=p_plus,
+        rng=np.random.default_rng(7))
+    out = region_oracle(seq, REGION_LEN, starts, lengths, is_plus, r=r, fl=fl,
+                        p_plus=p_plus, crop_start=CROP_START, tile_size=TILE)
+    assert np.array_equal(out["p"], probs)
+
+    # Z is the crop's share of a full enumeration that sums to 1, weighted by
+    # the asymmetric strand split p_plus=0.3 / 0.7.
+    total = crop = 0.0
+    for s, ps in ((True, p_plus), (False, 1 - p_plus)):
+        start_probs, W_s, t_s = dist[s]
+        cell = ps * start_probs[:, None] * np.divide(
+            W_s, t_s[:, None], out=np.zeros_like(W_s), where=t_s[:, None] > 0)
+        total += cell.sum(dtype=np.float64)
+        crop += cell[CROP_START:CROP_START + TILE].sum(dtype=np.float64)
+        other = is_plus != s
+        assert np.allclose(out["p_other"][other],
+                           cell[starts[other], lengths[other] - L_LO], rtol=1e-13)
+    assert abs(total - 1.0) < 1e-12
+    assert abs(out["Z"] - crop) < 1e-12
+
+    # The asymmetric strand weighting is actually exercised: swapping
+    # p_plus and 1 - p_plus moves Z by more than numerical noise.
+    out_swapped = region_oracle(seq, REGION_LEN, starts, lengths, is_plus, r=r,
+                                fl=fl, p_plus=1 - p_plus, crop_start=CROP_START,
+                                tile_size=TILE)
+    assert abs(out["Z"] - out_swapped["Z"]) > 1e-6
+
+
+def test_read_sidecar_is_exact(tmp_path):
+    rng = np.random.default_rng(42)
+    n = 10_000
+    p = rng.uniform(1e-9, 1e-5, n).astype(np.float64)
+    sidecar = tmp_path / "sim.p.tsv.gz"
+    with gzip.open(sidecar, "wt") as f:
+        f.write("# seed=1 sample=S\n")
+        f.write("contig\tstart\tstop\tstrand\tp\n")
+        for i, pv in enumerate(p):
+            f.write(f"chr1\t{i}\t{i + 100}\t+\t{pv:.17g}\n")
+
+    # Non-vacuity: pandas' default float parser misreads at least one value,
+    # so the test actually exercises float_precision="round_trip".
+    default_p = pd.read_csv(sidecar, sep="\t", skiprows=1)["p"].to_numpy(np.float64)
+    assert not np.array_equal(default_p, p)
+
+    header, frame = read_sidecar(str(sidecar))
+    assert header == {"seed": "1", "sample": "S"}
+    assert np.array_equal(frame["p"].to_numpy(np.float64), p)
 
 
 @pytest.fixture
@@ -187,3 +263,17 @@ def test_oracle_population_equals_the_scorers(store):
     assert not set(SHRUNK) & set(np.concatenate(
         [exact[s]["term_tiles"] for s in SPLITS]).tolist())
     assert 0 < arrays["scored"].sum() < len(arrays["scored"])
+
+
+def test_log_prob_ml_is_conditioned_on_the_crop(store):
+    """log_prob_ml is the strand-marginal of the uniform conditional on the
+    crop: p_other == p under the uniform generator, so p + p_other = 2p and
+    the two factors of 2 against Z_exact = TILE / REGION_LEN cancel to
+    -log(TILE * N_L)."""
+    store_path, _, _ = store
+    _, arrays = _oracle(store_path)
+    scored = arrays["scored"]
+    log_prob_ml = arrays["exact"]["log_prob_ml"]
+    expected = -np.log(np.float64(TILE * N_L))
+    np.testing.assert_allclose(log_prob_ml[scored], expected, rtol=1e-13)
+    assert np.all(np.isnan(log_prob_ml[~scored]))
