@@ -279,9 +279,10 @@ which is a relabelling of the same position.
 
 ## 6. Code
 
-Four modules, split along their dependency layers (owner decisions 169 and
+Five modules, split along their dependency layers (owner decisions 169 and
 174-177). Each imports only from layers above it, so `draw` imports `hexamers`
-directly as well as `simulator.measure`:
+directly as well as `simulator.measure`. Modules 1 and 2 are peers: both are
+numpy-only and neither imports the other.
 
 0. `background_model/constants.py` — the shared cut-site DEFINITIONS, and
    nothing else: `L_MIN`, `L_MAX` (inclusive), `N_LENGTHS`, `KMER`,
@@ -300,12 +301,18 @@ directly as well as `simulator.measure`:
    (`UNIFORM_BLOCK_SIZE`, `TABLE_NAMES`, `_SEED_WORD_MAX`, the encoder's
    `_BASE_LUT`/`_POW`) stay with the code that owns them.
 1. `background_model/hexamers.py` — encoding. numpy plus `constants` only.
-2. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
+2. `background_model/fragment_lengths.py` — `FragmentLengthDist` and
+   `fl_end_weight`. numpy only; it imports nothing from `background_model`.
+   Moved unchanged out of `simulator/measure.py` (owner decision 2026-10-10)
+   so that model-side code which builds its own tables from `f(L)`, such as
+   the cut-site table counter, can use the same code without importing
+   `simulator/`. Every caller, simulator included, imports them from here.
+3. `background_model/simulator/measure.py` — measurement on real data (`C(h)`,
    `N(h)`, `f(L)`, `r(h)`). Adds pandas and `fragmentomics_tools.dataframe`.
    It was `background_model/cut_site_stats.py` until owner decision 187
    (2026-10-09) moved it into the simulator package, since only simulator code
    imports it. A pure move: no computed output changed.
-3. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
+4. `background_model/simulator/draw.py` — the draw and its BED/sidecar writer.
 
 **Model code never imports `simulator/`:** no module under `background_model/`
 outside `background_model/simulator/`, nor `background_model_core.py`, imports
@@ -313,7 +320,8 @@ outside `background_model/simulator/`, nor `background_model_core.py`, imports
 blindness boundary for evaluating the cut-site model on simulated data (owner
 decision 187, enforced by `test_model_code_never_imports_simulator`).
 
-Modules 1-3 were one file, `count_hexamers_rdf.py`, until 2026-10-09. The split
+Modules 1, 3 and 4 were one file, `count_hexamers_rdf.py`, until 2026-10-09;
+module 2 was carved out of module 3 on 2026-10-10. The split
 moved code without changing it, and so did moving the definitions into
 `constants` (byte-identical 200-region output). The previous-generation simulator (`capture`,
 `emit`, `precompute`, `sampler`, `weights`) is in `attic/pre_rewrite_simulator/`.
@@ -329,9 +337,9 @@ moved code without changing it, and so did moving the definitions into
 | `simulate_fragments_to_bed` | `draw` | draws for every region, in parallel → 8-column BED + `.p.tsv.gz` sidecar. Takes the integer `seed`, not an rng. Stats include `oracle_nll` and `n_dup_redraws`. See §8 |
 | `region_rng` | `draw` | one region's stream, `default_rng([seed, region_index])`. See §8 |
 | `oracle_nll` | `draw` | `-mean(log(p))` in float64 |
-| `FragmentLengthDist` | `simulator.measure` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
+| `FragmentLengthDist` | `fragment_lengths` | `counts`, `densities`, `min_fl`, `max_fl`, cached CDF |
 | `uniform_hexamer_counts` | `simulator.measure` | → `N(h)`, in parallel over fixed region blocks. See §8 |
-| `fl_end_weight` | `simulator.measure` | `w(i)` above |
+| `fl_end_weight` | `fragment_lengths` | `w(i)` above |
 | `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
