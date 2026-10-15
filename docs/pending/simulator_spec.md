@@ -342,6 +342,7 @@ moved code without changing it, and so did moving the definitions into
 | `fl_end_weight` | `fragment_lengths` | `w(i)` above |
 | `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
+| `start_distribution` | `draw` | per strand, the distribution `sample_region` draws from → `{is_plus: StrandStartDistribution(start_probs, start_weights, W_s, t_s)}`, `None` for a strand with no live start |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
@@ -368,9 +369,19 @@ assembled in row order.
 which delegates to it. Its three arrays are read-only, since an in-place edit
 would leave the cached CDF stale.
 
-`sample_region` precomputes the full weight block `W_s` for all positions per
-strand, then draws the initial batch vectorised.  Only duplicate collisions
-enter a scalar redraw loop.
+`sample_region` takes the full weight block `W_s` for all positions per
+strand from `start_distribution`, then draws the initial batch vectorised.
+Only duplicate collisions enter a scalar redraw loop.
+
+`start_distribution` is the ONE definition of the per-region start and length
+distributions (owner, 2026-10-15).  It returns, per strand, `start_probs`
+(`P(i | s)`), `start_weights` (`a_s · live`, unnormalised), `W_s` and `t_s`,
+so `P(L | i, s) = W_s[i, L - min_fl] / t_s[i]`.  `P(s)` is not part of it.
+`sample_region` asks only for the strands that draw at least one fragment,
+and draws from exactly these arrays, so its `probs` are the helper's cells
+bit for bit.  A caller that needs the full distribution, such as the exact
+per-region normaliser `Z_r` of the cut-site oracle, reads the same arrays
+rather than restating the rule.  `TestStartDistribution` pins both claims.
 
 `W_s` is built from a 1-D gather, not a 2-D one (owner decision 192, a
 speed fix).  `W_s[i, l]` depends on its end only through `i + l`, so

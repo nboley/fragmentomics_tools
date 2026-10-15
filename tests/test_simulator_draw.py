@@ -44,6 +44,7 @@ from background_model.simulator.measure import (
 from background_model.simulator.draw import (
     sample_region,
     simulate_fragments_to_bed,
+    start_distribution,
 )
 from fragmentomics_tools.dataframe import RegionDataFrame
 
@@ -697,6 +698,139 @@ class TestT5Sampler:
             key = (s, s + L)
             assert key not in pairs, f"duplicate (start, stop) = {key}"
             pairs.add(key)
+
+
+# ── start_distribution: the one definition of the draw's distribution ──────
+
+class TestStartDistribution:
+    """``start_distribution`` is what ``sample_region`` draws from.
+
+    Owner decision 2026-10-15: one helper defines the per-region start
+    distribution, so the exact-normaliser oracle reads it rather than
+    restating it.  These tests pin that ``sample_region`` draws from the
+    helper's arrays and that its ``probs`` are the helper's cells, bit for bit.
+    """
+
+    @staticmethod
+    def _region(region_len, seed):
+        """Random sequence with Ns, random tables with zeros, realistic f(L)."""
+        rs = np.random.RandomState(seed)
+        counts = rs.randint(0, 1000, N_LENGTHS).astype(np.int64)
+        counts[0] = max(counts[0], 1)
+        fl = FragmentLengthDist(counts, L_MIN)
+        seq_len = region_len + 2 * HEX_HALF + fl.max_fl
+        bases = np.array(list("ACGT"))[rs.randint(0, 4, seq_len)]
+        bases[rs.rand(seq_len) < 0.03] = "N"
+        # Keep start 0 live on both strands at L = min_fl, as in
+        # test_probs_bitwise_equal_pre_192_formula, so no strand is dead.
+        for w in (slice(0, 6), slice(fl.min_fl, fl.min_fl + 6)):
+            bases[w] = np.where(bases[w] == "N", "A", bases[w])
+        seq = "".join(bases).encode()
+        r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
+        for k in TABLE_NAMES:
+            r[k][rs.choice(NHEX, 40, replace=False)] = 0.0
+        fwd, rc, _ = hexamer_indices(seq)
+        for k, idx in (("start_fwd", fwd[0]), ("end_rev", rc[0]),
+                       ("end_fwd", fwd[fl.min_fl]),
+                       ("start_rev", rc[fl.min_fl])):
+            r[k][idx] = max(r[k][idx], 1.0)
+        return seq, fl, r
+
+    @pytest.mark.parametrize("region_len", [1, 7, 300, 1536])
+    def test_distribution_sums_to_one(self, region_len):
+        """Per strand, starts sum to 1 and each live start's lengths sum to 1;
+        so the region's distribution over (strand, start, length) sums to 1.
+        All sums in float64."""
+        seq, fl, r = self._region(region_len, seed=20261015 + region_len)
+        dists = start_distribution(seq, region_len, r=r, fl=fl)
+        assert set(dists) == {True, False}
+        p_plus = 0.37
+        total = np.float64(0.0)
+        for is_plus, d in dists.items():
+            assert d is not None, "fixture strand has no live start"
+            assert d.start_probs.dtype == np.float64
+            assert d.t_s.dtype == np.float64
+            assert d.start_probs.shape == (region_len,)
+            assert d.W_s.shape == (region_len, fl.max_fl - fl.min_fl + 1)
+            assert np.all(d.start_probs >= 0)
+            np.testing.assert_allclose(
+                d.start_probs.sum(dtype=np.float64), 1.0, rtol=0, atol=1e-12)
+            live = d.start_probs > 0
+            assert np.all(d.t_s[live] > 0)
+            len_sums = (d.W_s[live] / d.t_s[live, None]).sum(
+                axis=1, dtype=np.float64)
+            np.testing.assert_allclose(len_sums, 1.0, rtol=0, atol=1e-12)
+            p_strand = np.float64(p_plus if is_plus else 1.0 - p_plus)
+            total += p_strand * (d.start_probs[live] * len_sums).sum(
+                dtype=np.float64)
+        np.testing.assert_allclose(total, 1.0, rtol=0, atol=1e-12)
+
+    @pytest.mark.parametrize("region_len", [7, 300, 1536])
+    def test_sample_region_probs_are_helper_cells_bitwise(self, region_len):
+        """``probs`` for drawn fragments equal the helper's cells bit for bit."""
+        seq, fl, r = self._region(region_len, seed=1015 + region_len)
+        n = max(1, region_len // 4)
+        p_plus = 0.37
+        starts, lengths, is_plus, probs = sample_region(
+            seq, region_len, n, r=r, fl=fl, p_plus=p_plus,
+            rng=np.random.default_rng([20261015, region_len]),
+        )
+        assert probs.size == n
+        dists = start_distribution(seq, region_len, r=r, fl=fl)
+        expected = np.empty_like(probs)
+        for plus in (True, False):
+            sel = is_plus == plus
+            if not sel.any():
+                continue
+            d = dists[plus]
+            p_strand = np.float64(p_plus if plus else (1.0 - p_plus))
+            s, li = starts[sel], lengths[sel] - fl.min_fl
+            expected[sel] = p_strand * d.start_probs[s] * (d.W_s[s, li] / d.t_s[s])
+        assert probs.tobytes() == expected.tobytes(), (
+            f"{int((probs != expected).sum())} of {probs.size} probs differ")
+
+    def test_sample_region_draws_from_helper_start_probs(self):
+        """The ``p`` handed to ``rng.choice`` is the helper's ``start_probs``,
+        bit for bit, on each strand that draws; a strand with no draws is not
+        computed."""
+        region_len = 300
+        seq, fl, r = self._region(region_len, seed=7)
+        dists = start_distribution(seq, region_len, r=r, fl=fl)
+        # Live starts, disjoint between strands, so no (start, stop) pair can
+        # collide and the recording rng never enters the redraw path.
+        live_plus = np.flatnonzero(dists[True].start_probs > 0)[:3]
+        live_minus = np.setdiff1d(
+            np.flatnonzero(dists[False].start_probs > 0), live_plus)[:3]
+        for n_plus, n in ((2, 5), (0, 3), (3, 3)):
+            ks = [(live, k) for live, k in ((live_plus, n_plus),
+                                            (live_minus, n - n_plus)) if k]
+            rng = _RecordingRng(
+                n_plus_values=[n_plus],
+                choice_returns=[live[:k] for live, k in ks],
+                random_values=[np.full((k, 1), 0.5) for _, k in ks],
+            )
+            sample_region(seq, region_len, n, r=r, fl=fl, p_plus=0.5, rng=rng)
+            want = [dists[s].start_probs for s, k in
+                    ((True, n_plus), (False, n - n_plus)) if k]
+            assert len(rng.recorded_start_weights) == len(want)
+            for got, exp in zip(rng.recorded_start_weights, want):
+                assert got.tobytes() == exp.tobytes()
+
+    def test_dead_strand_is_none(self):
+        """A strand with zero start weight maps to ``None``, and
+        ``sample_region`` skips it, drawing nothing on that strand."""
+        region_len = 300
+        seq, fl, r = self._region(region_len, seed=11)
+        r["start_fwd"][:] = 0.0
+        dists = start_distribution(seq, region_len, r=r, fl=fl)
+        assert dists[True] is None
+        assert dists[False] is not None
+        assert set(start_distribution(seq, region_len, r=r, fl=fl,
+                                      strands=(False,))) == {False}
+        starts, _, is_plus, _ = sample_region(
+            seq, region_len, 10, r=r, fl=fl, p_plus=1.0,
+            rng=np.random.default_rng(0))
+        assert starts.size == 0 and not is_plus.any()
 
 
 # ── T6: Writer and round trip ───────────────────────────────────────────────
