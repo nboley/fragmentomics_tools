@@ -30,7 +30,8 @@ a small correction.
 (``fl_end_weight``) are shared with model code, so they live in
 ``background_model.fragment_lengths`` rather than here; import them from there.
 This module reaches them as ``fragment_lengths.<name>`` and does not re-export
-them, so the pre-move import path raises ImportError.
+them, so the pre-move import path raises ImportError (owner decision
+2026-10-11).
 
 The ``C(h)`` path is three chained passes over a ``SampleAndRegionDataFrame``:
 
@@ -98,10 +99,7 @@ from fragmentomics_tools.dataframe import (
 )
 
 from background_model.constants import HEX_HALF, L_MAX, L_MIN, NHEX
-# Module import, not name import: ``FragmentLengthDist`` and ``fl_end_weight``
-# must not sit in this namespace, so the pre-move path
-# ``from background_model.simulator.measure import FragmentLengthDist`` raises
-# ImportError instead of resolving (owner decision 2026-10-11).
+# Module import, not name import: see the module docstring.
 from background_model import fragment_lengths
 from background_model.hexamers import (
     hexamer_indices,
