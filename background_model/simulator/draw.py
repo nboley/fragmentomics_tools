@@ -19,7 +19,7 @@ positions itself, so counts would apply hexamer abundance twice.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, NamedTuple, Optional
 
 import gzip
 
@@ -40,6 +40,85 @@ _SEED_WORD_MAX: int = 2 ** 32
 # is ~50 MB of text, but formatting it peaks near 230 MB (the per-column lists
 # and per-row strings before the join), measured at 2**20 rows.
 _SIDECAR_BLOCK_ROWS: int = 1 << 20
+
+
+class StrandStartDistribution(NamedTuple):
+    """One strand's start and length distributions in one region.
+
+    - ``start_probs[i] = P(i | strand)`` over ``[0, region_len)``, float64,
+      summing to 1.
+    - ``start_weights`` is the unnormalised start weight ``a_s * live``, so
+      ``start_probs = start_weights / start_weights.sum()``.
+    - ``W_s`` is the ``(region_len, n_L)`` length-weight block and ``t_s`` its
+      float64 row sums: ``P(L | i, strand) = W_s[i, L - fl.min_fl] / t_s[i]``,
+      defined where ``t_s[i] > 0``, which every start with
+      ``start_probs[i] > 0`` satisfies.
+    """
+
+    start_probs: np.ndarray
+    start_weights: np.ndarray
+    W_s: np.ndarray
+    t_s: np.ndarray
+
+
+def start_distribution(
+    sequence,
+    region_len: int,
+    *,
+    r: Dict[str, np.ndarray],
+    fl: "FragmentLengthDist",
+    strands=(True, False),
+) -> Dict[bool, Optional[StrandStartDistribution]]:
+    """The distributions ``sample_region`` draws from, per strand.
+
+    Returns ``{is_plus: StrandStartDistribution or None}`` for each strand in
+    ``strands``.  ``None`` means the strand has no live start (zero total
+    start weight); ``sample_region`` skips such a strand.
+
+    This is the ONE definition of the per-region start and length
+    distributions: ``sample_region`` draws from what it returns, so a caller
+    that needs the full distribution (an exact oracle normaliser, say) reads
+    the same arrays bit for bit.  The strand weight ``P(strand)`` is not part
+    of it; that is ``p_plus`` or ``1 - p_plus``.  See ``sample_region`` for the
+    rule itself.
+    """
+    seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
+    fwd, rc, valid = hexamer_indices(seq)
+    pos = np.arange(region_len)
+    # Every end position ``i + L`` any start can reach, in order.  W_s[i, l]
+    # depends on its end only through ``end_span[i + l]``, so the per-end
+    # factor is gathered once over this 1-D span and the (region_len x n_L)
+    # block is read through a sliding window of it, rather than gathered
+    # element by element.  Each element is still ``(e * valid) * f(L)`` in
+    # that order, so the block is bit-identical to the direct gather.
+    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)
+    n_L = fl.max_fl - fl.min_fl + 1
+
+    out = {}
+    for is_plus in strands:
+        track = fwd if is_plus else rc
+        s_tab = r["start_fwd"] if is_plus else r["end_rev"]
+        e_tab = r["end_fwd"] if is_plus else r["start_rev"]
+
+        e_end = e_tab[track[end_span]] * valid[end_span]
+        # C order is required, not cosmetic: the row sums below are pairwise
+        # along a contiguous row, and a differently laid-out block would sum
+        # in another order and move the last bits of t_s.
+        W_s = np.multiply(sliding_window_view(e_end, n_L),
+                          fl.densities[None, :], order="C")
+        t_s = W_s.sum(axis=1, dtype=np.float64)
+        live = t_s > 0
+
+        a_s = s_tab[track[pos]] * valid[pos]
+        a_s_live = a_s * live
+        tot = a_s_live.sum(dtype=np.float64)
+        if tot <= 0:
+            out[is_plus] = None
+            continue
+        out[is_plus] = StrandStartDistribution(
+            start_probs=a_s_live / tot, start_weights=a_s_live,
+            W_s=W_s, t_s=t_s)
+    return out
 
 
 def sample_region(
@@ -74,59 +153,38 @@ def sample_region(
 
         p = P(strand) * P(start | strand) * P(length | start, strand)
 
-    The full weight block ``W_s`` is computed once for all positions per
-    strand, then ``t_s = W_s.sum(axis=1)`` gives the per-start total.
-    ``live = t_s > 0`` restricts starts to those with at least one valid
-    length.  The initial draw is vectorised; only duplicate collisions
-    enter a scalar redraw loop.
+    The start and length distributions come from ``start_distribution``:
+    the full weight block ``W_s`` for all positions per strand, its per-start
+    total ``t_s``, and the start probabilities gated on ``live = t_s > 0``.
+    Only the strands that draw at least one fragment are computed.  The
+    initial draw is vectorised; only duplicate collisions enter a scalar
+    redraw loop.
     """
     if n > region_len:
         raise ValueError(
             f"requested n={n} fragments but region has only "
             f"{region_len} positions"
         )
-    seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
-    fwd, rc, valid = hexamer_indices(seq)
     Ls = np.arange(fl.min_fl, fl.max_fl + 1)
     pos = np.arange(region_len)
-    # Every end position ``i + L`` any start can reach, in order.  W_s[i, l]
-    # depends on its end only through ``end_span[i + l]``, so the per-end
-    # factor is gathered once over this 1-D span and the (region_len x n_L)
-    # block is read through a sliding window of it, rather than gathered
-    # element by element.  Each element is still ``(e * valid) * f(L)`` in
-    # that order, so the block is bit-identical to the direct gather.
-    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)
-    n_L = len(Ls)
 
     n_plus = int(rng.binomial(n, p_plus))
+    strand_ks = ((True, n_plus), (False, n - n_plus))
+    dists = start_distribution(
+        sequence, region_len, r=r, fl=fl,
+        strands=tuple(s for s, k in strand_ks if k > 0))
     used = set()
     out_s, out_L, out_p, out_prob = [], [], [], []
     n_dup_redraws = 0
 
-    for is_plus, k in ((True, n_plus), (False, n - n_plus)):
+    for is_plus, k in strand_ks:
         if k == 0:
             continue
-        track = fwd if is_plus else rc
-        s_tab = r["start_fwd"] if is_plus else r["end_rev"]
-        e_tab = r["end_fwd"] if is_plus else r["start_rev"]
-        p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
-
-        e_end = e_tab[track[end_span]] * valid[end_span]
-        # C order is required, not cosmetic: the row sums below are pairwise
-        # along a contiguous row, and a differently laid-out block would sum
-        # in another order and move the last bits of t_s.
-        W_s = np.multiply(sliding_window_view(e_end, n_L),
-                          fl.densities[None, :], order="C")
-        t_s = W_s.sum(axis=1, dtype=np.float64)
-        live = t_s > 0
-
-        a_s = s_tab[track[pos]] * valid[pos]
-        a_s_live = a_s * live
-        tot = a_s_live.sum(dtype=np.float64)
-        if tot <= 0:
+        dist = dists[is_plus]
+        if dist is None:
             continue
-
-        start_probs = a_s_live / tot
+        start_probs, a_s_live, W_s, t_s = dist
+        p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
 
         starts = rng.choice(pos, size=k, replace=True, p=start_probs)
         w = W_s[starts]
