@@ -1,15 +1,22 @@
 """Tests for scripts/simulator/cut_site_oracle_nll.py.
 
-Three properties, each pinned by its own test:
+What the tests pin:
 
 1. Closed form.  A uniform generator puts ``p = 1 / (2 * region_len * n_L)`` on
    every cell, so on the crop the oracle is ``log(2 * tile_size * n_L)`` -- the
-   uniform baseline -- in every region and every split.
+   uniform baseline -- per region and, on a store, in every split; the
+   count-ratio normaliser gives ``log Z_hat_r = log(n_scored / n_stored)``.
 2. The restated distribution IS the generator's: ``region_oracle`` reproduces
    ``sample_region``'s ``probs`` bit for bit, and its ``Z`` equals the crop's
-   share of a full enumeration that sums to 1.
-3. Same population as the model: on one store, the oracle's region population
+   share of a full enumeration that sums to 1.  A second case puts an N block
+   in the sequence so the live-start gate excludes starts, and uses an
+   asymmetric ``p_plus`` so the strand weighting is exercised.
+3. The run's gates on its inputs: ``read_sidecar`` parses ``p`` exactly (the
+   default pandas parser does not), and ``check_p_reproduces`` accepts bitwise
+   equal ``p`` and refuses a one-ulp difference, a NaN and a row-count mismatch.
+4. Same population as the model: on one store, the oracle's region population
    and scored rows equal the scorer's, under the trainer's ``min_N``.
+5. ``log_prob_ml`` is conditioned on the crop as ``log_prob`` is.
 """
 
 import gzip
@@ -33,6 +40,7 @@ from scripts.cut_site_model.baselines.reduce_split_nll import (
 from scripts.cut_site_model.score_fragments import SPLITS
 from scripts.cut_site_model.score_fragments import main as score_main
 from scripts.simulator.cut_site_oracle_nll import (
+    check_p_reproduces,
     oracle_arrays,
     read_sidecar,
     region_oracle,
@@ -182,6 +190,27 @@ def test_read_sidecar_is_exact(tmp_path):
     header, frame = read_sidecar(str(sidecar))
     assert header == {"seed": "1", "sample": "S"}
     assert np.array_equal(frame["p"].to_numpy(np.float64), p)
+
+
+def test_p_reproduction_gate_is_bitwise():
+    p = np.random.default_rng(4).uniform(1e-9, 1e-5, 1000)
+    check = check_p_reproduces(p.copy(), p)
+    assert check == {"n": 1000, "n_bitwise_equal": 1000, "max_rel_diff": 0.0}
+
+    # One ulp on one row is refused.
+    off = p.copy()
+    off[17] = np.nextafter(off[17], np.inf)
+    with pytest.raises(ValueError, match="does not reproduce"):
+        check_p_reproduces(off, p)
+
+    # A NaN difference is refused, not passed by a failed comparison.
+    nan = p.copy()
+    nan[3] = np.nan
+    with pytest.raises(ValueError, match="does not reproduce"):
+        check_p_reproduces(nan, p)
+
+    with pytest.raises(ValueError, match="rows"):
+        check_p_reproduces(p[:-1], p)
 
 
 @pytest.fixture

@@ -130,6 +130,12 @@ NORMALISERS = ("exact", "count_ratio")
 # bit-identical to the generator's (all 241,078 rows of the 10pct run).
 P_RTOL = 0.0
 
+# The code a run imports, relative to the repo root.  The provenance record
+# lists ``git status --porcelain`` over these (untracked files included), so a
+# run from a dirty tree is recorded, not refused.
+CODE_PATHSPEC = ("background_model", "background_model_core.py", "scripts",
+                 "fragmentomics_tools")
+
 
 # ---------------------------------------------------------------------------
 # The generator's distribution
@@ -284,8 +290,9 @@ def sidecar_p(st: Dict[str, np.ndarray], sidecar: pd.DataFrame) -> np.ndarray:
 
 def oracle_arrays(st, sequences: Sequence, p_side: np.ndarray, *, r, fl,
                   p_plus: float, n_workers=None) -> Dict[str, np.ndarray]:
-    """Per store row: the population mask, and ``log_prob`` under each
-    normaliser.  Per tile: ``Z`` exact and count-ratio.  Also the p check."""
+    """Per store row: the population mask, ``log_prob`` under each normaliser,
+    and the recomputed ``p`` for ``check_p_reproduces``.  Per tile: ``Z``
+    exact and count-ratio."""
     cfg = st["cfg"]
     if not (cfg.L_min <= fl.min_fl and fl.max_fl <= cfg.L_max):
         raise ValueError(
@@ -314,7 +321,6 @@ def oracle_arrays(st, sequences: Sequence, p_side: np.ndarray, *, r, fl,
     p_re = np.concatenate(res["p"].tolist())
     p_other = np.concatenate(res["p_other"].tolist())
 
-    rel = np.abs(p_re - p_side) / p_side
     n_stored = np.diff(indptr)
     n_scored = np.bincount(st["tile_of_row"], weights=scored,
                            minlength=len(n_stored)).astype(np.int64)
@@ -324,10 +330,7 @@ def oracle_arrays(st, sequences: Sequence, p_side: np.ndarray, *, r, fl,
     log_p = np.log(p_side)
     log_p_ml = np.log(p_side + p_other)
     out = {"scored": scored, "Z_exact": Z, "Z_count_ratio": Z_hat,
-           "n_stored": n_stored, "n_scored": n_scored,
-           "p_check": {"n": int(len(p_side)),
-                       "n_bitwise_equal": int((p_re == p_side).sum()),
-                       "max_rel_diff": float(rel.max()) if len(rel) else 0.0}}
+           "n_stored": n_stored, "n_scored": n_scored, "p_recomputed": p_re}
     # A tile with no scored row has Z_hat = 0; it contributes no term, so its
     # normaliser is never read, and 1 keeps the log finite.
     for name, z in (("exact", Z), ("count_ratio", np.where(Z_hat > 0, Z_hat, 1.0))):
@@ -335,6 +338,28 @@ def oracle_arrays(st, sequences: Sequence, p_side: np.ndarray, *, r, fl,
         lp_ml = np.where(scored, log_p_ml - np.log(z)[tile], np.nan)
         out[name] = {"log_prob": lp, "log_prob_ml": lp_ml}
     return out
+
+
+def check_p_reproduces(p_re: np.ndarray, p_side: np.ndarray) -> dict:
+    """The p-reproduction gate: raise unless every recomputed ``p`` is within
+    ``P_RTOL`` of the sidecar's (i.e. bitwise equal).  Returns the check's
+    summary for the provenance record.
+
+    Written as ``not <= `` so a NaN difference fails the gate instead of
+    slipping past a ``>`` comparison.
+    """
+    p_re = np.asarray(p_re, dtype=np.float64)
+    p_side = np.asarray(p_side, dtype=np.float64)
+    if p_re.shape != p_side.shape:
+        raise ValueError(f"recomputed p has {p_re.shape} rows, the sidecar "
+                         f"{p_side.shape}")
+    rel = np.abs(p_re - p_side) / p_side
+    check = {"n": int(len(p_side)),
+             "n_bitwise_equal": int((p_re == p_side).sum()),
+             "max_rel_diff": float(rel.max()) if len(rel) else 0.0}
+    if not check["max_rel_diff"] <= P_RTOL:
+        raise ValueError(f"recomputed p does not reproduce the sidecar: {check}")
+    return check
 
 
 def write_and_reduce(store_path: str, arrays, name: str, out_dir: str,
@@ -373,7 +398,7 @@ def _sha256(path: str) -> str:
 def _git(*args) -> str:
     try:
         return subprocess.run(["git", "-C", _REPO, *args], check=True,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True).stdout.rstrip("\n")
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 
@@ -466,10 +491,8 @@ def main(argv=None):
     t = time.time()
     arrays = oracle_arrays(st, seqs, p_side, r=m.r, fl=m.fl,
                            p_plus=run["p_plus"], n_workers=args.n_workers)
-    print(f"[oracle]  {time.time() - t:.1f} s, p check {arrays['p_check']}")
-    if arrays["p_check"]["max_rel_diff"] > P_RTOL:
-        raise ValueError(f"recomputed p does not reproduce the sidecar: "
-                         f"{arrays['p_check']}")
+    p_check = check_p_reproduces(arrays["p_recomputed"], p_side)
+    print(f"[oracle]  {time.time() - t:.1f} s, p check {p_check}")
 
     results = {}
     for name in NORMALISERS:
@@ -524,11 +547,13 @@ def main(argv=None):
     regions.to_csv(os.path.join(args.out_dir, "oracle_regions.tsv"), sep="\t",
                    index=False, float_format="%.17g")
 
+    code_status = _git("status", "--porcelain", "--", *CODE_PATHSPEC).splitlines()
     doc = {
         "argv": sys.argv,
         "git_head": _git("rev-parse", "HEAD"),
-        "script_dirty": bool(_git("status", "--porcelain", "--",
-                                  os.path.abspath(__file__))),
+        "code_pathspec": list(CODE_PATHSPEC),
+        "code_dirty": bool(code_status),
+        "code_status": code_status,
         "script_sha256": _sha256(os.path.abspath(__file__)),
         "background_model": os.path.abspath(background_model.__file__),
         "numpy": np.__version__,
@@ -542,7 +567,7 @@ def main(argv=None):
         "published_oracle_nll_fragment_pooled": run["emit_stats"]["oracle_nll"],
         "min_N": args.min_N, "p_plus": run["p_plus"],
         "measurement_matches_run_json": True,
-        "p_check": arrays["p_check"],
+        "p_check": p_check,
         "Z_exact_summary": {
             "min": float(arrays["Z_exact"].min()),
             "max": float(arrays["Z_exact"].max()),
@@ -555,7 +580,7 @@ def main(argv=None):
     }
     with open(os.path.join(args.out_dir, "oracle_nll.json"), "w") as f:
         json.dump(doc, f, indent=2)
-    print(json.dumps({"table": table, "p_check": arrays["p_check"]}, indent=2))
+    print(json.dumps({"table": table, "p_check": p_check}, indent=2))
 
 
 if __name__ == "__main__":
