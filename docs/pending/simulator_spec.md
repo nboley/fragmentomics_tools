@@ -14,65 +14,172 @@ models where those cuts fall and how far apart they are.
   than others. That preference is measured on a real sample, so simulated
   fragments carry the same sequence signature at their ends.
 - **Fragment length**, drawn from the distribution measured on the same sample.
-- **Strand**, a fair coin. A fragment has no intrinsic orientation, and adapter
-  ligation is symmetric, so `p_plus = 0.5` is a construction, not a fit. It still
-  matters: a minus-strand fragment's genomic start is its 3′ end, so the two
-  strands read different tables.
+- **Strand**, a fair coin.
 - **Depth.** Each region gets as many fragments as the real sample had there.
 
-**Not captured:** bulk GC (the length profile matches, the length-GC joint does
+**Not captured:** bulk GC (the length profile matches, the length–GC joint does
 not); anything in a fragment's interior; and lengths outside 25–180 bases, which
 are filtered out of the real data before measurement.
 
 ## 2. How a fragment is drawn
 
-Everything rests on the propensity of each of the 4096 6-mers:
+Within one region:
+
+1. **Strand** — flip a fair coin.
+2. **Start** — choose a start position, with probability proportional to the
+   propensity of the 6-mer there.
+3. **Length** — choose a length, with probability proportional to the propensity
+   of the 6-mer at the resulting far end, times the measured length
+   distribution.
+4. **Repeats** — if this start and length were already drawn in this region,
+   draw both again.
+
+The probability of the resulting fragment is recorded.
+
+## 3. Propensity
+
+Every step above reads one quantity, the propensity of each of the 4096 6-mers:
 
     r(h) = C(h) / N(h)
 
 `C(h)` counts how often `h` was a cut site in the real sample. `N(h)` counts how
 often it would have been if cutting ignored sequence. Their ratio is how much
-that sequence is preferred. There are four tables, since a cut can be at a
-molecule's 5′ or 3′ end, on either strand.
+that sequence is preferred.
 
-A region is one row of the BED, a half-open genomic interval `[gstart, gstop)`
-of length `region_len`. A fragment starting at `gstop` belongs to the next
-region, not this one. The draw works in offsets from `gstart`, and converts back
-to genomic coordinates when it writes.
+![Propensity over the 4096 hexamers](simulator_spec_figs/propensity.png)
 
-```
-    region  [gstart .................................... gstop)
-                  |<------------- L ------------>|
- ..ACGTAC         |                              |          GGATCC..
-   ^^^^^^       start                           stop          ^^^^^^
-  6-mer at the start                              6-mer at the end
-  picks the position                              picks the length
+Preference is strongly uneven and roughly lognormal: across 5,000 regions of
+RD-56804 the most-preferred 1% of hexamers are cut about 48 times as often as
+the least-preferred 1%. That spread is what the simulator reproduces and what a
+model has to learn. A larger study of these distributions across 92 samples is
+in `docs/pending/cut_site_hexamer_counts.md`; it used a different admission
+rule, so its counts are not directly comparable with these.
 
- |<-- 3 -->|<------------- region_len ------------->|<-- 183 -->|
-   left pad                                            right pad
-```
+### The four tables
 
-The right pad is wide enough for a fragment that starts just inside `gstop` and
-ends beyond it: its end 6-mer is still readable.
+A cut can be at a molecule's 5′ or 3′ end, on either strand, so `C`, `N` and `r`
+are each four tables. The strand drawn in step 1 selects which two are read,
+because a minus-strand fragment's genomic start is its 3′ end:
 
-To draw one fragment in a region:
+| strand | at genomic start `i` | at genomic stop `i + L` |
+|---|---|---|
+| plus | `r_start_fwd(hex_fwd(i))` | `r_end_fwd(hex_fwd(i + L))` |
+| minus | `r_end_rev(hex_rc(i))` | `r_start_rev(hex_rc(i + L))` |
 
-1. **Strand**, by a fair coin. This selects which tables steps 2 and 3 read.
-2. **Start**, with probability proportional to the propensity of the 6-mer there.
-   Positions from which no fragment of any valid length could be made are
-   excluded first, then the rest are renormalised.
-3. **Length**, with probability proportional to the propensity of the 6-mer at
-   the resulting far end, times the measured length distribution.
-4. **Reject repeats.** A `(start, stop)` pair already drawn in this region sends
-   both the start and the length back to be drawn again.
+Table names are molecule-relative; denominators are position-relative. So the
+`_rev` tables are crossed with respect to their names, and are correct that way:
 
-The probability of the resulting fragment is recorded.
+| table | tallies | divides by |
+|---|---|---|
+| `start_fwd` | genomic starts | `N_start` |
+| `end_fwd` | genomic stops | `N_end` |
+| `start_rev` | genomic **stops** | `N_end[perm]` |
+| `end_rev` | genomic **starts** | `N_start[perm]` |
 
-A length can be impossible three ways: a non-ACGT base at the far end, a 6-mer
-never observed as a cut site in this sample, or a length never observed. The draw
-does not distinguish them; it only asks whether any weight remains.
+Reversing this pairing produced a median 1.2% and maximum 16% error per
+propensity cell, silently, with every total intact.
 
-## 3. What a run produces
+### The two expectations
+
+`N_start` weights every position in the region equally, since under a
+sequence-indifferent model any position is an equally likely start.
+
+`N_end` is length-weighted, because a position is reachable as an end only from
+starts that lie inside the region. For a region of length `region_len` and the
+length distribution's CDF `F`:
+
+    w(i) = F(min(i, max_fl)) − F(max(min_fl − 1, i − region_len))
+
+![End weight across one region and across three adjacent regions](simulator_spec_figs/end_weight.png)
+
+The ramps are correct rather than a loss. A route excluded at one region's edge
+is counted in the neighbouring region, and `C` is tabulated under the same
+partition, so adjacent regions sum to exactly 1 in the interior (above,
+measured). An **isolated** region, with no neighbour, is genuinely depleted near
+its edges — which matters to anyone choosing a crop width or computing an
+oracle.
+
+## 4. The steps in detail
+
+Write `s` for the drawn strand, `i` for a position in the region, `l` for a
+length, and `valid(·)` for whether the 6-mer at a position is free of non-ACGT
+bases.
+
+### 4.1 Strand
+
+Bernoulli with `p_plus = 0.5`, where plus means the fragment's 5′ end is the end
+that aligns to the forward reference strand.
+
+The coin is a construction, not a fit. A fragment is double-stranded and has no
+intrinsic orientation; the strand label records only which of its two ends became
+read 1, and adapter ligation is symmetric. There is nothing to measure.
+
+The strand is drawn first because it decides which pair of tables steps 2 and 3
+read, per the table above. Both strands share one `valid` array: validity is a
+property of the reference, not of the strand.
+
+### 4.2 Start
+
+Positions are weighted by the propensity of the 6-mer at the start, but only
+after excluding positions from which no fragment at all could be made:
+
+    W_s[i, l] = r_end(hex(i + l)) · valid(i + l) · f(l)
+    t_s[i]    = Σ_l W_s[i, l]
+    live[i]   = t_s[i] > 0
+    a_s[i]    = r_start(hex(i)) · valid(i) · live[i]
+
+    P(i | s)  = a_s[i] / Σ_j a_s[j]
+
+`W_s` is the full weight block: for each start, the weight of every length. Its
+row sum `t_s[i]` is the total weight available at that start, so `live` marks
+the starts from which some fragment can be made. Normalisation is **within the
+strand**.
+
+A start belongs to the region containing it, and the region is the half-open
+interval `[region start, region stop)`. A fragment starting at the region stop
+belongs to the next region. This is what makes every fragment belong to exactly
+one region.
+
+### 4.3 Length
+
+Given the start, the length is read off the row already computed:
+
+    P(L | i, s) = W_s[i, L − min_fl] / t_s[i]
+
+so the start and the length come from one weight block rather than two separate
+rules.
+
+A length carries zero weight for any of three reasons, and the draw does not
+distinguish them — it tests only whether `t_s[i] > 0`:
+
+| factor | zero when | a property of |
+|---|---|---|
+| `valid` | the far-end 6-mer contains a non-ACGT base | the reference |
+| `r_end` | that 6-mer was never observed as a cut site | the sample, and its depth |
+| `f(l)` | that length was never observed | the sample |
+
+Two of the three are sample properties, so the same region normalises over
+different length sets for different samples.
+
+The support is the measured distribution's own, `[min_fl, max_fl]`, which lies
+inside 25–180 because the real fragments were filtered to that range before
+anything was measured. The bound is applied once, at that filter; the sampler
+does not re-check it.
+
+### 4.4 Repeats
+
+The `(start, stop)` pair is checked against the pairs already drawn in this
+region. Strand is not part of the key. On a collision both the start and the
+length are drawn again from the same distribution.
+
+Requesting more fragments than a region has positions raises, as does exceeding
+twice the requested count in draw attempts. Both raise rather than silently
+emitting fewer fragments than asked for.
+
+Because repeats are redrawn, the recorded probability is the first-draw
+marginal, which reads slightly high against sampling without replacement.
+
+## 5. What a run produces
 
 | Output | Content |
 |---|---|
@@ -91,7 +198,7 @@ pooled over every fragment and the whole length range; a model evaluated on a
 subset of regions or a cropped window needs its oracle recomputed over that same
 domain, which `scripts/simulator/cut_site_oracle_nll.py` does.
 
-## 4. Running it
+## 6. Running it
 
     python scripts/simulator/run_cut_site_simulator.py \
       --sample-id SAMPLE \
@@ -101,8 +208,11 @@ domain, which `scripts/simulator/cut_site_oracle_nll.py` does.
       --out-dir /efs/analytics/nathanboley/<run> \
       --seed N
 
-A full run covers 66,649 regions in about 7 minutes.
-`scripts/simulator/measure_cut_site_hexamers.py` runs the measurement alone.
+A full run covers 66,649 regions in about 7 minutes. The same seed gives the
+same output whatever the worker count.
+
+`scripts/simulator/measure_cut_site_hexamers.py` runs the measurement alone and
+writes `C`, `N`, `r`, `f(L)` and the per-region counts to an `.npz`.
 
 Region sets live in the main checkout's gitignored `data/region_sets/`:
 `..._removed_tile1536` (66,649 regions), `..._removed_tile2560` (11,505),
@@ -113,24 +223,7 @@ reference index, so artifacts built against a different reference will not
 compare as equal even where the sequence is identical. Record the reference in
 any output.
 
-## 5. Reproducibility
-
-**The same seed gives byte-identical output at any worker count** — BED, sidecar
-and statistics alike.
-
-Each region draws from its own stream, `default_rng([seed, region_index])`, where
-`region_index` is the region's position in the input region set, not its row in
-whatever frame reaches the draw. The pair keeps replicates under neighbouring
-seeds independent; both values must fit in 32 bits. The uniform counts `N(h)` are
-computed in fixed blocks of 256 regions, never per worker, because the block size
-fixes the summation order and so the last bits of the result.
-
-Regression references, both RD-56804 at seed 20261008:
-`/efs/analytics/nathanboley/sim_d166_lowfix_w1/` (200 regions) and
-`sim_d166_w1_2k/` (2,000). Compare sidecars **after decompressing** — gzip
-records a timestamp, so compressed bytes are never stable.
-
-## 6. Code
+## 7. Code
 
 | Module | Holds | Depends on |
 |---|---|---|
@@ -145,56 +238,13 @@ is inclusive. `fragment_lengths.py` sits outside `simulator/` on purpose:
 model-side code needs it and must not import the simulator.
 
 Entry points: `measure_sample` (the whole measurement for one sample),
-`simulate_fragments_to_bed` (draws every region in parallel, writes the output),
+`simulate_fragments_to_bed` (draws every region, writes the output),
 `sample_region`, `start_distribution` (the per-region start and length
-distributions the draw uses), `oracle_nll`.
+distributions of §4.2 and §4.3), `oracle_nll`.
 
-## 7. Rules that must not change without measurement
-
-Each was wrong once, or is load-bearing in a way the code does not show.
-
-- **A fragment belongs to the region containing its START**, which is what makes
-  it belong to exactly one tile. The sequence frame is padded asymmetrically for
-  the same reason — 3 bases left, 183 right — so a fragment whose end runs past
-  the region edge still has a readable 6-mer, without widening the set of
-  positions a fragment may start from.
-
-- **Start tables divide by the start expectation, end tables by the end
-  expectation — by POSITION, not by table name.** The `_rev` tables look crossed
-  relative to their names and are correct that way, because a minus-strand
-  fragment's 5′ cut site sits at its genomic stop. Reversing this pairing cost a
-  median 1.2% and maximum 16% error per propensity cell, silently, with every
-  total intact.
-
-- **The two expectations differ.** `N_start` weights every position equally.
-  `N_end` is length-weighted and ramps near region edges, because an end near an
-  edge is reachable by fewer lengths.
-
-  ![End weight across one tile and across three adjacent tiles](simulator_spec_figs/end_weight.png)
-
-  The ramp is correct rather than a loss: the excluded routes are counted in the
-  neighbouring tile, and `C` is tabulated under the same partition, so adjacent
-  tiles sum to exactly 1 in the interior (above, measured). An isolated tile with
-  no neighbour is genuinely depleted near its edges, which matters to anyone
-  choosing a crop width or computing an oracle.
-
-- **The length bound is applied once**, when the fragment arrays are built. The
-  sampler draws over the measured distribution's own support and does not know
-  `L_MIN` or `L_MAX`. Do not add a second check downstream.
-
-- **Mapping quality is filtered before deduplication**, because dedup keeps the
-  first occurrence of a `(start, stop)` pair, not the best-mapped one. The
-  remaining filters commute.
-
-- **Asking for more fragments than a region has positions raises**, as does
-  exceeding twice the requested count in draw attempts. Both raise rather than
-  silently emitting fewer fragments than asked for.
-
-- **`r` is a definition, not an estimate.** The simulator draws from `r` and the
-  oracle is computed from the same `r`, so they agree by construction. `C` and
-  `N` apply their validity gates differently; that changes what the model is, not
-  whether it is right. It would matter only if `r` were ever read as a
-  measurement of biology rather than as a generating parameter.
+Figures in this document are regenerated by
+`scripts/simulator/_make_spec_figures.py`, from the real tables and the real
+`fl_end_weight`.
 
 ## 8. Tests
 
