@@ -40,8 +40,8 @@ from background_model.cut_site_model.model import (
 )
 from background_model.cut_site_model.store import CutSiteStoreConfig
 from background_model.hexamers import rc_permutation
+from background_model.fragment_lengths import FragmentLengthDist
 from background_model.simulator.measure import (
-    FragmentLengthDist,
     counts_from_hexamers,
     cut_site_hexamers,
     propensities,

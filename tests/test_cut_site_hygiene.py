@@ -18,6 +18,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 
 # ── T7: Hygiene ─────────────────────────────────────────────────────────────
 
@@ -109,6 +111,30 @@ class TestT7Hygiene:
                             f"{mod.__name__} imports removed feature: "
                             f"{node.module}"
                         )
+
+    def test_moved_fragment_length_names_not_reachable_from_measure(self):
+        """Owner decision 2026-10-11: ``FragmentLengthDist`` and
+        ``fl_end_weight`` moved to ``background_model.fragment_lengths``, and
+        the old path ``from background_model.simulator.measure import ...``
+        must raise ImportError, so a stale import in a notebook, another
+        worktree or an unscanned script fails loudly instead of resolving.
+
+        Mutation: re-adding the name import
+        ``from background_model.fragment_lengths import FragmentLengthDist,
+        fl_end_weight`` to ``measure.py``.
+        """
+        import background_model.fragment_lengths as fl_mod
+        import background_model.simulator.measure as measure_mod
+        # Control: the same statement form resolves a name measure does own,
+        # so the ImportError below comes from the missing name, not the form.
+        exec("from background_model.simulator.measure import measure_sample", {})
+        for name in ("FragmentLengthDist", "fl_end_weight"):
+            assert hasattr(fl_mod, name), f"fragment_lengths lost {name}"
+            with pytest.raises(ImportError):
+                exec(f"from background_model.simulator.measure import {name}", {})
+            assert not hasattr(measure_mod, name), (
+                f"measure.{name} resolves; import it from "
+                f"background_model.fragment_lengths")
 
     def test_layering_holds(self):
         """Owner decision 169 split one module into three layers, each
