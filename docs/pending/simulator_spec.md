@@ -342,7 +342,7 @@ moved code without changing it, and so did moving the definitions into
 | `fl_end_weight` | `fragment_lengths` | `w(i)` above |
 | `propensities` | `simulator.measure` | `C / N` |
 | `sample_region` | `draw` | draw `n` fragments → `(starts_0, lengths, is_plus, probs)`. Dead starts restricted, duplicates redrawn |
-| `start_distribution` | `draw` | per strand, the distribution `sample_region` draws from → `{is_plus: StrandStartDistribution(start_probs, start_weights, W_s, t_s)}`, `None` for a strand with no live start |
+| `start_distribution` | `draw` | per strand, the distribution `sample_region` draws from → `{is_plus: StrandStartDistribution(start_probs, W_s, t_s)}`, `None` for a strand with no live start |
 | `hexamer_indices` | `hexamers` | sliding 6-mer encode; `str`/`bytes`/`uint8`, case-folded |
 | `hexamers_at` | `hexamers` | `(index, valid)` of the 6-mer at each region-local cut site. Used by `cut_site_hexamers` |
 | `rc_permutation` | `hexamers` | RC as a 4096 permutation, derived from the encoder |
@@ -375,7 +375,7 @@ Only duplicate collisions enter a scalar redraw loop.
 
 `start_distribution` is the ONE definition of the per-region start and length
 distributions (owner, 2026-10-15).  It returns, per strand, `start_probs`
-(`P(i | s)`), `start_weights` (`a_s · live`, unnormalised), `W_s` and `t_s`,
+(`P(i | s)`, the start weight `a_s · live` normalised), `W_s` and `t_s`,
 so `P(L | i, s) = W_s[i, L - min_fl] / t_s[i]`.  `P(s)` is not part of it.
 `sample_region` asks only for the strands that draw at least one fragment,
 and draws from exactly these arrays, so its `probs` are the helper's cells

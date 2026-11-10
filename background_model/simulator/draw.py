@@ -46,9 +46,7 @@ class StrandStartDistribution(NamedTuple):
     """One strand's start and length distributions in one region.
 
     - ``start_probs[i] = P(i | strand)`` over ``[0, region_len)``, float64,
-      summing to 1.
-    - ``start_weights`` is the unnormalised start weight ``a_s * live``, so
-      ``start_probs = start_weights / start_weights.sum()``.
+      summing to 1: the start weight ``a_s * live`` over its float64 total.
     - ``W_s`` is the ``(region_len, n_L)`` length-weight block and ``t_s`` its
       float64 row sums: ``P(L | i, strand) = W_s[i, L - fl.min_fl] / t_s[i]``,
       defined where ``t_s[i] > 0``, which every start with
@@ -56,7 +54,6 @@ class StrandStartDistribution(NamedTuple):
     """
 
     start_probs: np.ndarray
-    start_weights: np.ndarray
     W_s: np.ndarray
     t_s: np.ndarray
 
@@ -116,8 +113,7 @@ def start_distribution(
             out[is_plus] = None
             continue
         out[is_plus] = StrandStartDistribution(
-            start_probs=a_s_live / tot, start_weights=a_s_live,
-            W_s=W_s, t_s=t_s)
+            start_probs=a_s_live / tot, W_s=W_s, t_s=t_s)
     return out
 
 
@@ -183,7 +179,7 @@ def sample_region(
         dist = dists[is_plus]
         if dist is None:
             continue
-        start_probs, a_s_live, W_s, t_s = dist
+        start_probs, W_s, t_s = dist
         p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
 
         starts = rng.choice(pos, size=k, replace=True, p=start_probs)
@@ -217,7 +213,7 @@ def sample_region(
                     # Only the message reads this, so it is built here rather
                     # than as a full-block boolean on every strand.
                     n_distinct = int(
-                        ((a_s_live > 0)[:, None] & (W_s > 0)).sum())
+                        ((start_probs > 0)[:, None] & (W_s > 0)).sum())
                     raise RuntimeError(
                         f"duplicate redraws ({n_dup_redraws}) exceeded n={n}, "
                         f"i.e. more than 2n={2 * n} total draw attempts for "

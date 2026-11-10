@@ -713,7 +713,15 @@ class TestStartDistribution:
 
     @staticmethod
     def _region(region_len, seed):
-        """Random sequence with Ns, random tables with zeros, realistic f(L)."""
+        """Random sequence with Ns, random tables with zeros, realistic f(L).
+
+        From ``region_len >= 300`` the sequence also carries an N run long
+        enough to hide every end of the starts just left of it, while their
+        own start hexamers stay valid.  Those starts are dead: positive
+        start-side weight, but ``t_s == 0``.  The scattered 3% Ns killed no
+        start in these fixtures, so without the run nothing here exercised
+        the ``live`` gate.
+        """
         rs = np.random.RandomState(seed)
         counts = rs.randint(0, 1000, N_LENGTHS).astype(np.int64)
         counts[0] = max(counts[0], 1)
@@ -721,6 +729,15 @@ class TestStartDistribution:
         seq_len = region_len + 2 * HEX_HALF + fl.max_fl
         bases = np.array(list("ACGT"))[rs.randint(0, 4, seq_len)]
         bases[rs.rand(seq_len) < 0.03] = "N"
+        if region_len >= 300:
+            # End hexamer j reads bases [j, j + 6), so Ns over [a, b) void
+            # ends [a - 5, b).  Start i is then dead when
+            # [i + min_fl, i + max_fl] lies inside that, which holds for
+            # i in [a - 5 - min_fl, b - 1 - max_fl]; for i < a - 5 its own
+            # start hexamer is clear of the run.
+            a = region_len // 3
+            b = a + (fl.max_fl - fl.min_fl) + 30
+            bases[a:b] = "N"
         # Keep start 0 live on both strands at L = min_fl, as in
         # test_probs_bitwise_equal_pre_192_formula, so no strand is dead.
         for w in (slice(0, 6), slice(fl.min_fl, fl.min_fl + 6)):
@@ -756,6 +773,10 @@ class TestStartDistribution:
             np.testing.assert_allclose(
                 d.start_probs.sum(dtype=np.float64), 1.0, rtol=0, atol=1e-12)
             live = d.start_probs > 0
+            if region_len >= 300:
+                assert (d.t_s == 0).any(), "fixture N run left no dead start"
+            # Without the live gate a dead start keeps its start weight,
+            # and this fails.
             assert np.all(d.t_s[live] > 0)
             len_sums = (d.W_s[live] / d.t_s[live, None]).sum(
                 axis=1, dtype=np.float64)
@@ -791,8 +812,7 @@ class TestStartDistribution:
 
     def test_sample_region_draws_from_helper_start_probs(self):
         """The ``p`` handed to ``rng.choice`` is the helper's ``start_probs``,
-        bit for bit, on each strand that draws; a strand with no draws is not
-        computed."""
+        bit for bit, on each strand that draws."""
         region_len = 300
         seq, fl, r = self._region(region_len, seed=7)
         dists = start_distribution(seq, region_len, r=r, fl=fl)
