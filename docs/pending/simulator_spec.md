@@ -35,16 +35,25 @@ often it would have been if cutting ignored sequence. Their ratio is how much
 that sequence is preferred. There are four tables, since a cut can be at a
 molecule's 5′ or 3′ end, on either strand.
 
-```
-         region  [gstart ................................ gstop)
-                      |<----------- L ----------->|
-    ..ACGTAC          |                           |          GGATCC..
-      ^^^^^^          start                      stop          ^^^^^^
-    6-mer at the start                              6-mer at the end
-    picks the position                              picks the length
+A region is one row of the BED, a half-open genomic interval `[gstart, gstop)`
+of length `region_len`. A fragment starting at `gstop` belongs to the next
+region, not this one. The draw works in offsets from `gstart`, and converts back
+to genomic coordinates when it writes.
 
-    pad 3 |<-------------- region_len -------------->| pad 183
 ```
+    region  [gstart .................................... gstop)
+                  |<------------- L ------------>|
+ ..ACGTAC         |                              |          GGATCC..
+   ^^^^^^       start                           stop          ^^^^^^
+  6-mer at the start                              6-mer at the end
+  picks the position                              picks the length
+
+ |<-- 3 -->|<------------- region_len ------------->|<-- 183 -->|
+   left pad                                            right pad
+```
+
+The right pad is wide enough for a fragment that starts just inside `gstop` and
+ends beyond it: its end 6-mer is still readable.
 
 To draw one fragment in a region:
 
