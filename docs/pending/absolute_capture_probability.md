@@ -608,7 +608,7 @@ the existing validation.
 
 ---
 
-## 12. Implemented, and what it showed (`scripts/spike_recovery.py`)
+## 12. Implemented, and what it showed (`scripts/analysis/spike_recovery.py`)
 
 Per-sample, per-(length, GC) recovery from spikes, built to compare against
 ZTNB. Runs on real data: `load_spikes_for_result` for SPANK reads/deduped and
@@ -704,7 +704,7 @@ Sample 190000 has `d ~ 1.02` against ~1.31 for the others and correlates least
 with them (0.44-0.72). A different duplication regime; treat separately or
 exclude.
 
-### The comparison grids do not match (`scripts/compare_spike_vs_ztnb.py`)
+### The comparison grids do not match (`scripts/analysis/compare_spike_vs_ztnb.py`)
 
 Both surfaces now compute and render side by side, normalised at the same
 reference cell. The figure is a MECHANISM DEMO, not a result — the only ZTNB
@@ -742,7 +742,7 @@ rather than estimates.
 ## 13. Same-sample comparison — the two surfaces disagree
 
 Figure: `docs/pending/spike_vs_ztnb_plots/spike_vs_ztnb_RD-56670.png`
-Scripts: `scripts/ztnb_from_duphist.py`, `scripts/compare_spike_vs_ztnb.py`
+Scripts: `scripts/analysis/ztnb_from_duphist.py`, `scripts/analysis/compare_spike_vs_ztnb.py`
 
 ### Getting a real pairing
 
@@ -872,5 +872,5 @@ but not this one.
 
 ### Retained
 
-`scripts/spike_recovery.py` and `scripts/compare_spike_vs_ztnb.py` remain as the
+`scripts/analysis/spike_recovery.py` and `scripts/analysis/compare_spike_vs_ztnb.py` remain as the
 record of what was measured. They are not part of any pipeline.

@@ -36,7 +36,11 @@ FIXTURE_BAM = os.environ.get(
 DUP_H5 = os.path.join(_DATA, "golden.test_duplicates.frag.h5")
 DUP_BAM = os.path.join(_DATA, "test_duplicates.bam")
 
-FL_BANDS = [(40, 65), (120, 175)]
+# Canonical band layout (owner decision 14, 2026-09-27).  The "golden" here is a
+# LIVE independent pysam recount computed with these same bands, not a stored
+# number, so both sides recount under the canonical layout — this exercises the
+# real track layout rather than a superseded one.
+FL_BANDS = [(25, 110), (110, 180)]
 MIN_MAPQ = 10
 MAX_TLEN = 1000
 
@@ -165,8 +169,12 @@ def _rfa_counts(h5_path, contig, start, stop, fl_bands, min_mapq, dedup=True):
 
     h5 = FragmentsH5(h5_path, cache_pointers=False)
     region = Region(chrom=contig, start=start, stop=stop, strand=".")
+    # Load out to the largest band edge (exclusive), NOT a hardcoded 175 — the
+    # new (110,180) band admits lengths 175-179 that a stale 175 would drop,
+    # diverging from the pysam recount (which filters by lo <= L < hi).
+    max_frag_len = max(hi for _lo, hi in fl_bands)
     rfa = RegionFragmentArray.from_fragments_h5(
-        h5, region, min_mapq=min_mapq, max_frag_len=175
+        h5, region, min_mapq=min_mapq, max_frag_len=max_frag_len
     )
     n_before = rfa.n_frags
     if dedup:
@@ -324,7 +332,22 @@ class TestStrandInvariantSynthetic:
 
         region = Region(chrom="chr1", start=0, stop=200, strand=".")
         rfa = RegionFragmentArray(
-            starts_0=np.array([10]), stops_0=np.array([50]),  # length 40
-            region=region, max_frag_len=175, validate_data=False,
+            starts_0=np.array([10]), stops_0=np.array([35]),  # length 25 (band0 lo)
+            region=region, max_frag_len=180, validate_data=False,
         )
-        assert rfa.subset_fragment_lengths(40, 65).n_frags == 1
+        assert rfa.subset_fragment_lengths(25, 110).n_frags == 1
+
+    def test_fl_band_shared_boundary_110(self):
+        """The contiguous bands ((25,110),(110,180)) share the edge 110.  Half-open
+        [lo, hi) means a length of exactly 110 belongs to the SECOND band
+        (110,180) and NOT the first (25,110) — no double-count, no gap."""
+        from fragmentomics_tools.fragment_array.fragment_array import RegionFragmentArray
+        from fragmentomics_tools.region import Region
+
+        region = Region(chrom="chr1", start=0, stop=300, strand=".")
+        rfa = RegionFragmentArray(
+            starts_0=np.array([10]), stops_0=np.array([120]),  # length exactly 110
+            region=region, max_frag_len=180, validate_data=False,
+        )
+        assert rfa.subset_fragment_lengths(25, 110).n_frags == 0   # upper exclusive
+        assert rfa.subset_fragment_lengths(110, 180).n_frags == 1  # lower inclusive

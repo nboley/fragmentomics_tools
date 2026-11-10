@@ -15,7 +15,7 @@ from typing import Dict, Tuple
 
 # The three axes that define a track.
 STRANDS: Tuple[str, ...] = ("+", "-")
-FL_BANDS: Tuple[Tuple[int, int], ...] = ((40, 65), (120, 175))
+FL_BANDS: Tuple[Tuple[int, int], ...] = ((25, 110), (110, 180))
 COVERAGE_TYPES: Tuple[str, ...] = ("first", "last", "midpoint")
 
 # Canonical mapping: (strand, fl_band, coverage_type) -> column index.

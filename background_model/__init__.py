@@ -1,7 +1,7 @@
-"""Background model v2 — data plumbing.
+"""Background model v2.
 
-Preprocess cfDNA fragment h5 files into a zarr store suitable for training
-the sequence-driven background model (see background_model_core.py).
+Shared definitions live at the top level (``constants``, ``hexamers``,
+``tracks``). The 12-track band model is ``band_model/``; the cut-site
+simulator is ``simulator/``. This file imports nothing, so importing one
+shared module does not pull in either sub-package.
 """
-
-from background_model.config import PlumbingConfig

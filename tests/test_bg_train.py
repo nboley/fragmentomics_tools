@@ -1,4 +1,4 @@
-"""Tests for the training driver (background_model/train.py).
+"""Tests for the training driver (background_model/band_model/train.py).
 
 The key contract: InstrumentedBackgroundModel adds only detached diagnostic
 logging; its training loss must be byte-for-byte the frozen
@@ -14,7 +14,7 @@ import pytest
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from background_model_core import BackgroundModel, _with_lr_schedule
-from background_model.train import (
+from background_model.band_model.train import (
     ApplyLRReduction,
     RECOVERABLE_REASONS,
     DivergenceStop,
@@ -100,7 +100,7 @@ class _FakeTrainer:
 
 def _replay(values, factor=1.10, stall_patience=5):
     """Feed a val_loss sequence to the guard; return the stop epoch or None."""
-    from background_model.train import DivergenceStop
+    from background_model.band_model.train import DivergenceStop
 
     cb = DivergenceStop(factor, stall_patience=stall_patience)
     tr = _FakeTrainer()
@@ -139,7 +139,7 @@ def test_divergence_stop_disabled_by_zero_factor():
 
 
 def test_divergence_stop_skips_sanity_check():
-    from background_model.train import DivergenceStop
+    from background_model.band_model.train import DivergenceStop
 
     cb = DivergenceStop(1.10)
     tr = _FakeTrainer()
@@ -215,7 +215,7 @@ def test_stall_patience_cli_default_and_override():
 
 def _replay_reason(values, factor=1.10, stall_patience=5):
     """Like _replay but return (stop_epoch, stop_reason_dict) or (None, None)."""
-    from background_model.train import DivergenceStop
+    from background_model.band_model.train import DivergenceStop
 
     cb = DivergenceStop(factor, stall_patience=stall_patience)
     tr = _FakeTrainer()
@@ -2211,7 +2211,7 @@ def test_run_meta_contains_all_trainconfig_fields(tmp_path):
     added to TrainConfig but not plumbed through to _write_run_meta.
     """
     import dataclasses
-    from background_model.train import _write_run_meta
+    from background_model.band_model.train import _write_run_meta
 
     cfg = TrainConfig(**{**_REQUIRED, "runs_root": str(tmp_path)})
     run_dir = str(tmp_path / cfg.run_name)
@@ -2403,10 +2403,10 @@ def test_dirty_check_never_claims_clean_when_it_cannot_tell(tmp_path):
 
 def test_git_sha_store_uses_train_implementation():
     """store._get_version_info uses the same _git_sha as train.py."""
-    from background_model.store import _get_version_info
+    from background_model.band_model.store import _get_version_info
     import inspect
     source = inspect.getsource(_get_version_info)
-    assert "from background_model.train import _git_sha" in source, (
+    assert "from background_model.band_model.train import _git_sha" in source, (
         "store._get_version_info should import _git_sha from train, "
         "not have its own implementation"
     )

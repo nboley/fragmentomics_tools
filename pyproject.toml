@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.26",
     "pandas",
+    "pyarrow",
     "scipy",
     "scikit-learn",
     "matplotlib",

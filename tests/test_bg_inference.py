@@ -19,9 +19,9 @@ pytest.importorskip("background_model_core")
 
 import pysam
 
-from background_model.config import PlumbingConfig
-from background_model.dataset import BackgroundTileDataset
-from background_model.inference import (
+from background_model.band_model.config import PlumbingConfig
+from background_model.band_model.dataset import BackgroundTileDataset
+from background_model.band_model.inference import (
     WindowGeometry,
     build_window_mask,
     build_window_onehot,
@@ -29,8 +29,8 @@ from background_model.inference import (
     locate,
     predict_region_profiles,
 )
-from background_model.preprocess import run_preprocess
-from background_model.store import open_store
+from background_model.band_model.preprocess import run_preprocess
+from background_model.band_model.store import open_store
 from background_model_core import BackgroundModel
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -152,7 +152,7 @@ class TestEquivalenceToDataset:
         # margin overruns the contig and N-pads INSIDE the crop.
         # build_window_onehot must reproduce that padded edge byte-for-byte
         # against the val-mode Dataset x (design §3.1 / §4 contig-edge).
-        from background_model.config import JITTER, RF_BUDGET
+        from background_model.band_model.config import JITTER, RF_BUDGET
 
         model = _small_model()
         geom = WindowGeometry.from_model(model, _TILE)

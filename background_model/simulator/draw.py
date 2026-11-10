@@ -1,0 +1,595 @@
+"""The cut-site simulator's draw: fragments from ``r(h)``, ``f(L)`` and per-region counts.
+
+Inputs come from ``background_model.simulator.measure`` (``count_sample``,
+``uniform_hexamer_counts``, ``propensities``) and
+``background_model.fragment_lengths`` (``FragmentLengthDist``); encoding
+is ``background_model.hexamers``.  Authority: ``docs/pending/simulator_spec.md``.
+Driver: ``scripts/simulator/run_cut_site_simulator.py``.
+
+``simulate_fragments_to_bed`` is parallel over regions, and **byte-identical
+across worker counts** (owner decision 166): each region draws from its own
+stream ``default_rng([seed, region_index])``, and every reduction is grouped
+independently of ``n_workers``.  See ``region_rng``, and ``UNIFORM_BLOCK_SIZE``
+in ``measure`` for the same guarantee on ``N(h)``.
+
+The sampler takes the per-site RATE ``r(h)`` from
+``measure.propensities``, not raw counts: it re-enumerates candidate
+positions itself, so counts would apply hexamer abundance twice.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, NamedTuple, Optional
+
+import gzip
+
+import numpy as np
+import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
+
+from fragmentomics_tools.dataframe import DataFrameBase
+
+from background_model.constants import HEX_HALF, L_MAX
+from background_model.fragment_lengths import FragmentLengthDist
+from background_model.hexamers import hexamer_indices
+
+# Seeds and region indices are each ONE 32-bit word; see region_rng.
+_SEED_WORD_MAX: int = 2 ** 32
+
+# Sidecar rows formatted per write; any value gives the same bytes.  One block
+# is ~50 MB of text, but formatting it peaks near 230 MB (the per-column lists
+# and per-row strings before the join), measured at 2**20 rows.
+_SIDECAR_BLOCK_ROWS: int = 1 << 20
+
+
+class StrandStartDistribution(NamedTuple):
+    """One strand's start and length distributions in one region.
+
+    - ``start_probs[i] = P(i | strand)`` over ``[0, region_len)``, float64,
+      summing to 1.
+    - ``start_weights`` is the unnormalised start weight ``a_s * live``, so
+      ``start_probs = start_weights / start_weights.sum()``.
+    - ``W_s`` is the ``(region_len, n_L)`` length-weight block and ``t_s`` its
+      float64 row sums: ``P(L | i, strand) = W_s[i, L - fl.min_fl] / t_s[i]``,
+      defined where ``t_s[i] > 0``, which every start with
+      ``start_probs[i] > 0`` satisfies.
+    """
+
+    start_probs: np.ndarray
+    start_weights: np.ndarray
+    W_s: np.ndarray
+    t_s: np.ndarray
+
+
+def start_distribution(
+    sequence,
+    region_len: int,
+    *,
+    r: Dict[str, np.ndarray],
+    fl: "FragmentLengthDist",
+    strands=(True, False),
+) -> Dict[bool, Optional[StrandStartDistribution]]:
+    """The distributions ``sample_region`` draws from, per strand.
+
+    Returns ``{is_plus: StrandStartDistribution or None}`` for each strand in
+    ``strands``.  ``None`` means the strand has no live start (zero total
+    start weight); ``sample_region`` skips such a strand.
+
+    This is the ONE definition of the per-region start and length
+    distributions: ``sample_region`` draws from what it returns, so a caller
+    that needs the full distribution (an exact oracle normaliser, say) reads
+    the same arrays bit for bit.  The strand weight ``P(strand)`` is not part
+    of it; that is ``p_plus`` or ``1 - p_plus``.  See ``sample_region`` for the
+    rule itself.
+    """
+    seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
+    fwd, rc, valid = hexamer_indices(seq)
+    pos = np.arange(region_len)
+    # Every end position ``i + L`` any start can reach, in order.  W_s[i, l]
+    # depends on its end only through ``end_span[i + l]``, so the per-end
+    # factor is gathered once over this 1-D span and the (region_len x n_L)
+    # block is read through a sliding window of it, rather than gathered
+    # element by element.  Each element is still ``(e * valid) * f(L)`` in
+    # that order, so the block is bit-identical to the direct gather.
+    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)
+    n_L = fl.max_fl - fl.min_fl + 1
+
+    out = {}
+    for is_plus in strands:
+        track = fwd if is_plus else rc
+        s_tab = r["start_fwd"] if is_plus else r["end_rev"]
+        e_tab = r["end_fwd"] if is_plus else r["start_rev"]
+
+        e_end = e_tab[track[end_span]] * valid[end_span]
+        # C order is required, not cosmetic: the row sums below are pairwise
+        # along a contiguous row, and a differently laid-out block would sum
+        # in another order and move the last bits of t_s.
+        W_s = np.multiply(sliding_window_view(e_end, n_L),
+                          fl.densities[None, :], order="C")
+        t_s = W_s.sum(axis=1, dtype=np.float64)
+        live = t_s > 0
+
+        a_s = s_tab[track[pos]] * valid[pos]
+        a_s_live = a_s * live
+        tot = a_s_live.sum(dtype=np.float64)
+        if tot <= 0:
+            out[is_plus] = None
+            continue
+        out[is_plus] = StrandStartDistribution(
+            start_probs=a_s_live / tot, start_weights=a_s_live,
+            W_s=W_s, t_s=t_s)
+    return out
+
+
+def sample_region(
+    sequence,
+    region_len: int,
+    n: int,
+    *,
+    r: Dict[str, np.ndarray],
+    fl: "FragmentLengthDist",
+    p_plus: float,
+    rng,
+    _dup_counter=None,
+):
+    """Draw ``n`` fragments in one region.
+
+    Returns ``(starts_0, lengths, is_plus, probs)``.
+
+    Per fragment: strand, then start, then length.
+
+    - **Strand** ~ Bernoulli(``p_plus``).  The strand split is exactly
+      ``Binomial(n, p_plus)`` and is never revisited.
+    - **Start** ``i`` over ``[0, region_len)``, proportional to the start-side
+      propensity AND gated on the start having at least one valid length
+      (``live``).  Normalised within the strand.
+    - **Length** over ``[min_fl, max_fl]``, proportional to
+      ``end_p x f(L)``, normalised over ``L``.
+    - **Duplicates** on ``(start, start + length)`` are redrawn.  The key is
+      strand-blind, matching the read-time dedup convention.
+    - **Feasibility**: ``n > region_len`` raises ``ValueError``.
+
+    ``probs`` is the first-draw marginal probability of each fragment::
+
+        p = P(strand) * P(start | strand) * P(length | start, strand)
+
+    The start and length distributions come from ``start_distribution``:
+    the full weight block ``W_s`` for all positions per strand, its per-start
+    total ``t_s``, and the start probabilities gated on ``live = t_s > 0``.
+    Only the strands that draw at least one fragment are computed.  The
+    initial draw is vectorised; only duplicate collisions enter a scalar
+    redraw loop.
+    """
+    if n > region_len:
+        raise ValueError(
+            f"requested n={n} fragments but region has only "
+            f"{region_len} positions"
+        )
+    Ls = np.arange(fl.min_fl, fl.max_fl + 1)
+    pos = np.arange(region_len)
+
+    n_plus = int(rng.binomial(n, p_plus))
+    strand_ks = ((True, n_plus), (False, n - n_plus))
+    dists = start_distribution(
+        sequence, region_len, r=r, fl=fl,
+        strands=tuple(s for s, k in strand_ks if k > 0))
+    used = set()
+    out_s, out_L, out_p, out_prob = [], [], [], []
+    n_dup_redraws = 0
+
+    for is_plus, k in strand_ks:
+        if k == 0:
+            continue
+        dist = dists[is_plus]
+        if dist is None:
+            continue
+        start_probs, a_s_live, W_s, t_s = dist
+        p_strand = np.float64(p_plus if is_plus else (1.0 - p_plus))
+
+        starts = rng.choice(pos, size=k, replace=True, p=start_probs)
+        w = W_s[starts]
+        row_sums = t_s[starts]
+        cdf = np.cumsum(w / row_sums[:, None], axis=1)
+        pick = (cdf < rng.random((k, 1))).sum(axis=1)
+        lengths = Ls[pick]
+
+        result_starts = np.empty(k, dtype=np.int64)
+        result_lengths = np.empty(k, dtype=np.int64)
+        for j in range(k):
+            s, L = int(starts[j]), int(lengths[j])
+            while (s, s + L) in used:
+                n_dup_redraws += 1
+                # Total draw attempts for the region are n + n_dup_redraws.
+                # Cap them at 2n, so the raise fires once redraws exceed n.
+                # The counter is region-scoped (initialised before the strand
+                # loop), so this is a budget for the whole region rather than
+                # per fragment or per strand.
+                #
+                # Why 2n does not false-positive: n <= region_len is already
+                # enforced above, and each start admits ~len(Ls) lengths, so
+                # the live (start, L) space is ~len(Ls) times larger than n
+                # and expected redraws are well under 1% of n.  Exceeding n
+                # redraws means the live space is pathologically small -- not
+                # that collisions were unlucky -- so failing loudly beats
+                # spinning.  Do not loosen this without redoing that
+                # arithmetic.
+                if n_dup_redraws > n:
+                    # Only the message reads this, so it is built here rather
+                    # than as a full-block boolean on every strand.
+                    n_distinct = int(
+                        ((a_s_live > 0)[:, None] & (W_s > 0)).sum())
+                    raise RuntimeError(
+                        f"duplicate redraws ({n_dup_redraws}) exceeded n={n}, "
+                        f"i.e. more than 2n={2 * n} total draw attempts for "
+                        f"this region; {len(used)} of {n_distinct} distinct "
+                        f"(start, stop) pairs used in this strand block"
+                    )
+                s = int(rng.choice(pos, p=start_probs))
+                w_row = W_s[s]
+                cdf_row = np.cumsum(w_row / t_s[s])
+                l_idx = int((cdf_row < rng.random()).sum())
+                L = int(Ls[l_idx])
+            used.add((s, s + L))
+            result_starts[j] = s
+            result_lengths[j] = L
+
+        l_indices = result_lengths - fl.min_fl
+        p_start_vals = start_probs[result_starts]
+        p_length_vals = (
+            W_s[result_starts, l_indices] / t_s[result_starts]
+        )
+        probs = p_strand * p_start_vals * p_length_vals
+
+        out_s.append(result_starts)
+        out_L.append(result_lengths)
+        out_p.append(np.full(k, is_plus))
+        out_prob.append(probs)
+
+    if _dup_counter is not None:
+        _dup_counter[0] += n_dup_redraws
+
+    if not out_s:
+        z = np.zeros(0, dtype=np.int64)
+        return z, z, np.zeros(0, dtype=bool), np.zeros(0, dtype=np.float64)
+    return (np.concatenate(out_s).astype(np.int64),
+            np.concatenate(out_L).astype(np.int64),
+            np.concatenate(out_p),
+            np.concatenate(out_prob))
+
+
+def oracle_nll(probs: np.ndarray) -> float:
+    """``-mean(log(p))`` in float64."""
+    probs = np.asarray(probs, dtype=np.float64)
+    if probs.size == 0:
+        return float("nan")
+    return float(-np.log(probs).mean(dtype=np.float64))
+
+
+def _as_seed_word(value, name: str) -> int:
+    """``value`` as a Python int in ``[0, 2**32)``, or raise."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, np.integer)
+    ):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    value = int(value)
+    if not 0 <= value < _SEED_WORD_MAX:
+        raise ValueError(
+            f"{name}={value} is outside [0, 2**32); see region_rng for why "
+            f"a wider value would let two different (seed, region) pairs "
+            f"share a stream"
+        )
+    return value
+
+
+def region_rng(seed: int, region_index: int) -> np.random.Generator:
+    """The draw stream for one region: ``default_rng([seed, region_index])``.
+
+    Owner decision 166.  Each region's draw depends on ``(seed,
+    region_index)`` and nothing else -- not on the worker count, not on which
+    other regions are drawn, not on the order they run in.
+
+    **The PAIR, not ``seed + region_index``.**  With a sum, region 1 of seed
+    ``s`` and region 0 of seed ``s + 1`` share a stream, so replicates under
+    neighbouring seeds would be correlated.
+
+    **Both values must be ONE 32-bit word, so both are bounded to
+    ``[0, 2**32)``.**  ``SeedSequence`` flattens the list into 32-bit words
+    before hashing, so a wider seed spills into the region slot: measured,
+    ``[7 + 3 * 2**32, 0]`` and ``[7, 3]`` give the SAME stream.  With both
+    values one word wide the mapping from pair to stream is one-to-one.  (A
+    related quirk is harmless: ``[s, 0]`` equals ``default_rng(s)``, because
+    the entropy pool zero-pads.)
+    """
+    return np.random.default_rng([_as_seed_word(seed, "seed"),
+                                  _as_seed_word(region_index, "region_index")])
+
+
+def _draw_one_region(sequence, region_len: int, n: int, region_index: int,
+                     *, seed: int, r, fl, p_plus: float) -> dict:
+    """One region's draw on its own stream.  Runs in a worker.
+
+    The duplicate-redraw count travels back in the RETURN value: a counter
+    mutated inside a forked worker is the worker's copy and never reaches the
+    parent.
+    """
+    if n == 0:
+        z = np.zeros(0, dtype=np.int64)
+        return dict(starts_0=z, lengths=z, is_plus=np.zeros(0, dtype=bool),
+                    probs=np.zeros(0, dtype=np.float64), n_dup_redraws=0)
+    dup_counter = [0]
+    starts_0, lengths, is_plus, probs = sample_region(
+        sequence, region_len, n, r=r, fl=fl, p_plus=p_plus,
+        rng=region_rng(seed, region_index), _dup_counter=dup_counter,
+    )
+    return dict(starts_0=starts_0, lengths=lengths, is_plus=is_plus,
+                probs=probs, n_dup_redraws=dup_counter[0])
+
+
+def simulate_fragments_to_bed(
+    srdf,
+    out_path: str,
+    *,
+    r: Dict[str, np.ndarray],
+    fl: "FragmentLengthDist",
+    region_counts,
+    seed: int,
+    region_index=None,
+    p_plus: float = 0.5,
+    l_max: int = L_MAX,
+    mapq: int = 60,
+    sample_id: str | None = None,
+    p_sidecar_path: str | None = None,
+    n_workers: int | None = None,
+    verbose: bool = False,
+) -> dict:
+    """Draw fragments for every region and write an 8-column BED + a p sidecar.
+
+    The BED is the input to ``fragments_h5.build_fragments_h5``, which needs it
+    bgzipped and tabix-indexed -- that is the caller's next step, not this
+    function's.
+
+    ``region_counts`` is the per-row ``n``, as returned by
+    ``measure.count_srdf``.
+    ``seed`` is required rather than defaulted: an unseeded run cannot be
+    reproduced, and the seed is this artifact's only provenance.
+
+    **Seeding (owner decision 166).**  Row ``k`` draws from
+    ``region_rng(seed, region_index[k])`` -- its own stream, shared with no
+    other region.  ``region_index`` is the region's position in the INPUT
+    region set, a property of the region rather than of this frame, so a
+    filtered or reordered ``srdf`` draws exactly the same fragments for the
+    regions it keeps.  It is taken from the argument if given, else from the
+    frame's ``region_index`` column, which ``measure.count_sample``
+    attaches.  There is no positional fallback: ``arange(len(srdf))`` would
+    silently re-key every region of a filtered frame.  Values must be unique.
+
+    **Parallel, and byte-identical for every ``n_workers``.**  Regions are
+    drawn through ``parallel_apply`` (``None`` = every CPU, ``1`` =
+    in-process); the results come back in row order and are assembled exactly
+    as a serial loop would, and ``n_dup_redraws`` is summed from per-region
+    return values.  The BED, the sidecar and the stats are therefore
+    identical whatever the worker count.
+
+    Column layout, verified against ``fragments_h5.fragment.tsv_to_fragments``:
+
+        contig  start  stop  <empty>  0  strand  mapq  mapq
+
+    - **Exactly 8 columns.** 7 is rejected outright by the reader, and a row
+      whose column count differs from the first row's is skipped.
+    - **Column 4 is EMPTY, not** ``"."``. The reader takes
+      ``parts[3] if parts[3] else None``, and ``"."`` is truthy -- it would
+      write a literal ``"."`` cell barcode into the h5. Empty writes none.
+    - **MAPQ is written explicitly** in columns 7 and 8, and must be 0-255.
+      Omitting it stores a 255 sentinel that reads back as ``-1``, and the
+      model's ``min_mapq=10`` then drops **every** fragment. The default 60
+      clears that with room to spare.
+    - 0-based half-open, matching ``starts_0``/``stops_0``.
+
+    Output is sorted by ``(contig, start, stop)`` because tabix requires each
+    contig's records contiguous and position-ordered. Sorting here is why
+    ``sample_region``'s draw order is not part of its contract.
+
+    **Sidecar:** a gzipped TSV next to the BED (``<prefix>.p.tsv.gz``) carrying
+    ``(contig, start, stop, strand, p)`` for every drawn fragment.  With
+    duplicates redrawn the ``(contig, start, stop, strand)`` key is unique, so
+    a join against the h5 is exact and one-to-one.  ``p`` is written as
+    ``%.17g`` to round-trip float64 exactly.  Read-time dedup removes nothing.
+
+    Next step, verified end to end against the real reader::
+
+        gz = pysam.tabix_index(bed_path, preset="bed", force=True)
+        build_fragments_h5(gz, out_h5, fasta_filename=...)   # FASTA required
+
+    **``pysam.tabix_index`` CONSUMES the plain BED** -- measured: after the call
+    only ``sim.bed.gz`` and ``sim.bed.gz.tbi`` remain. Do not plan to re-read or
+    hash the plain file afterwards. Convenient for the two-output contract,
+    since the intermediate deletes itself, but surprising if unexpected.
+
+    Returns a stats dict including ``oracle_nll`` and ``n_dup_redraws``.
+    ``n_drawn == n_requested`` in all practical cases; ``n_short_regions`` is
+    retained for interface continuity but is permanently zero.
+    """
+    if out_path.endswith(".gz"):
+        raise ValueError(
+            f"write a PLAIN bed, got {out_path!r}. pandas would gzip it, and "
+            f"tabix needs BGZIP, which gzip is not -- the index step would fail "
+            f"on a file that looks correct. bgzip it as a separate step."
+        )
+    region_counts = np.asarray(region_counts)
+    if region_counts.shape != (len(srdf),):
+        raise ValueError(
+            f"region_counts has shape {region_counts.shape}, expected "
+            f"({len(srdf)},) -- one entry per row of srdf, in row order"
+        )
+    for col in ("contig", "start", "stop", "fragment_array", "sequence"):
+        if col not in srdf.columns:
+            raise ValueError(f"srdf has no {col!r} column")
+    seed = _as_seed_word(seed, "seed")
+
+    expected_seq_len_extra = 2 * HEX_HALF + l_max
+
+    # Validate every row in the parent, before anything forks, so a bad frame
+    # fails with its row number rather than from inside a worker.
+    region_lens = np.empty(len(srdf), dtype=np.int64)
+    for i, (contig, gstart, gstop, fa, seq) in enumerate(zip(
+        srdf["contig"], srdf["start"], srdf["stop"],
+        srdf["fragment_array"], srdf["sequence"],
+    )):
+        region_len = int(gstop) - int(gstart)
+        region_lens[i] = region_len
+        if fa.length != region_len:
+            raise AssertionError(
+                f"row {i}: fragment_array.length {fa.length} != stop-start "
+                f"{region_len}. Admission used the former and the sequence "
+                f"frame the latter, so they must agree."
+            )
+        if len(seq) != region_len + expected_seq_len_extra:
+            raise AssertionError(
+                f"row {i} ({contig}:{gstart}-{gstop}): sequence is {len(seq)} b, "
+                f"expected {region_len + expected_seq_len_extra} "
+                f"(region {region_len} + left_pad {HEX_HALF} + right_pad "
+                f"{l_max + HEX_HALF}). A short sequence means the flank was "
+                f"truncated -- a region within {l_max + HEX_HALF} b of a contig "
+                f"end cannot supply it -- and every hexamer index would shift."
+            )
+
+    if region_index is None:
+        if "region_index" not in srdf.columns:
+            raise ValueError(
+                "srdf has no 'region_index' column and none was passed. Each "
+                "region's stream is keyed on its position in the INPUT region "
+                "set (count_sample attaches it); a positional default would "
+                "silently re-key every region of a filtered frame."
+            )
+        region_index = srdf["region_index"]
+    region_index = np.asarray(region_index)
+    if region_index.shape != (len(srdf),):
+        raise ValueError(
+            f"region_index has shape {region_index.shape}, expected "
+            f"({len(srdf)},) -- one entry per row of srdf, in row order"
+        )
+    region_index = np.array([_as_seed_word(v, "region_index")
+                             for v in region_index.tolist()], dtype=np.int64)
+    if np.unique(region_index).size != region_index.size:
+        raise ValueError(
+            "region_index has duplicate values, so two rows would draw from "
+            "the same stream. A frame with several samples per region has "
+            "one row per (sample, region) pair and is not supported here."
+        )
+
+    if len(srdf):
+        work = DataFrameBase(pd.DataFrame({
+            "sequence": srdf["sequence"].to_numpy(),
+            "region_len": region_lens,
+            "n": region_counts.astype(np.int64),
+            "region_index": region_index,
+        }))
+        draws = work.parallel_apply(
+            lambda row: _draw_one_region(
+                row["sequence"], int(row["region_len"]), int(row["n"]),
+                int(row["region_index"]),
+                seed=seed, r=r, fl=fl, p_plus=p_plus,
+            ),
+            n_workers=n_workers,
+            verbose=verbose,
+        )
+        # Records come back in ROW order whatever process drew them, so
+        # concatenating each column in that order is the serial assembly.
+        starts_0 = np.concatenate(draws["starts_0"].tolist())
+        lengths = np.concatenate(draws["lengths"].tolist())
+        is_plus = np.concatenate(draws["is_plus"].tolist())
+        probs = np.concatenate(draws["probs"].tolist())
+        n_per_region = np.array([len(s) for s in draws["starts_0"]],
+                                dtype=np.int64)
+        n_dup_redraws = int(sum(int(v) for v in draws["n_dup_redraws"]))
+    else:
+        starts_0 = lengths = np.zeros(0, dtype=np.int64)
+        is_plus = np.zeros(0, dtype=bool)
+        probs = np.zeros(0, dtype=np.float64)
+        n_per_region = np.zeros(0, dtype=np.int64)
+        n_dup_redraws = 0
+
+    n_requested = int(region_counts.sum())
+    asked = region_counts > 0
+    n_drawn = int(n_per_region[asked].sum())
+    n_short = int((n_per_region[asked] < region_counts[asked]).sum())
+
+    # One frame for every region at once.  Each region's rows sit in row
+    # order, as one DataFrame per region concatenated would put them, and the
+    # stable sort below then gives the same row order as that per-region
+    # build did.
+    gstarts = np.asarray(srdf["start"].to_numpy(), dtype=np.int64)
+    starts = np.repeat(gstarts, n_per_region) + starts_0
+    stops = starts + lengths
+    strands = np.where(is_plus, "+", "-")
+    bed = pd.DataFrame({
+        "contig": np.repeat(srdf["contig"].to_numpy(dtype=object),
+                            n_per_region),
+        "start": starts,
+        "stop": stops,
+        "name": "",
+        "score": 0,
+        "strand": strands,
+        "mapq1": mapq,
+        "mapq2": mapq,
+        "p": probs,
+    })
+    if len(bed):
+        bed.sort_values(["contig", "start", "stop"], kind="stable", inplace=True)
+
+    bed_out = bed[["contig", "start", "stop", "name", "score",
+                   "strand", "mapq1", "mapq2"]]
+    bed_out.to_csv(out_path, sep="\t", header=False, index=False)
+
+    # Sidecar: (contig, start, stop, strand, p) with provenance header.
+    if out_path.endswith(".bed"):
+        sidecar_default = out_path[:-4] + ".p.tsv.gz"
+    else:
+        sidecar_default = out_path + ".p.tsv.gz"
+    sidecar_path = p_sidecar_path or sidecar_default
+    # compresslevel=6 (gzip's own default; Python's gzip module defaults to 9).
+    # Measured on 2,000 regions: level 9 spent 0.70 s of a ~1.2 s parent tail in
+    # zlib.compress, which scales to ~23 s of the full 66,649-region run, for a
+    # file ~0.4% smaller.
+    #
+    # Why this is NOT a change to the artifact's content: the DECOMPRESSED bytes
+    # are identical at any level, and the join key plus `%.17g` round-tripping
+    # are unaffected. The compressed bytes do change -- but they were never
+    # stable anyway, because gzip stores an mtime in its header, so two runs of
+    # identical code already produce different `.gz` files. Comparing sidecars
+    # byte for byte therefore requires decompressing first, at any level.
+    # (Owner decision 2026-10-10, after the review established the mtime point;
+    # the level had previously been left alone on the false premise that
+    # changing it was what would make the `.gz` bytes differ.)
+    with gzip.open(sidecar_path, "wt", compresslevel=6) as f:
+        meta_parts = [f"seed={seed}"]
+        if sample_id is not None:
+            meta_parts.append(f"sample={sample_id}")
+        f.write(f"# {' '.join(meta_parts)}\n")
+        f.write("contig\tstart\tstop\tstrand\tp\n")
+        # Python-level columns, formatted in blocks: one write per block
+        # rather than per row, with memory bounded for a full region set.
+        cols = [bed[c].to_numpy() for c in ("contig", "start", "stop",
+                                            "strand", "p")]
+        for lo in range(0, len(bed), _SIDECAR_BLOCK_ROWS):
+            hi = lo + _SIDECAR_BLOCK_ROWS
+            f.write("".join(
+                f"{c}\t{s}\t{e}\t{st}\t{p:.17g}\n"
+                for c, s, e, st, p in zip(*(col[lo:hi].tolist()
+                                            for col in cols))
+            ))
+
+    all_p = bed["p"].to_numpy(dtype=np.float64) if len(bed) else np.array(
+        [], dtype=np.float64
+    )
+
+    return dict(
+        n_regions=len(srdf),
+        n_requested=n_requested,
+        n_drawn=n_drawn,
+        n_short_regions=n_short,
+        n_rows_written=len(bed),
+        oracle_nll=oracle_nll(all_p),
+        n_dup_redraws=n_dup_redraws,
+        p_sidecar=sidecar_path,
+    )

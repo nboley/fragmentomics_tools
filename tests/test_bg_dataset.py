@@ -17,9 +17,9 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("background_model_core")
 
-from background_model.config import C, PlumbingConfig
-from background_model.dataset import _COMPLEMENT_LUT, BackgroundTileDataset
-from background_model.store import create_store
+from background_model.band_model.config import C, PlumbingConfig
+from background_model.band_model.dataset import _COMPLEMENT_LUT, BackgroundTileDataset
+from background_model.band_model.store import create_store
 
 # tiny geometry for fast synthetic stores
 _TILE = 256

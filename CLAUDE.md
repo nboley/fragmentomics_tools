@@ -17,38 +17,32 @@ those, but treat the *rules* as binding unless the owner says otherwise.
   A kill shows as exit 137 and means it HUNG — that is a finding to diagnose
   (`py-spy dump --pid <pid>`), not a flake to re-run.
 - Two suites exist and are easy to confuse: `test/` is the library suite
-  (the `make test` default) and `tests/` is `background_model`.
-  Baseline at `version_2` HEAD, measured 2026-10-07 after merging `main`:
-  `make test` **2 failed / 612 passed / 3 skipped / 0 xfailed**, total 617.
-  Before the merge it was 2 / 610 / 3 / 2 — the same total, because the merge
-  brought in the orientation fix and turned the two pinned-defect xfails into
-  passes without changing what is collected.
-  The 2 failures are missing data, not defects:
-  `test_slice_encode_big_wig` needs an ENCODE bigwig,
-  `test_get_one_hot_encoded_sequence` needs the in-package GRCh38 reference.
-  The 3 skips are Region doctests needing the optional `fbio`. There are no
-  longer any xfails: the two that existed pinned the `from_fragments_h5`
-  minus-strand defects, and both were fixed on `main` and merged in.
-  **Reconcile the TOTAL first** when two measurements disagree. The total is
+  and `tests/` is `background_model`. **The default `make test` collects
+  both** (`PYTEST_ARGS` is `test/ tests/ fragmentomics_tools/`), plus the
+  `fragmentomics_tools/` doctests.
+  Last measured baselines, both PRE-DATING the 2026-10-09 merge of main into
+  the simulator branch, so re-measure: `test/ fragmentomics_tools/` alone gave
+  **2 failed / 398 passed / 3 skipped / 0 xfailed**, total 403 (2026-10-07, at
+  the autoflip-removal commit); the default target on the simulator branch gave
+  **2 failed / 1009 passed / 3 skipped** (2026-10-09, before the merge).
+  **Reconcile the TOTAL first** when two measurements disagree: it is
   invariant under environment, so a matching total means you are looking at an
-  environment difference, while a differing total means tests went
-  uncollected. Two separate measurement confusions on this work would have
-  been one-step diagnoses with that check.
+  environment difference while a differing total means tests went uncollected.
+  Both failures are missing data, not defects: `test_slice_encode_big_wig`
+  needs an ENCODE bigwig, `test_get_one_hot_encoded_sequence` needs the
+  in-package GRCh38 reference; the 3 skips are Region doctests needing the
+  optional `fbio`. A few `self.log()`-without-Trainer warnings in `tests/`
+  are expected and harmless.
+  **Every baseline above is STALE: `version_2` merged `main` on 2026-11-10
+  and nothing has been re-measured since. Measure your own.**
   **`test_formats.py` is PATH-sensitive and this has burned two agents.**
   It drives the `bedToBigBed`, `tabix` and `bedtools` *binaries*. Without them
   on `PATH` roughly 40 `test_formats.py` tests fail and none of it is a
-  regression — measured at an earlier commit as `41 failed / 557 passed`
-  against `2 failed / 596 passed` with them, the same total either way. The
-  `Makefile` now puts `$(PYTHON)`'s own `bin/` first on `PATH` so `make test`
-  is self-contained; the failing figure is what you get running pytest by hand
-  in a shell without the env activated. Note that `2 failed / 557 passed` is an
-  **impossible pair** and means two runs got spliced together;
-  **`make test` does NOT cover `tests/`** — `PYTEST_ARGS` is
-  `test/ fragmentomics_tools/`, so any change under `fragment_array/` needs an
-  explicit `make test PYTEST_ARGS="tests/ -q"` run or a `background_model`
-  regression ships unseen.
-  `tests/` **494 passed, 0 skipped** (re-measured 2026-10-07), where a few
-  `self.log()`-without-Trainer warnings are expected and harmless.
+  regression. The `Makefile` puts `$(PYTHON)`'s own `bin/` first on `PATH` so
+  `make test` is self-contained; the failing figure is what you get running
+  pytest by hand in a shell without the env activated. Note that
+  `2 failed / 557 passed` is an **impossible pair** and means two runs got
+  spliced together.
   These numbers move with almost every commit, so **measure them yourself
   before and after your change** rather than quoting this line — the `tests/`
   figure sat at 196 long enough that the gap to reality reached 298 tests,
@@ -104,8 +98,16 @@ inside `Dataset.__getitem__`, and hardcoded `/scratch/...` and `/home/nboley/...
 paths that no longer exist.
 
 The live replacement is `background_model_core.py` plus the `background_model/`
-package (config, store, preprocess, dataset, inference, correction), developed
-on branch `background-model-v2` with designs in `docs/`.
+package, developed on branch `background-model-v2` with designs in `docs/`.
+Layout (owner decisions 195-197): shared definitions stay top-level
+(`constants`, `hexamers`, `tracks`, and `fragment_lengths`, which holds
+`FragmentLengthDist`/`fl_end_weight` so model code never has to import
+`simulator/`); the 12-track band model is
+`background_model/band_model/` (config, store, preprocess, sample_sheet,
+dataset, train, inference, correction, measure_throughput); the cut-site
+simulator is `background_model/simulator/`. `scripts/` mirrors this with
+`simulator/`, `band_model/`, `ctcf/`, `cut_site/` and `analysis/`
+subdirectories; a script's repo-root `sys.path` pin depends on its depth.
 
 ## Frozen statistical core
 
@@ -163,6 +165,9 @@ forward.
   its dtype and densifies as `values.dtype`, so fractional correction weights
   survive. Do not "tidy" it to match its name; that would floor every weight
   < 1 to zero and make corrected pileups quietly wrong. See its docstring.
+- **`reverse_complement_track_permutation` is NOT dead code** — `scripts/ctcf/ctcf_pileup_run.py`
+  uses it to orient minus-strand CTCF sites, so do not delete it when refactoring
+  the track models.
 - **fl bands are half-open** `[lo, hi)`: `(40, 65)` captures 40–64.
 - **Never identify tqdm's monitor thread by name.** `TMonitor` is named
   `tqdm_monitor` only from tqdm **4.69.0**; the pinned env has 4.67.1, where it

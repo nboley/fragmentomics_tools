@@ -532,7 +532,7 @@ The `BackgroundModel` class in `background_model_core.py` is the statistical
 specification. The KEN model should be a **separate class** (e.g.,
 `BackgroundModelKEN`) that implements the same Lightning interface
 (`training_step`, `validation_step`, `predict_profile`, etc.) and shares the
-same loss functions. The training harness (`background_model/train.py`) adds
+same loss functions. The training harness (`background_model/band_model/train.py`) adds
 a `--model` flag to select between CNN and KEN.
 
 This avoids modifying the frozen statistical core.
@@ -540,8 +540,8 @@ This avoids modifying the frozen statistical core.
 ### 6.6 Inference and Correction
 
 `predict_profile()` returns `{"probs": ..., "log_dispersion": ...}` — same
-interface. The correction module (`background_model/correction.py`) and
-inference module (`background_model/inference.py`) operate on these outputs
+interface. The correction module (`background_model/band_model/correction.py`) and
+inference module (`background_model/band_model/inference.py`) operate on these outputs
 and do not depend on model internals. No changes needed.
 
 

@@ -1,4 +1,4 @@
-"""Tests for background_model.store — layout, CSR access, N computation."""
+"""Tests for background_model.band_model.store — layout, CSR access, N computation."""
 
 import os
 import shutil
@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import zarr
 
-from background_model.config import C, L_TARGET, TILE, PlumbingConfig
-from background_model.store import (
+from background_model.band_model.config import C, L_TARGET, TILE, PlumbingConfig
+from background_model.band_model.store import (
     compute_N_for_tile,
     create_store,
     csr_slice,
@@ -228,7 +228,7 @@ class TestCSRResize:
     def test_resize_counts_arrays(self, store_fixture):
         """The defensive CSR resize path (overwrite=True) must work across
         zarr 2/3 and yield writable arrays of the new shape."""
-        from background_model.store import _create_array
+        from background_model.band_model.store import _create_array
 
         root = store_fixture["root"]
         counts = root["counts"]

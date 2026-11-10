@@ -202,3 +202,6 @@ STATUS.*.md
 
 # training run residue written into CWD by Lightning (belongs on EFS)
 lightning_logs/
+
+# mutation harness run output (scripts/_mutation_test.py); the harness is tracked
+scripts/_mutation_results.json
