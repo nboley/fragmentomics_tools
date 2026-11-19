@@ -123,8 +123,8 @@ from scripts.cut_site_model.score_fragments import (  # noqa: E402
 NORMALISERS = ("exact", "count_ratio")
 
 # The sidecar's p must reproduce to this relative tolerance: exactly.  It checks
-# the re-measured r(h)/f(L) and the restated formula together, and both are
-# bit-identical to the generator's (all 241,078 rows of the 10pct run).
+# the re-measured r(h)/f(L) and the shared ``start_distribution`` together, and
+# both are bit-identical to the generator's (all 241,078 rows of the 10pct run).
 P_RTOL = 0.0
 
 # The code a run imports, relative to the repo root.  The provenance record

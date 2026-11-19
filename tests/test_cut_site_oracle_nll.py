@@ -6,7 +6,7 @@ What the tests pin:
    every cell, so on the crop the oracle is ``log(2 * tile_size * n_L)`` -- the
    uniform baseline -- per region and, on a store, in every split; the
    count-ratio normaliser gives ``log Z_hat_r = log(n_scored / n_stored)``.
-2. The restated distribution IS the generator's: ``region_oracle`` reproduces
+2. The scored distribution IS the generator's: ``region_oracle`` reproduces
    ``sample_region``'s ``probs`` bit for bit, and its ``Z`` equals the crop's
    share of a full enumeration that sums to 1.  A second case puts an N block
    in the sequence so the live-start gate excludes starts, and uses an
@@ -87,7 +87,14 @@ def test_uniform_generator_matches_the_closed_form():
                                np.log(2 * TILE * N_L), rtol=1e-14)
 
 
-def test_restatement_reproduces_sample_region_bit_for_bit():
+def test_cell_p_matches_sample_region_bit_for_bit():
+    """Guard the oracle's per-fragment product, NOT the start distributions.
+
+    Both sides now read ``draw.start_distribution``, so this no longer compares
+    two independent derivations of the distributions -- that guard lives in
+    tests/test_simulator_draw.py.  What it still checks is real: the oracle's
+    ``cell_p`` formula against ``sample_region``'s own product (draw.py:233-237).
+    """
     rs = np.random.default_rng(1)
     r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
     fl = FragmentLengthDist(rs.integers(1, 50, N_L), L_LO)
@@ -124,7 +131,7 @@ def test_restatement_reproduces_sample_region_bit_for_bit():
 DEAD_LO, DEAD_HI = 250, 450   # N block (sequence/track coordinates)
 
 
-def test_restatement_live_gate_and_asymmetric_strands():
+def test_cell_p_live_gate_and_asymmetric_strands():
     rs = np.random.default_rng(6)
     r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
     fl = FragmentLengthDist(rs.integers(1, 50, N_L), L_LO)
