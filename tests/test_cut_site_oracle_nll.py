@@ -31,7 +31,7 @@ from background_model.constants import HEX_HALF, NHEX
 from background_model.cut_site_model.model import hex_registration_record
 from background_model.fragment_lengths import FragmentLengthDist
 from background_model.hexamers import hexamer_indices
-from background_model.simulator.draw import sample_region
+from background_model.simulator.draw import sample_region, start_distribution
 from background_model.simulator.measure import TABLE_NAMES
 from scripts.cut_site_model.baselines.reduce_split_nll import (
     read_per_fragment,
@@ -169,6 +169,29 @@ def test_restatement_live_gate_and_asymmetric_strands():
                                 fl=fl, p_plus=1 - p_plus, crop_start=CROP_START,
                                 tile_size=TILE)
     assert abs(out["Z"] - out_swapped["Z"]) > 1e-6
+
+
+@pytest.mark.parametrize("dead_plus", [True, False])
+def test_dead_strand_raises_not_none(dead_plus):
+    """``start_distribution`` returns None for a dead strand; the oracle must
+    turn that into ValueError, never pass None on to a score."""
+    rs = np.random.default_rng(8)
+    r = {k: rs.uniform(0.1, 3.0, NHEX) for k in TABLE_NAMES}
+    # Zero only this strand's start table: the other strand stays live.
+    r["start_fwd" if dead_plus else "end_rev"][:] = 0.0
+    fl = FragmentLengthDist(rs.integers(1, 50, N_L), L_LO)
+    seq = _seq(rs)
+
+    # Non-vacuity: the helper really reports exactly this strand dead.
+    raw = start_distribution(seq, REGION_LEN, r=r, fl=fl)
+    assert raw[dead_plus] is None and raw[not dead_plus] is not None
+
+    sign = "+" if dead_plus else "-"
+    with pytest.raises(ValueError, match=rf"strand \{sign} has no live start"):
+        strand_start_probs(seq, REGION_LEN, r=r, fl=fl)
+    with pytest.raises(ValueError, match=rf"strand \{sign} has no live start"):
+        region_oracle(seq, REGION_LEN, [0], [L_LO], [not dead_plus], r=r, fl=fl,
+                      p_plus=0.5, crop_start=CROP_START, tile_size=TILE)
 
 
 def test_read_sidecar_is_exact(tmp_path):

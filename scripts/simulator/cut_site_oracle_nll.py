@@ -61,13 +61,11 @@ Two normalisers
                  is Jensen-biased low at ~36 draws, and reuses the draws it
                  scores.
 
-``strand_start_probs`` restates the start and length distributions of
-``simulator.draw.sample_region``, which returns ``p`` for drawn fragments only
-and exposes no per-start distribution.  Changing the simulator was out of scope
-(this is an additive measurement), so the restatement is pinned instead: it must
-reproduce ``sample_region``'s ``probs`` bit for bit
-(``tests/test_cut_site_oracle_nll.py``), and every run re-checks it against the
-sidecar.
+``strand_start_probs`` reads the start and length distributions from
+``simulator.draw.start_distribution``, the one definition ``sample_region``
+itself draws from, and refuses a dead strand.  The oracle must still reproduce
+``sample_region``'s ``probs`` bit for bit (``tests/test_cut_site_oracle_nll.py``),
+and every run re-checks it against the sidecar.
 
 Not modelled, by owner decision (``simulator_spec.md``, Settled, "Duplicates
 are redrawn"): the sidecar's ``p`` is the first-draw marginal, while duplicate
@@ -90,7 +88,6 @@ from typing import Dict, Sequence
 import numpy as np
 import pandas as pd
 import zarr
-from numpy.lib.stride_tricks import sliding_window_view
 
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _REPO)
@@ -111,7 +108,7 @@ from background_model.cut_site_model.dataset import (  # noqa: E402
     crop_origin,
 )
 from background_model.cut_site_model.store import CutSiteStoreConfig  # noqa: E402
-from background_model.hexamers import hexamer_indices  # noqa: E402
+from background_model.simulator.draw import start_distribution  # noqa: E402
 from scripts.cut_site_model.baselines.reduce_split_nll import (  # noqa: E402
     read_per_fragment,
     reduce_splits,
@@ -145,35 +142,21 @@ CODE_PATHSPEC = ("background_model", "background_model_core.py", "scripts",
 def strand_start_probs(sequence, region_len: int, *, r, fl):
     """Per strand, the generator's start and length distributions.
 
-    Returns ``{is_plus: (start_probs, W_s, t_s)}``: ``start_probs[i] = P(i | s)``
-    over ``[0, region_len)``, and ``P(L | i, s) = W_s[i, L - fl.min_fl] /
-    t_s[i]``.  A RESTATEMENT of ``simulator.draw.sample_region``, kept in its
-    operation order so the two agree bit for bit; see the module docstring.
+    Returns ``{is_plus: StrandStartDistribution(start_probs, W_s, t_s)}`` from
+    ``simulator.draw.start_distribution``: ``start_probs[i] = P(i | s)`` over
+    ``[0, region_len)``, and ``P(L | i, s) = W_s[i, L - fl.min_fl] / t_s[i]``.
 
-    A strand with no live start raises.  ``sample_region`` skips such a strand
-    and emits fewer fragments, so its draws would not follow ``P(s) = p_plus``
-    and no oracle built on that assumption would be the generator's.
+    A strand with no live start (``None`` from ``start_distribution``) raises.
+    ``sample_region`` skips such a strand and emits fewer fragments, so its
+    draws would not follow ``P(s) = p_plus`` and no oracle built on that
+    assumption would be the generator's.
     """
-    seq = np.frombuffer(bytes(sequence).upper(), dtype=np.uint8)
-    fwd, rc, valid = hexamer_indices(seq)
-    n_L = fl.max_fl - fl.min_fl + 1
-    pos = np.arange(region_len)
-    end_span = np.arange(fl.min_fl, region_len + fl.max_fl)
-    out = {}
-    for is_plus in (True, False):
-        track = fwd if is_plus else rc
-        s_tab = r["start_fwd"] if is_plus else r["end_rev"]
-        e_tab = r["end_fwd"] if is_plus else r["start_rev"]
-        e_end = e_tab[track[end_span]] * valid[end_span]
-        W_s = np.multiply(sliding_window_view(e_end, n_L),
-                          fl.densities[None, :], order="C")
-        t_s = W_s.sum(axis=1, dtype=np.float64)
-        a_s_live = s_tab[track[pos]] * valid[pos] * (t_s > 0)
-        tot = a_s_live.sum(dtype=np.float64)
-        if tot <= 0:
+    out = start_distribution(sequence, region_len, r=r, fl=fl,
+                             strands=(True, False))
+    for is_plus, dist in out.items():
+        if dist is None:
             raise ValueError(f"strand {'+' if is_plus else '-'} has no live "
                              f"start; the generator would not draw it")
-        out[is_plus] = (a_s_live / tot, W_s, t_s)
     return out
 
 
@@ -192,7 +175,7 @@ def region_oracle(sequence, region_len: int, starts_0, lengths, is_plus, *,
     dist = strand_start_probs(sequence, region_len, r=r, fl=fl)
     p_strand = {True: np.float64(p_plus), False: np.float64(1.0 - p_plus)}
     crop = slice(crop_start, crop_start + tile_size)
-    Z = sum(p_strand[s] * dist[s][0][crop].sum(dtype=np.float64)
+    Z = sum(p_strand[s] * dist[s].start_probs[crop].sum(dtype=np.float64)
             for s in (True, False))
 
     starts_0 = np.asarray(starts_0, dtype=np.int64)
@@ -200,7 +183,8 @@ def region_oracle(sequence, region_len: int, starts_0, lengths, is_plus, *,
     is_plus = np.asarray(is_plus, dtype=bool)
 
     def cell_p(s, rows):
-        start_probs, W_s, t_s = dist[s]
+        d = dist[s]
+        start_probs, W_s, t_s = d.start_probs, d.W_s, d.t_s
         i, li = starts_0[rows], l_idx[rows]
         return p_strand[s] * start_probs[i] * (W_s[i, li] / t_s[i])
 
