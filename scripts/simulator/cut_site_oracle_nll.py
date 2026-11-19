@@ -407,6 +407,30 @@ def _strip_terms(res: Dict[str, dict]) -> Dict[str, dict]:
             for s, d in res.items()}
 
 
+def run_regions(run: dict, ref: str):
+    """The regions the run actually drew from, not the whole BED.
+
+    ``run.json`` records the FULL ``region_bed`` path but the SLICED
+    ``n_regions`` count: the simulator slices with ``rdf.iloc[:n_regions]``
+    before it measures (run_cut_site_simulator.py).  Loading the BED without
+    that slice measures a different population, so every ``--n-regions`` run
+    failed the re-measurement gate and could not be scored at all.
+
+    Mirrors the simulator's slice exactly.  A no-op for a full run.
+    """
+    # Late import: the measure stack is heavy and only the CLI needs it.
+    from fragmentomics_tools.dataframe import RegionDataFrame
+
+    rdf = RegionDataFrame.from_bed(run["region_bed"], ref=ref)
+    n = run["n_regions"]
+    if len(rdf) < n:
+        raise ValueError(
+            f"region_bed has {len(rdf)} regions, fewer than the run's "
+            f"n_regions={n}: {run['region_bed']} is not the BED this run used"
+        )
+    return rdf.iloc[:n]
+
+
 def main(argv=None):
     sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__,
@@ -453,10 +477,10 @@ def main(argv=None):
           f"{len(st['start'])} fragments")
 
     # Late import: the measure stack is heavy and only main needs it.
-    from fragmentomics_tools.dataframe import RegionDataFrame
     from background_model.simulator.measure import measure_sample
 
-    rdf = RegionDataFrame.from_bed(run["region_bed"], ref=args.ref)
+    rdf = run_regions(run, args.ref)
+    print(f"[regions] {len(rdf)} of {run['region_bed']}")
     t = time.time()
     m = measure_sample(rdf, run["sample_id"], run["fragments_h5"], run["fasta"],
                        min_mapq=run["min_mapq"], n_workers=args.n_workers,

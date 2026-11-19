@@ -44,6 +44,7 @@ from scripts.simulator.cut_site_oracle_nll import (
     oracle_arrays,
     read_sidecar,
     region_oracle,
+    run_regions,
     store_rows,
     strand_start_probs,
     write_and_reduce,
@@ -336,3 +337,44 @@ def test_log_prob_ml_is_conditioned_on_the_crop(store):
     expected = -np.log(np.float64(TILE * N_L))
     np.testing.assert_allclose(log_prob_ml[scored], expected, rtol=1e-13)
     assert np.all(np.isnan(log_prob_ml[~scored]))
+
+
+# ---------------------------------------------------------------------------
+# run_regions: the --n-regions subset gate
+# ---------------------------------------------------------------------------
+
+def _write_bed(path, n):
+    """n regions on chr1, 1kb apart, the shape run_cut_site_simulator emits."""
+    with open(path, "w") as fh:
+        for i in range(n):
+            fh.write(f"chr1\t{1000 * i}\t{1000 * i + 500}\n")
+    return str(path)
+
+
+def test_run_regions_slices_to_the_runs_subset(tmp_path):
+    """A --n-regions run records the FULL bed but the SLICED count.
+
+    Loading the bed without the slice measures a different population, which
+    is what made every subset run unscoreable.
+    """
+    bed = _write_bed(tmp_path / "full.bed", 50)
+    run = {"region_bed": bed, "n_regions": 7}
+
+    rdf = run_regions(run, "hg38")
+
+    assert len(rdf) == 7                      # the slice happened
+    # and it is the FIRST 7, the same ones the simulator drew from
+    assert list(rdf["start"]) == [1000 * i for i in range(7)]
+
+
+def test_run_regions_is_a_noop_for_a_full_run(tmp_path):
+    bed = _write_bed(tmp_path / "full.bed", 12)
+    rdf = run_regions({"region_bed": bed, "n_regions": 12}, "hg38")
+    assert len(rdf) == 12
+
+
+def test_run_regions_rejects_a_bed_that_is_too_short(tmp_path):
+    """A shorter bed would silently yield fewer regions; iloc does not raise."""
+    bed = _write_bed(tmp_path / "short.bed", 3)
+    with pytest.raises(ValueError, match="fewer than the run's n_regions"):
+        run_regions({"region_bed": bed, "n_regions": 9}, "hg38")
