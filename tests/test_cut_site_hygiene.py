@@ -277,14 +277,18 @@ class TestT7Hygiene:
             )
 
     def test_model_code_never_imports_simulator(self):
-        """Owner decision 187: ``simulator/`` is the on-disk blindness
-        boundary. The cut-site model is evaluated blind on simulated data, so
-        no module under ``background_model/`` outside
+        """Owner decisions 187/194: ``simulator/`` is an import boundary. The
+        model must never use the generating f(L) or hexamer counts as a prior
+        (blinding itself was dropped in 194), so no module under ``background_model/`` outside
         ``background_model/simulator/``, and not ``background_model_core.py``,
         may import ``background_model.simulator`` -- absolutely, as
         ``from background_model import simulator``, relatively
         (``from .simulator import draw``), or by string through
         ``importlib.import_module`` / ``__import__``. Guards mutation B1.
+
+        ``scripts/cut_site_model/`` is held to the same boundary, every
+        subdirectory included: those scripts build the model's prior (stage
+        1, baselines) and train it.
 
         Scans the files on disk, not ``sys.modules``, so a module no test
         imports is still checked.
@@ -292,6 +296,7 @@ class TestT7Hygiene:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         pkg_dir = os.path.join(repo_root, "background_model")
         sim_dir = os.path.join(pkg_dir, "simulator")
+        scripts_dir = os.path.join(repo_root, "scripts", "cut_site_model")
         banned = "background_model.simulator"
 
         def is_banned(name):
@@ -340,13 +345,14 @@ class TestT7Hygiene:
                         yield node.args[0].value
 
         scanned, first_party, offenders = [], 0, []
-        for root, dirs, files in os.walk(pkg_dir):
-            dirs[:] = [d for d in dirs if d != "__pycache__"]
-            if os.path.commonpath([root, sim_dir]) == sim_dir:
-                continue
-            for fn in files:
-                if fn.endswith(".py"):
-                    scanned.append(os.path.join(root, fn))
+        for top in (pkg_dir, scripts_dir):
+            for root, dirs, files in os.walk(top):
+                dirs[:] = [d for d in dirs if d != "__pycache__"]
+                if os.path.commonpath([root, sim_dir]) == sim_dir:
+                    continue
+                for fn in files:
+                    if fn.endswith(".py"):
+                        scanned.append(os.path.join(root, fn))
         scanned.append(os.path.join(repo_root, "background_model_core.py"))
         for path in scanned:
             for name in imported_names(path):
@@ -359,11 +365,13 @@ class TestT7Hygiene:
             "model code imports the simulator (decision 187 boundary):\n  "
             + "\n  ".join(offenders))
 
-        # Non-vacuity. 15 modules sit outside simulator/ today (5 top-level,
-        # 10 in band_model/), plus the core; far fewer means the walk is
-        # skipping files. And they import each other, so seeing no first-party
+        # Non-vacuity. 19 modules sit outside simulator/ today (5 top-level,
+        # 10 in band_model/, 4 in cut_site_model/), plus the core, plus 6
+        # scripts in scripts/cut_site_model/: 26 files.  Fewer means the walk
+        # is skipping files (or one was deleted, which should lower this floor
+        # on purpose). And they import each other, so seeing no first-party
         # import means the walker is blind.
-        assert len(scanned) >= 13, f"scanned only {len(scanned)} modules"
+        assert len(scanned) >= 26, f"scanned only {len(scanned)} modules"
         # fragment_lengths.py holds code moved out of the simulator so that
         # model-side code can share it (owner decision 2026-10-10); it is
         # exactly what this boundary must see, so its absence from the walk is
@@ -371,9 +379,22 @@ class TestT7Hygiene:
         assert os.path.join(pkg_dir, "fragment_lengths.py") in scanned, (
             "fragment_lengths.py was not scanned")
         # The walk descends into sibling sub-packages, not just the top level:
-        # band_model/ is model code and is held to the same boundary.
-        assert os.path.join(pkg_dir, "band_model", "train.py") in scanned, (
-            "band_model/ was not scanned")
+        # band_model/ and cut_site_model/ are model code and are held to the
+        # same boundary.  cut_site_model/ is the model whose prior it protects.
+        for sub in (("band_model", "train.py"),
+                    ("cut_site_model", "dataset.py"),
+                    ("cut_site_model", "model.py")):
+            assert os.path.join(pkg_dir, *sub) in scanned, (
+                f"{'/'.join(sub)} was not scanned")
+        # Every script under scripts/cut_site_model/, at any depth, counted by
+        # glob rather than by the walk under test, so a new subdirectory
+        # (e.g. baselines/) cannot drop out of the scan unseen.
+        import glob
+        scripts = glob.glob(os.path.join(scripts_dir, "**", "*.py"),
+                            recursive=True)
+        assert os.path.join(scripts_dir, "stage1_hex_baseline.py") in scripts
+        missed = sorted(set(scripts) - set(scanned))
+        assert not missed, f"scripts not scanned: {missed}"
         assert first_party >= 10, (
             f"saw only {first_party} background_model imports across "
             f"{len(scanned)} modules")

@@ -17,12 +17,20 @@ lowest band's ``lo`` and ``L_MAX`` the highest band's ``hi``.  ``L_MAX`` is
 INCLUSIVE -- a fragment of exactly ``L_MAX`` is admitted -- even though each
 band is half-open ``[lo, hi)``, so a length-``L_MAX`` fragment is admitted by
 the cut-site path but falls in no track band.  Inclusive 180 is the meaning
-here and in the cut-site store and model on the ``worktree-cut-site-model``
-branch (``cut_site_store.py``, ``cut_site_model.py``).  One evaluator on that
-branch, ``scripts/eval_fragment_nll.py``, uses ``max(hi) - 1`` = 179, the
-half-open reading; reconciling it is that branch's decision.  Do not "align"
-``L_MAX`` here to the bands without an owner decision, since it changes which
-fragments are counted.
+here and in the cut-site store and model
+(``background_model/cut_site_model/store.py``,
+``background_model/cut_site_model/model.py``).
+
+The one evaluator that disagreed, ``scripts/eval_fragment_nll.py``, used
+``max(hi) - 1`` = 179.  That was reconciled to ``L_MAX`` = 180 by owner
+decision 185: in that script only, a length-180 fragment is scored with the
+top band's tracks and a guard raises if any fragment lands in no
+(strand, band) group.  The script has since been retired to
+``attic/twelve_track_comparison/`` along with the 12-track comparison it
+served, with the fix intact.
+
+Do not "align" ``L_MAX`` here to the bands without an owner decision, since it
+changes which fragments are counted.
 
 >>> L_MIN, L_MAX, N_LENGTHS
 (25, 180, 156)

@@ -361,16 +361,99 @@ def run_phase_a(
 
 # ── Phase B — store assembly ─────────────────────────────────────────────
 
+def copy_region_splits_from_store(store_path: str) -> dict:
+    """Read a (contig, start) -> split mapping out of an existing zarr store.
+
+    Used to build a second store whose splits are *identical* to a first one,
+    so that "val" means the same regions in both and models trained on each
+    can be compared.  Regenerating the splits from `config.seed` is NOT a
+    safe substitute:
+
+      - `assign_region_splits` shuffles a list whose order comes from dict
+        iteration over `tiles`, so the same seed with a different region
+        ordering yields a different split.
+      - NumPy only guarantees stream stability for the legacy `RandomState`,
+        not for `default_rng`, so even identical seed *and* ordering can
+        split differently under a different NumPy build.
+
+    This is not hypothetical.  The 12-track store bg_store_b8d7ba35 and the
+    cut-site store quiet_tile1536_v2 were built from the SAME bed, with the
+    same seed and region_fracs, and agree on only 60% of assignments --
+    close to the 66% expected of two independent draws.  Worse, 100% of the
+    cut-site val regions landed in the 12-track TRAIN split, so evaluating
+    one store's model on the other's val split is training-on-test.
+
+    The key is (contig, start), NOT region_id: the two builders use different
+    region_id conventions ("chr1:833100-834636" vs "r0") and different
+    start/stop spans (l_target vs tile_size), but they agree on the start
+    coordinate.  Keying on region_id silently finds nothing in common.
+    """
+    import zarr
+
+    root = zarr.open_group(store_path, mode="r")
+    contigs = root["tiles/contig"][:]
+    starts = root["tiles/start"][:]
+    splits = root["tiles/split"][:]
+    mapping = {}
+    for contig, start, sp in zip(contigs, starts, splits):
+        key = (str(contig), int(start))
+        sp = int(sp)
+        if mapping.setdefault(key, sp) != sp:
+            raise ValueError(
+                f"source store {store_path} assigns region {key} to more than "
+                f"one split -- splits must be region-granular to be copied"
+            )
+    return mapping
+
+
+def _tile_split_key(tile) -> tuple:
+    """Join key for copying splits across stores: (contig, l_target start)."""
+    return (str(tile["contig"]), int(tile["start"]))
+
+
+def validate_split_overrides(tiles: list, split_overrides: dict) -> None:
+    """Fail if any tile is absent from a copied split map.
+
+    Called BEFORE Phase A, not just inside Phase B where the splits are
+    finally applied: Phase A is the expensive per-sample pass, and a key
+    mismatch is knowable from the tile list alone.  Validating late means
+    paying for the whole build to learn the join was wrong.
+    """
+    missing = sorted({_tile_split_key(t) for t in tiles} - set(split_overrides))
+    if missing:
+        raise ValueError(
+            f"{len(missing)} of {len(tiles)} tile(s) absent from the copied "
+            f"split map (first few: {missing[:5]}). The two stores must cover "
+            f"the same regions, and the join key is (contig, start) -- check "
+            f"that both were built from the same bed with the same jitter."
+        )
+
+
 def assign_region_splits(
     tiles: list,
     config: PlumbingConfig,
+    split_overrides: dict | None = None,
 ):
     """Assign splits to regions, then propagate to tiles.
 
     Split values: 0=train, 1=val, 2=heldout_inactive, 3=positive_control.
     Regions from a 'positive_control' BED get split=3 unconditionally.
     Other regions are split at REGION granularity using config.region_fracs.
+
+    If `split_overrides` (region_id -> split) is given, it is used verbatim
+    instead of drawing new splits, and a region missing from it is a hard
+    error.  Falling back to a random draw for the missing ones would produce
+    a store that is *almost* aligned with its source, which is worse than one
+    that is obviously not: the comparison it exists to support would be
+    silently invalid.  See `copy_region_splits_from_store`.
     """
+    if split_overrides is not None:
+        validate_split_overrides(tiles, split_overrides)
+        return np.array(
+            [split_overrides[_tile_split_key(t)] for t in tiles],
+            dtype=np.uint8,
+        )
+
     rng = np.random.default_rng(config.seed)
 
     # Collect unique regions and their split_name
@@ -422,6 +505,7 @@ def run_phase_b(
     shard_dir: str,
     output_dir: str,
     ref: str,
+    split_overrides: dict | None = None,
 ):
     """Phase B: assemble shards into a zarr store.
 
@@ -461,7 +545,7 @@ def run_phase_b(
     tile_region_ids = np.array([t["region_id"] for t in tiles])
 
     # Assign region splits
-    tile_splits = assign_region_splits(tiles, config)
+    tile_splits = assign_region_splits(tiles, config, split_overrides)
 
     root["tiles/contig"][:] = tile_contigs
     root["tiles/start"][:] = tile_starts
@@ -669,8 +753,20 @@ def run_preprocess(
     output_dir: str,
     ref: str = "hg38",
     n_workers: int = 8,
+    copy_splits_from: str | None = None,
 ):
     """Run the full preprocessing pipeline (Phase A + Phase B)."""
+    split_overrides = (
+        copy_region_splits_from_store(copy_splits_from)
+        if copy_splits_from
+        else None
+    )
+    if split_overrides is not None:
+        log.info(
+            f"Copying splits for {len(split_overrides)} regions from "
+            f"{copy_splits_from} (NOT redrawing from config.seed)"
+        )
+
     sheet = pd.read_csv(config.sample_sheet, sep="\t")
     drawn_sheet = draw_samples(sheet, config)
 
@@ -678,10 +774,16 @@ def run_preprocess(
         config.region_beds, config.tile_size, config.jitter, config.rf_budget, ref
     )
 
+    if split_overrides is not None:
+        validate_split_overrides(tiles, split_overrides)
+        log.info(f"Split-copy join validated for all {len(tiles)} tiles")
+
     shard_dir = os.path.join(output_dir, f"shards_{config.config_hash8()}")
     run_phase_a(config, drawn_sheet, tiles, shard_dir, ref, n_workers)
 
-    store_path = run_phase_b(config, drawn_sheet, tiles, shard_dir, output_dir, ref)
+    store_path = run_phase_b(
+        config, drawn_sheet, tiles, shard_dir, output_dir, ref, split_overrides
+    )
     return store_path
 
 
@@ -693,13 +795,24 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument("--ref", default="hg38", help="Reference genome name")
     parser.add_argument("--workers", type=int, default=8, help="Number of Phase A workers")
+    parser.add_argument(
+        "--copy-splits-from",
+        default=None,
+        help="Path to an existing zarr store whose region_id -> split mapping "
+             "should be used verbatim instead of drawing new splits. Required "
+             "when the resulting store must be comparable to that one: 'val' "
+             "then means the same regions in both. A region missing from the "
+             "source is a hard error, never a silent redraw.",
+    )
     args = parser.parse_args(argv)
 
     with open(args.config) as f:
         config = PlumbingConfig.from_json(f.read())
 
     logging.basicConfig(level=logging.INFO)
-    run_preprocess(config, args.output_dir, args.ref, args.workers)
+    run_preprocess(
+        config, args.output_dir, args.ref, args.workers, args.copy_splits_from
+    )
 
 
 if __name__ == "__main__":

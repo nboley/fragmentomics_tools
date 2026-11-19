@@ -161,7 +161,8 @@ class TestConstants:
             const_mod.__file__,
             # A self-contained GPU cost skeleton; its L range (25..256) is
             # deliberately not the cut-site one and never meets the store.
-            os.path.join(repo_root, "scripts", "cut_site", "bench_fragment_logit_sweep.py"),
+            os.path.join(repo_root, "scripts", "cut_site_model",
+                         "bench_fragment_logit_sweep.py"),
         }
         paths = sorted(
             p for p in (

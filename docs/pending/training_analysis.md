@@ -962,6 +962,111 @@ per-hexamer count overdispersion is the transfer risk) was falsified by a
 pre-flight measurement: the effect is ~4% excess variance at our counts, and the
 conditional loss cannot see it regardless.
 
+## 10. Cut-Site Fragment Model — Real-Data Comparison (2026-10-01)
+
+> **Retired code (owner ruling, 2026-10-10).** The 12-track cross-model
+> comparison this section reports was dropped — the quiet region set is 1,536 bp
+> islands and a 12-track model needs ~16 kb tiles at this depth, so the
+> comparison has no territory to run on. `eval_fragment_nll.py` and
+> `train_12track.py` are now in `attic/twelve_track_comparison/` and no longer
+> run. See that directory's README for the revival condition (loss masking) and
+> for why the scripts are correct rather than broken.
+>
+> **Do not quote the 12-track figures below.** The `12.325` for the old CNN is
+> a *training-set* score: that store shared 100% of its regions with the
+> cut-site validation split. The cut-site numbers here are also superseded —
+> all of them predate start-based admission. Current figures are in §11 and §12.
+
+A new model family trained on per-fragment data rather than aggregate 12-track
+position profiles. Three cut-site model ablations and two old CNN runs on the
+same tile1536 region set, evaluated on a common **fragment-level multinomial
+NLL** metric via `eval_fragment_nll.py` / `eval_cutsite_fragment_nll.py`.
+
+### 10.1 Stores
+
+| Store | Path | Tiles | Data |
+|---|---|---|---|
+| Real cut-site | `cut_site_stores/quiet_tile1536.zarr` | 66,649 | per-fragment (start, length, strand) |
+| Real 12-track | `stores/12track_tile1536/bg_store_b8d7ba35.zarr` | 66,649 | aggregate 12-track endpoint counts |
+| Sim cut-site | `cut_site_stores/sim_tile1536.zarr` | 66,649 | simulated fragments |
+| Sim 12-track | `stores/sim_12track_tile1536/bg_store_21d9a69a.zarr` | 66,649 | simulated 12-track counts |
+
+### 10.2 Training Results (real data)
+
+**Cut-site model ablations** (tile_size=1024, 20 epochs, A10G, ~4.5h each):
+
+| Run | Mult wt | NB wt | val_mult_nll | val_nb_loss | Notes |
+|---|---|---|---|---|---|
+| NB-only | 0.0 | 1.0 (fixed) | 12.669 | **5.432** | Count-only, val_nb barely learns |
+| Mult-only | 1.0 | 0.0 | **12.011** | 5.571 | Shape-only, best mult NLL |
+| Combined (run6) | 1.0 | 1.0→0.0 | 12.718 | 5.456 | NB warmup→mult, tile2560 |
+
+**Old CNN models** (lr=1e-4, fp32, 30 min cap → 7 epochs):
+
+| Run | Loss | val_mult_nll (12-track) |
+|---|---|---|
+| Multinomial | multinomial | 6.738 |
+| NB-frozen-disp | nb_offset (frozen r) | 6.737 |
+
+### 10.3 Fragment-Level NLL (common metric, same val set)
+
+All models evaluated with the same per-fragment multinomial NLL — the metric
+the cut-site model directly optimises. For old CNN models, fragment
+probabilities are derived from the 12-track position predictions via
+`eval_fragment_nll.py` (product of endpoint probabilities × marginal p(L),
+normalized).
+
+| Model | Fragment NLL | Method |
+|---|---|---|
+| **Stage 1 hex baseline** | **12.024** | Analytical (zero training) |
+| **Cut-site Mult-only** | **12.012** | `eval_cutsite_fragment_nll.py` |
+| Old CNN Multinomial | 12.325 | `eval_fragment_nll.py` |
+| Old CNN NB-frozen | 12.325 | `eval_fragment_nll.py` |
+| Cut-site NB-only | 12.669 | `eval_cutsite_fragment_nll.py` |
+
+**Key findings:**
+- The analytical hex baseline (12.024) already beats the old CNN (12.325) with
+  **zero training** — the factored model p_start × p_stop × p(L) captures
+  more than the CNN's 12-track aggregation loses.
+- ~~Cut-site Mult-only (12.012) is the best trained model, improving only 0.012
+  nats over the analytical baseline — most of the signal is in the hex tables.~~
+  **RETRACTED 2026-10-05** — see the retraction box at the head of §10. The
+  12.024 baseline was computed on a different fragment population with a
+  different estimator and normalizer. Measured on the model's own terms the
+  baseline is 12.847500 and the correction is worth −0.663966 nats, so the hex
+  tables do NOT hold most of the signal.
+- Both old CNN models give identical fragment NLL (12.325), confirming the
+  frozen-dispersion NB correctly approximates multinomial for shape learning.
+
+### 10.4 Stage 1 — Conv Approximation of Hex Tables
+
+Can the model's L1 architecture (Conv1d(4, 128, k=6) + LeakyReLU) learn the
+analytical hex table values? Trained on per-position multinomial loss predicting
+cut-site density from one-hot sequence.
+
+| Data | Train tiles | Epochs | Final loss | Pearson r (start_fwd / stop_fwd / start_rev / stop_rev) |
+|---|---|---|---|---|
+| Real | 10,000 | 30 | 6.668 | 0.950 / 0.904 / 0.953 / 0.902 |
+| Sim | 20,000 | 30 | 6.915 | 0.350 / 0.511 / 0.543 / 0.463 |
+
+The conv achieves r ≈ 0.90–0.95 on real data — it can approximate hex tables
+well but not perfectly (the LeakyReLU nonlinearity means it is not a direct
+lookup table). On sim data the correlations are much lower (r ≈ 0.35–0.54)
+because the signal-to-noise is worse (uniform fragment density, lower counts).
+
+### 10.5 Sim-Data Training (1 epoch, 30 min timeout)
+
+| Model | val_mult_nll | val_nb_loss | Status |
+|---|---|---|---|
+| CS Combined | **12.093** | 4.722 | Stable |
+| CS Mult-only | **12.095** | 4.734 | Stable |
+| CS NB-only | 12.678 | **4.721** | Stable |
+| Old CNN NB-frozen | 6.991 → 385 | — | Diverged ep 1 |
+| Old CNN Multinomial | 42.4 → 52K | — | Diverged immediately |
+
+Both old CNN models diverge on the low-count sim data (~6 counts/track).
+Cut-site models are stable with 1 epoch.
+
 ## Appendix: Run Inventory
 
 All runs at `/efs/analytics/nathanboley/background_model/simulation_v2/runs/`:
@@ -1008,5 +1113,690 @@ LR sweep (2026-09-23), all multinomial, B=512, seed 1337, `--min-N 0`:
 | `lrsweep_cnn_lr2e-3` | cnn 128k/1L | 2e-3 | 7.552690 | 39 | 67.0% | not converged (ep 39/40) |
 | `lrsweep_cnn_lr7e-3` | cnn 128k/1L | 7e-3 | 7.579552 | 31 | 37.0% | diverged ep31 (pre-div min) |
 | `lrsweep_ken_lr2e-2` | ken 512k/2L | 2e-2 | 7.612706 | 0 | — | **collapsed ep0 — equals uniform, not a result** |
+
+---
+
+## 10. Cut-Site Fragment Model — Ablation & Baseline Comparison (2026-10-01)
+
+> ## ⚠⚠ SECOND RETRACTION (2026-10-05, later) — 12.847500 and 12.183534 are BOTH void
+>
+> The first retraction below replaced the 12.024 baseline with **12.847500**,
+> measured through the model's own val path, and reported the correction as
+> worth **−0.663966 nats**. **Both numbers are now withdrawn.** They were
+> measured against a prior that was *anti-informative*.
+>
+> `de6c224` subtracted `CUT_OFFSET_IN_KMER` from the hex gather index in
+> `compute_log_p0`. The `WINDOW_HALF` convention already centres the k-mer, so
+> the offset was applied **twice**, moving the gathered window to
+> `cut-6 .. cut-1` — entirely upstream of the cut, carrying no information
+> about it. Reverted in `a3abc8f`.
+>
+> Measured on 300 val regions with the geometry `train_cut_site.py` uses:
+>
+> | hex prior | NLL |
+> |---|---|
+> | correct registration (offset 3) | **12.143030** |
+> | uniform, `ln\|D\|` = `ln(319488)` | 12.674475 |
+> | with the `de6c224` bug (offset 6) | 12.975469 |
+>
+> **The broken prior scored 0.30 nats worse than guessing uniformly.** That is
+> what made the "gain" look large: the model spent 20 epochs partly undoing a
+> misregistration, and the correctly-registered prior alone (~12.143) is
+> already better than the trained model ever reached (12.183534).
+>
+> How it was found: the owner asked why uniform beat the baseline. For a
+> normalised `q`, `E_p[-log q] = H(p) + KL(p‖q)`, so losing to uniform means
+> `KL(p‖q) > KL(p‖uniform)` — the prior points the *wrong way*. That cannot be
+> explained by a weak prior, which is what my first two explanations (a
+> fit/apply population mismatch, then a start/stop table swap) both assumed.
+> Only an actively misregistered window does it.
+>
+> **Do not cite any Stage-2 number in §10.** Both the baseline and the trained
+> figure need re-measuring from the corrected prior: batch `ebe12cb1`
+> (baseline, full val) and `fcd41e26` (20-epoch full-data retrain).
+>
+> Guard added: `test_calc_input_region_size_implies_the_cut_offset` derives the
+> cut offset from the model's padding alone. The two pre-existing registration
+> probes build their own `l_in`, so they asserted the index the buggy code
+> produced and passed throughout.
+
+> ## ⚠ RETRACTION (2026-10-05) — read before using any number in §10
+>
+> **Every Stage-2-vs-baseline comparison in §10 is invalid.** The two sides were
+> never measuring the same thing, so the recorded conclusion is backwards.
+>
+> The baseline figure (12.024) came from
+> `stage1_hex_baseline.evaluate_baseline_nll`, a *second* implementation of the
+> fragment rule. It had drifted from `CutSiteFragmentDataset` — the thing the
+> model actually trains and validates on — on **four independent axes**:
+>
+> | | baseline | model |
+> |---|---|---|
+> | fragment filter | centre **and** endpoints in-tile | centre only |
+> | region filter | none | drops regions with < `min_N`=10 fragments |
+> | normalizer | endpoints-in-tile domain | `log_softmax` over all `P×n_L×2` |
+> | estimator | fragment-weighted `total/total` | **region-weighted** `(nll_sum/N).mean()` |
+>
+> Compounded, these made the published baseline roughly **0.8 nats too easy**.
+>
+> Measured correctly — through the model's own validation path, with the
+> correction zeroed, so population, estimator and normalizer match by
+> construction (`train_cut_site.py --validate-only --zero-correction`):
+>
+> | | val_mult_nll |
+> |---|---|
+> | hex baseline | **12.847500** |
+> | Stage 2, 20 ep @ 10% data | 12.235727 |
+> | **Stage 2, 20 ep @ FULL data (converged)** | **12.183534** |
+> | **correction is worth** | **−0.663966 nats** |
+>
+> **The converged figure is 12.183534 / −0.663966** (batch `c5bfa8c9`, run dir
+> `fulldata_zeroinit_offset3`, best at epoch 18). It is plateaued, not truncated:
+> epochs 17–19 give 12.185205 / 12.183534 / 12.188797, oscillating in the third
+> decimal, and the LR scheduler never fired. Full data is worth +0.052 over the
+> 10% run. The 10%-data figures above are retained only to show the trajectory —
+> **cite 12.183534, not 12.2357 or 12.248.**
+>
+> Two limits on how far this result generalises:
+> - **Multinomial-only.** `nb_weight` was 0.0 at every logged step (verified in
+>   the run's own metrics), so the NB endpoint head received no gradient. This
+>   says nothing about endpoint or dispersion modelling.
+> - **One library.** The store is `n_train_samples=1` (RD-56413-Lib1). There is
+>   no between-sample variation in this data at all, so nothing here tests
+>   whether the correction transfers — which is the axis §9 identifies as the
+>   one that matters.
+>
+> ![Stage-2 loss path against the correctly-measured baseline](training_analysis_plots/offset3_loss_path_vs_true_baseline.png)
+>
+> **Specifically retracted:**
+> - "improving only 0.012 nats over the analytical baseline — most of the
+>   signal is in the hex tables" (§10.3 / §10.1). The correction is worth
+>   ~50× more than stated, and the hex tables do **not** hold most of the signal.
+> - "All learning rates produce val NLL worse than the Stage 1 analytical
+>   baseline" (§10.6). They were all *better* than the real baseline.
+> - The 10-fold figure 12.0255 ± 0.0059 (§10.7). The cross-validation itself
+>   was sound, but it validated the wrong estimator on the wrong population, so
+>   the number is not a target for anything.
+>
+> 12.8475 has reproduced bit-identically five times (fp32, bf16-mixed, and
+> three separate flag paths), and the model at init scores 12.847876 — very
+> slightly *worse*, as it must, since random noise added to a correctly
+> normalised log-prob can only hurt once renormalised.
+>
+> A separate, real bug was found in the same investigation: the hex tables were
+> **keyed at offset 2 and read at offset 0**, so the model was handed a
+> corrupted prior. Fixed (`de6c224`); registration is now junction-centred at
+> offset 3 and guarded by `tests/test_hex_registration.py`. An offset sweep over
+> 0–5 gives a symmetric U-curve minimised at the two central registrations
+> (2 and 3, tied to 0.00013); offset 0 — the textbook "end motif" convention —
+> is the worst of the six.
+>
+> **Caveat that applies to the corrected numbers too:** all of this is a
+> **single library** (`RD-56413-Lib1`). There is no between-sample variation
+> anywhere in the store, so −0.663966 says the correction captures real structure
+> *in one sample* and says nothing about transfer. Conclusion 9 of this document
+> identifies sample heterogeneity as the axis that matters; this store has none
+> of it. Unlike the earlier 10%-data figure, −0.663966 is **not** a floor — the
+> full-data run converged (plateaued across epochs 17–19, LR scheduler never
+> fired), so more training on *this* data is not the missing ingredient. A
+> second library is.
+
+A new model family that predicts **per-fragment** probabilities p(m, L, s)
+directly, rather than aggregate per-position profiles. Trained on the same
+regions (66,649 tiles, tile1536) with a single real sample (`RD-56413-Lib1`,
+patient NC-14158, IBD cohort — read from the store's `source_h5` attribute).
+This previously read "RD-56670", which is a different library belonging to
+`absolute_capture_probability.md`; corrected 2026-10-05.
+
+### 10.1 Fragment-Level NLL — Unified Comparison
+
+> ## ⚠ RETRACTED 2026-10-05 — this table is not a valid comparison
+>
+> Two independent defects, either of which alone would void it.
+>
+> **1. Train-on-test leakage in the old CNN numbers.** The old 12-track models
+> were trained on `stores/12track_tile1536/bg_store_b8d7ba35.zarr`. Joining that
+> store to the cut-site store on `(contig, start)` — the only key that matches,
+> since the two use different `region_id` conventions:
+>
+> | | |
+> |---|---|
+> | regions in common | 66,649 (identical region set) |
+> | same split assignment | 39,991 = **60.00%** |
+> | **cut-site VAL regions that are 12-track TRAIN** | **6,664 = 100.00%** |
+>
+> **Every region in the cut-site model's val set was in the old models'
+> training set.** So `12.325` is a *training*-set score placed beside
+> validation-set scores. 60% agreement is near the 66% expected of two
+> *independent* draws at `region_fracs=[0.8,0.1,0.1]`, so the two split
+> assignments are effectively unrelated.
+>
+> **Direction of the bias matters here.** Leakage *flatters* the old CNN, and it
+> still lost. So "the cut-site model beats the old 12-track CNN" survives
+> directionally — but the margin is **understated**, which is the opposite bias
+> from the other retractions in this document.
+>
+> **2. Three different scorers in one column.** The claim "all models evaluated
+> … using the same per-fragment multinomial NLL metric" is false. `12.325` comes
+> from `eval_fragment_nll.py`; the cut-site figures come from the model's own val
+> path; the hex baseline came from `stage1_hex_baseline`, which hand-rolled the
+> crop, the fragment filter, the normalizer and the estimator and has since been
+> deleted for that reason.
+>
+> Measured, so the scope of this is exact rather than asserted:
+>
+> | | population | normalizer | estimator |
+> |---|---|---|---|
+> | `eval_fragment_nll` | **6,204** regions | endpoints-in-tile, own `Z` | region-weighted |
+> | model val path | **6,204** regions | `log_softmax` over `P×n_L×2` | region-weighted |
+> | `stage1_hex_baseline` (deleted) | no `min_N` floor | endpoints-in-tile | fragment-weighted |
+>
+> So `eval_fragment_nll` and the model **agree** on population and on `min_N`
+> semantics (both apply it to the raw indptr count), and agree on the estimator.
+> They differ in the **normalizer** and the **length domain** — the script
+> derives `L_MAX = max(band hi) − 1 = 179` because the 12-track bridge has no
+> band to score L=180 in, while the model's domain is `[25, 180]` by design,
+> `L_min`/`L_max` having been deliberately decoupled from `FL_BANDS` in 569bdd7.
+> Cross-model scoring therefore restricts to the intersection `[25, 179]` in the
+> scorer, where the band constraint actually lives.
+>
+> An earlier version of this box cited "6,652 vs 6,204" as evidence of a
+> population divergence between those two. **That was wrong** — 6,652 comes from
+> an older store revision, not from a live disagreement. Corrected here rather
+> than silently dropped, since mis-attributing a real defect to the wrong cause
+> is how the original error in this section survived review.
+>
+> **Status:** the old checkpoints and `bg_store_b8d7ba35` are both unusable for
+> this comparison. A split-aligned 12-track store is being built (splits copied
+> by `(contig, start)`, not redrawn), CNN-multinomial and KEN will be retrained
+> on it, and all models will then be scored through one unified scorer on the
+> length intersection `[25, 179]`. Until then **no number in this table should
+> be cited.**
+>
+> Nothing below this line has been re-derived.
+
+All models evaluated on the same val set (6,652 regions, 67,477 fragments)
+using the same per-fragment multinomial NLL metric. Old CNN models evaluated
+via `eval_fragment_nll.py` which bridges 12-track position predictions to
+fragment probabilities via p_start × p_stop × p(L) / Z.
+
+| Model | Fragment NLL | Training | Notes |
+|-------|-------------|----------|-------|
+| **Cut-site Mult-only** | **12.012** | 20 epochs, lr=1e-3 | Best trained model |
+| **Stage 1 hex baseline** | **12.024** | Zero training (analytical MLE) | Factored: p_start × p_stop × p(L) |
+| Stage 2 correction (ep 1) | 12.048 | 2 epochs, hex baseline + neural correction | Still improving |
+| Old CNN Multinomial | 12.325 | 7 epochs, lr=1e-4, fp32 | Position-profile → fragment bridge |
+| Old CNN NB-frozen-disp | 12.325 | 7 epochs, lr=1e-4, fp32 | Frozen high-r ≈ multinomial |
+| Cut-site NB-only | 12.669 | 20 epochs, lr=1e-3 | Not optimizing multinomial loss |
+
+**Key findings:**
+
+1. The analytical hex-table baseline (12.024) — computed from empirical
+   hexamer cut frequencies with zero gradient descent — nearly matches the
+   best trained cut-site model (12.012). The 0.012-nat gap is the value of
+   everything the neural network learns beyond hexamer lookup + length marginal.
+
+2. The cut-site Mult-only model beats the old 12-track CNN by 0.31 nats on
+   the fragment metric (12.012 vs 12.325), but most of that gap is already
+   closed by the analytical baseline (12.024 vs 12.325 = 0.30 nats).
+
+3. The old CNN's fragment NLL (12.325) is substantially worse than the
+   factored baseline (12.024), meaning the 12-track aggregation loses
+   information that the factored start × stop model preserves.
+
+### 10.2 Cut-Site Ablation — Training Dynamics
+
+Three loss-weighting variants of the same architecture (Conv1d(4,128,k=6) +
+SSM banks + shape/dispersion heads), all on real data, tile_size=1024:
+
+| Variant | Mult weight | NB weight | val_mult_nll (ep 19) | val_nb_loss (ep 19) |
+|---------|------------|-----------|---------------------|-------------------|
+| **Mult-only** | 1.0 | 0.0 | **12.011** | 5.571 |
+| NB-only | 0.0 | 1.0 (fixed) | 12.669 | **5.432** |
+| Combined (run6, tile2560) | 1.0 | 1.0→0.0 (annealed) | 12.718 | 5.456 |
+
+- NB-only barely learns (val_nb drops 0.012 over 20 epochs — near-instant
+  convergence).
+- Mult-only shows steady improvement (12.047 → 12.008 over 20 epochs).
+- The two losses pull in different directions: optimizing one hurts the other.
+
+### 10.3 Stage 1 — Analytical Hex-Table Baseline
+
+Computed empirical cut-site probabilities by counting hexamer occurrences
+at fragment endpoints across all training tiles. Four tables (start_fwd,
+stop_fwd, start_rev, stop_rev), 4096 entries each. Combined with empirical
+marginal p(L) to form the factored baseline:
+
+    log p₀(m, L, s) = log p_start(hex) + log p_stop(hex) + log p(L) - log Z
+
+| Data | Baseline NLL | Fragments | Regions |
+|------|-------------|-----------|---------|
+| Real | 12.024 | 67,477 | 6,652 |
+| Sim | 11.932 | 154,917 | 6,664 |
+
+Sim baseline is better because the simulator generates from hexamer tables,
+so the factored model is the true data-generating process.
+
+**Conv approximation test:** Conv1d(4, 128, k=6) + LeakyReLU + Conv1d(128, 4, 1)
+trained to predict the analytical hex-table values from one-hot sequence:
+
+| Table | Pearson r (real, 30 ep) | Pearson r (sim, 30 ep) |
+|-------|------------------------|------------------------|
+| start_fwd | 0.950 | 0.350 |
+| stop_fwd | 0.904 | 0.511 |
+| start_rev | 0.953 | 0.543 |
+| stop_rev | 0.902 | 0.463 |
+
+The conv architecture recovers ~90-95% correlation on real data but only
+~35-55% on sim data (lower signal-to-noise with fewer fragments per hexamer).
+
+### 10.4 Stage 2 — Neural Correction Model
+
+Model outputs additive log-corrections to the hex baseline:
+
+    log p(m, L, s) = log_softmax(log_p0 + f_θ(seq))
+
+Hex tables are trainable parameters initialized from Stage 1 MLE. Only
+2 epochs completed (30 min timeout):
+
+| Data | Epoch 0 | Epoch 1 | Stage 1 baseline |
+|------|---------|---------|-----------------|
+| Real | 12.072 | **12.048** | 12.024 |
+| Sim | 12.063 | **12.017** | 11.932 |
+
+The correction network is learning — epoch 0→1 shows clear improvement.
+Longer runs needed to assess convergence.
+
+### 10.5 Sim Data — Model Stability
+
+All models trained on simulated data (66,649 tiles, 37 frags/region, 30 min
+cap). Cut-site models are stable; old CNN models diverge on low-count data.
+
+| Model | val_mult_nll (ep 0) | Status |
+|-------|-------------------|--------|
+| CS Mult-only | 12.095 | Stable |
+| CS Combined | 12.093 | Stable |
+| CS NB-only | 12.678 | Stable (not optimizing mult) |
+| Old CNN Multinomial | 42.371 → 52K | **Diverged** (lr=1e-4 too high) |
+| Old CNN NB-frozen | 6.464 → 385 | **Diverged** by epoch 1 |
+
+### 10.6 LR Sweep — Stage 2 Neural Correction (2026-10-02)
+
+Four learning rates tested on Stage 2, all with 10% train data (`--limit-batches 0.1`),
+hex tables initialized from Stage 1 MLE and trainable, 13 epochs:
+
+| LR | Best val_mult_nll | vs Stage 1 baseline (12.024) | Epochs |
+|---|---|---|---|
+| 5e-3 | 12.075 | +0.051 (worse) | 13 |
+| 1e-3 | 12.062 | +0.038 (worse) | 15 |
+| 5e-4 | 12.085 | +0.061 (worse) | 13 |
+| 1e-4 | 12.170 | +0.146 (worse, still learning) | 13 |
+
+![LR sweep comparison](../../../lr_sweep_comparison.png)
+
+~~**All learning rates produce val NLL worse than the Stage 1 analytical baseline.**~~
+**RETRACTED 2026-10-05** — see the retraction box at the head of §10. Every LR
+in this sweep was in fact *better* than the real baseline (12.8475); the
+comparison was against a figure ~0.8 nats too easy.
+The neural correction network is adding noise that overwhelms the residual
+signal beyond the hexamer tables. lr=1e-3 is closest (12.062) but still 0.038
+nats above the baseline.
+
+A follow-up run with **frozen hex tables** (`--freeze-hex`, lr=1e-3, 20 epochs)
+timed out at epoch 16 with val_mult_nll = 12.092 — also worse than baseline.
+
+### 10.7 K-Fold Cross-Validation of the Hex Baseline (2026-10-04)
+
+> **RETRACTED 2026-10-05 as an anchor** — see the retraction box at the head of
+> §10. The cross-validation is methodologically sound and its variance estimate
+> (σ = 0.0059) is still the best evidence that the hex baseline is stable across
+> folds. But it measures the *superseded* estimator on the *superseded*
+> population, so **12.0255 is not a target for any model number** and must not
+> be compared against a `val_mult_nll`. It also predates the registration fix,
+> so it describes offset-2 tables. The usable baseline is 12.8475.
+
+To assess whether the baseline-vs-model gap is real or within noise, the
+hex-table baseline NLL was evaluated under 10-fold cross-validation over
+all 66,649 tiles. Each fold fits hex tables on 90% of tiles and evaluates
+on the held-out 10%.
+
+| Fold | Val Tiles | Val Frags | NLL |
+|------|-----------|-----------|-----|
+| 0 | 6,664 | 67,819 | 12.0276 |
+| 1 | 6,664 | 67,418 | 12.0270 |
+| 2 | 6,664 | 67,465 | 12.0286 |
+| 3 | 6,664 | 67,584 | 12.0243 |
+| 4 | 6,664 | 66,987 | 12.0267 |
+| 5 | 6,664 | 67,913 | 12.0300 |
+| 6 | 6,664 | 66,978 | 12.0268 |
+| 7 | 6,664 | 67,866 | 12.0204 |
+| 8 | 6,664 | 67,740 | 12.0104 |
+| 9 | 6,673 | 67,541 | 12.0330 |
+
+**Weighted mean: 12.0255 ± 0.0059 (std), range 0.023 nats.**
+
+The original single-split baseline (12.024) is within 1σ of the cross-validated
+mean (12.025). The hex baseline is very stable: σ = 0.006 nats.
+
+**Comparison to trained models:**
+
+| Model | Best val NLL | vs baseline mean | Significance |
+|---|---|---|---|
+| Hex baseline (10-fold mean) | **12.025 ± 0.006** | — | — |
+| Stage 2 lr=1e-3 (best neural) | 12.062 | +0.037 | 6.3σ worse |
+| Stage 2 real (2 ep) | 12.048 | +0.023 | 3.9σ worse |
+| Stage 2 sim (2 ep) | 12.017 | −0.008 | 1.4σ better |
+| Cut-site Mult-only (20 ep) | 12.012 | −0.013 | 2.2σ better |
+
+**Findings:**
+
+1. The Stage 2 neural correction **reliably makes things worse** on real data:
+   the best lr sweep result (12.062) is 6σ above the analytical baseline.
+   The conv backbone adds noise that overwhelms the residual signal.
+
+2. Only the full-data Mult-only model (12.012, 20 epochs) and the sim Stage 2
+   (12.017, 2 epochs) dip below the baseline, and neither is strongly
+   significant (2.2σ and 1.4σ respectively).
+
+3. The hex tables capture essentially all learnable structure at this data
+   scale — the gap between the analytical MLE and the best trained model
+   is only 0.013 nats (2.2σ), meaning the neural network learns almost
+   nothing beyond what counting hexamer frequencies already provides.
+
+4. The tight cross-validation variance (σ = 0.006) confirms that the
+   baseline NLL is a stable, well-determined quantity — not an artifact of
+   a particular train/val split.
+
+### 10.8 Next Steps — Two-Stage Training Design
+
+See `docs/pending/two_stage_training.md` for the full design.
+
+**Open question:** Why does the neural correction make things worse? Hypotheses:
+
+1. **Insufficient data per parameter.** 675K fragments across 60K train tiles
+   may be too sparse for the conv backbone to learn corrections beyond hex noise.
+2. **Architecture mismatch.** The additive log-correction + log_softmax may
+   fight the hex baseline's already-correct normalization.
+3. **The hex tables ARE the signal.** On real data with one sample, there may
+   be no learnable structure beyond hexamer cut-site frequencies + marginal p(L).
+   The 0.013-nat gap (Mult-only vs baseline) could be entirely overfitting.
+
+Next experiments to discriminate:
+
+- **Multi-sample training.** The current store has 1 sample. Adding more samples
+  would provide cross-sample signal that hex tables cannot capture.
+- **Evaluate Mult-only on held-out test split** (not val) to check whether the
+  0.013-nat improvement is real or overfit.
+- **Direct hex-table correction** without the conv backbone — train only the
+  hex table parameters and p(L) with gradient descent, keeping the factored form.
+
+Key decisions:
+
+1. Hex tables are **trainable** parameters (initialized from empirical MLE)
+2. k=6 (4096 hexamers), optimize on real data later
+3. NB count loss stays **separate** from the Stage 2 correction
+4. Baseline pooled across all regions (global MLE), not per-region
+
+The sim-data sanity check: on simulated data generated from hexamer tables,
+the Stage 2 corrections should converge to zero — the baseline IS the ground
+truth. Any improvement beyond baseline indicates learned correlations; any
+degradation indicates overfitting.
+
+---
+
+## 11. Cut-Site Model — Blind Fit on a Simulated Sample (2026-10-09)
+
+First end-to-end blind validation of the cut-site fragment model: fit on a
+simulated sample using only the inputs a real sample would provide, then
+compared against the generative oracle *after* the fit was frozen.
+
+### Setup
+
+Inputs, and nothing else: `RD-56804.fragments.h5` (241,078 fragments),
+`regions.bed` (6,665 tiles x 1536 bp, 23 contigs), and the GRCh38.p12 FASTA.
+The hexamer prior was refit on this sample's train split alone — no tables from
+any other sample were reused.
+
+Geometry `tile_size=1024, jitter=256`, so `l_target=1536` matches the supplied
+regions exactly, and the scored domain is 1024 x 156 x 2 = 319,488 cells,
+identical to the real-data pipeline. Lengths [25, 180] inclusive.
+Split: random over regions, seed 42,
+**5333 / 666 / 666** tiles; `min_N=10` leaves 5210 / 655 / 647 scored.
+
+Training: 20 epochs, batch 32, lr 1e-3, bf16-mixed, multinomial objective only,
+prior frozen. One A10G, ~32 min. Artifacts under
+`/efs/analytics/nathanboley/model_output_sim_rand10pct_20261009/`.
+
+![Sim blind fit — training paths and oracle ceiling](training_analysis_plots/22_sim_rand10pct_training_paths.png)
+
+### The model overfits at epoch 5-6
+
+Two independent runs both bottom out at epoch 5-6 and then rise monotonically
+to epoch 19, so this is a property of the data size (5,333 train tiles, a tenth
+of the real quiet store), not a fluke of one run.
+
+| run | best epoch | best val | final (ep 19) |
+|---|---|---|---|
+| 1 | 5 | 12.086762 | 12.104975 |
+| 2 (shipped) | 6 | 12.084553 | 12.101922 |
+
+This surfaced a real gap: `train_cut_site.py` configured no `ModelCheckpoint`,
+so Lightning persisted only the last epoch — 0.017 nats worse than the best.
+It had never bitten because earlier runs only *reported* best-epoch NLL out of
+`metrics.csv`; the first consumer needing to score *from* the best model
+exposed it. Fixed in `6ef0e1d`.
+
+**A span-only convergence check passes this run.** The last six epochs span
+0.0039, under the usual 0.01 threshold, while the curve rises monotonically
+away from its optimum. A flat tail is not a good stopping point when the trend
+has a sign.
+
+### Results, region-weighted, all on the model's domain
+
+Oracle normalised **per region**.
+
+| split | regions | uniform | prior | model | oracle (ceiling) | captured |
+|---|---|---|---|---|---|---|
+| train | 5210 | 12.674475 | 12.095545 | 11.956233 | 11.972525 | 102.3% |
+| val | 655 | 12.674475 | 12.203930 | 12.084561 | 11.979271 | 84.9% |
+| **test** | **647** | 12.674475 | **12.214898** | **12.105756** | **11.987397** | **82.8%** |
+
+`captured = (uniform - model) / (uniform - oracle)`, with
+uniform = ln(1024 x 156 x 2) = ln(319,488). It is constant across splits but
+carried in the table so each row can be checked without looking away.
+
+**On held-out test the model captures 82.8% of the achievable bias.** The
+zero-parameter analytical prior alone captures 66.9%; the neural correction
+adds 15.9 percentage points. The residual gap to the oracle is 0.1184 nats.
+Under a pooled normaliser the figures are 84.2% / 68.0% — the choice moves the
+headline by ~1.4 points and no conclusion depends on it.
+
+Val is *not* held out — the epoch was selected on it, which makes it optimistic
+by 0.021 nats relative to test. Quote test.
+
+**The 103.6% on train is not the model beating the truth.** It has partly
+memorised the realised draws, so it scores the training sample better than the
+generative probability that produced it. It is the epoch-6 overfitting,
+measured a second way.
+
+### The published oracle number is not directly comparable
+
+`run.json` reports `oracle_nll = 12.384644985938586`. Set beside the model's
+12.105756 that would say the model beats the oracle, which is impossible.
+Three differences:
+
+| | oracle as published | model |
+|---|---|---|
+| domain | 1536 starts x 156 x 2 = 479,232 | centred 1024 x 156 x 2 = 319,488 |
+| population | all 241,078 fragments | scored, `min_N>=10`, per split |
+| estimator | fragment-weighted | region-weighted |
+
+The domain difference alone is ln(479,232) − ln(319,488) = **0.405465 nats**.
+
+Conditioning the oracle on "the start lands in the crop" gives
+`p_cond = p / Z_r`, i.e. `-log p_cond = -log p + log Z_r`. `Z_r` is not in the
+sidecar, which carries `p` only for drawn fragments, so it must be estimated
+from the draws. **`Z_r` is estimated per region**, as that region's own
+fraction of draws landing in the crop.
+
+Two measured caveats. A per-region estimate from ~36 draws carries a Jensen
+bias on `log Z` of about **-0.0069 nats**, which does not average away; the
+pooled alternative avoids it but discards real between-region variation in
+`Z_r` (sd 0.0150). And the degenerate `Z_hat = 1` case, which would set
+`log Z = 0`, affects **zero val and test regions** here (1 of 5,210 train).
+
+    pooled reference: Z = 160,951/241,078 = 0.667630, geometric 1024/1536 = 0.666667
+
+That the pooled crop mass sits 0.1% from the pure length ratio says something
+narrower than it first appears: the hexamer propensity has **no large-scale
+positional gradient** within a region, so block sums over 1024 vs 512
+contiguous bases are near-proportional to block width. It does *not* mean
+fragmentation is uniform in position — per-base hexamer bias spans a 216.7x
+max/min range in this sample, and `Z_r` varies between regions. Only the
+across-region average is near 2/3.
+
+Reproduction check before any of this: recomputing `-mean(log p)` over all
+241,078 sidecar rows returns 12.384644985938586, **identical** to the published
+value (difference 0.0e+00).
+
+### Caveats
+
+1. **A third of fragments carry no score — because the outer third is jitter
+   headroom, not data being discarded.** `l_target = tile_size + 2*jitter`, so
+   a 1536 bp region is 1024 bp of scorable tile plus 512 bp of room for the
+   crop to slide. In training the crop moves over `j` in [-256, +256] and the
+   union of its positions is the full [0, 1536), so every base is used. At eval
+   `j = 0` is forced, pinning the crop to [256, 1280), so 80,127 of 241,078
+   fragments never receive a score and are emitted as NaN. Exclude them from
+   any aggregate.
+   **This is equally true of the real pipeline** — same tile, same jitter, same
+   1536 bp region set, measured unscored fraction 33.31%. It surfaced here only
+   because this is the first deliverable to ask for a row per fragment rather
+   than an aggregate over the eval set. The centre is not density-biased
+   relative to the flanks (measured crop mass 0.666932 against the geometric
+   0.666667). Full coverage requires `tile 1536 / jitter 0`, which also aligns
+   the model's domain with the oracle's, at the cost of augmentation.
+2. **Training is not exactly reproducible.** No global seed, unseeded shuffle,
+   and the jitter RNG is seeded partly on `os.getpid()`. Two runs of identical
+   code differed by ~0.002 nats on best-epoch val. Do not read a third-decimal
+   difference between runs as a real effect.
+3. **One carried defect.** The learned endpoint branch taps the 3' cut at
+   `m + L` while the prior, the store and the registration test use `m + L - 1`.
+   It predates this work and affects the correction, not the prior.
+4. **One sample.** Nothing here measures transfer across samples.
+
+---
+
+## 12. Full Simulation Set vs Real Data — Paired Runs (2026-10-10)
+
+Section 11's pilot used a random 10% of regions. This runs the full simulation
+set AND real data through the same pipeline, matched so that differences are
+attributable to the data rather than the configuration.
+
+### Matched by construction
+
+| | matched |
+|---|---|
+| regions | identical 66,649 (contigs and starts verified equal) |
+| splits | identical 53,321 / 6,664 / 6,664, 100.00% agreement, seed 42 |
+| geometry | identical, `config_hash d5e89191901ea991`, `l_seq 1908` |
+| hyperparameters | 8 epochs, lr 1e-3, batch 32, bf16-mixed, `--val-check-interval 0.25`, `--freeze-hex`, `--nb-w0 0.0`, `min_N 10` |
+
+They differ **only** in the data: the sim was seeded from **RD-56804**
+(2,397,106 fragments, 36/region); real **is** RD-56413-Lib1 (1,123,884
+fragments, 17/region). That 2.2x density gap is sequencing depth between two
+libraries, not deduplication — both have near-identical duplicate rates
+(0.746 vs 0.733) and the deduped depth ratio (2.22x) matches the observed
+store ratio (2.13x).
+
+![Full sim vs real training curves](training_analysis_plots/23_sim_full_vs_real_curves.png)
+
+### Results, TEST split, region-weighted
+
+A baseline is added here: **uniform cut-site position with the marginal
+fragment-length distribution**, `p(m,L,s) = (1/tile_size) * p_L(L) * (1/2)`,
+i.e. `-log p = ln(2048) - log p_L(L)`. It uses the train-fit `p_L` from the hex
+tables (the same one the prior uses, so no leakage) and a uniform 1/2 strand.
+It separates the length contribution from the sequence contribution, which the
+hex prior otherwise conflates.
+
+| run | uniform | unif+p_L | prior | model | oracle | captured vs prior |
+|---|---|---|---|---|---|---|
+| SIM 10pct | 12.674475 | 12.409225 | 12.214898 | 12.105756 | 11.987397 | 48.0% |
+| SIM full | 12.674475 | 12.402190 | 12.071311 | 12.034882 | 12.007078 | 56.7% |
+| REAL | 12.674475 | 12.501596 | 12.142214 | 11.996969 | — | — |
+
+Real has no oracle, so no capture fraction exists for it.
+
+`captured vs prior = (prior - model) / (prior - oracle)` — the share of the
+headroom remaining **after** the free analytical prior. Measured from uniform
+instead, the same rows read 82.8% and 95.8%, but that denominator is dominated
+by a zero-parameter table anyone obtains for free and so mostly measures the
+prior rather than the model.
+
+### Additive decomposition
+
+The three gains sum exactly to `uniform - model` in every row.
+
+| run | len gain | seq gain | corr gain | total |
+|---|---|---|---|---|
+| SIM 10pct | 0.265250 | 0.194327 | 0.109142 | 0.568719 |
+| SIM full | 0.272285 | 0.330879 | 0.036429 | 0.639593 |
+| REAL | 0.172879 | 0.359382 | 0.145245 | 0.677506 |
+
+`len gain = uniform - (unif+p_L)`, `seq gain = (unif+p_L) - prior`,
+`corr gain = prior - model`.
+
+### Findings
+
+**1. More data helps, and removes the overfitting.** Test capture (vs prior)
+48.0% -> 56.7%. The pilot's overfit-past-oracle artefact is gone: train capture
+was 102.3% on the pilot, 98.2% on the full set. The curves show it directly —
+the pilot rises monotonically after epoch 7, the full set plateaus and stays
+flat.
+
+**2. The neural correction is worth ~4x more on real data than the simulation
+says.** Correction gain on test: 0.036429 (sim full) vs **0.145245** (real).
+The simulation is generated *from* a hexamer propensity, so a hexamer prior is
+nearly sufficient there and the learned arm has almost nothing left to find.
+Real fragmentation is not hexamer-shaped.
+**Do not use simulation capture% to judge whether the neural arm earns its
+keep.** It reports the correction as nearly worthless where real data makes it
+the largest non-free component.
+
+**3. The simulation's prior advantage is LENGTH, not sequence.** The sim's
+prior beats real's (0.603 vs 0.532), which invites the reading that the sim has
+stronger cut-site bias. Decomposed, the opposite holds for sequence: the sim's
+length gain is 0.099 higher, but its **sequence gain is 0.028 lower** (0.331 vs
+0.359). Real carries slightly more hexamer information. An independent
+KL(p‖uniform) comparison of the tables agrees (real 0.268 vs sim 0.260).
+
+**4. More data improves the sequence prior, not the length prior.** Across the
+two sim runs, seq gain 0.194 -> 0.331 while len gain only 0.265 -> 0.272. Four
+tables of 4,096 hexamers need far more data than 156 length bins, which are
+already well determined at 241K fragments.
+
+**5. The full sim is saturated after one epoch; real is not saturated at
+eight.** The sim reaches ~12.032 by epoch 1 and moves 0.0009 over the last two
+epochs, so its residual 3.6% gap to the oracle is model capacity, not training
+time. Real's best is at the **final** validation check, still descending.
+**`11.996969` is therefore an upper bound on real's NLL, and 0.145245 a lower
+bound on its correction gain.** Real at 17 fragments/region needs more epochs
+than sim at 36.
+
+### Caveats
+
+- **Different libraries.** The sim is seeded from RD-56804, the real run is
+  RD-56413-Lib1. Sim-vs-real differences carry a sample-identity and a 2.2x
+  depth confound on top of everything else.
+- **Pilot vs full is not paired.** They have different test region sets (a
+  random 10% vs all), so their oracles differ (11.987397 vs 12.007078). It is
+  "how the pipeline does on its own data" in each case, not a controlled
+  contrast.
+- **Real is undertrained**, as above.
+- `max/min` on a hexamer table is **not** comparable across sample sizes; use
+  KL. The two sim tables share one generative propensity, yet max/min reads
+  216.7 vs 561.2 while KL reads 0.353 vs 0.260 — the statistics move in
+  opposite directions with n.
 
 <!-- publish-metadata: {"source": "/home/nathanboley/src/fragmentomics_tools/.claude/worktrees/recovery-threshold/docs/pending/training_analysis.md", "title": "[WIP] Background Model v2 — Simulation Study Training Analysis", "space": "~712020a51962ab453e44f8970c582262fa711a", "published_at": "2026-09-25T22:07:11.520404+00:00", "page_id": "4963532846", "published_version": 3} -->

@@ -20,6 +20,7 @@ from background_model.band_model.config import C, TILE, PlumbingConfig
 from background_model.band_model.preprocess import (
     TRACK_INDEX,
     _contig_length,
+    _tile_split_key,
     _worker_process_sample,
     assign_region_splits,
     build_tiles,
@@ -220,6 +221,66 @@ class TestRegionSplits:
         assert 0.6 < train_frac < 0.95, f"train_frac={train_frac}"
         assert 0.01 < val_frac < 0.25, f"val_frac={val_frac}"
         assert 0.01 < heldout_frac < 0.25, f"heldout_frac={heldout_frac}"
+
+    def test_copied_splits_are_used_verbatim(self, tmp_dir):
+        """A copied split map must override the random draw exactly.
+
+        Guards the cross-store comparison: two stores built from the same bed
+        with the same seed were measured agreeing on only 60% of assignments,
+        and 100% of one store's val regions landed in the other's train split.
+        """
+        regions = [("chr1", i * 16384, (i + 1) * 16384) for i in range(20)]
+        bed = _make_region_bed(tmp_dir, regions=regions)
+        tiles = build_tiles({"train": bed}, tile_size=16384, jitter=128,
+                            rf_budget=2048, ref="hg38")
+        cfg = PlumbingConfig(sample_sheet="dummy", seed=42)
+
+        drawn = assign_region_splits(tiles, cfg)
+        # Force every region to a split the random draw would not produce.
+        forced = {_tile_split_key(t): 1 for t in tiles}
+        copied = assign_region_splits(tiles, cfg, forced)
+
+        assert (copied == 1).all(), "copied splits were not used verbatim"
+        assert not np.array_equal(copied, drawn), (
+            "test is vacuous: the forced map happens to equal the random draw"
+        )
+
+    def test_copied_splits_join_on_contig_start_not_region_id(self, tmp_dir):
+        """The join key is (contig, start).
+
+        The 12-track and cut-site builders use different region_id conventions
+        ("chr1:833100-834636" vs "r0"), so a region_id join finds ZERO overlap
+        between stores covering the identical region set.
+        """
+        regions = [("chr1", i * 16384, (i + 1) * 16384) for i in range(5)]
+        bed = _make_region_bed(tmp_dir, regions=regions)
+        tiles = build_tiles({"train": bed}, tile_size=16384, jitter=128,
+                            rf_budget=2048, ref="hg38")
+
+        # A map keyed the way the OTHER builder names regions still joins,
+        # because the key is derived from coordinates, not from the name.
+        renamed = [dict(t, region_id=f"r{i}") for i, t in enumerate(tiles)]
+        by_coord = {_tile_split_key(t): 2 for t in tiles}
+        out = assign_region_splits(renamed, PlumbingConfig(sample_sheet="d"),
+                                   by_coord)
+        assert (out == 2).all()
+
+    def test_missing_region_in_copied_map_raises(self, tmp_dir):
+        """A region absent from the copied map must be a hard error.
+
+        Falling back to a random draw for the missing ones yields a store that
+        is *almost* aligned with its source, which is worse than one that is
+        obviously not: the comparison it exists to support would be silently
+        invalid.
+        """
+        regions = [("chr1", i * 16384, (i + 1) * 16384) for i in range(5)]
+        bed = _make_region_bed(tmp_dir, regions=regions)
+        tiles = build_tiles({"train": bed}, tile_size=16384, jitter=128,
+                            rf_budget=2048, ref="hg38")
+        partial = {_tile_split_key(t): 0 for t in tiles[:-1]}
+
+        with pytest.raises(ValueError, match="absent from the copied split map"):
+            assign_region_splits(tiles, PlumbingConfig(sample_sheet="d"), partial)
 
     def test_tiles_inherit_region_split(self, tmp_dir):
         """Adjacent tiles from the same region must have the same split."""
